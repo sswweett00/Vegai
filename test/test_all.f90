@@ -5,6 +5,9 @@ program test_all
    use symbolic_memory
    use reasoning_core
    use resonator_network
+   use hdc_pretraining
+   use text_tokenizer, only: TOKEN_LEN, MAX_LINE_CHARS, MAX_TOKENS_PER_LINE, tokenize_ascii_line
+   use vocabulary
    use test_support
    implicit none
 
@@ -12,6 +15,8 @@ program test_all
    call test_symbolic_memory()
    call test_reasoning_pipeline()
    call test_resonator_network()
+   call test_text_ingest()
+   call test_hdc_pretraining()
    call finish_tests()
 
 contains
@@ -90,6 +95,15 @@ contains
       call assert_hv_equal(updated_a, updated_b, 'Hebbian plasticity mask is deterministic')
       call assert_true(hv_hamming(updated_a, a) > 1000_int32, &
                        'plastic update changes a substantial sparse subset')
+
+      ones%bits = not(a%bits)
+      call hv_hebbian_update_percent(a, ones, 25_int32, 31_int64, updated_a, status)
+      call assert_i32_equal(status, HV_OK, 'exact-rate Hebbian update succeeds')
+      call assert_i32_equal(hv_hamming(a, updated_a), 4096_int32, &
+                            'exact-rate update selects exactly 25 percent when inputs differ')
+      call hv_hebbian_update_percent(a, ones, 101_int32, 31_int64, updated_b, status)
+      call assert_i32_equal(status, HV_ERR_INVALID_ARGUMENT, 'invalid exact-rate update is rejected')
+      call assert_hv_equal(updated_b, a, 'invalid exact-rate update preserves prototype output')
    end subroutine test_hypervector_algebra
 
    subroutine test_symbolic_memory()
@@ -314,5 +328,190 @@ contains
          call mem_destroy(ambiguous_books(i))
       end do
    end subroutine test_resonator_network
+
+   subroutine test_text_ingest()
+      type(vocabulary_t) :: vocab
+      character(len=TOKEN_LEN) :: tokens(MAX_TOKENS_PER_LINE)
+      integer(int32) :: n_tokens, status, slot
+      logical :: found, truncated
+
+      call tokenize_ascii_line("HELLO, can't; _id42!", tokens, n_tokens, truncated)
+      call assert_i32_equal(n_tokens, 3_int32, 'ASCII tokenizer emits expected token count')
+      call assert_true(.not. truncated, 'ordinary ASCII tokenization has no truncation')
+      call assert_true(trim(tokens(1)) == 'hello', 'ASCII tokenizer lowercases letters')
+      call assert_true(trim(tokens(2)) == "can't", 'ASCII tokenizer keeps internal apostrophe')
+      call assert_true(trim(tokens(3)) == '_id42', 'ASCII tokenizer keeps underscore and digits')
+      call tokenize_ascii_line(repeat('z', TOKEN_LEN + 1_int32)//' valid', tokens, n_tokens, truncated)
+      call assert_i32_equal(n_tokens, 1_int32, 'overlong token is dropped rather than truncated')
+      call assert_true(truncated .and. trim(tokens(1)) == 'valid', &
+                       'overlong token reports telemetry while preserving later token')
+
+      call vocab_init(vocab, 4_int32, 2_int64, status)
+      call assert_i32_equal(status, VOCAB_OK, 'fixed vocabulary initializes')
+      call vocab_observe(vocab, 'alpha', status)
+      call vocab_observe(vocab, 'beta', status)
+      call vocab_observe(vocab, 'alpha', status)
+      call vocab_observe(vocab, 'gamma', status)
+      call assert_i32_equal(status, VOCAB_OK, 'vocabulary observes tokens and frequencies')
+      call vocab_finalize(vocab, status)
+      call assert_i32_equal(status, VOCAB_OK, 'vocabulary frequency finalization succeeds')
+      call assert_i32_equal(vocab%active_count, 1_int32, 'only thresholded token is active')
+      call vocab_lookup(vocab, 'alpha', slot, found, status, .true.)
+      call assert_i32_equal(status, VOCAB_OK, 'active vocabulary lookup succeeds')
+      call assert_true(found .and. slot == 1_int32, 'active lookup returns first-seen slot')
+      call vocab_lookup(vocab, 'beta', slot, found, status, .true.)
+      call assert_i32_equal(status, VOCAB_ERR_NOT_FOUND, 'inactive token is excluded from active lookup')
+      call vocab_rebuild_index(vocab, status)
+      call assert_i32_equal(status, VOCAB_OK, 'vocabulary hash index rebuild succeeds')
+      call vocab_lookup(vocab, 'alpha', slot, found, status, .true.)
+      call assert_i32_equal(status, VOCAB_OK, 'rebuilt vocabulary index preserves lookup')
+      call vocab_destroy(vocab)
+   end subroutine test_text_ingest
+
+   subroutine test_hdc_pretraining()
+      character(len=*), parameter :: CORPUS_PATH = 'vegai_pretraining_test_corpus.txt'
+      character(len=*), parameter :: CHECKPOINT_PATH = 'vegai_pretraining_test_checkpoint.vgai'
+      type(hdc_pretrain_model_t) :: model_a, model_b, restored
+      type(hdc_pretrain_config_t) :: config, resumed_config, strict_config
+      type(pretrain_metrics_t) :: vocabulary_metrics, train_metrics
+      type(hv_t) :: semantic_hv
+      character(len=TOKEN_LEN) :: nearest_token
+      integer :: unit, io_status
+      integer(int32) :: status, slot, nearest_slot
+      logical :: found
+      real :: similarity
+
+      open(newunit=unit, file=CORPUS_PATH, status='replace', action='write', &
+           form='formatted', iostat=io_status)
+      call assert_true(io_status == 0, 'pretraining fixture corpus opens')
+      if (io_status /= 0) return
+      write(unit, '(A)') 'king queen royal court'
+      write(unit, '(A)') 'queen king royal court'
+      write(unit, '(A)') 'king queen royal court'
+      write(unit, '(A)') 'dog cat animal pet'
+      write(unit, '(A)') 'cat dog animal pet'
+      write(unit, '(A)') 'dog cat animal pet'
+      close(unit)
+
+      config = hdc_pretrain_config_t()
+      config%max_vocabulary = 32_int32
+      config%min_frequency = 2_int64
+      config%context_window = 2_int32
+      config%position_shift_bits = 41_int32
+      config%epochs = 1_int32
+      config%initial_plasticity_percent = 25_int32
+      config%minimum_plasticity_percent = 1_int32
+      config%plasticity_decay_events = 4_int32
+
+      call pretrain_build_vocabulary(model_a, CORPUS_PATH, config, vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'pretraining vocabulary pass succeeds')
+      call assert_i32_equal(model_a%vocabulary%count, 8_int32, 'vocabulary preserves first-seen unique tokens')
+      call assert_i32_equal(model_a%vocabulary%active_count, 8_int32, 'frequency threshold activates repeated tokens')
+      call assert_true(vocabulary_metrics%raw_tokens == 24_int64, 'vocabulary pass counts raw tokens')
+      call assert_true(vocabulary_metrics%tokenizer_truncations == 0_int64, &
+                       'fixture corpus has no tokenizer truncation')
+      call assert_true(pretrain_model_is_ready(model_a), 'vocabulary pass initializes trainable model')
+      call assert_true(pretrain_model_footprint_bytes(model_a) > 0_int64, &
+                       'pretraining model reports resident footprint')
+
+      call pretrain_train_file(model_a, CORPUS_PATH, config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'streaming HDC training pass succeeds')
+      call assert_true(train_metrics%raw_tokens == 24_int64, 'training pass counts raw tokens')
+      call assert_true(train_metrics%active_tokens == 24_int64, 'all fixture tokens are active')
+      call assert_true(train_metrics%oov_tokens == 0_int64, 'fixture corpus has no OOV tokens')
+      call assert_true(train_metrics%context_pairs == 60_int64, 'windowed ordered context count is exact')
+      call assert_true(train_metrics%center_updates == 24_int64, 'one prototype update occurs per active center')
+      call assert_true(model_a%training_epochs_completed == 1_int64, 'one completed epoch is recorded')
+
+      call pretrain_lookup_token(model_a, 'king', slot, found, status)
+      call assert_i32_equal(status, PT_OK, 'active token lookup succeeds')
+      call assert_true(found, 'active token lookup reports found')
+      call pretrain_get_semantic_hv(model_a, slot, semantic_hv, status)
+      call assert_i32_equal(status, PT_OK, 'semantic prototype retrieval succeeds')
+      call pretrain_nearest_semantic(model_a, semantic_hv, nearest_slot, nearest_token, similarity, status, slot)
+      call assert_i32_equal(status, PT_OK, 'nearest semantic search succeeds')
+      call assert_true(nearest_slot /= slot .and. len_trim(nearest_token) > 0, &
+                       'nearest semantic search excludes the requested token')
+
+      call pretrain_build_vocabulary(model_b, CORPUS_PATH, config, vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'second deterministic vocabulary pass succeeds')
+      call pretrain_train_file(model_b, CORPUS_PATH, config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'second deterministic training pass succeeds')
+      call assert_true(all(model_a%base_bits == model_b%base_bits), 'base hypervectors are reproducible')
+      call assert_true(all(model_a%semantic_bits == model_b%semantic_bits), &
+                       'streaming semantic prototypes are reproducible')
+      call assert_true(all(model_a%experience_count == model_b%experience_count), &
+                       'experience counters are reproducible')
+
+      call pretrain_checkpoint_save(model_a, CHECKPOINT_PATH, status)
+      call assert_i32_equal(status, PT_OK, 'pretraining checkpoint save succeeds')
+      call pretrain_checkpoint_load(CHECKPOINT_PATH, restored, status)
+      call assert_i32_equal(status, PT_OK, 'pretraining checkpoint load succeeds')
+      call assert_i32_equal(restored%vocabulary%active_count, model_a%vocabulary%active_count, &
+                            'checkpoint rebuild restores active vocabulary count')
+      call assert_true(all(restored%base_bits == model_a%base_bits), 'checkpoint restores base hypervectors')
+      call assert_true(all(restored%semantic_bits == model_a%semantic_bits), &
+                       'checkpoint restores semantic hypervectors')
+      call assert_true(all(restored%experience_count == model_a%experience_count), &
+                       'checkpoint restores experience counters')
+
+      call pretrain_config_from_model(restored, resumed_config, status)
+      call assert_i32_equal(status, PT_OK, 'checkpoint exposes compatible resume configuration')
+      resumed_config%epochs = 1_int32
+      call pretrain_train_file(model_a, CORPUS_PATH, config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'reference second epoch succeeds')
+      call pretrain_train_file(restored, CORPUS_PATH, resumed_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'checkpoint resume epoch succeeds')
+      call assert_true(all(restored%semantic_bits == model_a%semantic_bits), &
+                       'checkpoint resume remains bit-identical to uninterrupted training')
+      call assert_true(all(restored%experience_count == model_a%experience_count), &
+                       'checkpoint resume preserves deterministic learning schedule')
+
+      resumed_config%context_window = resumed_config%context_window + 1_int32
+      call pretrain_train_file(restored, CORPUS_PATH, resumed_config, train_metrics, status)
+      call assert_i32_equal(status, PT_ERR_INCOMPATIBLE_CONFIG, &
+                            'semantic configuration mismatch is rejected on resume')
+
+      open(newunit=unit, file=CORPUS_PATH, status='replace', action='write', &
+           form='formatted', iostat=io_status)
+      call assert_true(io_status == 0, 'strict tokenizer fixture opens')
+      if (io_status == 0) then
+         write(unit, '(A)') repeat('x', 49)
+         close(unit)
+         strict_config = config
+         strict_config%strict_tokenization = .true.
+         call pretrain_build_vocabulary(model_b, CORPUS_PATH, strict_config, vocabulary_metrics, status)
+         call assert_i32_equal(status, PT_ERR_TOKENIZATION, 'strict mode rejects dropped long token')
+      end if
+
+      open(newunit=unit, file=CORPUS_PATH, status='replace', action='write', &
+           form='formatted', iostat=io_status)
+      call assert_true(io_status == 0, 'overlong record fixture opens')
+      if (io_status == 0) then
+         write(unit, '(A)') repeat('y', MAX_LINE_CHARS + 1_int32)
+         write(unit, '(A)') 'safe safe'
+         close(unit)
+         call pretrain_build_vocabulary(model_b, CORPUS_PATH, config, vocabulary_metrics, status)
+         call assert_i32_equal(status, PT_OK, 'non-strict mode drops overlong record and continues')
+         call assert_true(vocabulary_metrics%overlong_records == 1_int64, &
+                          'overlong record is explicitly counted')
+         call assert_true(vocabulary_metrics%raw_tokens == 2_int64, &
+                          'overlong record prefix never enters vocabulary')
+         strict_config = config
+         strict_config%strict_tokenization = .true.
+         call pretrain_build_vocabulary(model_b, CORPUS_PATH, strict_config, vocabulary_metrics, status)
+         call assert_i32_equal(status, PT_ERR_RECORD_TOO_LONG, &
+                               'strict mode rejects overlong physical record')
+      end if
+
+      call pretrain_model_destroy(model_a)
+      call pretrain_model_destroy(model_b)
+      call pretrain_model_destroy(restored)
+      open(newunit=unit, file=CORPUS_PATH, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+      open(newunit=unit, file=CHECKPOINT_PATH, status='old', access='stream', form='unformatted', &
+           iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+   end subroutine test_hdc_pretraining
 
 end program test_all

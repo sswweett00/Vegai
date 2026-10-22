@@ -275,7 +275,33 @@ Sonuçta `resonator_result_t` şunları birbirinden ayırır:
 Kapsamlı API, complexity ve çalışma örneği için
 [RESONATOR_NETWORK.md](RESONATOR_NETWORK.md) belgesine bakın.
 
-## 6. Paralellik ve performans sınırları
+## 6. Corpus pretraining katmanı
+
+`text_tokenizer`, `vocabulary` ve `hdc_pretraining`, mevcut sembolik HDC
+çekirdeğinin üstünde iki-pass, bounded-memory bir distributional learning
+katmanı oluşturur. Bu katman Transformer/attention/backpropagation içermez.
+
+İlk pass token frequency'lerini fixed-capacity sözlükte sayar. Hash
+fingerprint yalnız probe hızlandırıcısıdır; fingerprint hit'i tam token string
+eşitliği ile doğrulanır. Frequency eşiği active mask'i belirler. Capacity
+taşması, approximate eviction yerine deterministik hata üretir.
+
+İkinci pass'te token identity hiper-vektörleri relative-position permutation
+ile bundle edilir ve center token semantic prototype'ına exact-cardinality
+plasticity mask'i uygulanır. `base_bits(HV_WORDS, capacity)` ve
+`semantic_bits(HV_WORDS, capacity)` ayrı tutulur: identity değişmez, semantic
+iz online güncellenir. Aynı corpus, config ve source commit için işlem sırası
+bit-tam sonuç üretmelidir.
+
+Ingest boundary'si de mimari sözleşmesidir: tokenizer ASCII-byte semantiklidir;
+long token truncate edilmez, >8.192-byte fiziksel record prefix olarak
+öğrenilmez ve tamamen düşürülür. Drop'lar metrik olur; strict modda hata olur.
+Checkpoint'te vocabulary hash table saklanmaz, tokenlardan rebuild edilir;
+semantic config, planes, counters ve accidental-corruption checksum saklanır.
+Ayrıntılı contract ve data governance için [PRETRAINING.md](PRETRAINING.md)'ye
+bakın.
+
+## 7. Paralellik ve performans sınırları
 
 `hv_bind`, `hv_bundle3`, `hv_hamming` ve mask işlemlerinde `!$omp simd`
 ipucu bulunur. `mem_cleanup` global taraması `!$omp parallel do reduction(min:...)`

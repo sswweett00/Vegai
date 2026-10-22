@@ -22,6 +22,7 @@ yerine geçmez.
 | `make test` | native cebir, error path, memory, reasoning | `Checks: ..., failures: 0` |
 | `make debug` | bounds/runtime/FPE denetimli native test | başarısızlık yok |
 | `make run` | 512+ sembollü demo | frame, analogy, 4 causal adım ve 3-factor Resonator PASS |
+| `make pretrain` | HDC corpus CLI derlemesi | `build/vegai_pretrain` oluşur |
 | `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties` PASS |
 
 CI bunların checked CMake/OpenMP varyantını ve ayrıca optimize Make hedefini
@@ -75,6 +76,25 @@ Resonator iteratif fazı heuristic olduğundan test, yalnızca pozitif similarit
 ile başarı kabul etmez; final `exact=.true.` ve `hamming_distance=0` şartını
 arar. Bounded verifier birden fazla tuple bulduğunda count değerini ikiye
 saturate ederek ambiguity'yi doğrular.
+
+### `hdc_pretraining`
+
+- fixed fixture corpus üzerinde exact unique/active vocabulary, raw/active/OOV
+  token sayaçları ve ordered-window context pair sayısı;
+- aynı input/config ile iki bağımsız run'ın base plane, semantic plane ve
+  experience counter bakımından bit-tam eşitliği;
+- semantic prototype lookup ve self-excluded nearest-neighbour diagnostic;
+- binary checkpoint save/load, rebuilt hash index ve payload plane round-trip;
+- kesintisiz ikinci epoch ile checkpoint'ten resume edilen ikinci epoch'un
+  bit-tam eşitliği;
+- resume semantic config mismatch, strict long-token ve strict >8.192-byte
+  record hata yolları;
+- exact-rate Hebbian update için complement input altında %25 = 4.096 Hamming
+  flip property.
+
+CI ayrıca `examples/corpus/toy_hdc_corpus.txt` ile `train → inspect → resume`
+CLI smoke zincirini çalıştırır. Bu test corpus'u yalnız pipeline doğrulamasıdır;
+semantic kalite veya dil yeteneği benchmarkı değildir.
 
 ## Olasılık modeli ve sayısal marjlar
 
@@ -180,4 +200,8 @@ Bir değişiklik merge edilmeden önce:
 - [ ] Fortran derlemesi `-std=f2023` (veya compiler eşdeğeri) ile geçti
 - [ ] exact ve approximate cleanup sözleşmeleri karıştırılmadı
 - [ ] Resonator sonucunda heuristic network residual ile certified final residual ayrıldı
+- [ ] pretraining corpus manifesti, lisans/PII/retention değerlendirmesi ve digest'i kaydedildi
+- [ ] tokenizer/overlong-record telemetry'si incelendi; strict veya kabul politikası açıklandı
+- [ ] checkpoint save/load + resume sonucu hedef compiler/ABI üzerinde doğrulandı
+- [ ] pretraining semantic kalite iddiası held-out görev ve baseline ile ölçüldü
 - [ ] benchmark iddiası hedef platformda ölçüm çıktısıyla desteklendi

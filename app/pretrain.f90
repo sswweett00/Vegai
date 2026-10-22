@@ -1,0 +1,356 @@
+! SPDX-License-Identifier: MIT
+! Command-line entry point for deterministic HDC/VSA corpus pretraining.
+program vegai_pretrain
+   use, intrinsic :: iso_fortran_env, only: int32, int64, output_unit, error_unit, real32
+   use hyper_types, only: hv_t
+   use text_tokenizer, only: TOKEN_LEN, MAX_TOKENS_PER_LINE, tokenize_ascii_line
+   use hdc_pretraining
+   implicit none
+
+   character(len=512) :: command, corpus_path, checkpoint_path, query
+   type(hdc_pretrain_model_t) :: model
+   type(hdc_pretrain_config_t) :: config
+   type(pretrain_metrics_t) :: vocabulary_metrics, training_metrics
+   integer(int32) :: status
+   integer :: argument_count
+
+   argument_count = command_argument_count()
+   if (argument_count < 1) call fail_usage()
+   call get_command_argument(1, command)
+
+   select case (trim(command))
+   case ('train')
+      if (argument_count < 3) call fail_usage()
+      call get_command_argument(2, corpus_path)
+      call get_command_argument(3, checkpoint_path)
+      query = ''
+      config = hdc_pretrain_config_t()
+      call parse_train_options(4, argument_count, config, query, status)
+      if (status /= PT_OK) call fail_with_status('invalid train option', status)
+
+      call pretrain_build_vocabulary(model, trim(corpus_path), config, vocabulary_metrics, status)
+      if (status /= PT_OK) call fail_with_status('vocabulary pass failed', status)
+      call print_vocabulary_summary(model, vocabulary_metrics)
+
+      call pretrain_train_file(model, trim(corpus_path), config, training_metrics, status)
+      if (status /= PT_OK) call fail_with_status('training pass failed', status)
+      call print_training_summary(model, training_metrics)
+
+      call pretrain_checkpoint_save(model, trim(checkpoint_path), status)
+      if (status /= PT_OK) call fail_with_status('checkpoint save failed', status)
+      write(output_unit, '(A,A)') 'checkpoint: ', trim(checkpoint_path)
+      call maybe_query(model, query, status)
+      if (status /= PT_OK) call fail_with_status('query failed', status)
+
+   case ('resume')
+      if (argument_count < 3) call fail_usage()
+      call get_command_argument(2, corpus_path)
+      call get_command_argument(3, checkpoint_path)
+      call pretrain_checkpoint_load(trim(checkpoint_path), model, status)
+      if (status /= PT_OK) call fail_with_status('checkpoint load failed', status)
+      call pretrain_config_from_model(model, config, status)
+      if (status /= PT_OK) call fail_with_status('checkpoint configuration failed', status)
+      query = ''
+      call parse_resume_options(4, argument_count, config, query, status)
+      if (status /= PT_OK) call fail_with_status('invalid resume option', status)
+
+      call pretrain_train_file(model, trim(corpus_path), config, training_metrics, status)
+      if (status /= PT_OK) call fail_with_status('training pass failed', status)
+      call print_training_summary(model, training_metrics)
+      call pretrain_checkpoint_save(model, trim(checkpoint_path), status)
+      if (status /= PT_OK) call fail_with_status('checkpoint save failed', status)
+      write(output_unit, '(A,A)') 'checkpoint: ', trim(checkpoint_path)
+      call maybe_query(model, query, status)
+      if (status /= PT_OK) call fail_with_status('query failed', status)
+
+   case ('inspect')
+      if (argument_count < 2) call fail_usage()
+      call get_command_argument(2, checkpoint_path)
+      query = ''
+      call parse_inspect_options(3, argument_count, query, status)
+      if (status /= PT_OK) call fail_with_status('invalid inspect option', status)
+      call pretrain_checkpoint_load(trim(checkpoint_path), model, status)
+      if (status /= PT_OK) call fail_with_status('checkpoint load failed', status)
+      call print_model_summary(model)
+      call maybe_query(model, query, status)
+      if (status /= PT_OK) call fail_with_status('query failed', status)
+
+   case ('help', '--help', '-h')
+      call print_usage()
+
+   case default
+      call fail_usage()
+   end select
+
+   call pretrain_model_destroy(model)
+
+contains
+
+   subroutine parse_train_options(first_argument, last_argument, parsed_config, parsed_query, parse_status)
+      integer, intent(in) :: first_argument, last_argument
+      type(hdc_pretrain_config_t), intent(inout) :: parsed_config
+      character(len=*), intent(out) :: parsed_query
+      integer(int32), intent(out) :: parse_status
+      character(len=512) :: option, value
+      integer :: index, io_status
+
+      parsed_query = ''
+      parse_status = PT_OK
+      index = first_argument
+      do while (index <= last_argument)
+         call get_command_argument(index, option)
+         select case (trim(option))
+         case ('--strict')
+            parsed_config%strict_tokenization = .true.
+            index = index + 1
+         case ('--max-vocab', '--min-frequency', '--window', '--position-shift', '--epochs', &
+               '--initial-plasticity', '--minimum-plasticity', '--decay-events', '--query')
+            if (index == last_argument) then
+               parse_status = PT_ERR_INVALID_ARGUMENT
+               return
+            end if
+            call get_command_argument(index + 1, value)
+            select case (trim(option))
+            case ('--max-vocab')
+               read(value, *, iostat=io_status) parsed_config%max_vocabulary
+            case ('--min-frequency')
+               read(value, *, iostat=io_status) parsed_config%min_frequency
+            case ('--window')
+               read(value, *, iostat=io_status) parsed_config%context_window
+            case ('--position-shift')
+               read(value, *, iostat=io_status) parsed_config%position_shift_bits
+            case ('--epochs')
+               read(value, *, iostat=io_status) parsed_config%epochs
+            case ('--initial-plasticity')
+               read(value, *, iostat=io_status) parsed_config%initial_plasticity_percent
+            case ('--minimum-plasticity')
+               read(value, *, iostat=io_status) parsed_config%minimum_plasticity_percent
+            case ('--decay-events')
+               read(value, *, iostat=io_status) parsed_config%plasticity_decay_events
+            case ('--query')
+               parsed_query = value
+               io_status = 0
+            end select
+            if (io_status /= 0) then
+               parse_status = PT_ERR_INVALID_ARGUMENT
+               return
+            end if
+            index = index + 2
+         case default
+            parse_status = PT_ERR_INVALID_ARGUMENT
+            return
+         end select
+      end do
+   end subroutine parse_train_options
+
+   subroutine parse_resume_options(first_argument, last_argument, parsed_config, parsed_query, parse_status)
+      integer, intent(in) :: first_argument, last_argument
+      type(hdc_pretrain_config_t), intent(inout) :: parsed_config
+      character(len=*), intent(out) :: parsed_query
+      integer(int32), intent(out) :: parse_status
+      character(len=512) :: option, value
+      integer :: index, io_status
+
+      parsed_query = ''
+      parse_status = PT_OK
+      index = first_argument
+      do while (index <= last_argument)
+         call get_command_argument(index, option)
+         select case (trim(option))
+         case ('--strict')
+            parsed_config%strict_tokenization = .true.
+            index = index + 1
+         case ('--epochs', '--query')
+            if (index == last_argument) then
+               parse_status = PT_ERR_INVALID_ARGUMENT
+               return
+            end if
+            call get_command_argument(index + 1, value)
+            if (trim(option) == '--epochs') then
+               read(value, *, iostat=io_status) parsed_config%epochs
+            else
+               parsed_query = value
+               io_status = 0
+            end if
+            if (io_status /= 0) then
+               parse_status = PT_ERR_INVALID_ARGUMENT
+               return
+            end if
+            index = index + 2
+         case default
+            parse_status = PT_ERR_INVALID_ARGUMENT
+            return
+         end select
+      end do
+   end subroutine parse_resume_options
+
+   subroutine parse_inspect_options(first_argument, last_argument, parsed_query, parse_status)
+      integer, intent(in) :: first_argument, last_argument
+      character(len=*), intent(out) :: parsed_query
+      integer(int32), intent(out) :: parse_status
+      character(len=512) :: option
+
+      parsed_query = ''
+      parse_status = PT_OK
+      if (first_argument > last_argument) return
+      if (first_argument + 1 /= last_argument) then
+         parse_status = PT_ERR_INVALID_ARGUMENT
+         return
+      end if
+      call get_command_argument(first_argument, option)
+      if (trim(option) /= '--query') then
+         parse_status = PT_ERR_INVALID_ARGUMENT
+         return
+      end if
+      call get_command_argument(last_argument, parsed_query)
+   end subroutine parse_inspect_options
+
+   subroutine print_vocabulary_summary(trained_model, metrics)
+      type(hdc_pretrain_model_t), intent(in) :: trained_model
+      type(pretrain_metrics_t), intent(in) :: metrics
+
+      write(output_unit, '(A)') 'phase: vocabulary'
+      write(output_unit, '(A,I0)') '  corpus lines: ', metrics%corpus_lines
+      write(output_unit, '(A,I0)') '  observed tokens: ', metrics%raw_tokens
+      write(output_unit, '(A,I0)') '  unique tokens: ', trained_model%vocabulary%count
+      write(output_unit, '(A,I0)') '  active tokens: ', trained_model%vocabulary%active_count
+      write(output_unit, '(A,I0)') '  tokenizer truncations: ', metrics%tokenizer_truncations
+      write(output_unit, '(A,I0)') '  dropped overlong records: ', metrics%overlong_records
+   end subroutine print_vocabulary_summary
+
+   subroutine print_training_summary(trained_model, metrics)
+      type(hdc_pretrain_model_t), intent(in) :: trained_model
+      type(pretrain_metrics_t), intent(in) :: metrics
+
+      write(output_unit, '(A)') 'phase: streaming HDC context learning'
+      write(output_unit, '(A,I0)') '  completed epochs: ', trained_model%training_epochs_completed
+      write(output_unit, '(A,I0)') '  corpus lines: ', metrics%corpus_lines
+      write(output_unit, '(A,I0)') '  raw tokens: ', metrics%raw_tokens
+      write(output_unit, '(A,I0)') '  active tokens: ', metrics%active_tokens
+      write(output_unit, '(A,I0)') '  out-of-vocabulary tokens: ', metrics%oov_tokens
+      write(output_unit, '(A,I0)') '  ordered context pairs: ', metrics%context_pairs
+      write(output_unit, '(A,I0)') '  prototype updates: ', metrics%center_updates
+      write(output_unit, '(A,I0)') '  tokenizer truncations: ', metrics%tokenizer_truncations
+      write(output_unit, '(A,I0)') '  dropped overlong records: ', metrics%overlong_records
+   end subroutine print_training_summary
+
+   subroutine print_model_summary(trained_model)
+      type(hdc_pretrain_model_t), intent(in) :: trained_model
+
+      write(output_unit, '(A)') 'Vegai HDC pretraining checkpoint'
+      write(output_unit, '(A,I0)') '  vocabulary capacity: ', trained_model%vocabulary%capacity
+      write(output_unit, '(A,I0)') '  unique tokens: ', trained_model%vocabulary%count
+      write(output_unit, '(A,I0)') '  active tokens: ', trained_model%vocabulary%active_count
+      write(output_unit, '(A,I0)') '  min frequency: ', trained_model%vocabulary%min_frequency
+      write(output_unit, '(A,I0)') '  context window: ', trained_model%context_window
+      write(output_unit, '(A,I0)') '  positional shift: ', trained_model%position_shift_bits
+      write(output_unit, '(A,I0)') '  completed epochs: ', trained_model%training_epochs_completed
+      write(output_unit, '(A,I0)') '  total prototype updates: ', trained_model%totals%center_updates
+      write(output_unit, '(A,I0)') '  estimated resident bytes: ', pretrain_model_footprint_bytes(trained_model)
+   end subroutine print_model_summary
+
+   subroutine maybe_query(trained_model, requested_query, query_status)
+      type(hdc_pretrain_model_t), intent(in) :: trained_model
+      character(len=*), intent(in) :: requested_query
+      integer(int32), intent(out) :: query_status
+      character(len=TOKEN_LEN) :: canonical_query, nearest_token
+      character(len=TOKEN_LEN) :: token_buffer(MAX_TOKENS_PER_LINE)
+      type(hv_t) :: semantic_hv
+      integer(int32) :: n_tokens, slot, nearest_slot, lookup_status
+      logical :: truncated, found
+      real(real32) :: similarity
+
+      query_status = PT_OK
+      if (len_trim(requested_query) == 0) return
+      call tokenize_ascii_line(trim(requested_query), token_buffer, n_tokens, truncated)
+      if (truncated .or. n_tokens /= 1_int32) then
+         query_status = PT_ERR_INVALID_ARGUMENT
+         return
+      end if
+      canonical_query = token_buffer(1)
+      call pretrain_lookup_token(trained_model, canonical_query, slot, found, lookup_status)
+      if (lookup_status /= PT_OK .or. .not. found) then
+         query_status = lookup_status
+         return
+      end if
+      call pretrain_get_semantic_hv(trained_model, slot, semantic_hv, query_status)
+      if (query_status /= PT_OK) return
+      call pretrain_nearest_semantic(trained_model, semantic_hv, nearest_slot, nearest_token, &
+                                     similarity, query_status, slot)
+      if (query_status == PT_ERR_NOT_FOUND) then
+         write(output_unit, '(A,A)') 'query: ', trim(canonical_query)
+         write(output_unit, '(A)') '  nearest semantic neighbour: unavailable (one active token)'
+         query_status = PT_OK
+         return
+      end if
+      if (query_status /= PT_OK) return
+      write(output_unit, '(A,A)') 'query: ', trim(canonical_query)
+      write(output_unit, '(A,A)') '  nearest semantic neighbour: ', trim(nearest_token)
+      write(output_unit, '(A,F8.5)') '  bipolar similarity: ', similarity
+   end subroutine maybe_query
+
+   subroutine print_usage()
+      write(output_unit, '(A)') 'Vegai deterministic HDC/VSA corpus pretraining'
+      write(output_unit, '(A)') 'Usage:'
+      write(output_unit, '(A)') '  vegai_pretrain train CORPUS CHECKPOINT [options]'
+      write(output_unit, '(A)') '  vegai_pretrain resume CORPUS CHECKPOINT [--epochs N] [--strict] [--query TOKEN]'
+      write(output_unit, '(A)') '  vegai_pretrain inspect CHECKPOINT [--query TOKEN]'
+      write(output_unit, '(A)') 'Train options:'
+      write(output_unit, '(A)') '  --max-vocab N --min-frequency N --window N --position-shift N --epochs N'
+      write(output_unit, '(A)') '  --initial-plasticity N --minimum-plasticity N --decay-events N --strict --query TOKEN'
+      write(output_unit, '(A)') 'This is streaming distributional HDC learning, not Transformer/LLM pretraining.'
+   end subroutine print_usage
+
+   subroutine fail_usage()
+      call print_usage()
+      error stop 2
+   end subroutine fail_usage
+
+   subroutine fail_with_status(stage, failure_status)
+      character(len=*), intent(in) :: stage
+      integer(int32), intent(in) :: failure_status
+
+      write(error_unit, '(A,A,A,I0,A)') 'ERROR: ', trim(stage), ' (status ', failure_status, ')'
+      write(error_unit, '(A,A)') '       ', trim(status_description(failure_status))
+      error stop 1
+   end subroutine fail_with_status
+
+   pure function status_description(failure_status) result(description)
+      integer(int32), intent(in) :: failure_status
+      character(len=64) :: description
+
+      select case (failure_status)
+      case (PT_OK)
+         description = 'success'
+      case (PT_ERR_INVALID_ARGUMENT)
+         description = 'invalid argument or configuration'
+      case (PT_ERR_IO)
+         description = 'file open, read, or write failure'
+      case (PT_ERR_VOCABULARY)
+         description = 'vocabulary capacity or integrity failure'
+      case (PT_ERR_ALLOCATION)
+         description = 'memory allocation failure'
+      case (PT_ERR_MODEL_NOT_READY)
+         description = 'model is not initialized'
+      case (PT_ERR_TOKENIZATION)
+         description = 'strict tokenizer policy rejected corpus data'
+      case (PT_ERR_INCOMPATIBLE_CONFIG)
+         description = 'resume semantics differ from checkpoint configuration'
+      case (PT_ERR_CHECKPOINT)
+         description = 'checkpoint schema or integrity failure'
+      case (PT_ERR_COUNTER_OVERFLOW)
+         description = 'counter overflow prevented'
+      case (PT_ERR_NOT_FOUND)
+         description = 'token was not found in active vocabulary'
+      case (PT_ERR_EMPTY_VOCABULARY)
+         description = 'no token met the minimum frequency threshold'
+      case (PT_ERR_HYPERVECTOR)
+         description = 'hypervector operation failed'
+      case (PT_ERR_RECORD_TOO_LONG)
+         description = 'strict record-length policy rejected corpus data'
+      case default
+         description = 'unknown pretraining status'
+      end select
+   end function status_description
+
+end program vegai_pretrain

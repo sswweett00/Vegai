@@ -14,9 +14,12 @@ set(CMAKE_Fortran_EXTENSIONS OFF)
 
 add_library(vegai_hds STATIC
     src/hyper_types.f90
+    src/text_tokenizer.f90
+    src/vocabulary.f90
     src/symbolic_memory.f90
     src/resonator_network.f90
     src/reasoning_core.f90
+    src/hdc_pretraining.f90
 )
 
 set_target_properties(vegai_hds PROPERTIES
@@ -53,6 +56,9 @@ endif()
 
 add_executable(hds_engine app/main.f90)
 target_link_libraries(hds_engine PRIVATE vegai_hds)
+
+add_executable(vegai_pretrain app/pretrain.f90)
+target_link_libraries(vegai_pretrain PRIVATE vegai_hds)
 
 if(VEGAI_BUILD_TESTS)
     include(CTest)

@@ -11,8 +11,16 @@ property tests live in test/test_all.f90.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from io import BytesIO
 from itertools import product
 from math import isclose
+
+from corpus_manifest import (
+    DEFAULT_MAX_LINE_BYTES,
+    DEFAULT_MAX_TOKENS_PER_LINE,
+    DEFAULT_TOKEN_LENGTH,
+    scan_corpus,
+)
 
 BITS = 16_384
 WORDS = 256
@@ -329,9 +337,29 @@ def run_end_to_end_demo_contract() -> None:
     require(ambiguous_count == 2, "duplicate factor codewords must report ambiguity")
 
 
+def run_corpus_manifest_contract() -> None:
+    """Exercise the bounded local preflight independently of Fortran runtime."""
+    fixture = b"HELLO can't\n" + (b"z" * 49) + b" valid\n" + (b"y" * 8193) + b"\n" + b"\xff\n"
+    digest, byte_count, stats = scan_corpus(
+        BytesIO(fixture),
+        DEFAULT_MAX_LINE_BYTES,
+        DEFAULT_TOKEN_LENGTH,
+        DEFAULT_MAX_TOKENS_PER_LINE,
+    )
+    require(len(digest) == 64 and byte_count == len(fixture), "manifest SHA-256 scan is malformed")
+    require(stats.records == 4, "manifest physical record count is wrong")
+    require(stats.accepted_tokens == 3, "manifest accepted-token count is wrong")
+    require(stats.dropped_tokens == 1, "manifest long-token drop count is wrong")
+    require(stats.records_with_tokenizer_truncation == 1, "manifest truncation record count is wrong")
+    require(stats.overlong_records == 1, "manifest overlong-record count is wrong")
+    require(stats.maximum_record_bytes == 8193, "manifest maximum-record count is wrong")
+    require(stats.non_ascii_bytes == 1, "manifest non-ASCII byte count is wrong")
+
+
 def main() -> None:
     run_unit_properties()
     run_end_to_end_demo_contract()
+    run_corpus_manifest_contract()
     print("Python reference verification: PASS")
 
 

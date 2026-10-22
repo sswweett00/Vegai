@@ -41,7 +41,7 @@ module hyper_types
    public :: hv_bind, hv_bundle3, hv_permute
    public :: hv_hamming, hv_similarity, hv_hamming_zscore, hv_equal
    public :: hv_acc_reset, hv_acc_add, hv_acc_finalize
-   public :: hv_hebbian_update
+   public :: hv_hebbian_update, hv_hebbian_update_percent
    public :: hv_inject_noise_exact, hv_inject_noise_percent
 
    ! SplitMix64 constants are represented as BOZ values so their bit patterns
@@ -377,6 +377,84 @@ contains
       end do
    end function hv_hebbian_update
 
+   ! Exact-rate plasticity for streaming learners.  Unlike hv_hebbian_update,
+   ! this routine replaces an exact percentage of dimensions, which makes a
+   ! learning-rate schedule reproducible and independently auditable.
+   pure subroutine hv_hebbian_update_percent(prototype, new_state, plasticity_percent, &
+                                             plasticity_seed, updated, status)
+      type(hv_t), intent(in) :: prototype, new_state
+      integer(int32), intent(in) :: plasticity_percent
+      integer(int64), intent(in) :: plasticity_seed
+      type(hv_t), intent(out) :: updated
+      integer(int32), intent(out) :: status
+      type(hv_t) :: plastic_mask
+      integer(int32) :: flip_count, word
+
+      updated = prototype
+      status = HV_OK
+      if (plasticity_percent < 0_int32 .or. plasticity_percent > 100_int32) then
+         status = HV_ERR_INVALID_ARGUMENT
+         return
+      end if
+      flip_count = (HV_BITS * plasticity_percent + 50_int32) / 100_int32
+      call hv_exact_selection_mask(flip_count, plasticity_seed, plastic_mask, status)
+      if (status /= HV_OK) return
+
+      !$omp simd
+      do word = 1, HV_WORDS
+         updated%bits(word) = ior(iand(prototype%bits(word), not(plastic_mask%bits(word))), &
+                                  iand(new_state%bits(word), plastic_mask%bits(word)))
+      end do
+   end subroutine hv_hebbian_update_percent
+
+   ! Produces an exact-cardinality binary mask without heap allocation.  It is
+   ! shared by deterministic plasticity and may be reused by future test tools.
+   pure subroutine hv_exact_selection_mask(selected_bits, selection_seed, mask, status)
+      integer(int32), intent(in) :: selected_bits
+      integer(int64), intent(in) :: selection_seed
+      type(hv_t), intent(out) :: mask
+      integer(int32), intent(out) :: status
+      integer(int64) :: state, random_word, positive_random
+      integer(int32) :: selected, position, word, bit, attempts
+
+      mask = hv_zero()
+      status = HV_OK
+      if (selected_bits < 0_int32 .or. selected_bits > HV_BITS) then
+         status = HV_ERR_INVALID_ARGUMENT
+         return
+      end if
+      if (selected_bits == 0_int32) return
+
+      state = selection_seed
+      selected = 0_int32
+      attempts = 0_int32
+      do while (selected < selected_bits)
+         call splitmix64_next(state, random_word)
+         positive_random = iand(random_word, huge(0_int64))
+         position = int(modulo(positive_random, int(HV_BITS, int64)), int32)
+         word = position / WORD_BITS + 1_int32
+         bit = modulo(position, WORD_BITS)
+         if (.not. btest(mask%bits(word), bit)) then
+            mask%bits(word) = ibset(mask%bits(word), bit)
+            selected = selected + 1_int32
+         end if
+
+         attempts = attempts + 1_int32
+         if (attempts >= HV_BITS * 16_int32 .and. selected < selected_bits) then
+            do position = 0, HV_BITS - 1_int32
+               word = position / WORD_BITS + 1_int32
+               bit = modulo(position, WORD_BITS)
+               if (.not. btest(mask%bits(word), bit)) then
+                  mask%bits(word) = ibset(mask%bits(word), bit)
+                  selected = selected + 1_int32
+                  if (selected == selected_bits) exit
+               end if
+            end do
+            exit
+         end if
+      end do
+   end subroutine hv_exact_selection_mask
+
    !---------------------------------------------------------------------------
    ! Exact deterministic noise injection for resilience tests
    !---------------------------------------------------------------------------
@@ -390,49 +468,10 @@ contains
       type(hv_t), intent(out) :: noisy
       integer(int32), intent(out) :: status
       type(hv_t) :: flip_mask
-      integer(int64) :: state, random_word, positive_random
-      integer(int32) :: selected, position, word, bit, attempts
 
       noisy = v
-      status = HV_OK
-      if (flip_count < 0_int32 .or. flip_count > HV_BITS) then
-         status = HV_ERR_INVALID_ARGUMENT
-         return
-      end if
-      if (flip_count == 0_int32) return
-
-      flip_mask = hv_zero()
-      state = noise_seed
-      selected = 0_int32
-      attempts = 0_int32
-
-      do while (selected < flip_count)
-         call splitmix64_next(state, random_word)
-         positive_random = iand(random_word, huge(0_int64))
-         position = int(modulo(positive_random, int(HV_BITS, int64)), int32)
-         word = position / WORD_BITS + 1_int32
-         bit = modulo(position, WORD_BITS)
-         if (.not. btest(flip_mask%bits(word), bit)) then
-            flip_mask%bits(word) = ibset(flip_mask%bits(word), bit)
-            selected = selected + 1_int32
-         end if
-
-         attempts = attempts + 1_int32
-         ! Guarantees termination even in an adversarial or near-full request.
-         if (attempts >= HV_BITS * 16_int32 .and. selected < flip_count) then
-            do position = 0, HV_BITS - 1_int32
-               word = position / WORD_BITS + 1_int32
-               bit = modulo(position, WORD_BITS)
-               if (.not. btest(flip_mask%bits(word), bit)) then
-                  flip_mask%bits(word) = ibset(flip_mask%bits(word), bit)
-                  selected = selected + 1_int32
-                  if (selected == flip_count) exit
-               end if
-            end do
-            exit
-         end if
-      end do
-
+      call hv_exact_selection_mask(flip_count, noise_seed, flip_mask, status)
+      if (status /= HV_OK) return
       noisy = hv_bind(v, flip_mask)
    end subroutine hv_inject_noise_exact
 

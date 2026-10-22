@@ -19,6 +19,8 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 - role–filler çerçeve çözümleme, sıralı n-gram, analoji ve nedensel zincir;
 - çoklu-faktör ayrıştırma için deterministic multi-restart **Resonator Network**
   ve bounded meet-in-the-middle exact verifier;
+- iki-pass vocabulary, allocation-free ASCII ingest, streaming positional-context
+  Hebbian öğrenme, checkpoint/resume ve telemetry içeren HDC/VSA corpus pipeline;
 - yerel Fortran özellik/entegrasyon testleri, bağımsız Python referans modeli
   ve GitHub Actions ile denetimli derleme.
 
@@ -27,6 +29,12 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 > Bit-seviyesi işlemler, özellikle sabit sembol sözlükleri ve bileşimsel
 > anahtarlar için çok ucuzdur; doğruluk/kapasite, bundle kardinalitesi,
 > sözlük büyüklüğü ve sorgu gürültüsüne bağlı istatistiksel bir konudur.
+>
+> **Corpus pretraining notu:** `vegai_pretrain`, Transformer/LLM eğitimi değil;
+> deterministik, stream edilen positional context'lerden HDC semantic prototype
+> öğrenimidir. Unicode corpus'lar ön-tokenization ister; veri yönetişimi,
+> checkpoint ve sınırlar [PRETRAINING.md](docs/PRETRAINING.md)'de açıkça
+> tanımlıdır.
 
 ## Hızlı başlangıç
 
@@ -36,6 +44,7 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 # Fortran 2023 modu destekleyen GNU Fortran ve OpenMP çalışma zamanı gerekir
 make test
 make run
+make pretrain
 
 # Sınır denetimli hata ayıklama derlemesi
 make debug
@@ -59,6 +68,15 @@ cmake -S . -B build -DVEGAI_ENABLE_OPENMP=ON -DVEGAI_BUILD_TESTS=ON
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 OMP_NUM_THREADS=2 ./build/hds_engine
+
+# Küçük deterministic corpus smoke run
+./build/vegai_pretrain train examples/corpus/toy_hdc_corpus.txt toy.vgai \
+  --max-vocab 64 --min-frequency 2 --epochs 2 --query king
+./build/vegai_pretrain inspect toy.vgai --query dog
+
+# Gerçek corpus'u eğitmeden önce local digest + ingest preflight
+python3 tools/corpus_manifest.py CORPUS.txt --output corpus-manifest.json \
+  --source 'dataset URI/version' --license 'license ID' --strict-contract
 ```
 
 GNU CMake hedefi `-std=f2023` bayrağını uygulama, test ve kütüphane hedeflerine
@@ -93,8 +111,11 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Çağrışımsal bellek | `src/symbolic_memory.f90` | sabit kapasiteli SoA store, ID hash, LSH, exact/approximate cleanup |
 | Akıl yürütme | `src/reasoning_core.f90` | role–filler frame, n-gram, kural bankası, analogik transfer |
 | Resonator Network | `src/resonator_network.f90` | slot-spesifik codebook'larla çoklu-faktör çözümleme ve exact certification |
+| Corpus ingest | `src/text_tokenizer.f90`, `src/vocabulary.f90` | bounded ASCII canonicalization, collision-safe frequency vocabulary |
+| HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, position-context prototype update, metrics, checkpoint/resume |
+| Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `inspect` ve nearest semantic diagnostic |
 | Çalıştırılabilir doğrulama | `app/main.f90` | %25 exact gürültü, analoji, causal chain ve 3-faktör Resonator demo |
-| Native testler | `test/test_all.f90` | cebirsel invariantlar, hata yolları, bellek ve uçtan uca test |
+| Native testler | `test/test_all.f90` | cebirsel invariantlar, hata yolları, bellek, pretraining ve uçtan uca test |
 | Bağımsız oracle | `tools/verify_reference.py` | standart SplitMix64 ve demo sözleşmelerinin Python modeli |
 
 Bir hiper-vektörün payload'u tam olarak `256 × 8 = 2048` bayttır. Bu, 64-byte
@@ -106,8 +127,9 @@ iddia etmiyoruz. Sıfır-kayıplı 64-byte hizalama gerekiyorsa derleyici/ABI'ye
 
 Ayrıntılı tasarım ve invariantlar için [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
 Resonator Network sözleşmesi için [docs/RESONATOR_NETWORK.md](docs/RESONATOR_NETWORK.md),
-ölçülebilir doğrulama planı ve istatistiksel sınırlar için
-[docs/VALIDATION.md](docs/VALIDATION.md) dosyalarına bakın.
+corpus veri hattı, yönetişim ve checkpoint sözleşmesi için
+[docs/PRETRAINING.md](docs/PRETRAINING.md), ölçülebilir doğrulama planı ve
+istatistiksel sınırlar için [docs/VALIDATION.md](docs/VALIDATION.md) dosyalarına bakın.
 
 ## Temel işlem sözleşmeleri
 

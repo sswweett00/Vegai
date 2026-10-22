@@ -1,9 +1,9 @@
 name = "vegai-hds"
-version = "0.2.0"
+version = "0.3.0"
 license = "MIT"
 author = "Vegai contributors"
 maintainer = "Vegai contributors"
-description = "Fortran 2023 verified 16,384-bit VSA/HDC engine with Resonator Network factorization"
+description = "Fortran 2023 verified 16,384-bit VSA/HDC engine with Resonator factorization and streaming corpus pretraining"
 categories = ["artificial-intelligence", "symbolic-reasoning", "high-performance-computing"]
 keywords = ["vsa", "hdc", "hyperdimensional", "fortran", "symbolic-ai"]
 

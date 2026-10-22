@@ -11,15 +11,19 @@ COMMON_FLAGS ?= -ffree-line-length-none
 FFLAGS ?= $(OPT_FLAGS) $(WARN_FLAGS) $(COMMON_FLAGS) $(OPENMP_FLAGS)
 LDFLAGS ?= $(OPENMP_FLAGS)
 
-SOURCES := src/hyper_types.f90 src/symbolic_memory.f90 src/resonator_network.f90 src/reasoning_core.f90
+SOURCES := src/hyper_types.f90 src/text_tokenizer.f90 src/vocabulary.f90 \
+           src/symbolic_memory.f90 src/resonator_network.f90 src/reasoning_core.f90 \
+           src/hdc_pretraining.f90
 APP := app/main.f90
+PRETRAIN_APP := app/pretrain.f90
 TEST_SOURCES := test/test_support.f90 test/test_all.f90
 ENGINE := $(BUILD_DIR)/hds_engine
+PRETRAIN := $(BUILD_DIR)/vegai_pretrain
 TEST_BINARY := $(BUILD_DIR)/vegai_tests
 
-.PHONY: all engine test run check clean debug
+.PHONY: all engine pretrain test run run-pretrain check clean debug
 
-all: engine
+all: engine pretrain
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)/mod
@@ -29,6 +33,11 @@ engine: $(ENGINE)
 $(ENGINE): $(SOURCES) $(APP) | $(BUILD_DIR)
 	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(SOURCES) $(APP) -o $@ $(LDFLAGS)
 
+pretrain: $(PRETRAIN)
+
+$(PRETRAIN): $(SOURCES) $(PRETRAIN_APP) | $(BUILD_DIR)
+	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(SOURCES) $(PRETRAIN_APP) -o $@ $(LDFLAGS)
+
 $(TEST_BINARY): $(SOURCES) $(TEST_SOURCES) | $(BUILD_DIR)
 	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(SOURCES) $(TEST_SOURCES) -o $@ $(LDFLAGS)
 
@@ -37,6 +46,9 @@ test: $(TEST_BINARY)
 
 run: $(ENGINE)
 	OMP_NUM_THREADS=$${OMP_NUM_THREADS:-2} $(ENGINE)
+
+run-pretrain: $(PRETRAIN)
+	$(PRETRAIN) help
 
 # Debug build with bounds, undefined floating-point, and backtrace checks.
 debug:

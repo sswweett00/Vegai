@@ -55,6 +55,24 @@ jobs:
           fi
           exit "$exit_code"
 
+      - name: Validate sample corpus manifest and ingest contract
+        run: |
+          python3 tools/corpus_manifest.py examples/corpus/toy_hdc_corpus.txt \
+            --output "${RUNNER_TEMP}/toy-manifest.json" \
+            --source 'repository smoke fixture' --license MIT \
+            --retrieved-at 'source-controlled fixture' --preprocessing none --strict-contract
+          python3 -m json.tool "${RUNNER_TEMP}/toy-manifest.json" > /dev/null
+
+      - name: Run HDC pretraining CLI smoke test
+        run: |
+          set -euo pipefail
+          checkpoint="${RUNNER_TEMP}/vegai-smoke.vgai"
+          ./build-ci/vegai_pretrain train examples/corpus/toy_hdc_corpus.txt "$checkpoint" \
+            --max-vocab 64 --min-frequency 2 --window 2 --epochs 1 --query king
+          ./build-ci/vegai_pretrain inspect "$checkpoint" --query dog
+          ./build-ci/vegai_pretrain resume examples/corpus/toy_hdc_corpus.txt "$checkpoint" \
+            --epochs 1 --query queen
+
       - name: Run independent Python reference verification
         run: python3 tools/verify_reference.py
 

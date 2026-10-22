@@ -25,6 +25,9 @@ __pycache__/
 *.py[cod]
 .venv/
 
-# Runtime artifacts
+# Runtime artifacts and locally governed corpora/checkpoints
 *.out
 *.prof
+*.vgai
+/corpora/
+/checkpoints/
