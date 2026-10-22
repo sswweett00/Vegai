@@ -107,15 +107,45 @@ jobs:
           {
             python3 tools/verify_openvino_provider.py
             python3 tools/verify_openvino_context_worker.py
-            python3 tools/verify_openvino_context_provider.py --pretrain-bin ./build-ci/vegai_pretrain
+            python3 tools/verify_openvino_context_provider.py --pretrain-bin ./build-ci/vegai_pretrain \
+              --report "${RUNNER_TEMP}/openvino-context-provider.json"
           } > openvino-bridge-output.txt 2>&1
           exit_code=$?
           cat openvino-bridge-output.txt
           if [ "$exit_code" -ne 0 ]; then
             detail=$(tail -n 24 openvino-bridge-output.txt | tr '\n' ' ' | cut -c1-1900)
             echo "::error title=OpenVINO context-provider diagnostic::$detail"
+            exit "$exit_code"
           fi
-          exit "$exit_code"
+          python3 - "${RUNNER_TEMP}/openvino-context-provider.json" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as source:
+              report = json.load(source)
+          message = (
+              f"runtime={report['runtime']}; "
+              f"cpu_train_seconds={report['cpu_reference_train_seconds']:.6f}; "
+              f"openvino_context_provider_train_seconds={report['openvino_context_provider_train_seconds']:.6f}; "
+              f"openvino_to_cpu_time_ratio={report['openvino_to_cpu_time_ratio']:.4f}x; "
+              f"dispatched_contexts={report['openvino_dispatched_contexts']}; "
+              f"checkpoint_bytes_identical={report['checkpoint_byte_identical']}"
+          )
+          with open(sys.argv[2], "a", encoding="utf-8") as summary:
+              print("## OpenVINO CPU context-provider bridge", file=summary)
+              print(file=summary)
+              print(
+                  "Each value is one complete `vegai_pretrain train` child process. Corpus fixture creation, "
+                  "checkpoint byte comparison, and Python harness work are excluded. This CPU-plugin result is "
+                  "a correctness/overhead observation, not an Intel GPU/NPU acceleration claim.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("```text", file=summary)
+              print(message, file=summary)
+              print("```", file=summary)
+          print(f"::notice title=OpenVINO context-provider bridge::{message}")
+          PY
 
       - name: Compile portable and host-native GNU Make binaries
         run: |
