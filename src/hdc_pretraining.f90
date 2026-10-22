@@ -10,7 +10,7 @@
 !  passes, bounded memory, checkpoint/resume, and explicit data-loss metrics.
 !==============================================================================
 module hdc_pretraining
-   use, intrinsic :: iso_fortran_env, only: int32, int64, real32, iostat_end, iostat_eor
+   use, intrinsic :: iso_fortran_env, only: int32, int64, real32, iostat_end, iostat_eor, error_unit
    use hyper_types
    use text_tokenizer
    use vocabulary
@@ -1165,9 +1165,11 @@ contains
       character(len=8) :: input_magic, output_magic
       character(len=1024) :: request_path, response_path
       character(len=4096) :: command
+      character(len=512) :: failure_detail
       logical :: stream_open
 
       status = PT_OK
+      failure_detail = ''
       used_provider = .false.
       stream_open = .false.
       group_counts = 0_int32
@@ -1279,6 +1281,8 @@ contains
       if (config%openvino_require_accelerator) command = trim(command) // ' --require-accelerator'
       call execute_command_line(trim(command), wait=.true., exitstat=exit_status, cmdstat=command_status)
       if (command_status /= 0 .or. exit_status /= 0) then
+         write(failure_detail, '(A,I0,A,I0)') 'worker command failed: cmdstat=', command_status, &
+                                               ' exitstat=', exit_status
          status = PT_ERR_CONTEXT_PROVIDER
          goto 900
       end if
@@ -1286,6 +1290,7 @@ contains
       open(newunit=unit, file=trim(response_path), status='old', action='read', &
            access='stream', form='unformatted', iostat=io_status)
       if (io_status /= 0) then
+         failure_detail = 'worker did not create a readable response file'
          status = PT_ERR_CONTEXT_PROVIDER
          goto 900
       end if
@@ -1294,6 +1299,8 @@ contains
       if (io_status /= 0 .or. output_magic /= 'VGHDCO01' .or. protocol_version /= 1_int32 .or. &
           output_groups /= group_count .or. lane_count /= 2_int32 * HV_WORDS .or. execution_mask <= 0_int32 .or. &
           iand(execution_mask, not(7_int32)) /= 0_int32) then
+         write(failure_detail, '(A,A,A,I0,A,I0,A,I0,A,I0)') 'invalid worker response magic=', output_magic, &
+              ' version=', protocol_version, ' groups=', output_groups, ' lanes=', lane_count, ' mask=', execution_mask
          status = PT_ERR_CONTEXT_PROVIDER
          goto 910
       end if
@@ -1301,6 +1308,8 @@ contains
          if (group_counts(item_count) == 0_int32) cycle
          read(unit, iostat=io_status) output_item_count, output_count
          if (io_status /= 0 .or. output_item_count /= item_count .or. output_count /= group_counts(item_count)) then
+            write(failure_detail, '(A,I0,A,I0,A,I0,A,I0)') 'worker group mismatch expected_items=', item_count, &
+                 ' expected_count=', group_counts(item_count), ' got_items=', output_item_count, ' got_count=', output_count
             status = PT_ERR_CONTEXT_PROVIDER
             goto 910
          end if
@@ -1354,6 +1363,8 @@ contains
       call openvino_delete_stream_file(request_path)
       call openvino_delete_stream_file(response_path)
       if (status == PT_OK) status = PT_ERR_CONTEXT_PROVIDER
+      if (len_trim(failure_detail) == 0) failure_detail = 'request encoding, worker output, or protocol validation failed'
+      write(error_unit, '(A,A)') 'OpenVINO context provider: ', trim(failure_detail)
    end subroutine pretrain_construct_line_contexts_openvino
 
    ! Apply an already-built context in the exact stream order.  The explicit
