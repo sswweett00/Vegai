@@ -85,7 +85,9 @@ python3 tools/compare_pretraining_modes.py \
 ```
 
 Bu yalnız sentetik in-corpus diagnostic'tir; doğal Türkçe anlama benchmarkı
-veya production throughput iddiası değildir.
+veya production throughput iddiası değildir. Kaydedilmiş CI önce/sonra değerleri
+[`docs/PRETRAINING_MODE_COMPARISON.md`](../docs/PRETRAINING_MODE_COMPARISON.md)
+belgesindedir.
 
 ## Veri yönetişimi
 

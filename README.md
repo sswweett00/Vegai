@@ -138,6 +138,8 @@ Resonator Network sözleşmesi için [docs/RESONATOR_NETWORK.md](docs/RESONATOR_
 corpus veri hattı, yönetişim ve checkpoint sözleşmesi için
 [docs/PRETRAINING.md](docs/PRETRAINING.md), fixture üzerinde gerçek yürütme
 telemetrisi için [docs/EXAMPLE_PRETRAINING_RUN.md](docs/EXAMPLE_PRETRAINING_RUN.md),
+önce/sonra hız ve controlled semantic-cohesion sonuçları için
+[docs/PRETRAINING_MODE_COMPARISON.md](docs/PRETRAINING_MODE_COMPARISON.md),
 ölçülebilir doğrulama planı ve istatistiksel sınırlar için
 [docs/VALIDATION.md](docs/VALIDATION.md) dosyalarına bakın.
 

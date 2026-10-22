@@ -317,6 +317,9 @@ python3 tools/compare_pretraining_modes.py \
   --pretrain-bin ./build/vegai_pretrain --repetitions 3 --omp-threads 1
 ```
 
+Kayıtlı optimized CI sonucu ve yorum için
+[PRETRAINING_MODE_COMPARISON.md](PRETRAINING_MODE_COMPARISON.md)'ye bakın.
+
 Bu kontroller semantic usefulness, bias, güvenlik, gerçek dünya language quality
 veya herhangi bir throughput iddiası değildir. Üretim kullanımı için kendi
 lisanslı corpus'unuzda held-out retrieval, task accuracy, robustness, latency,
