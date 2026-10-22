@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  statuses: write
 
 jobs:
   verify:
@@ -46,6 +47,15 @@ jobs:
             cat demo-output.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$exit_code" -ne 0 ]; then
+            detail=$(grep -E 'FATAL|ASSERTION|VERIFICATION RESULT' demo-output.txt | tail -n 1 | cut -c1-120)
+            if [ -z "$detail" ]; then
+              detail="hds_engine failed; inspect executable log"
+            fi
+            GH_TOKEN="$GITHUB_TOKEN" gh api --method POST \
+              "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+              -f state=failure -f context='Vegai demo diagnostic' -f description="$detail"
+          fi
           exit "$exit_code"
 
       - name: Run independent Python reference verification
