@@ -293,7 +293,7 @@ contains
                       abs(int(config%position_shift_bits, int64))
       if (maximum_shift > int(huge(0_int32), int64)) status = PT_ERR_INVALID_ARGUMENT
       if (config%context_provider == PT_CONTEXT_PROVIDER_OPENVINO .and. &
-          (2_int64 * int(config%context_window, int64) + &
+          (4_int64 * int(config%context_window, int64) + &
            int(HIERARCHICAL_GLOBAL_CONTEXT_WEIGHT, int64) > int(HV_BITACC_MAX_ITEMS, int64))) then
          status = PT_ERR_INVALID_ARGUMENT
       end if
@@ -1183,7 +1183,7 @@ contains
          return
       end if
 
-      maximum_items = 2_int32 * config%context_window + HIERARCHICAL_GLOBAL_CONTEXT_WEIGHT
+      maximum_items = 4_int32 * config%context_window + HIERARCHICAL_GLOBAL_CONTEXT_WEIGHT
       if (maximum_items < 1_int32 .or. maximum_items > HV_BITACC_MAX_ITEMS) then
          status = PT_ERR_CONTEXT_PROVIDER
          return
