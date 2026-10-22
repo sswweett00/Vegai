@@ -10,7 +10,7 @@
 !  passes, bounded memory, checkpoint/resume, and explicit data-loss metrics.
 !==============================================================================
 module hdc_pretraining
-   use, intrinsic :: iso_fortran_env, only: int32, int64, real32, iostat_end, iostat_eor, error_unit
+   use, intrinsic :: iso_fortran_env, only: int8, int32, int64, real32, iostat_end, iostat_eor, error_unit
    use hyper_types
    use text_tokenizer
    use vocabulary
@@ -1087,11 +1087,11 @@ contains
 
    pure logical function openvino_host_is_little_endian()
       integer(int32) :: marker
-      character(len=4) :: bytes
+      integer(int8) :: bytes(4)
 
       marker = 1_int32
       bytes = transfer(marker, bytes)
-      openvino_host_is_little_endian = iachar(bytes(1:1)) == 1
+      openvino_host_is_little_endian = bytes(1) == 1_int8
    end function openvino_host_is_little_endian
 
    pure logical function openvino_safe_command_component(value)
