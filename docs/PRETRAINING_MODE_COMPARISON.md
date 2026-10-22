@@ -94,6 +94,47 @@ signal: same-cluster Top-1 gerilemez ve mean Top-1 similarity gain `> 0.002`
 olur. Bu bilerek tasarlanmış in-corpus cohesion testidir; held-out task
 başarısı değildir.
 
+## Güncel V3 sonucu — portable profile ile doğrulanmış GNU Fortran CI
+
+[GitHub Actions run 39836218246](https://github.com/sswweett00/Vegai/actions/runs/39836218246)
+(commit `db538b1`) Linux `7.0.0-1017-azure`, `x86_64`, Intel(R) Xeon(R)
+`6973P-C` hostunda, `OMP_NUM_THREADS=1` ve üç repetition ile tamamlandı.
+Checked CMake/OpenMP testleri, hardware reporter, portable/native byte-equality
+benchmark, executable CLI doğrulamaları ve controlled semantic benchmark'ın
+tümü geçti. GPU compute kullanılmadı.
+
+### Portable varsayılan ile host-native profil: gerçek önce / sonra
+
+Bu iki sonuç aynı hostta, aynı gerçek `hybrid` train corpus/config ile alındı;
+derleme ve harness süresi hariçtir.
+
+| Build profile | Median train süresi | Yaklaşık training token/s | Sonuç |
+|---|---:|---:|---|
+| portable, host-ISA yok | 0.126613 s | ≈16,175.274 | dağıtılabilir varsayılan |
+| native, build-host tuned | 0.113506 s | ≈18,043.099 | **1.1155×** daha hızlı |
+
+Portable/native checkpoint byte dizisi ve SHA-256'sı **tam eşit** bulundu
+(`portable_native_bytes_identical=True`). Böylece portable default, semantic
+ve persistent model state değiştirmeden bu hostta native profile göre yaklaşık
+%10.35 daha düşük throughput ile çalıştı. Bu fark yalnız bu Xeon/Linux runner
+içindir; Ultra 5 125H veya başka bir CPU'ya doğrudan taşınamaz.
+
+### Portable binary üzerinde fused context / semantic diagnostic
+
+| Encoder / kernel | Median train süresi | Yaklaşık training token/s | Karşılaştırma |
+|---|---:|---:|---|
+| `legacy` | 0.383280 s | ≈5,343.352 | 1.0000× |
+| `positional` | 0.112116 s | ≈18,266.795 | 3.4186× legacy'ye göre |
+| fused `hybrid` | 0.112756 s | ≈18,163.113 | 3.3992× legacy'ye göre |
+| reference `hybrid` | 0.115806 s | ≈17,684.749 | fused'e göre 1.0271× daha yavaş |
+
+Fused/reference `hybrid` checkpoint'leri yine byte-tam eşitti. Base fixture
+fused hybrid mean Top-1 similarity değeri `0.137414` oldu. Long-record
+controlled diagnostic'te local hybrid `0.168998`, hierarchical `0.826843`
+mean Top-1 similarity üretti: **+0.657845** (+389.262%). Aynı-küme Top-1
+hit gerilememe koşulu geçti. Bu son semantic satır yalnız tasarlanmış 16-token
+in-corpus fixture için geçerlidir; doğal dil veya held-out task iddiası değildir.
+
 ## Önceki baseline (fused-pair değişikliğinden önce)
 
 [GitHub Actions run 39826604165](https://github.com/sswweett00/Vegai/actions/runs/39826604165)
@@ -155,9 +196,9 @@ semantic-quality sonucu olarak genellenemez.
 
 Her zaman aynı runner içindeki oranları yorumlayın. Cache, CPU frequency/termal
 state, filesystem, compiler sürümü/flag'leri ve OpenMP ayarı mutlak ölçümü
-değiştirir. V3 portable/native gerçek ölçümü sonraki doğrulanmış CI run'ı ile
-bu belgeye eklenir; bu değerler eski v2 native-default sonucu ile doğrudan
-cross-run throughput iddiası olarak karşılaştırılmamalıdır.
+değiştirir. Yukarıdaki V3 portable/native değerleri ile bu eski v2
+native-default sonucu farklı CI hostlarında alındığı için doğrudan cross-run
+throughput iddiası olarak karşılaştırılmamalıdır.
 
 ## Uygulama notları
 

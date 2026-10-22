@@ -151,6 +151,13 @@ etmek veya aynı ABI toolchain'i kullanmak güvenli yoldur.
 CPU modeli, OS, mimari, logical CPU sayısı ve GPU adapter sayısını JSON
 provenance içine ekler. Timing kapsamı yine yalnız gerçek `vegai_pretrain train`
 child process'idir; hardware discovery, compilation ve harness süreleri
-hariçtir. Son doğrulanmış portable/native gerçek CI ölçümü
-[PRETRAINING_MODE_COMPARISON.md](PRETRAINING_MODE_COMPARISON.md) içinde
-kaydedilir.
+hariçtir.
+
+Son doğrulanmış portable/native gerçek ölçüm
+[GitHub Actions run 39836218246](https://github.com/sswweett00/Vegai/actions/runs/39836218246)
+üzerinde Intel(R) Xeon(R) 6973P-C / Linux x86_64 hostunda yapıldı: portable
+`0.126613 s`, native `0.113506 s`, native/portable oranı `1.1155×` ve
+checkpoint byte equality `True`. Bu bir host-specific CI sonucu olup Ultra 5
+125H, Apple Silicon veya başka CPU'lar için doğrudan throughput vaadi değildir.
+Ayrıntılı önce/sonra tablo için
+[PRETRAINING_MODE_COMPARISON.md](PRETRAINING_MODE_COMPARISON.md)'ye bakın.
