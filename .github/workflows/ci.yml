@@ -6,7 +6,6 @@ on:
 
 permissions:
   contents: read
-  statuses: write
 
 jobs:
   verify:
@@ -52,9 +51,7 @@ jobs:
             if [ -z "$detail" ]; then
               detail="hds_engine failed; inspect executable log"
             fi
-            GH_TOKEN="$GITHUB_TOKEN" gh api --method POST \
-              "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
-              -f state=failure -f context='Vegai demo diagnostic' -f description="$detail"
+            echo "::error file=app/main.f90,line=1,title=HDS demo diagnostic::$detail"
           fi
           exit "$exit_code"
 
