@@ -81,8 +81,11 @@ adapter inventory'si tek başına compute iddiası değildir. Intel Core Ultra i
 opt-in OpenVINO/oneAPI context provider vardır: immutable packed-HDC context
 bundle işlemini gerçek worker device'ına dispatch eder, source-ordered
 prototype commit'i CPU'da tutar ve checkpoint byte equality ile doğrulanır.
-Provider/runtime yoksa CPU fallback açıkça raporlanır; `--openvino-require-
-accelerator` gerçek GPU/NPU execution yoksa fail closed döner. RAM,
+Bir `train` çağrısında worker resident kalır ve dynamic-batch graph cache'i
+tekrar kullanılır. Açık CPU fallback policy'si ise OpenVINO CPU graph'ını
+başlatmak yerine native fused/OpenMP context kernel'ine gider; bu, dürüstçe
+CPU execution olarak raporlanır. `--openvino-require-accelerator` gerçek
+GPU/NPU execution yoksa fail closed döner. RAM,
 SSD, dual-channel/NUMA ve çok-core planı için
 [RESOURCE_AWARE_TRAINING.md](docs/RESOURCE_AWARE_TRAINING.md)'ye; platform/
 CPU/checkpoint sınırları için [HARDWARE_COMPATIBILITY.md](docs/HARDWARE_COMPATIBILITY.md)'ye bakın.
@@ -161,7 +164,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect`, CPU/OpenVINO context-provider execution switch ve nearest semantic diagnostic |
 | Continual transaction | `tools/continuous_shard_manifest.py`, `tools/continuous_pretrain.py` | immutable SHA-256 ledger, strict ingest gate, candidate generation, atomic state journal |
 | Kaynak preflight | `tools/training_resource_plan.py` | bounded RAM/checkpoint storage estimate, CPU/NUMA/OpenMP recommendation, static accelerator truth contract |
-| OpenVINO context worker | `tools/openvino_context_worker.py` | optional Intel uint32-lane immutable-context bundle/finalize bridge; execution mask / CPU fallback contract |
+| OpenVINO context worker | `tools/openvino_context_worker.py` | optional Intel uint32-lane immutable-context bridge; resident per-train service, dynamic-batch compiled-graph cache, execution mask / native-CPU bypass contract |
 | Çalıştırılabilir doğrulama | `app/main.f90` | %25 exact gürültü, analoji, causal chain ve 3-faktör Resonator demo |
 | Native testler | `test/test_all.f90` | cebirsel invariantlar, hata yolları, serial/OpenMP pretraining eşitliği ve uçtan uca test |
 | Donanım/OS profili | `tools/hardware_compatibility.py` | privacy-conscious CPU/RAM/GPU/NPU inventory, portable CPU backend sözleşmesi |

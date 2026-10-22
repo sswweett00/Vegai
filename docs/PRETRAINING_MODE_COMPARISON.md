@@ -124,26 +124,36 @@ ve gain `+0.657845`. Genel fresh `train` varsayılanı artık `hierarchical`tir;
 bu quality default yalnız ≥12 active-token record'larda local hybrid'den ayrılır.
 Bu yine sentetik/in-corpus diagnostic'tir, held-out doğal dil başarısı değildir.
 
-## V5: OpenVINO immutable-context bridge — gerçek correctness / cold-start sonucu
+## V5: OpenVINO immutable-context bridge — resident worker / CPU policy sonucu
 
-[GitHub Actions run 39848562780](https://github.com/sswweett00/Vegai/actions/runs/39848562780)
-(commit `ee9ffcc`) optional OpenVINO runtime'ını kurup actual Fortran↔Python
-lane-worker bridge'ini çalıştırdı. Worker, immutable pre-positioned context
-item'larını OpenVINO graph'ında bundle/finalize etti; source-order Hebbian
-commit Fortran CPU'da kaldı. CPU reference ve provider checkpoint byte'ları
-tam eşitti.
+[GitHub Actions run 39851363774](https://github.com/sswweett00/Vegai/actions/runs/39851363774)
+(commit `750af27`) optional OpenVINO runtime'ı ile gerçek Fortran↔Python
+lane-worker bridge'ini tekrar çalıştırdı. Worker artık bir train süresince
+resident, `Core`/dynamic-batch compiled graph cache'i request'ler arasında
+paylaşılıyor. Actual edge cardinality'leri seeded neutral `(tie, NOT tie)`
+pair'leri ile iki reusable odd/even graph shape'ına normalize edilir;
+source-order Hebbian commit Fortran CPU'da kalır. Strict CPU reference ve
+provider checkpoint byte'ları tam eşitti.
 
 | Arm | Gerçek `vegai_pretrain train` süresi | Dispatched context | Checkpoint |
 |---|---:|---:|---|
-| portable CPU reference | `0.021183 s` | 0 | regression arm |
-| OpenVINO **CPU plugin** context provider | `1.438524 s` | 30 | **byte-tam eşit** |
+| portable CPU reference | `0.021801 s` | 0 | regression arm |
+| önceki process-per-line strict CPU bridge | `1.438524 s` | 30 | byte-tam eşit |
+| resident/cached strict OpenVINO **CPU plugin** bridge | `0.400872 s` | 30 | **byte-tam eşit** |
 
-Provider/CPU ratio **67.9080×** oldu. Bu iki 15-token hierarchical record'luk
-bilerek küçük correctness fixture'da Python process startup ve graph compile
-maliyeti baskındır; CPU plugin ile hızlandırma iddiası değildir. Ölçü yalnız
+Strict bridge ratio `67.9080×`den **`18.3878×`**e indi; same small fixture'da
+bridge süresi yaklaşık **3.59×** azaldı. Bu, cold Python/OpenVINO startup
+maliyetinin tamamını değil per-line startup ve repeated-shape compile maliyetini
+ortadan kaldırır. Dolayısıyla strict CPU plugin armı hâlâ CPU hızlandırması
+iddiası değildir.
+
+Production CPU policy ayrıdır: fallback açıkken explicit `--openvino-device
+CPU`, worker açmak yerine native fused/OpenMP context construction'a gider;
+runtime output `native-CPU bypass` sayacını yükseltir, OpenVINO device execution
+mask'i ve worker session/request sayaçları sıfır kalır. CI bu arm için de
+checkpoint equality ve bounded child-process timing guard uygular. Ölçü yalnız
 `vegai_pretrain train` child process'ini kapsar; fixture üretimi, byte compare
-ve Python harness hariçtir. Bu sonuç default `--openvino-min-contexts 64`
-threshold'ünün kısa record'ları CPU/OpenMP'de tutmasının nedenidir.
+ve Python harness hariçtir.
 
 CI hostunda iGPU/NPU yoktu. Bu nedenle gerçek Intel Core Ultra GPU/NPU speedup,
 energy veya multi-device scaling değeri **henüz ölçülmüş değildir**. Target

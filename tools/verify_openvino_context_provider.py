@@ -83,6 +83,34 @@ def main() -> int:
             cpu_command[3] = str(cpu_checkpoint)
             _, cpu_seconds = run(cpu_command, "CPU reference training")
 
+            # CPU is not an accelerator for this packed-bit workload.  In
+            # normal fallback mode an explicit CPU policy must therefore stay
+            # on the native fused/OpenMP implementation rather than launching
+            # Python/OpenVINO.  This is the production speed path; the strict
+            # provider arm below remains an exact bridge correctness check.
+            bypass_checkpoint = directory / "native-cpu-bypass.vgai"
+            bypass_command = common.copy()
+            bypass_command[3] = str(bypass_checkpoint)
+            bypass_command.extend(
+                [
+                    "--context-provider", "openvino", "--openvino-worker", str(WORKER),
+                    "--openvino-python", sys.executable, "--openvino-device", "CPU",
+                    "--openvino-work-dir", str(directory), "--openvino-min-contexts", "1", "--openvino-fallback-cpu",
+                ]
+            )
+            bypass_output, bypass_seconds = run(bypass_command, "native CPU bypass training")
+            require(metric(bypass_output, "OpenVINO-dispatched contexts") == 0, "CPU bypass dispatched OpenVINO contexts")
+            require(metric(bypass_output, "OpenVINO resident worker sessions") == 0, "CPU bypass launched a worker")
+            require(metric(bypass_output, "OpenVINO worker requests") == 0, "CPU bypass sent a worker request")
+            require(metric(bypass_output, "OpenVINO native-CPU bypass contexts") == 30, "CPU bypass did not cover all contexts")
+            require(metric(bypass_output, "OpenVINO CPU-fallback contexts") == 0, "CPU bypass was reported as a worker failure")
+            require("OpenVINO execution devices: CPU=F GPU=F NPU=F" in bypass_output, "CPU bypass made a false device-execution claim")
+            require(cpu_checkpoint.read_bytes() == bypass_checkpoint.read_bytes(), "CPU bypass checkpoint differs from CPU reference")
+            # This tiny fixture is deliberately startup-sensitive.  The bound
+            # allows normal host jitter while guarding against a regression to
+            # a per-line Python worker launch in the production CPU path.
+            require(bypass_seconds <= cpu_seconds * 3.0, "native CPU bypass regressed beyond the bounded overhead guard")
+
             provider_command = common.copy()
             provider_command[3] = str(provider_checkpoint)
             provider_command.extend(
@@ -104,10 +132,12 @@ def main() -> int:
             require("OpenVINO execution devices: CPU=T GPU=F NPU=F" in output, "provider execution truth was not CPU")
             require(cpu_checkpoint.read_bytes() == provider_checkpoint.read_bytes(), "CPU and OpenVINO checkpoints differ")
             report = {
-                "schema": "vegai-openvino-context-provider-verification/v2",
+                "schema": "vegai-openvino-context-provider-verification/v3",
                 "runtime": "OpenVINO CPU plugin",
                 "workload": {"records": 2, "active_tokens": 30, "context_mode": "hierarchical", "window": 4},
                 "cpu_reference_train_seconds": cpu_seconds,
+                "native_cpu_bypass_train_seconds": bypass_seconds,
+                "native_cpu_bypass_to_cpu_time_ratio": bypass_seconds / cpu_seconds if cpu_seconds > 0.0 else None,
                 "openvino_context_provider_train_seconds": provider_seconds,
                 "openvino_to_cpu_time_ratio": provider_seconds / cpu_seconds if cpu_seconds > 0.0 else None,
                 "openvino_dispatched_contexts": dispatched_contexts,
@@ -124,9 +154,10 @@ def main() -> int:
 
     print(
         "OpenVINO context provider verification: PASS "
-        f"(OpenVINO graph contexts, byte-identical checkpoint; cpu_train_seconds={cpu_seconds:.6f}; "
+        f"(native CPU bypass + OpenVINO graph contexts, byte-identical checkpoints; "
+        f"cpu_train_seconds={cpu_seconds:.6f}; native_cpu_bypass_seconds={bypass_seconds:.6f}; "
         f"openvino_context_provider_train_seconds={provider_seconds:.6f}; "
-        f"ratio={provider_seconds / cpu_seconds:.4f}x)"
+        f"strict_provider_ratio={provider_seconds / cpu_seconds:.4f}x)"
     )
     return 0
 

@@ -179,11 +179,14 @@ source-order prototype/Hebbian commit, experience schedule ve checkpoint yazım�
 Fortran CPU tarafında kalır. Böylece GPU/NPU yalnız uygun immutable context
 işinde kullanılır; semantiği sıralı olan update aşaması zorla offload edilmez.
 
-Worker yalnız adapter listesi değildir; selected device üzerinde iki gerçek HDC
-shape'ı çalıştırır. Default `window=4` için full hybrid 16 item, hierarchical
-record-summary ile 19 item test edilir. CPU, GPU veya NPU worker çıktısı
-Fortran'ın `hv_bitacc_finalize` sonucuyla byte-eşit olmak zorundadır; aksi halde
-provider başarısız sayılır.
+Worker yalnız adapter listesi değildir; selected device üzerinde gerçek HDC
+shape'larını çalıştırır. Bir `vegai_pretrain train` çağrısında Python process,
+OpenVINO `Core` ve dynamic-batch compiled model cache'i **resident** kalır.
+Aynı line içindeki farklı actual item cardinality'leri, seeded `(tie, NOT tie)`
+çiftleriyle yalnız iki neutral majority shape'ına (en büyük odd/even) normalize
+edilir; böylece her edge cardinality için yeniden compile gerekmez. CPU, GPU
+veya NPU worker çıktısı Fortran'ın `hv_bitacc_finalize` sonucuyla byte-eşit
+olmak zorundadır; aksi halde provider başarısız sayılır.
 
 ```bash
 # Intel accelerator denemesi yapılacak makinede:
@@ -210,14 +213,23 @@ OMP_NUM_THREADS=8 OMP_PROC_BIND=close OMP_PLACES=cores \
   --openvino-required --openvino-require-accelerator
 ```
 
-`--openvino-work-dir` mevcut, yazılabilir ve aynı anda yalnız bir train process
-ile kullanılan bir dizin olmalıdır. Worker request/response stream dosyalarını
-atomik response replace ile kullanır; bunlar train sonunda silinir. `--openvino-
-min-contexts` transfer/process overhead'ini küçük record'larda önler. Bu
-threshold altında CPU/OpenMP context build kasıtlıdır; runtime summary şu
-alanları ayırır: CPU-built contexts, OpenVINO-dispatched contexts, worker
-invocation, fallback contexts ve gerçekten execute eden CPU/GPU/NPU device
-flag'leri. Bu alanlar checkpoint'e yazılmaz.
+`--openvino-work-dir` mevcut ve yazılabilir olmalıdır. Her train çağrısı,
+içinde tek in-flight request/response bulunan unique bir transient session
+dizini oluşturur; worker atomic marker/response replace kullanır ve normal
+shutdown acknowledgement sonrası session'ı siler. `--openvino-timeout-ms`
+(default `120000`) startup, request ve shutdown için bounded fail-closed
+güvencedir.
+
+`--openvino-min-contexts` küçük record'larda worker startup/IPC overhead'ini
+önler. Ayrıca `--openvino-fallback-cpu --openvino-device CPU` açık policy'si,
+CPU plugin graph'ını dispatch etmez: native fused/OpenMP path'e gider. Bu bir
+OpenVINO CPU execution veya hızlandırma iddiası değildir. `auto` policy yalnız
+CPU'ya resolve olursa aynı bypass ilk readiness probe'dan sonra uygulanır;
+GPU/NPU policy ve `--openvino-required` ise resident worker'ı kullanmaya devam
+eder. Runtime summary CPU-built contexts, native-CPU bypass contexts,
+OpenVINO-dispatched contexts, resident-worker sessions, worker requests,
+fallback contexts ve gerçek CPU/GPU/NPU execution flag'lerini ayırır. Bunların
+hiçbiri checkpoint'e yazılmaz.
 
 ### Exact tensor ABI ve fail-closed preflight
 
@@ -255,18 +267,40 @@ OpenVINO bridge test bu eşitliği CPU OpenVINO plugin'iyle zorunlu kılar; ger�
 Core Ultra GPU/NPU throughput veya energy sonucu ancak hedef host'ta ayrıca
 ölçülüp kaydedilmelidir.
 
-### Kaydedilmiş gerçek bridge sonucu (CPU plugin; accelerator speed iddiası değildir)
+### CPU plugin yavaşlığının kök nedeni ve yapılan düzeltme
 
-[CI run 39848562780](https://github.com/sswweett00/Vegai/actions/runs/39848562780)
-AMD EPYC 7763/Linux hostunda OpenVINO CPU plugin ile iki 15-token hierarchical
-record (30 dispatched context) çalıştırdı. Yalnız bir `vegai_pretrain train`
-child process ölçülerek CPU referans `0.021183 s`, process-isolated OpenVINO
-context provider `1.438524 s` çıktı: provider/CPU ratio **67.9080×** ve
-checkpoint byte equality `True`.
+İlk bridge tasarımı her corpus line'ı için ayrı Python process başlatıyor,
+OpenVINO import/Core oluşturuyor ve line'daki her item cardinality shape'ını
+yeniden compile ediyordu. İki 15-token record'da beş farklı cardinality vardı;
+16.384-bit context arithmetic'in kendisinden çok process startup, filesystem
+IPC ve graph compilation süreye hükmediyordu. CPU tarafında aynı HDC işi zaten
+fused Fortran/OpenMP ile çok küçüktür; CPU plugin bu workload için doğru bir
+"accelerator" değildir.
 
-Bu deliberately küçük correctness fixture'da Python worker startup + graph
-compile overhead'i baskındır; CPU OpenVINO kullanımının hızlandırma olmadığını
-gösterir. Bu nedenle default `--openvino-min-contexts 64` küçük record'ları
-CPU/OpenMP'de bırakır. Sonuç Intel iGPU/NPU benchmarkı değildir ve Core Ultra
-üzerinde GPU/NPU speedup/energy iddiası yapılamaz; strict target ölçümü için
-`--openvino-require-accelerator` ile ayrı benchmark gerekir.
+Düzeltme üç parçalıdır:
+
+1. worker bir train çağrısı boyunca resident kalır; `Core` ve dynamic-batch
+   compiled graph'lar request'ler arasında cache'lenir;
+2. tie/complement neutral padding, değişken cardinality'leri yalnız iki yeniden
+   kullanılabilir odd/even graph shape'ına indirir; majority/tie semantics bit-tam korunur;
+3. normal explicit CPU fallback policy native fused/OpenMP kernel'ine bypass
+   eder. Strict `--openvino-required` ise hâlâ graph bridge'i çalıştırır; bu
+   doğruluk testi ile production CPU policy birbirine karıştırılmaz.
+
+[CI run 39851363774](https://github.com/sswweett00/Vegai/actions/runs/39851363774)
+AMD EPYC 7763/Linux hostunda same two-record / 30-context strict CPU-plugin
+fixture'ı byte-tam checkpoint equality ile tekrar çalıştırdı:
+
+| Strict OpenVINO CPU bridge sürümü | Gerçek train süresi | CPU reference'a oran | Sonuç |
+|---|---:|---:|---|
+| process-per-line / per-shape compile (önceki) | `1.438524 s` | `67.9080×` | correctness only |
+| resident worker + dynamic cache + two neutral shapes | `0.400872 s` | `18.3878×` | **3.59× daha düşük bridge süresi**, byte-tam eşit |
+
+Bu cold strict bridge hâlâ küçük fixture'da doğrudan CPU'dan yavaştır; bu
+beklenen ve açıkça raporlanan sonuçtur. Yeni normal CPU-fallback armı native
+CPU'da kalır ve CPU plugin dispatch/sessions/requests değerlerini sıfır olarak
+raporlar; CI buna checkpoint equality ve bounded timing regression guard uygular.
+Dolayısıyla "OpenVINO CPU hızlandırdı" iddiası yapılmaz. Sonuç Intel iGPU/NPU
+benchmarkı değildir; Core Ultra GPU/NPU speedup/energy iddiası için
+`--openvino-require-accelerator` ile hedef makinede strict equality + timing
+ölçümü gerekir.

@@ -126,8 +126,12 @@ jobs:
           message = (
               f"runtime={report['runtime']}; "
               f"cpu_train_seconds={report['cpu_reference_train_seconds']:.6f}; "
+              f"native_cpu_bypass_train_seconds={report['native_cpu_bypass_train_seconds']:.6f}; "
+              f"native_cpu_bypass_to_cpu_time_ratio={report['native_cpu_bypass_to_cpu_time_ratio']:.4f}x; "
               f"openvino_context_provider_train_seconds={report['openvino_context_provider_train_seconds']:.6f}; "
               f"openvino_to_cpu_time_ratio={report['openvino_to_cpu_time_ratio']:.4f}x; "
+              f"resident_worker_sessions={report['openvino_resident_worker_sessions']}; "
+              f"worker_requests={report['openvino_worker_requests']}; "
               f"dispatched_contexts={report['openvino_dispatched_contexts']}; "
               f"checkpoint_bytes_identical={report['checkpoint_byte_identical']}"
           )
@@ -136,8 +140,9 @@ jobs:
               print(file=summary)
               print(
                   "Each value is one complete `vegai_pretrain train` child process. Corpus fixture creation, "
-                  "checkpoint byte comparison, and Python harness work are excluded. This CPU-plugin result is "
-                  "a correctness/overhead observation, not an Intel GPU/NPU acceleration claim.",
+                  "checkpoint byte comparison, and Python harness work are excluded. The native-CPU bypass is the "
+                  "production CPU policy; the strict CPU-plugin arm is a correctness/overhead observation, not an "
+                  "Intel GPU/NPU acceleration claim.",
                   file=summary,
               )
               print(file=summary)
