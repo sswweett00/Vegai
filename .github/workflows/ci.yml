@@ -47,9 +47,9 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$exit_code" -ne 0 ]; then
-            detail=$(grep -E 'FATAL|ASSERTION|VERIFICATION RESULT' demo-output.txt | tail -n 1 | cut -c1-120)
+            detail=$(tail -n 4 demo-output.txt | tr '\n' ' ' | cut -c1-240)
             if [ -z "$detail" ]; then
-              detail="hds_engine failed; inspect executable log"
+              detail="hds_engine failed before emitting output"
             fi
             echo "::error file=app/main.f90,line=1,title=HDS demo diagnostic::$detail"
           fi
