@@ -124,6 +124,32 @@ ve gain `+0.657845`. Genel fresh `train` varsayılanı artık `hierarchical`tir;
 bu quality default yalnız ≥12 active-token record'larda local hybrid'den ayrılır.
 Bu yine sentetik/in-corpus diagnostic'tir, held-out doğal dil başarısı değildir.
 
+## V5: OpenVINO immutable-context bridge — gerçek correctness / cold-start sonucu
+
+[GitHub Actions run 39848562780](https://github.com/sswweett00/Vegai/actions/runs/39848562780)
+(commit `ee9ffcc`) optional OpenVINO runtime'ını kurup actual Fortran↔Python
+lane-worker bridge'ini çalıştırdı. Worker, immutable pre-positioned context
+item'larını OpenVINO graph'ında bundle/finalize etti; source-order Hebbian
+commit Fortran CPU'da kaldı. CPU reference ve provider checkpoint byte'ları
+tam eşitti.
+
+| Arm | Gerçek `vegai_pretrain train` süresi | Dispatched context | Checkpoint |
+|---|---:|---:|---|
+| portable CPU reference | `0.021183 s` | 0 | regression arm |
+| OpenVINO **CPU plugin** context provider | `1.438524 s` | 30 | **byte-tam eşit** |
+
+Provider/CPU ratio **67.9080×** oldu. Bu iki 15-token hierarchical record'luk
+bilerek küçük correctness fixture'da Python process startup ve graph compile
+maliyeti baskındır; CPU plugin ile hızlandırma iddiası değildir. Ölçü yalnız
+`vegai_pretrain train` child process'ini kapsar; fixture üretimi, byte compare
+ve Python harness hariçtir. Bu sonuç default `--openvino-min-contexts 64`
+threshold'ünün kısa record'ları CPU/OpenMP'de tutmasının nedenidir.
+
+CI hostunda iGPU/NPU yoktu. Bu nedenle gerçek Intel Core Ultra GPU/NPU speedup,
+energy veya multi-device scaling değeri **henüz ölçülmüş değildir**. Target
+benchmark yalnız `--openvino-require-accelerator` ile worker'ın GPU/NPU mask'i
+doğrulandığında raporlanmalıdır.
+
 ## Güncel V3 sonucu — portable profile ile doğrulanmış GNU Fortran CI
 
 [GitHub Actions run 39836218246](https://github.com/sswweett00/Vegai/actions/runs/39836218246)

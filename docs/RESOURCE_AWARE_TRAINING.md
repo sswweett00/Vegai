@@ -253,5 +253,20 @@ Provider execution-only'dir: aynı corpus/config için CPU referans ve OpenVINO
 context run checkpoint byte equality ile test edilmelidir. CI'daki optional
 OpenVINO bridge test bu eşitliği CPU OpenVINO plugin'iyle zorunlu kılar; gerçek
 Core Ultra GPU/NPU throughput veya energy sonucu ancak hedef host'ta ayrıca
-ölçülüp kaydedilmelidir. Bu repository şu anda target GPU/NPU üzerinde ölçülmüş
-bir hızlanma rakamı iddia etmez.
+ölçülüp kaydedilmelidir.
+
+### Kaydedilmiş gerçek bridge sonucu (CPU plugin; accelerator speed iddiası değildir)
+
+[CI run 39848562780](https://github.com/sswweett00/Vegai/actions/runs/39848562780)
+AMD EPYC 7763/Linux hostunda OpenVINO CPU plugin ile iki 15-token hierarchical
+record (30 dispatched context) çalıştırdı. Yalnız bir `vegai_pretrain train`
+child process ölçülerek CPU referans `0.021183 s`, process-isolated OpenVINO
+context provider `1.438524 s` çıktı: provider/CPU ratio **67.9080×** ve
+checkpoint byte equality `True`.
+
+Bu deliberately küçük correctness fixture'da Python worker startup + graph
+compile overhead'i baskındır; CPU OpenVINO kullanımının hızlandırma olmadığını
+gösterir. Bu nedenle default `--openvino-min-contexts 64` küçük record'ları
+CPU/OpenMP'de bırakır. Sonuç Intel iGPU/NPU benchmarkı değildir ve Core Ultra
+üzerinde GPU/NPU speedup/energy iddiası yapılamaz; strict target ölçümü için
+`--openvino-require-accelerator` ile ayrı benchmark gerekir.

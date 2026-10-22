@@ -157,10 +157,11 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Akıl yürütme | `src/reasoning_core.f90` | role–filler frame, n-gram, kural bankası, analogik transfer |
 | Resonator Network | `src/resonator_network.f90` | slot-spesifik codebook'larla çoklu-faktör çözümleme ve exact certification |
 | Corpus ingest | `src/text_tokenizer.f90`, `src/vocabulary.f90` | bounded ASCII canonicalization, collision-safe frequency vocabulary |
-| HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, hierarchical default, deterministic OpenMP context preparation + source-ordered commit, metrics, checkpoint/resume |
-| Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect`, context-build execution switch ve nearest semantic diagnostic |
+| HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, hierarchical default, deterministic OpenMP / optional OpenVINO immutable-context preparation + source-ordered CPU commit, metrics, checkpoint/resume |
+| Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect`, CPU/OpenVINO context-provider execution switch ve nearest semantic diagnostic |
 | Continual transaction | `tools/continuous_shard_manifest.py`, `tools/continuous_pretrain.py` | immutable SHA-256 ledger, strict ingest gate, candidate generation, atomic state journal |
-| Kaynak preflight | `tools/training_resource_plan.py` | bounded RAM/checkpoint storage estimate, CPU/NUMA/OpenMP recommendation, accelerator truth contract |
+| Kaynak preflight | `tools/training_resource_plan.py` | bounded RAM/checkpoint storage estimate, CPU/NUMA/OpenMP recommendation, static accelerator truth contract |
+| OpenVINO context worker | `tools/openvino_context_worker.py` | optional Intel uint32-lane immutable-context bundle/finalize bridge; execution mask / CPU fallback contract |
 | Çalıştırılabilir doğrulama | `app/main.f90` | %25 exact gürültü, analoji, causal chain ve 3-faktör Resonator demo |
 | Native testler | `test/test_all.f90` | cebirsel invariantlar, hata yolları, serial/OpenMP pretraining eşitliği ve uçtan uca test |
 | Donanım/OS profili | `tools/hardware_compatibility.py` | privacy-conscious CPU/RAM/GPU/NPU inventory, portable CPU backend sözleşmesi |
