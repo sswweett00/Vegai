@@ -63,6 +63,31 @@ program vegai_pretrain
       call maybe_query(model, query, status)
       if (status /= PT_OK) call fail_with_status('query failed', status)
 
+   case ('continue')
+      if (argument_count < 3) call fail_usage()
+      call get_command_argument(2, corpus_path)
+      call get_command_argument(3, checkpoint_path)
+      call pretrain_checkpoint_load(trim(checkpoint_path), model, status)
+      if (status /= PT_OK) call fail_with_status('checkpoint load failed', status)
+      call pretrain_config_from_model(model, config, status)
+      if (status /= PT_OK) call fail_with_status('checkpoint configuration failed', status)
+      query = ''
+      call parse_resume_options(4, argument_count, config, query, status)
+      if (status /= PT_OK) call fail_with_status('invalid continue option', status)
+
+      call pretrain_extend_vocabulary(model, trim(corpus_path), config, vocabulary_metrics, status)
+      if (status /= PT_OK) call fail_with_status('vocabulary extension failed', status)
+      call print_vocabulary_summary(model, vocabulary_metrics, 'vocabulary extension')
+
+      call pretrain_train_file(model, trim(corpus_path), config, training_metrics, status)
+      if (status /= PT_OK) call fail_with_status('training pass failed', status)
+      call print_training_summary(model, training_metrics)
+      call pretrain_checkpoint_save(model, trim(checkpoint_path), status)
+      if (status /= PT_OK) call fail_with_status('checkpoint save failed', status)
+      write(output_unit, '(A,A)') 'checkpoint: ', trim(checkpoint_path)
+      call maybe_query(model, query, status)
+      if (status /= PT_OK) call fail_with_status('query failed', status)
+
    case ('inspect')
       if (argument_count < 2) call fail_usage()
       call get_command_argument(2, checkpoint_path)
@@ -242,11 +267,15 @@ contains
       end do
    end subroutine parse_inspect_options
 
-   subroutine print_vocabulary_summary(trained_model, metrics)
+   subroutine print_vocabulary_summary(trained_model, metrics, phase_name)
       type(hdc_pretrain_model_t), intent(in) :: trained_model
       type(pretrain_metrics_t), intent(in) :: metrics
+      character(len=*), intent(in), optional :: phase_name
+      character(len=64) :: rendered_phase
 
-      write(output_unit, '(A)') 'phase: vocabulary'
+      rendered_phase = 'vocabulary'
+      if (present(phase_name)) rendered_phase = phase_name
+      write(output_unit, '(A,A)') 'phase: ', trim(rendered_phase)
       write(output_unit, '(A,I0)') '  corpus lines: ', metrics%corpus_lines
       write(output_unit, '(A,I0)') '  observed tokens: ', metrics%raw_tokens
       write(output_unit, '(A,I0)') '  unique tokens: ', trained_model%vocabulary%count
@@ -366,10 +395,12 @@ contains
       write(output_unit, '(A)') 'Usage:'
       write(output_unit, '(A)') '  vegai_pretrain train CORPUS CHECKPOINT [options]'
       write(output_unit, '(A)') '  vegai_pretrain resume CORPUS CHECKPOINT [--epochs N] [--strict] [--query TOKEN]'
+      write(output_unit, '(A)') '  vegai_pretrain continue SHARD CHECKPOINT [--epochs N] [--strict] [--query TOKEN]'
       write(output_unit, '(A)') '  vegai_pretrain inspect CHECKPOINT [--query TOKEN | --query-file PATH]'
       write(output_unit, '(A)') 'Train options:'
       write(output_unit, '(A)') '  --max-vocab N --min-frequency N --window N --position-shift N --context-mode MODE --epochs N'
       write(output_unit, '(A)') '  MODE is legacy, positional, or hybrid (default hybrid)'
+      write(output_unit, '(A)') '  continue first extends vocabulary from one immutable shard, then trains it'
       write(output_unit, '(A)') '  --initial-plasticity N --minimum-plasticity N --decay-events N --strict --query TOKEN'
       write(output_unit, '(A)') 'This is streaming distributional HDC learning, not Transformer/LLM pretraining.'
    end subroutine print_usage

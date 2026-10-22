@@ -89,6 +89,18 @@ veya production throughput iddiası değildir. Kaydedilmiş CI önce/sonra değe
 [`docs/PRETRAINING_MODE_COMPARISON.md`](../docs/PRETRAINING_MODE_COMPARISON.md)
 belgesindedir.
 
+## Kesintisiz shard örneği
+
+Bu fixture tek dosyalı deterministic smoke/benchmark içindir. Production benzeri
+append-only akışta corpus'u ayrı strict ASCII/LF shard'lara bölün; önce
+`tools/continuous_shard_manifest.py` ile SHA-256 ledger üretin, sonra
+`tools/continuous_pretrain.py` ile `min-frequency=1` state journal'ına commit
+edin. İkinci araç candidate checkpoint, private snapshot ve atomic state
+publish kullanır; doğrudan `continue` komutunu durable checkpoint üzerinde
+çalıştırmak aynı crash/restart garantisini vermez. Tam komutlar ve failure
+semantics için
+[`docs/CONTINUOUS_PRETRAINING.md`](../docs/CONTINUOUS_PRETRAINING.md)'ye bakın.
+
 ## Veri yönetişimi
 
 `*.vgai` çalışma çıktısıdır; gerçek corpus veya checkpoint'i depoya commit

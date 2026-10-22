@@ -20,7 +20,8 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 - çoklu-faktör ayrıştırma için deterministic multi-restart **Resonator Network**
   ve bounded meet-in-the-middle exact verifier;
 - iki-pass vocabulary, allocation-free ASCII ingest, streaming positional-context
-  Hebbian öğrenme, checkpoint/resume ve telemetry içeren HDC/VSA corpus pipeline;
+  Hebbian öğrenme, checkpoint/resume telemetry ve SHA-256 journal'lı continual
+  shard pretraining içeren HDC/VSA corpus pipeline;
 - yerel Fortran özellik/entegrasyon testleri, bağımsız Python referans modeli
   ve GitHub Actions ile denetimli derleme.
 
@@ -33,8 +34,9 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 > **Corpus pretraining notu:** `vegai_pretrain`, Transformer/LLM eğitimi değil;
 > deterministik positional + order-invariant hybrid context'lerden HDC semantic
 > prototype öğrenimidir. Unicode corpus'lar ön-tokenization ister; veri yönetişimi,
-> checkpoint ve sınırlar [PRETRAINING.md](docs/PRETRAINING.md)'de açıkça
-> tanımlıdır.
+> checkpoint ve sınırlar [PRETRAINING.md](docs/PRETRAINING.md)'de, immutable
+> shard'larla crash-safe continual çalışma ise
+> [CONTINUOUS_PRETRAINING.md](docs/CONTINUOUS_PRETRAINING.md)'de açıkça tanımlıdır.
 
 ## Hızlı başlangıç
 
@@ -85,6 +87,13 @@ python3 tools/compare_pretraining_modes.py --pretrain-bin ./build/vegai_pretrain
 # Gerçek corpus'u eğitmeden önce local digest + ingest preflight
 python3 tools/corpus_manifest.py CORPUS.txt --output corpus-manifest.json \
   --source 'dataset URI/version' --license 'license ID' --strict-contract
+
+# Ordered immutable shard'larla crash-safe continual pretraining
+python3 tools/continuous_shard_manifest.py data/shards/000001.txt data/shards/000002.txt \
+  --output data/continual-ledger.json --source 'dataset version' --license 'license ID'
+python3 tools/continuous_pretrain.py --pretrain-bin ./build/vegai_pretrain \
+  --manifest data/continual-ledger.json --state-dir state/continual \
+  --max-vocab 50000 --min-frequency 1 --context-mode hybrid --epochs 1
 ```
 
 GNU CMake hedefi `-std=f2023` bayrağını uygulama, test ve kütüphane hedeflerine
@@ -120,8 +129,9 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Akıl yürütme | `src/reasoning_core.f90` | role–filler frame, n-gram, kural bankası, analogik transfer |
 | Resonator Network | `src/resonator_network.f90` | slot-spesifik codebook'larla çoklu-faktör çözümleme ve exact certification |
 | Corpus ingest | `src/text_tokenizer.f90`, `src/vocabulary.f90` | bounded ASCII canonicalization, collision-safe frequency vocabulary |
-| HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, position-context prototype update, metrics, checkpoint/resume |
-| Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `inspect` ve nearest semantic diagnostic |
+| HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, shard vocabulary extension, position-context prototype update, metrics, checkpoint/resume |
+| Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect` ve nearest semantic diagnostic |
+| Continual transaction | `tools/continuous_shard_manifest.py`, `tools/continuous_pretrain.py` | immutable SHA-256 ledger, strict ingest gate, candidate generation, atomic state journal |
 | Çalıştırılabilir doğrulama | `app/main.f90` | %25 exact gürültü, analoji, causal chain ve 3-faktör Resonator demo |
 | Native testler | `test/test_all.f90` | cebirsel invariantlar, hata yolları, bellek, pretraining ve uçtan uca test |
 | Bağımsız oracle | `tools/verify_reference.py` | standart SplitMix64 ve demo sözleşmelerinin Python modeli |
@@ -136,7 +146,9 @@ iddia etmiyoruz. Sıfır-kayıplı 64-byte hizalama gerekiyorsa derleyici/ABI'ye
 Ayrıntılı tasarım ve invariantlar için [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
 Resonator Network sözleşmesi için [docs/RESONATOR_NETWORK.md](docs/RESONATOR_NETWORK.md),
 corpus veri hattı, yönetişim ve checkpoint sözleşmesi için
-[docs/PRETRAINING.md](docs/PRETRAINING.md), fixture üzerinde gerçek yürütme
+[docs/PRETRAINING.md](docs/PRETRAINING.md), immutable shard ledger ve
+crash-safe exactly-once continual pretraining için
+[docs/CONTINUOUS_PRETRAINING.md](docs/CONTINUOUS_PRETRAINING.md), fixture üzerinde gerçek yürütme
 telemetrisi için [docs/EXAMPLE_PRETRAINING_RUN.md](docs/EXAMPLE_PRETRAINING_RUN.md),
 önce/sonra hız ve controlled semantic-cohesion sonuçları için
 [docs/PRETRAINING_MODE_COMPARISON.md](docs/PRETRAINING_MODE_COMPARISON.md),

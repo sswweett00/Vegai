@@ -88,7 +88,7 @@ module hdc_pretraining
       integer(int64), allocatable :: experience_count(:)
    end type hdc_pretrain_model_t
 
-   public :: pretrain_build_vocabulary, pretrain_train_file
+   public :: pretrain_build_vocabulary, pretrain_extend_vocabulary, pretrain_train_file
    public :: pretrain_model_destroy, pretrain_model_is_ready
    public :: pretrain_metrics_reset, pretrain_model_footprint_bytes
    public :: pretrain_checkpoint_save, pretrain_checkpoint_load
@@ -408,6 +408,10 @@ contains
          call tokenize_ascii_line(line, tokens, n_tokens, truncated, non_ascii_count)
          call add_nonnegative(metrics%non_ascii_bytes, non_ascii_count, status)
          if (status /= PT_OK) exit
+         if (config%strict_tokenization .and. non_ascii_count > 0_int64) then
+            status = PT_ERR_TOKENIZATION
+            exit
+         end if
          if (truncated) then
             call add_nonnegative(metrics%tokenizer_truncations, 1_int64, status)
             if (status /= PT_OK) exit
@@ -460,6 +464,149 @@ contains
       model%tie_seed = config%tie_seed
       model%ready = .true.
    end subroutine pretrain_build_vocabulary
+
+   ! Activates only vocabulary slots that crossed min_frequency during a
+   ! continuous shard-extension pass.  Existing semantic prototypes and their
+   ! experience schedules are deliberately left untouched.
+   subroutine initialize_new_active_hypervectors(model, active_before_extension)
+      type(hdc_pretrain_model_t), intent(inout) :: model
+      logical, intent(in) :: active_before_extension(:)
+      type(hv_t) :: vector
+      integer(int32) :: slot
+
+      if (size(active_before_extension, kind=int32) /= model%vocabulary%capacity) return
+      do slot = 1, model%vocabulary%count
+         if (.not. model%vocabulary%active(slot) .or. active_before_extension(slot)) cycle
+         vector = hv_from_seed(vocab_seed_for_slot(model%vocabulary, slot))
+         model%base_bits(:, slot) = vector%bits
+         model%semantic_bits(:, slot) = vector%bits
+         model%experience_count(slot) = 0_int64
+      end do
+   end subroutine initialize_new_active_hypervectors
+
+   ! Observes one new immutable corpus shard without resetting an already
+   ! trained model.  It may append vocabulary slots (up to the fixed capacity)
+   ! and deterministically initializes only newly-active identities.  The
+   ! caller subsequently invokes pretrain_train_file on the same shard.
+   !
+   ! The API intentionally exposes extension and learning as distinct phases:
+   ! a transactional continuous controller can keep the durable checkpoint
+   ! unchanged until both have completed and been integrity-checked.
+   subroutine pretrain_extend_vocabulary(model, corpus_path, config, metrics, status)
+      type(hdc_pretrain_model_t), intent(inout) :: model
+      character(len=*), intent(in) :: corpus_path
+      type(hdc_pretrain_config_t), intent(in) :: config
+      type(pretrain_metrics_t), intent(out) :: metrics
+      integer(int32), intent(out) :: status
+      character(len=MAX_LINE_CHARS) :: line
+      character(len=TOKEN_LEN) :: tokens(MAX_TOKENS_PER_LINE)
+      logical, allocatable :: active_before_extension(:)
+      integer :: unit, io_status, allocation_status
+      integer(int32) :: token_index, n_tokens, vocab_status
+      integer(int64) :: non_ascii_count
+      logical :: eof, overlong, truncated
+
+      call pretrain_metrics_reset(metrics)
+      status = PT_OK
+      if (.not. pretrain_model_is_ready(model)) then
+         status = PT_ERR_MODEL_NOT_READY
+         return
+      end if
+      call validate_pretrain_config(config, status)
+      if (status /= PT_OK) return
+      if (len_trim(corpus_path) == 0) then
+         status = PT_ERR_INVALID_ARGUMENT
+         return
+      end if
+      if (config%max_vocabulary /= model%vocabulary%capacity .or. &
+          config%min_frequency /= model%vocabulary%min_frequency .or. &
+          config%context_window /= model%context_window .or. &
+          config%position_shift_bits /= model%position_shift_bits .or. &
+          config%context_mode /= model%context_mode .or. &
+          config%initial_plasticity_percent /= model%initial_plasticity_percent .or. &
+          config%minimum_plasticity_percent /= model%minimum_plasticity_percent .or. &
+          config%plasticity_decay_events /= model%plasticity_decay_events .or. &
+          config%tie_seed /= model%tie_seed) then
+         status = PT_ERR_INCOMPATIBLE_CONFIG
+         return
+      end if
+
+      allocate(active_before_extension(model%vocabulary%capacity), stat=allocation_status)
+      if (allocation_status /= 0) then
+         status = PT_ERR_ALLOCATION
+         return
+      end if
+      active_before_extension = model%vocabulary%active
+
+      open(newunit=unit, file=trim(corpus_path), status='old', action='read', &
+           form='formatted', iostat=io_status)
+      if (io_status /= 0) then
+         deallocate(active_before_extension)
+         status = PT_ERR_IO
+         return
+      end if
+
+      do
+         call read_corpus_record(unit, line, eof, overlong, status)
+         if (status /= PT_OK) exit
+         if (eof) exit
+         call add_nonnegative(metrics%corpus_lines, 1_int64, status)
+         if (status /= PT_OK) exit
+         if (overlong) then
+            call add_nonnegative(metrics%overlong_records, 1_int64, status)
+            if (status /= PT_OK) exit
+            if (config%strict_tokenization) then
+               status = PT_ERR_RECORD_TOO_LONG
+               exit
+            end if
+            cycle
+         end if
+         call tokenize_ascii_line(line, tokens, n_tokens, truncated, non_ascii_count)
+         call add_nonnegative(metrics%non_ascii_bytes, non_ascii_count, status)
+         if (status /= PT_OK) exit
+         if (config%strict_tokenization .and. non_ascii_count > 0_int64) then
+            status = PT_ERR_TOKENIZATION
+            exit
+         end if
+         if (truncated) then
+            call add_nonnegative(metrics%tokenizer_truncations, 1_int64, status)
+            if (status /= PT_OK) exit
+            if (config%strict_tokenization) then
+               status = PT_ERR_TOKENIZATION
+               exit
+            end if
+         end if
+         do token_index = 1, n_tokens
+            call add_nonnegative(metrics%raw_tokens, 1_int64, status)
+            if (status /= PT_OK) exit
+            call vocab_observe(model%vocabulary, tokens(token_index), vocab_status)
+            if (vocab_status /= VOCAB_OK) then
+               status = PT_ERR_VOCABULARY
+               exit
+            end if
+         end do
+         if (status /= PT_OK) exit
+      end do
+      close(unit)
+      if (status /= PT_OK) then
+         deallocate(active_before_extension)
+         return
+      end if
+
+      call vocab_finalize(model%vocabulary, vocab_status)
+      if (vocab_status /= VOCAB_OK) then
+         deallocate(active_before_extension)
+         status = PT_ERR_VOCABULARY
+         return
+      end if
+      if (model%vocabulary%active_count == 0_int32) then
+         deallocate(active_before_extension)
+         status = PT_ERR_EMPTY_VOCABULARY
+         return
+      end if
+      call initialize_new_active_hypervectors(model, active_before_extension)
+      deallocate(active_before_extension)
+   end subroutine pretrain_extend_vocabulary
 
    pure function scheduled_plasticity_percent(model, experiences) result(percent)
       type(hdc_pretrain_model_t), intent(in) :: model
@@ -612,6 +759,10 @@ contains
          call tokenize_ascii_line(line, tokens, n_tokens, truncated, non_ascii_count)
          call add_nonnegative(metrics%non_ascii_bytes, non_ascii_count, status)
          if (status /= PT_OK) exit
+         if (config%strict_tokenization .and. non_ascii_count > 0_int64) then
+            status = PT_ERR_TOKENIZATION
+            exit
+         end if
          if (truncated) then
             call add_nonnegative(metrics%tokenizer_truncations, 1_int64, status)
             if (status /= PT_OK) exit

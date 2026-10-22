@@ -390,10 +390,12 @@ contains
    subroutine test_hdc_pretraining()
       character(len=*), parameter :: CORPUS_PATH = 'vegai_pretraining_test_corpus.txt'
       character(len=*), parameter :: CHECKPOINT_PATH = 'vegai_pretraining_test_checkpoint.vgai'
-      type(hdc_pretrain_model_t) :: model_a, model_b, restored, legacy_model, positional_model
-      type(hdc_pretrain_config_t) :: config, resumed_config, strict_config, legacy_config, positional_config
-      type(pretrain_metrics_t) :: vocabulary_metrics, train_metrics
-      type(hv_t) :: semantic_hv
+      character(len=*), parameter :: CONTINUATION_A_PATH = 'vegai_continuation_a.txt'
+      character(len=*), parameter :: CONTINUATION_B_PATH = 'vegai_continuation_b.txt'
+      type(hdc_pretrain_model_t) :: model_a, model_b, restored, legacy_model, positional_model, continuation_model
+      type(hdc_pretrain_config_t) :: config, resumed_config, strict_config, legacy_config, positional_config, continuation_config
+      type(pretrain_metrics_t) :: vocabulary_metrics, train_metrics, extension_metrics
+      type(hv_t) :: semantic_hv, semantic_before_extension, semantic_after_extension
       character(len=TOKEN_LEN) :: nearest_token
       integer :: unit, io_status
       integer(int32) :: status, slot, nearest_slot
@@ -527,6 +529,62 @@ contains
       call assert_i32_equal(status, PT_ERR_INCOMPATIBLE_CONFIG, &
                             'context encoder mismatch is rejected on resume')
 
+      ! Continuous pretraining grows a fixed-capacity vocabulary transactionally
+      ! at shard boundaries.  With min_frequency=1 every accepted token in a
+      ! strict shard becomes active before that same shard is learned, so no
+      ! token becomes an avoidable OOV loss.
+      open(newunit=unit, file=CONTINUATION_A_PATH, status='replace', action='write', &
+           form='formatted', iostat=io_status)
+      call assert_true(io_status == 0, 'first continuation shard opens')
+      if (io_status == 0) then
+         write(unit, '(A)') 'alpha beta'
+         write(unit, '(A)') 'beta alpha'
+         close(unit)
+      end if
+      open(newunit=unit, file=CONTINUATION_B_PATH, status='replace', action='write', &
+           form='formatted', iostat=io_status)
+      call assert_true(io_status == 0, 'second continuation shard opens')
+      if (io_status == 0) then
+         write(unit, '(A)') 'beta gamma'
+         write(unit, '(A)') 'gamma beta'
+         close(unit)
+      end if
+      continuation_config = config
+      continuation_config%max_vocabulary = 16_int32
+      continuation_config%min_frequency = 1_int64
+      continuation_config%epochs = 1_int32
+      continuation_config%strict_tokenization = .true.
+      call pretrain_build_vocabulary(continuation_model, CONTINUATION_A_PATH, continuation_config, &
+                                     vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'first continuation shard builds vocabulary')
+      call assert_i32_equal(continuation_model%vocabulary%count, 2_int32, &
+                            'first shard supplies two vocabulary terms')
+      call pretrain_train_file(continuation_model, CONTINUATION_A_PATH, continuation_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'first continuation shard trains')
+      call pretrain_lookup_token(continuation_model, 'beta', slot, found, status)
+      call assert_true(found .and. status == PT_OK, 'existing continuation token is queryable')
+      call pretrain_get_semantic_hv(continuation_model, slot, semantic_before_extension, status)
+      call assert_i32_equal(status, PT_OK, 'existing continuation prototype is readable')
+      call pretrain_extend_vocabulary(continuation_model, CONTINUATION_B_PATH, continuation_config, &
+                                      extension_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'second continuation shard extends vocabulary')
+      call assert_true(extension_metrics%raw_tokens == 4_int64, &
+                       'vocabulary extension observes all second-shard tokens')
+      call assert_i32_equal(continuation_model%vocabulary%count, 3_int32, &
+                            'extension appends unseen gamma token')
+      call assert_i32_equal(continuation_model%vocabulary%active_count, 3_int32, &
+                            'min-frequency-one extension activates every observed token')
+      call pretrain_lookup_token(continuation_model, 'beta', slot, found, status)
+      call pretrain_get_semantic_hv(continuation_model, slot, semantic_after_extension, status)
+      call assert_hv_equal(semantic_after_extension, semantic_before_extension, &
+                           'vocabulary extension never resets existing semantic prototypes')
+      call pretrain_train_file(continuation_model, CONTINUATION_B_PATH, continuation_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'second continuation shard trains after extension')
+      call assert_true(train_metrics%raw_tokens == 4_int64 .and. train_metrics%active_tokens == 4_int64 .and. &
+                       train_metrics%oov_tokens == 0_int64, 'strict continuous shard has no token loss or OOV')
+      call pretrain_lookup_token(continuation_model, 'gamma', slot, found, status)
+      call assert_true(found .and. status == PT_OK, 'new continuation token becomes immediately queryable')
+
       open(newunit=unit, file=CORPUS_PATH, status='replace', action='write', &
            form='formatted', iostat=io_status)
       call assert_true(io_status == 0, 'strict tokenizer fixture opens')
@@ -537,6 +595,18 @@ contains
          strict_config%strict_tokenization = .true.
          call pretrain_build_vocabulary(model_b, CORPUS_PATH, strict_config, vocabulary_metrics, status)
          call assert_i32_equal(status, PT_ERR_TOKENIZATION, 'strict mode rejects dropped long token')
+      end if
+
+      open(newunit=unit, file=CORPUS_PATH, status='replace', action='write', &
+           form='formatted', iostat=io_status)
+      call assert_true(io_status == 0, 'strict non-ASCII fixture opens')
+      if (io_status == 0) then
+         write(unit, '(A)') 'plain' // achar(195) // achar(167)
+         close(unit)
+         strict_config = config
+         strict_config%strict_tokenization = .true.
+         call pretrain_build_vocabulary(model_b, CORPUS_PATH, strict_config, vocabulary_metrics, status)
+         call assert_i32_equal(status, PT_ERR_TOKENIZATION, 'strict mode rejects non-ASCII bytes')
       end if
 
       open(newunit=unit, file=CORPUS_PATH, status='replace', action='write', &
@@ -564,6 +634,11 @@ contains
       call pretrain_model_destroy(restored)
       call pretrain_model_destroy(legacy_model)
       call pretrain_model_destroy(positional_model)
+      call pretrain_model_destroy(continuation_model)
+      open(newunit=unit, file=CONTINUATION_A_PATH, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+      open(newunit=unit, file=CONTINUATION_B_PATH, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
       open(newunit=unit, file=CORPUS_PATH, status='old', iostat=io_status)
       if (io_status == 0) close(unit, status='delete')
       open(newunit=unit, file=CHECKPOINT_PATH, status='old', access='stream', form='unformatted', &

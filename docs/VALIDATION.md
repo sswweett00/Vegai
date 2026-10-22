@@ -23,7 +23,7 @@ yerine geçmez.
 | `make debug` | bounds/runtime/FPE denetimli native test | başarısızlık yok |
 | `make run` | 512+ sembollü demo | frame, analogy, 4 causal adım ve 3-factor Resonator PASS |
 | `make pretrain` | HDC corpus CLI derlemesi | `build/vegai_pretrain` oluşur |
-| `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties` PASS |
+| `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties`, `vegai_example_pretraining`, `vegai_continuous_pretraining` PASS |
 
 CI bunların checked CMake/OpenMP varyantını ve ayrıca optimize Make hedefini
 çalıştırır.
@@ -89,16 +89,21 @@ saturate ederek ambiguity'yi doğrular.
 - binary checkpoint save/load, rebuilt hash index ve payload plane round-trip;
 - kesintisiz ikinci epoch ile checkpoint'ten resume edilen ikinci epoch'un
   bit-tam eşitliği;
-- resume semantic config mismatch, strict long-token ve strict >8.192-byte
-  record hata yolları;
+- resume semantic config mismatch, strict long-token, strict non-ASCII byte ve
+  strict >8.192-byte record hata yolları;
+- iki shard üzerinde vocabulary extension: yeni token'ın active/queryable olması,
+  mevcut semantic prototype'ın resetlenmemesi ve `OOV=0` training invariantı;
 - exact-rate Hebbian update için complement input altında %25 = 4.096 Hamming
   flip property.
 
 CI, küçük `toy_hdc_corpus.txt` ile `train → inspect → resume` smoke zincirini
 ve `mini_turkish_ascii_pretrain.txt` ile manifest, dengeli-token cardinality,
 bit-tam çift checkpoint ve `train → inspect → resume` integration zincirini
-çalıştırır. CI ayrıca optimized Make binary ile aynı corpus/config üzerinde
-`tools/compare_pretraining_modes.py` çalıştırır; `legacy → positional → hybrid`
+çalıştırır. CTest'in `vegai_continuous_pretraining` entegrasyonu gerçek CLI ile
+SHA-256 shard mutation rejection, append-only manifest prefix, OOV=0 ve
+idempotent restart journal davranışını ayrıca sınar. CI ayrıca optimized Make
+binary ile aynı corpus/config üzerinde `tools/compare_pretraining_modes.py`
+çalıştırır; `legacy → positional → hybrid`
 modlarının isolate edilmiş `train` wall-clock medyanını, token/saniyesini ve
 checkpoint üzerinden controlled Top-1 topical-cohesion ölçümünü workflow
 summary'ye yazar. Bu fixture'lar yalnız pipeline doğrulaması ve kontrollü
@@ -177,6 +182,9 @@ latency benchmarkı ölçün.
 | `int16` accumulator overflow | `HV_ERR_ACCUMULATOR_OVERFLOW`, hiçbir count mutasyona uğramaz |
 | invalid noise count/percent | `HV_ERR_INVALID_ARGUMENT`, output input'a eşit kalır |
 | LSH bucket boş | `MEM_ERR_NO_LSH_CANDIDATE` yalnız approximate API'de |
+| continuous shard SHA/preflight uyuşmazlığı | controller child CLI çağrısından önce shard'ı reddeder; committed state değişmez |
+| continuous manifest committed prefix rewrite | controller reddeder; önceki generation replay edilmez |
+| candidate checkpoint sonrası crash | state journal eski generation'da kalır; orphan candidate durable commit sayılmaz |
 
 ## Reproducibility kaydı
 
@@ -211,5 +219,6 @@ Bir değişiklik merge edilmeden önce:
 - [ ] pretraining corpus manifesti, lisans/PII/retention değerlendirmesi ve digest'i kaydedildi
 - [ ] tokenizer/overlong-record telemetry'si incelendi; strict veya kabul politikası açıklandı
 - [ ] checkpoint save/load + resume sonucu hedef compiler/ABI üzerinde doğrulandı
+- [ ] continual iş varsa immutable SHA-256 manifest, `min_frequency=1`, state journal ve restart/fault senaryosu doğrulandı
 - [ ] pretraining semantic kalite iddiası held-out görev ve baseline ile ölçüldü
 - [ ] benchmark iddiası hedef platformda ölçüm çıktısıyla desteklendi

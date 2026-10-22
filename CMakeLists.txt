@@ -83,7 +83,12 @@ if(VEGAI_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_example_corpus.py
                     --pretrain-bin $<TARGET_FILE:vegai_pretrain>
         )
+        add_test(
+            NAME vegai_continuous_pretraining
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_continuous_pretraining.py
+                    --pretrain-bin $<TARGET_FILE:vegai_pretrain>
+        )
     else()
-        message(WARNING "Python3 was not found; example corpus integration test is not registered.")
+        message(WARNING "Python3 was not found; Python corpus/continuous integration tests are not registered.")
     endif()
 endif()

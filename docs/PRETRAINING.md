@@ -118,9 +118,10 @@ fiziksel kayıt ilk 8.192 byte ile öğrenilmez: tamamı drain edilir, düşür�
 `overlong_records` artırılır. Bu davranış prefix-aliasing ve sessiz corpus
 bozulmasını önler.
 
-`--strict` etkinse iki durumda eğitim durur:
+`--strict` etkinse üç durumda eğitim durur:
 
 - tokenizer'ın token/token-count limitini aşması: `PT_ERR_TOKENIZATION`;
+- `>127` non-ASCII byte görülmesi: `PT_ERR_TOKENIZATION`;
 - fiziksel kayıt limiti aşması: `PT_ERR_RECORD_TOO_LONG`.
 
 Türkçe veya başka Unicode dillerindeki corpus'lar için normalizasyon, segmentasyon
@@ -145,8 +146,11 @@ cmake --build build --parallel
   --context-mode hybrid --epochs 3 --initial-plasticity 25 --minimum-plasticity 1 \
   --decay-events 32 --query token
 
-# Checkpoint semantic configuration ile uyumlu ek epoch
+# Checkpoint semantic configuration ile uyumlu ek epoch (vocabulary değiştirmez)
 ./build/vegai_pretrain resume CORPUS.txt model.vgai --epochs 1 --query token
+
+# Yeni immutable shard'dan vocabulary'yi genişletir, sonra sadece o shard'ı öğrenir
+./build/vegai_pretrain continue NEW_SHARD.txt model.vgai --epochs 1 --strict --query newtoken
 
 # Eğitim yapmadan metadata ve tek nearest-neighbour sorgusu
 ./build/vegai_pretrain inspect model.vgai --query token
@@ -174,10 +178,18 @@ cmake --build build --parallel
 
 `resume`, checkpoint'ten vocabulary threshold/capacity, `window`, shift,
 context encoder, plasticity ve tie seed'ini geri alır; yalnız `--epochs`,
-`--strict`, `--query` kabul eder. Öğrenme semantiğini
-checkpoint'ten farklı bir config ile sürdürme `PT_ERR_INCOMPATIBLE_CONFIG` ile
-reddedilir. CLI query'si tokenizer üzerinden canonicalize edilir ve yalnız bir
-token kabul eder.
+`--strict`, `--query` kabul eder ve vocabulary'yi değiştirmez. `continue` aynı
+uyumlu config'i geri alır, önce yeni shard'ın token'larını vocabulary'ye ekler,
+yalnız newly-active slotları başlatır, ardından shard'ı train eder. Öğrenme
+semantiğini checkpoint'ten farklı bir config ile sürdürme
+`PT_ERR_INCOMPATIBLE_CONFIG` ile reddedilir. CLI query'si tokenizer üzerinden
+canonicalize edilir ve yalnız bir token kabul eder.
+
+Crash-safe append-only shard ledger, SHA-256, strict LF/ASCII contract ve
+exactly-once durable generation semantics için
+[CONTINUOUS_PRETRAINING.md](CONTINUOUS_PRETRAINING.md)'yi kullanın. Tek başına
+`continue`, checkpoint'i verilen path üzerinde güncellediği için controller'ın
+private candidate + journal transaction garantisinin yerini tutmaz.
 
 Küçük smoke corpus ve dengeli Türkçe-ASCII fixture için
 [`examples/`](../examples/README.md) altındaki örneğe bakın. İkinci fixture,
@@ -199,7 +211,7 @@ CLI ve `pretrain_metrics_t` aşağıdaki sayıları verir:
 | `context_pairs` | position-permuted neighbor katkılarının sayısı |
 | `center_updates` | en az bir active neighbor bulan center update sayısı |
 | `tokenizer_truncations` | düşürülen long-token / excess-token kaydı |
-| `non_ascii_bytes` | in-contract kayıtlarda gözlenen `>127` byte sayısı; Unicode kalite sinyali, hata değildir |
+| `non_ascii_bytes` | in-contract kayıtlarda gözlenen `>127` byte sayısı; non-strict telemetry'dir, `--strict` altında hatadır |
 | `overlong_records` | tamamı düşürülen >8.192-byte fiziksel kayıt |
 
 `active_tokens + oov_tokens = raw_tokens` ikinci geçiş için beklenen temel
