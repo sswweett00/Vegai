@@ -87,13 +87,16 @@ Vulkan compute veya vendor NPU runtime'ı yüklenmez. Sonuç olarak:
 - Intel Arc/iGPU, AMD Radeon iGPU, Apple integrated GPU veya discrete GPU'nun
   varlığı CPU execution için önkoşul değildir;
 - ekran sürücüsünün vendor API desteği yoksa bile portable CPU backend çalışır;
-- GPU ve NPU inventory yalnız benchmark/resource provenance amacıyla kaydedilir,
-  GPU/NPU hızlandırması iddiası değildir;
-- `--require-accelerator` resource plan'da fail-closed davranır; adapter
-  tespitinin compute dispatch'e dönüştüğünü varsaymaz;
-- ileride GPU/NPU backend eklenirse ayrı numerical determinism, driver,
-  transfer, fallback ve checkpoint sözleşmesi gerekir; mevcut CPU checkpoint
-  equality garantisi otomatik olarak accelerator backend'e taşınmış sayılmaz.
+- GPU ve NPU inventory tek başına GPU/NPU hızlandırması iddiası değildir;
+- generic `--require-accelerator` resource plan'da fail-closed davranır;
+  adapter tespitinin compute dispatch'e dönüştüğünü varsaymaz;
+- Intel Core Ultra için opt-in OpenVINO context provider immutable packed-HDC
+  bundle/finalize aşamasını CPU/GPU/NPU policy'sine dispatch edebilir; runtime
+  summary gerçek execution mask'ini raporlar ve `--openvino-require-accelerator`
+  CPU fallback'i reddeder;
+- provider için lane ABI, driver, transfer, fallback ve CPU-reference
+  checkpoint-byte-equality sözleşmesi ayrı doğrulanır; adapter varlığı bu
+  sözleşmenin yerine geçmez.
 
 Host bilgisini güvenli/taşınabilir bir JSON olarak kaydetmek için:
 
@@ -114,10 +117,11 @@ python3 tools/training_resource_plan.py --corpus CORPUS.txt \
 
 Ayrıntılı RAM/SSD/multi-core/quality/accelerator sınırları için
 [RESOURCE_AWARE_TRAINING.md](RESOURCE_AWARE_TRAINING.md)'ye bakın. Intel Core
-Ultra target'larında optional `tools/openvino_provider.py`, OpenVINO CPU/GPU/NPU
-plugin inventory'si, direct uint64 diagnostic ve exact uint32-lane HDC
-bundle probe'u sağlar; başarı, henüz GPU/NPU train dispatch'in aktif olduğu
-anlamına gelmez.
+Ultra target'larında `tools/openvino_provider.py` preflight'i direct uint64
+diagnostic ve exact uint32-lane HDC bundle probe'u sağlar; `tools/openvino_
+context_worker.py` aynı lane ABI'sini actual immutable-context dispatch'te
+kullanır. Train CLI runtime output'ı GPU/NPU execution'ı yalnız worker mask'i
+bunu doğruladığında true raporlar.
 
 ## 4. İşletim sistemi ve compiler yolu
 

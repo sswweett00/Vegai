@@ -26,8 +26,10 @@ yerine geçmez.
 | `make native` | yalnız build-host CPU'suna tuned ikili | `build-native/vegai_pretrain` oluşur |
 | `python3 tools/verify_hardware_compatibility.py` | CPU/OS/RAM/GPU/NPU inventory ve CPU-backend truth contract | `hardware compatibility verification: PASS` |
 | `python3 tools/verify_training_resource_plan.py` | bounded RAM/checkpoint storage/OpenMP placement planı ve accelerator fail-closed contract | `training resource plan verification: PASS` |
-| `python3 tools/verify_openvino_provider.py` | optional Intel OpenVINO provider truth/fail-closed contract | `OpenVINO provider verification: PASS` |
-| `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties`, `vegai_hardware_compatibility`, `vegai_training_resource_plan`, `vegai_openvino_provider_contract`, `vegai_example_pretraining`, `vegai_continuous_pretraining` PASS |
+| `python3 tools/verify_openvino_provider.py` | optional Intel OpenVINO provider preflight/truth contract | `OpenVINO provider verification: PASS` |
+| `python3 tools/verify_openvino_context_worker.py` | uint32-lane worker protocol; runtime yoksa fail-closed | `OpenVINO context worker verification: PASS` |
+| `python3 tools/verify_openvino_context_provider.py --pretrain-bin build/vegai_pretrain` | CPU reference vs real OpenVINO context graph checkpoint equality (runtime yoksa SKIP) | `OpenVINO context provider verification: PASS` |
+| `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties`, `vegai_hardware_compatibility`, `vegai_training_resource_plan`, `vegai_openvino_provider_contract`, `vegai_openvino_context_worker_contract`, `vegai_openvino_context_provider`, `vegai_example_pretraining`, `vegai_continuous_pretraining` PASS |
 
 CI bunların checked CMake/OpenMP varyantını ve ayrıca optimize Make hedefini
 çalıştırır.
@@ -112,9 +114,11 @@ idempotent restart journal davranışını ayrıca sınar.
 
 CI önce `tools/hardware_compatibility.py` ile CPU/OS/mimari/RAM/GPU/NPU
 inventory metadata'sını, sonra `tools/training_resource_plan.py` ile bounded
-RAM/checkpoint-storage/OpenMP placement planını kaydeder. GPU/NPU compute
-kullanılmadığı açıkça raporlanır; accelerator talebi provider yoksa fail-closed
-döner. Ardından portable varsayılan Make binary ile aynı host için opt-in
+RAM/checkpoint-storage/OpenMP placement planını kaydeder. Generic plan GPU/NPU
+compute kullanmadığını açıkça raporlar ve provider/device execution bilgisi
+olmaksızın accelerator talebini fail-closed reddeder. Ayrı OpenVINO bridge
+adımı, optional runtime'ı kurar ve CPU OpenVINO context graph ile Fortran CPU
+reference checkpoint byte equality'yi test eder. Ardından portable varsayılan Make binary ile aynı host için opt-in
 `native` binary'yi `tools/compare_pretraining_build_profiles.py` üzerinden
 ölçer. İki profile'ın checkpoint byte eşitliği zorunludur; süre oranı yalnız o
 host için anlamlıdır.

@@ -1,11 +1,12 @@
 # RAM, SSD ve çok çekirdek için kaynak-duyarlı HDC pretraining
 
-Bu belge Vegai'nin mevcut **gerçek** eğitim backend'ini açıklar: portable
-Fortran/OpenMP ile CPU üzerinde çalışan deterministic HDC context learning.
-GPU/NPU adapter'larının görünmesi veya bir iGPU'nun mevcut olması, tek başına
-GPU/NPU compute kullanıldığı anlamına gelmez. Şu an checked-in binary için
-`CPU compute used=true`, `GPU compute used=false` ve `NPU compute used=false`
-durumlarıdır.
+Bu belge Vegai'nin gerçek eğitim backend'lerini açıklar. Varsayılan portable
+Fortran/OpenMP yolu CPU üzerinde deterministic HDC context learning çalıştırır.
+GPU/NPU adapter'larının görünmesi veya bir iGPU'nun mevcut olması tek başına
+GPU/NPU compute kullanıldığı anlamına gelmez. Intel Core Ultra için explicit
+OpenVINO context-provider seçilmediğinde `CPU compute used=true`, `GPU compute
+used=false`, `NPU compute used=false` durumları geçerlidir; opt-in provider
+çalıştığında gerçek worker execution mask'i ayrı runtime summary'de raporlanır.
 
 > “Tam uyumluluk” donanım fiziksel topolojisinin yazılımla kontrol edilebileceği
 > anlamına gelmez. OS; DIMM channel interleaving, NUMA page placement, SSD queue
@@ -147,12 +148,15 @@ olduğu için klasik dense neural graph değildir. Her GPU/NPU offload'u faydal�
 olmaz; host-device transfer, driver/runtime, integer bit semantics ve
 checkpoint determinism ayrı doğrulanmalıdır.
 
-Dolayısıyla mevcut sürüm, adapter bulunduğunda GPU/NPU'yu gizlice kullanmaz.
-`tools/training_resource_plan.py --require-accelerator` bu nedenle **fail
-closed** döner. Gerçek joint CPU/GPU/NPU eğitim eklemek için hedef platform ve
-provider açıkça seçilmelidir; örneğin Intel Core Ultra için OpenVINO/oneAPI,
-NVIDIA için CUDA veya AMD için ROCm. Provider şu sözleşmeleri sağlamadan
-"kullanılıyor" diye belgelenmemelidir:
+Dolayısıyla varsayılan portable CPU sürümü, adapter bulunduğunda GPU/NPU'yu
+gizlice kullanmaz. Generic `tools/training_resource_plan.py --require-
+accelerator` provider/device execution'ını görmediği için hâlâ **fail closed**
+döner. Intel Core Ultra için explicit `--context-provider openvino` yolu,
+yalnız immutable context stage'ini gerçek OpenVINO worker'a dispatch edebilir;
+runtime output ve `--openvino-require-accelerator` gerçek GPU/NPU execution'ı
+ayrıca doğrular. NVIDIA/AMD gibi başka provider'lar için ayrı, eşdeğer contract
+gereklidir. Provider şu sözleşmeleri sağlamadan "kullanılıyor" diye
+belgelenmemelidir:
 
 - provider/driver/runtime sürümü ve supported OS/architecture manifesti;
 - HDC bit arithmetic, tie seed, overflow ve checkpoint byte-equivalence veya
@@ -165,56 +169,89 @@ NVIDIA için CUDA veya AMD için ROCm. Provider şu sözleşmeleri sağlamadan
 Bu sınır, iGPU/NPU bulunan sistemin CPU fallback'ten mahrum kalmamasını ve
 olmayan bir multi-accelerator hızlandırmayı yanlışlıkla iddia etmemeyi sağlar.
 
-## 5. Intel Core Ultra için optional OpenVINO/oneAPI readiness
+## 5. Intel Core Ultra için optional OpenVINO/oneAPI context provider
 
 Intel Core Ultra seçeneği için repository, portable CPU binary'sine zorunlu
-runtime eklemeden bir OpenVINO provider probe'u içerir. Probe yalnız adapter
-listesi değildir; seçilen device üzerinde iki gerçek graph çalıştırır:
+runtime eklemeden gerçek bir optional OpenVINO context provider içerir. HDC
+akışındaki mutable olmayan bölüm (positioned base-vector item'larının
+bit-sliced bundle/finalize işlemi) OpenVINO worker'a batch olarak gönderilir;
+source-order prototype/Hebbian commit, experience schedule ve checkpoint yazımı
+Fortran CPU tarafında kalır. Böylece GPU/NPU yalnız uygun immutable context
+işinde kullanılır; semantiği sıralı olan update aşaması zorla offload edilmez.
 
-1. mixed high/low-bit girdili direct `uint64 XOR` diagnostics; ve
-2. `hv_bitacc_*` ile aynı carry-plane/majority mantığını kullanan `uint32`
-   lane HDC bundle/finalize graph'ları. Default `window=4` için full hybrid
-   16 item, hierarchical ise record-summary ile 19 item test edilir.
+Worker yalnız adapter listesi değildir; selected device üzerinde iki gerçek HDC
+shape'ı çalıştırır. Default `window=4` için full hybrid 16 item, hierarchical
+record-summary ile 19 item test edilir. CPU, GPU veya NPU worker çıktısı
+Fortran'ın `hv_bitacc_finalize` sonucuyla byte-eşit olmak zorundadır; aksi halde
+provider başarısız sayılır.
 
 ```bash
-# Yalnız Intel accelerator denemesi yapılacak makinede:
+# Intel accelerator denemesi yapılacak makinede:
 python3 -m pip install -r requirements-openvino.txt
+mkdir -p .vegai-openvino-work
 
-# AUTO yalnız device tercihidir; tek graph'ın CPU+GPU+NPU üzerinde aynı anda
-# çalıştığı iddiası değildir.
+# CPU/OpenMP fallback açık: kısa records (<64 eligible center) CPU'da kalır;
+# worker/runtime/device hatası da açıkça runtime summary'de fallback olarak görünür.
+OMP_NUM_THREADS=8 OMP_PROC_BIND=close OMP_PLACES=cores \
+  ./build/vegai_pretrain train CORPUS.txt checkpoints/model.vgai \
+  --context-provider openvino \
+  --openvino-worker tools/openvino_context_worker.py \
+  --openvino-python python3 --openvino-device 'AUTO:GPU,NPU,CPU' \
+  --openvino-work-dir .vegai-openvino-work --openvino-min-contexts 64 \
+  --openvino-fallback-cpu
+
+# Production/benchmark gate: worker, exact graph ve gerçek GPU/NPU execution
+# zorunludur; CPU fallback nonzero ile reddedilir.
+./build/vegai_pretrain train CORPUS.txt checkpoints/model.vgai \
+  --context-provider openvino \
+  --openvino-worker tools/openvino_context_worker.py \
+  --openvino-python python3 --openvino-device 'AUTO:GPU,NPU,CPU' \
+  --openvino-work-dir .vegai-openvino-work --openvino-min-contexts 64 \
+  --openvino-required --openvino-require-accelerator
+```
+
+`--openvino-work-dir` mevcut, yazılabilir ve aynı anda yalnız bir train process
+ile kullanılan bir dizin olmalıdır. Worker request/response stream dosyalarını
+atomik response replace ile kullanır; bunlar train sonunda silinir. `--openvino-
+min-contexts` transfer/process overhead'ini küçük record'larda önler. Bu
+threshold altında CPU/OpenMP context build kasıtlıdır; runtime summary şu
+alanları ayırır: CPU-built contexts, OpenVINO-dispatched contexts, worker
+invocation, fallback contexts ve gerçekten execute eden CPU/GPU/NPU device
+flag'leri. Bu alanlar checkpoint'e yazılmaz.
+
+### Exact tensor ABI ve fail-closed preflight
+
+```bash
 python3 tools/openvino_provider.py --device auto --format json \
   --output openvino-provider.json
 
-# Hedefte GPU/NPU envanteri, exact HDC graph ve graph'ın CPU fallback yerine
-# gerçekten bir accelerator üzerinde execute edilmesi gerekiyorsa:
+# Hedefte hem GPU hem NPU envanteri, exact HDC graph ve gerçek accelerator
+# execution gerekiyorsa:
 python3 tools/openvino_provider.py --device 'AUTO:GPU,NPU,CPU' \
   --require-openvino --require-gpu --require-npu \
   --require-hdc-probe --require-hdc-accelerator
 ```
 
 Doğrudan `uint64` bitwise ops, bazı OpenVINO plugin/sürümlerinde 64 bitin tümünü
-korumayabilir. Bu nedenle probe'daki direct `uint64` sonucu yalnız diagnostics
-amaçlıdır; başarısız olması tek başına HDC ABI'nin başarısız olduğu anlamına
-gelmez. Aday ABI her Fortran `int64` bit-pattern'i için explicit olarak
-`lane[2*w]=low32(word[w])`, `lane[2*w+1]=high32(word[w])` üretir. Bu `uint32`
-lane'lerde XOR/AND/OR/NOT ve bit-sliced counter her bit için bağımsız çalıştığı
-için packed 16,384-dimensional semantiği koruyabilir. Probe hem lane
-round-trip'i hem de even (seeded tie) / odd majority context sonuçlarını CPU
-oracle ile byte-eşit kontrol eder. Raw byte reinterpretation/endian varsayımı
-sözleşmenin parçası **değildir**.
+korumayabilir. Bu nedenle probe'daki mixed high/low-bit direct `uint64` sonucu
+yalnız diagnostics amaçlıdır; başarısız olması tek başına HDC ABI'nin başarısız
+olduğu anlamına gelmez. Provider her Fortran `int64` bit-pattern'i için explicit
+olarak `lane[2*w]=low32(word[w])`, `lane[2*w+1]=high32(word[w])` üretir. Bu
+`uint32` lane'lerde XOR/AND/OR/NOT ve bit-sliced counter her bit için bağımsız
+çalıştığı için packed 16,384-dimensional semantiği korur. Worker protocol
+little-endian Intel/x86 ABI'sidir; host byte reinterpretation/endian varsayımı
+kullanmaz ve big-endian host'ta fail closed olur.
 
-OpenVINO yalnız optional probe ile import edilir. Paket/device yoksa portable
-Fortran trainer bozulmaz; `--require-*` seçeneği nonzero ile durur. `AUTO`,
-`MULTI` ve `HETERO` OpenVINO device-policy terimleridir: bunlar tek başına bir
-HDC train graph'ının CPU, GPU ve NPU arasında aynı anda doğru/yararlı biçimde
-bölündüğünü kanıtlamaz.
+`AUTO`, `MULTI` ve `HETERO` OpenVINO device-policy terimleridir: tek başına bir
+graph'ın CPU, GPU ve NPU üzerinde aynı anda yürüdüğünü kanıtlamaz. Vegai'nin
+truth contract'i daha dar ve ölçülebilirdir: worker output header'ı gerçek
+execution device mask'ini taşır; `--openvino-require-accelerator` GPU veya NPU
+mask'i yoksa başarısız olur. Sıralı CPU commit + doğrulanmış accelerator context
+kombinasyonu dışında joint training iddiası yapılmaz.
 
-Şu an exact lane probe başarılı olsa dahi `training_dispatch` alanı bilinçli
-olarak `GPU=false`, `NPU=false`, `hdc_context_offload_integrated=false`
-döndürür. Sebep, Fortran trainer'ın source-ordered prototype commit ve
-checkpoint byte-equality sözleşmesini henüz OpenVINO tensor ABI'siyle
-bağlamamış olmasıdır. Bu açık sınır, device göründüğü için yanlış bir
-accelerator training iddiasını engeller. Gerçek Intel context-offload provider
-ancak batched immutable context graph, transfer/memory ownership, fallback,
-serial-vs-provider checkpoint equality ve real target-host timing testleri
-tamamlandığında aktif sayılmalıdır.
+Provider execution-only'dir: aynı corpus/config için CPU referans ve OpenVINO
+context run checkpoint byte equality ile test edilmelidir. CI'daki optional
+OpenVINO bridge test bu eşitliği CPU OpenVINO plugin'iyle zorunlu kılar; gerçek
+Core Ultra GPU/NPU throughput veya energy sonucu ancak hedef host'ta ayrıca
+ölçülüp kaydedilmelidir. Bu repository şu anda target GPU/NPU üzerinde ölçülmüş
+bir hızlanma rakamı iddia etmez.

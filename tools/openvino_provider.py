@@ -15,11 +15,12 @@ split explicitly into low/high uint32 lanes. Its HDC operations are only
 per-bit boolean operations, so they preserve the packed 16,384-dimensional
 semantics without relying on a provider's uint64 implementation.
 
-This is a readiness gate, not a cosmetic adapter detector. The current Fortran
-trainer remains the authoritative CPU execution backend and never claims that
-GPU/NPU training dispatch is active. A full provider must still connect this
-verified graph to batched immutable context construction, define ownership and
-transfer policy, and prove checkpoint equality against CPU training.
+This is a readiness gate, not a cosmetic adapter detector. The checked-in
+Fortran provider uses this uint32-lane ABI for batched immutable context
+construction while retaining authoritative source-ordered CPU commits. The
+probe itself is not a train run: it cannot claim GPU/NPU dispatch until
+``vegai_pretrain`` reports a worker execution mask and checkpoint equality is
+verified.
 """
 
 from __future__ import annotations
@@ -163,25 +164,26 @@ def run_direct_uint64_xor_diagnostic(openvino: Any, numpy: Any, selected_device:
         return failed_probe(str(error))
 
 
-def build_u32_bundle_model(openvino: Any, numpy: Any, item_count: int) -> Any:
+def build_u32_bundle_model(openvino: Any, numpy: Any, item_count: int, batch_size: int = 1) -> Any:
     """Build exact bit-sliced HDC bundle/finalize for pre-permuted lane vectors.
 
-    The graph receives ``[item_count, 512]`` uint32 items and a uint32 seeded
-    tie breaker. It is algebraically the same carry-plane counter and majority
-    finalization as ``hv_bitacc_*`` in ``src/hyper_types.f90``. The input items
-    are already positioned; this makes the graph's ABI explicit and lets a
-    future batched provider choose whether rotations happen on host or device.
+    The graph receives ``[batch, item_count, 512]`` uint32 items and
+    ``[batch, 1, 512]`` seeded tie breakers. It is algebraically the same
+    carry-plane counter and majority finalization as ``hv_bitacc_*`` in
+    ``src/hyper_types.f90``. The input items are already positioned; this makes
+    the graph's ABI explicit and lets a future batched provider choose whether
+    rotations happen on host or device.
     """
     ops = openvino.opset13
-    words = ops.parameter([item_count, HDC_LANES], openvino.Type.u32, name="prepositioned_u32_lanes")
-    tie_breaker = ops.parameter([1, HDC_LANES], openvino.Type.u32, name="tie_breaker_u32_lanes")
-    zero = ops.constant(numpy.zeros((1, HDC_LANES), dtype=numpy.uint32))
-    axis_zero = ops.constant(numpy.array(0, dtype=numpy.int64))
+    words = ops.parameter([batch_size, item_count, HDC_LANES], openvino.Type.u32, name="prepositioned_u32_lanes")
+    tie_breaker = ops.parameter([batch_size, 1, HDC_LANES], openvino.Type.u32, name="tie_breaker_u32_lanes")
+    zero = ops.constant(numpy.zeros((batch_size, 1, HDC_LANES), dtype=numpy.uint32))
+    item_axis = ops.constant(numpy.array(1, dtype=numpy.int64))
     planes = [zero for _ in range(HDC_BITACC_PLANES)]
 
     for item_index in range(item_count):
         index = ops.constant(numpy.array([item_index], dtype=numpy.int64))
-        carry = ops.gather(words, index, axis_zero)
+        carry = ops.gather(words, index, item_axis)
         for plane_index in range(HDC_BITACC_PLANES):
             previous = planes[plane_index]
             planes[plane_index] = ops.bitwise_xor(previous, carry)
@@ -203,7 +205,7 @@ def build_u32_bundle_model(openvino: Any, numpy: Any, item_count: int) -> Any:
         result = ops.bitwise_or(greater_mask, ops.bitwise_and(equal_mask, tie_breaker))
     else:
         result = greater_mask
-    return openvino.Model([ops.result(result)], [words, tie_breaker], f"vegai_hdc_bundle_{item_count}")
+    return openvino.Model([ops.result(result)], [words, tie_breaker], f"vegai_hdc_bundle_{item_count}_batch_{batch_size}")
 
 
 def hdc_bundle_reference(numpy: Any, items: Any, tie_breaker: Any) -> Any:
@@ -267,8 +269,8 @@ def run_u32_bundle_case(openvino: Any, numpy: Any, selected_device: str, item_co
         compiled = openvino.Core().compile_model(model, selected_device)
         execution_devices = [str(item) for item in compiled.get_property("EXECUTION_DEVICES")]
         items, tie_breaker = deterministic_lane_inputs(numpy, item_count)
-        expected = hdc_bundle_reference(numpy, items, tie_breaker).reshape(1, HDC_LANES)
-        output = next(iter(compiled([items, tie_breaker.reshape(1, HDC_LANES)]).values()))
+        expected = hdc_bundle_reference(numpy, items, tie_breaker).reshape(1, 1, HDC_LANES)
+        output = next(iter(compiled([items.reshape(1, item_count, HDC_LANES), tie_breaker.reshape(1, 1, HDC_LANES)]).values()))
         return {
             "item_count": item_count,
             "attempted": True,
@@ -344,10 +346,12 @@ def unavailable_report() -> dict[str, Any]:
             "cpu_compute_used": True,
             "gpu_compute_used": False,
             "npu_compute_used": False,
-            "hdc_context_offload_integrated": False,
+            "openvino_context_provider_implemented": True,
+            "openvino_context_provider_available": False,
+            "probe_is_not_a_train_run": True,
             "contract": (
-                "OpenVINO is optional and unavailable. The portable Fortran trainer remains CPU-only; "
-                "no GPU/NPU training fallback was silently claimed."
+                "The Fortran/OpenVINO immutable-context provider is implemented but this optional runtime is unavailable. "
+                "The portable CPU trainer remains usable; no GPU/NPU training fallback was silently claimed."
             ),
         },
     }
@@ -384,11 +388,13 @@ def build_report(arguments: argparse.Namespace) -> dict[str, Any]:
             "cpu_compute_used": True,
             "gpu_compute_used": False,
             "npu_compute_used": False,
-            "hdc_context_offload_integrated": False,
+            "openvino_context_provider_implemented": True,
+            "openvino_context_provider_available": bool(lane_bundle["output_bit_identical"]),
+            "probe_is_not_a_train_run": True,
             "contract": (
-                "Exact uint32-lane HDC bundle probes validate a prospective OpenVINO context ABI only. "
-                "They do not make GPU/NPU train dispatch active: the checked-in Fortran trainer keeps source-ordered "
-                "prototype commits on CPU until a full batched provider is integrated and checkpoint-equality tested."
+                "The checked-in Fortran provider sends immutable pre-positioned contexts to the uint32-lane worker and "
+                "keeps source-ordered prototype commits on CPU. This probe is not a train run: GPU/NPU fields remain false "
+                "until vegai_pretrain reports actual worker execution and checkpoint equality is verified."
             ),
         },
     }
@@ -431,7 +437,7 @@ def render_text(report: dict[str, Any]) -> str:
     dispatch = report["training_dispatch"]
     lines.extend(
         [
-            "actual training dispatch: CPU=yes GPU=no NPU=no",
+            "probe train-dispatch claim: none (run vegai_pretrain for actual CPU/GPU/NPU flags)",
             "contract: " + dispatch["contract"],
         ]
     )

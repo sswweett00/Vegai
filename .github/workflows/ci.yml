@@ -89,6 +89,14 @@ jobs:
           python3 tools/verify_hardware_compatibility.py
           python3 tools/verify_training_resource_plan.py
           python3 tools/verify_openvino_provider.py
+          python3 tools/verify_openvino_context_worker.py
+
+      - name: Verify optional OpenVINO context-provider bridge
+        run: |
+          python3 -m pip install --disable-pip-version-check -r requirements-openvino.txt
+          python3 tools/verify_openvino_provider.py
+          python3 tools/verify_openvino_context_worker.py
+          python3 tools/verify_openvino_context_provider.py --pretrain-bin ./build-ci/vegai_pretrain
 
       - name: Compile portable and host-native GNU Make binaries
         run: |

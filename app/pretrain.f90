@@ -11,6 +11,7 @@ program vegai_pretrain
    type(hdc_pretrain_model_t) :: model
    type(hdc_pretrain_config_t) :: config
    type(pretrain_metrics_t) :: vocabulary_metrics, training_metrics
+   type(pretrain_execution_report_t) :: execution_report
    integer(int32) :: status
    integer :: argument_count
 
@@ -32,9 +33,9 @@ program vegai_pretrain
       if (status /= PT_OK) call fail_with_status('vocabulary pass failed', status)
       call print_vocabulary_summary(model, vocabulary_metrics)
 
-      call pretrain_train_file(model, trim(corpus_path), config, training_metrics, status)
+      call pretrain_train_file(model, trim(corpus_path), config, training_metrics, status, execution_report)
       if (status /= PT_OK) call fail_with_status('training pass failed', status)
-      call print_training_summary(model, training_metrics)
+      call print_training_summary(model, training_metrics, config, execution_report)
 
       call pretrain_checkpoint_save(model, trim(checkpoint_path), status)
       if (status /= PT_OK) call fail_with_status('checkpoint save failed', status)
@@ -54,9 +55,9 @@ program vegai_pretrain
       call parse_resume_options(4, argument_count, config, query, status)
       if (status /= PT_OK) call fail_with_status('invalid resume option', status)
 
-      call pretrain_train_file(model, trim(corpus_path), config, training_metrics, status)
+      call pretrain_train_file(model, trim(corpus_path), config, training_metrics, status, execution_report)
       if (status /= PT_OK) call fail_with_status('training pass failed', status)
-      call print_training_summary(model, training_metrics)
+      call print_training_summary(model, training_metrics, config, execution_report)
       call pretrain_checkpoint_save(model, trim(checkpoint_path), status)
       if (status /= PT_OK) call fail_with_status('checkpoint save failed', status)
       write(output_unit, '(A,A)') 'checkpoint: ', trim(checkpoint_path)
@@ -79,9 +80,9 @@ program vegai_pretrain
       if (status /= PT_OK) call fail_with_status('vocabulary extension failed', status)
       call print_vocabulary_summary(model, vocabulary_metrics, 'vocabulary extension')
 
-      call pretrain_train_file(model, trim(corpus_path), config, training_metrics, status)
+      call pretrain_train_file(model, trim(corpus_path), config, training_metrics, status, execution_report)
       if (status /= PT_OK) call fail_with_status('training pass failed', status)
-      call print_training_summary(model, training_metrics)
+      call print_training_summary(model, training_metrics, config, execution_report)
       call pretrain_checkpoint_save(model, trim(checkpoint_path), status)
       if (status /= PT_OK) call fail_with_status('checkpoint save failed', status)
       write(output_unit, '(A,A)') 'checkpoint: ', trim(checkpoint_path)
@@ -142,8 +143,24 @@ contains
          case ('--reference-context-kernel')
             parsed_config%reference_context_kernel = .true.
             index = index + 1
+         case ('--openvino-required')
+            parsed_config%context_provider = PT_CONTEXT_PROVIDER_OPENVINO
+            parsed_config%openvino_fallback_cpu = .false.
+            index = index + 1
+         case ('--openvino-require-accelerator')
+            parsed_config%context_provider = PT_CONTEXT_PROVIDER_OPENVINO
+            parsed_config%openvino_require_accelerator = .true.
+            parsed_config%openvino_fallback_cpu = .false.
+            index = index + 1
+         case ('--openvino-fallback-cpu')
+            parsed_config%context_provider = PT_CONTEXT_PROVIDER_OPENVINO
+            parsed_config%openvino_fallback_cpu = .true.
+            parsed_config%openvino_require_accelerator = .false.
+            index = index + 1
          case ('--max-vocab', '--min-frequency', '--window', '--position-shift', '--context-mode', '--epochs', &
-               '--initial-plasticity', '--minimum-plasticity', '--decay-events', '--query')
+               '--initial-plasticity', '--minimum-plasticity', '--decay-events', '--query', '--context-provider', &
+               '--openvino-worker', '--openvino-python', '--openvino-device', '--openvino-work-dir', &
+               '--openvino-min-contexts')
             if (index == last_argument) then
                parse_status = PT_ERR_INVALID_ARGUMENT
                return
@@ -186,6 +203,31 @@ contains
             case ('--query')
                parsed_query = value
                io_status = 0
+            case ('--context-provider')
+               select case (trim(value))
+               case ('cpu')
+                  parsed_config%context_provider = PT_CONTEXT_PROVIDER_CPU
+                  io_status = 0
+               case ('openvino')
+                  parsed_config%context_provider = PT_CONTEXT_PROVIDER_OPENVINO
+                  io_status = 0
+               case default
+                  io_status = 1
+               end select
+            case ('--openvino-worker')
+               parsed_config%openvino_worker = value
+               io_status = 0
+            case ('--openvino-python')
+               parsed_config%openvino_python = value
+               io_status = 0
+            case ('--openvino-device')
+               parsed_config%openvino_device = value
+               io_status = 0
+            case ('--openvino-work-dir')
+               parsed_config%openvino_work_dir = value
+               io_status = 0
+            case ('--openvino-min-contexts')
+               read(value, *, iostat=io_status) parsed_config%openvino_min_contexts
             end select
             if (io_status /= 0) then
                parse_status = PT_ERR_INVALID_ARGUMENT
@@ -225,18 +267,59 @@ contains
          case ('--reference-context-kernel')
             parsed_config%reference_context_kernel = .true.
             index = index + 1
-         case ('--epochs', '--query')
+         case ('--openvino-required')
+            parsed_config%context_provider = PT_CONTEXT_PROVIDER_OPENVINO
+            parsed_config%openvino_fallback_cpu = .false.
+            index = index + 1
+         case ('--openvino-require-accelerator')
+            parsed_config%context_provider = PT_CONTEXT_PROVIDER_OPENVINO
+            parsed_config%openvino_require_accelerator = .true.
+            parsed_config%openvino_fallback_cpu = .false.
+            index = index + 1
+         case ('--openvino-fallback-cpu')
+            parsed_config%context_provider = PT_CONTEXT_PROVIDER_OPENVINO
+            parsed_config%openvino_fallback_cpu = .true.
+            parsed_config%openvino_require_accelerator = .false.
+            index = index + 1
+         case ('--epochs', '--query', '--context-provider', '--openvino-worker', '--openvino-python', &
+               '--openvino-device', '--openvino-work-dir', '--openvino-min-contexts')
             if (index == last_argument) then
                parse_status = PT_ERR_INVALID_ARGUMENT
                return
             end if
             call get_command_argument(index + 1, value)
-            if (trim(option) == '--epochs') then
+            select case (trim(option))
+            case ('--epochs')
                read(value, *, iostat=io_status) parsed_config%epochs
-            else
+            case ('--query')
                parsed_query = value
                io_status = 0
-            end if
+            case ('--context-provider')
+               select case (trim(value))
+               case ('cpu')
+                  parsed_config%context_provider = PT_CONTEXT_PROVIDER_CPU
+                  io_status = 0
+               case ('openvino')
+                  parsed_config%context_provider = PT_CONTEXT_PROVIDER_OPENVINO
+                  io_status = 0
+               case default
+                  io_status = 1
+               end select
+            case ('--openvino-worker')
+               parsed_config%openvino_worker = value
+               io_status = 0
+            case ('--openvino-python')
+               parsed_config%openvino_python = value
+               io_status = 0
+            case ('--openvino-device')
+               parsed_config%openvino_device = value
+               io_status = 0
+            case ('--openvino-work-dir')
+               parsed_config%openvino_work_dir = value
+               io_status = 0
+            case ('--openvino-min-contexts')
+               read(value, *, iostat=io_status) parsed_config%openvino_min_contexts
+            end select
             if (io_status /= 0) then
                parse_status = PT_ERR_INVALID_ARGUMENT
                return
@@ -306,9 +389,11 @@ contains
       write(output_unit, '(A,I0)') '  dropped overlong records: ', metrics%overlong_records
    end subroutine print_vocabulary_summary
 
-   subroutine print_training_summary(trained_model, metrics)
+   subroutine print_training_summary(trained_model, metrics, active_config, execution)
       type(hdc_pretrain_model_t), intent(in) :: trained_model
       type(pretrain_metrics_t), intent(in) :: metrics
+      type(hdc_pretrain_config_t), intent(in) :: active_config
+      type(pretrain_execution_report_t), intent(in) :: execution
 
       write(output_unit, '(A)') 'phase: streaming HDC context learning'
       write(output_unit, '(A,I0)') '  completed epochs: ', trained_model%training_epochs_completed
@@ -321,6 +406,19 @@ contains
       write(output_unit, '(A,I0)') '  tokenizer truncations: ', metrics%tokenizer_truncations
       write(output_unit, '(A,I0)') '  non-ASCII input bytes: ', metrics%non_ascii_bytes
       write(output_unit, '(A,I0)') '  dropped overlong records: ', metrics%overlong_records
+      if (active_config%context_provider == PT_CONTEXT_PROVIDER_OPENVINO) then
+         write(output_unit, '(A,A)') '  requested context provider: ', &
+                                    trim(pretrain_context_provider_name(active_config%context_provider))
+         write(output_unit, '(A,I0)') '  CPU-built contexts: ', execution%cpu_contexts
+         write(output_unit, '(A,I0)') '  OpenVINO-dispatched contexts: ', execution%openvino_contexts
+         write(output_unit, '(A,I0)') '  OpenVINO worker invocations: ', execution%openvino_worker_invocations
+         write(output_unit, '(A,I0)') '  OpenVINO CPU-fallback contexts: ', execution%openvino_fallback_contexts
+         write(output_unit, '(A,L1,A,L1,A,L1)') '  OpenVINO execution devices: CPU=', &
+              execution%openvino_cpu_execution, ' GPU=', execution%openvino_gpu_execution, &
+              ' NPU=', execution%openvino_npu_execution
+      else
+         write(output_unit, '(A)') '  context execution backend: CPU/OpenMP'
+      end if
    end subroutine print_training_summary
 
    subroutine print_model_summary(trained_model)
@@ -429,6 +527,9 @@ contains
       write(output_unit, '(A)') '  --parallel-context-build (default) builds immutable per-record contexts with OpenMP when available'
       write(output_unit, '(A)') '  --serial-context-build disables that execution-only parallel stage for diagnosis'
       write(output_unit, '(A)') '  --reference-context-kernel is an exact benchmark/regression implementation switch'
+      write(output_unit, '(A)') '  --context-provider cpu|openvino --openvino-worker PATH --openvino-python CMD --openvino-device DEVICE'
+      write(output_unit, '(A)') '  --openvino-work-dir DIR --openvino-min-contexts N [--openvino-fallback-cpu|--openvino-required]'
+      write(output_unit, '(A)') '  --openvino-require-accelerator rejects OpenVINO CPU fallback; immutable contexts only, commits stay ordered on CPU'
       write(output_unit, '(A)') 'This is streaming distributional HDC learning, not Transformer/LLM pretraining.'
    end subroutine print_usage
 
@@ -479,6 +580,8 @@ contains
          description = 'hypervector operation failed'
       case (PT_ERR_RECORD_TOO_LONG)
          description = 'strict record-length policy rejected corpus data'
+      case (PT_ERR_CONTEXT_PROVIDER)
+         description = 'optional context provider failed and CPU fallback was disabled'
       case default
          description = 'unknown pretraining status'
       end select

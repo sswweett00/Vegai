@@ -96,7 +96,7 @@ def main() -> int:
         print(f"training resource plan verification: FAIL: {error}", file=sys.stderr)
         return 1
 
-    print("training resource plan verification: PASS (bounded RAM/storage plan, CPU-only accelerator truth)")
+    print("training resource plan verification: PASS (bounded RAM/storage plan, static accelerator fail-closed truth)")
     return 0
 
 

@@ -31,6 +31,9 @@ module hdc_pretraining
    integer(int32), parameter, public :: PT_ERR_EMPTY_VOCABULARY = -510_int32
    integer(int32), parameter, public :: PT_ERR_HYPERVECTOR = -511_int32
    integer(int32), parameter, public :: PT_ERR_RECORD_TOO_LONG = -512_int32
+   ! Optional execution-provider failure.  This is deliberately distinct from
+   ! semantic HDC errors so an explicit CPU fallback can remain truthful.
+   integer(int32), parameter, public :: PT_ERR_CONTEXT_PROVIDER = -513_int32
 
    ! Context encoders share the same deterministic update and checkpoint
    ! contracts.  LEGACY_POSITIONAL retains the original signed-counter path for
@@ -44,6 +47,13 @@ module hdc_pretraining
    ! HIERARCHICAL retains hybrid's local positional/topic evidence and adds a
    ! bounded whole-record topical summary for records with many active tokens.
    integer(int32), parameter, public :: PT_CONTEXT_HIERARCHICAL = 4_int32
+
+   ! Execution-only context providers.  CPU is the portable authoritative
+   ! backend.  OPENVINO can offload only immutable, pre-positioned context
+   ! bundling through an optional external worker; source-ordered prototype
+   ! commits always remain in this Fortran module.
+   integer(int32), parameter, public :: PT_CONTEXT_PROVIDER_CPU = 1_int32
+   integer(int32), parameter, public :: PT_CONTEXT_PROVIDER_OPENVINO = 2_int32
 
    integer(int32), parameter :: HIERARCHICAL_MIN_ACTIVE_TOKENS = 12_int32
    integer(int32), parameter :: HIERARCHICAL_GLOBAL_CONTEXT_WEIGHT = 3_int32
@@ -74,7 +84,32 @@ module hdc_pretraining
       ! on the same line.  A compiler without OpenMP ignores the directives and
       ! remains serial; this flag is intentionally not checkpoint state.
       logical :: parallel_context_build = .true.
+      ! Optional OpenVINO execution settings; none of these affect checkpoint
+      ! semantics.  The worker receives pre-positioned immutable base-vector
+      ! items and returns contexts; CPU applies commits in source order.
+      integer(int32) :: context_provider = PT_CONTEXT_PROVIDER_CPU
+      character(len=512) :: openvino_worker = ''
+      character(len=512) :: openvino_python = 'python3'
+      character(len=512) :: openvino_work_dir = '.'
+      character(len=256) :: openvino_device = 'auto'
+      integer(int32) :: openvino_min_contexts = 64_int32
+      logical :: openvino_require_accelerator = .false.
+      logical :: openvino_fallback_cpu = .true.
    end type hdc_pretrain_config_t
+
+   ! This is transient execution truth, intentionally excluded from semantic
+   ! metrics/checkpoints.  A run can therefore distinguish CPU fallback from
+   ! device context dispatch without changing a resume contract.
+   type, public :: pretrain_execution_report_t
+      integer(int64) :: cpu_contexts = 0_int64
+      integer(int64) :: openvino_contexts = 0_int64
+      integer(int64) :: openvino_worker_invocations = 0_int64
+      integer(int64) :: openvino_fallback_contexts = 0_int64
+      logical :: openvino_cpu_execution = .false.
+      logical :: openvino_gpu_execution = .false.
+      logical :: openvino_npu_execution = .false.
+      logical :: openvino_provider_requested = .false.
+   end type pretrain_execution_report_t
 
    type, public :: pretrain_metrics_t
       integer(int64) :: corpus_lines = 0_int64
@@ -111,7 +146,8 @@ module hdc_pretraining
    public :: pretrain_metrics_reset, pretrain_model_footprint_bytes
    public :: pretrain_checkpoint_save, pretrain_checkpoint_load
    public :: pretrain_lookup_token, pretrain_get_semantic_hv, pretrain_nearest_semantic
-   public :: pretrain_config_from_model, pretrain_context_mode_name
+   public :: pretrain_config_from_model, pretrain_context_mode_name, pretrain_context_provider_name
+   public :: pretrain_execution_report_reset
 
 contains
 
@@ -141,6 +177,33 @@ contains
          name = 'invalid'
       end select
    end function pretrain_context_mode_name
+
+   pure function pretrain_context_provider_name(context_provider) result(name)
+      integer(int32), intent(in) :: context_provider
+      character(len=10) :: name
+
+      select case (context_provider)
+      case (PT_CONTEXT_PROVIDER_CPU)
+         name = 'cpu'
+      case (PT_CONTEXT_PROVIDER_OPENVINO)
+         name = 'openvino'
+      case default
+         name = 'invalid'
+      end select
+   end function pretrain_context_provider_name
+
+   subroutine pretrain_execution_report_reset(report)
+      type(pretrain_execution_report_t), intent(inout) :: report
+
+      report%cpu_contexts = 0_int64
+      report%openvino_contexts = 0_int64
+      report%openvino_worker_invocations = 0_int64
+      report%openvino_fallback_contexts = 0_int64
+      report%openvino_cpu_execution = .false.
+      report%openvino_gpu_execution = .false.
+      report%openvino_npu_execution = .false.
+      report%openvino_provider_requested = .false.
+   end subroutine pretrain_execution_report_reset
 
    subroutine pretrain_metrics_reset(metrics)
       type(pretrain_metrics_t), intent(inout) :: metrics
@@ -201,6 +264,21 @@ contains
          status = PT_ERR_INVALID_ARGUMENT
          return
       end if
+      if (config%context_provider /= PT_CONTEXT_PROVIDER_CPU .and. &
+          config%context_provider /= PT_CONTEXT_PROVIDER_OPENVINO) then
+         status = PT_ERR_INVALID_ARGUMENT
+         return
+      end if
+      if (config%context_provider == PT_CONTEXT_PROVIDER_OPENVINO) then
+         if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL .or. &
+             len_trim(config%openvino_worker) == 0 .or. len_trim(config%openvino_python) == 0 .or. &
+             len_trim(config%openvino_work_dir) == 0 .or. len_trim(config%openvino_device) == 0 .or. &
+             config%openvino_min_contexts <= 0_int32 .or. &
+             (config%openvino_require_accelerator .and. config%openvino_fallback_cpu)) then
+            status = PT_ERR_INVALID_ARGUMENT
+            return
+         end if
+      end if
       if (config%initial_plasticity_percent <= 0_int32 .or. &
           config%initial_plasticity_percent > 100_int32 .or. &
           config%minimum_plasticity_percent <= 0_int32 .or. &
@@ -213,6 +291,11 @@ contains
       maximum_shift = int(config%context_window, int64) * &
                       abs(int(config%position_shift_bits, int64))
       if (maximum_shift > int(huge(0_int32), int64)) status = PT_ERR_INVALID_ARGUMENT
+      if (config%context_provider == PT_CONTEXT_PROVIDER_OPENVINO .and. &
+          (2_int64 * int(config%context_window, int64) + &
+           int(HIERARCHICAL_GLOBAL_CONTEXT_WEIGHT, int64) > int(HV_BITACC_MAX_ITEMS, int64))) then
+         status = PT_ERR_INVALID_ARGUMENT
+      end if
    end subroutine validate_pretrain_config
 
    subroutine add_nonnegative(counter, delta, status)
@@ -871,6 +954,401 @@ contains
       context_bits = context%bits
    end subroutine pretrain_construct_center_context
 
+
+   ! Number of immutable bundle items sent to the OpenVINO lane graph for one
+   ! center.  The worker groups equal cardinalities because seeded majority
+   ! thresholds cannot be safely zero-padded.
+   pure function openvino_context_item_count(config, neighbor_count, line_active_tokens) result(item_count)
+      type(hdc_pretrain_config_t), intent(in) :: config
+      integer(int32), intent(in) :: neighbor_count, line_active_tokens
+      integer(int32) :: item_count, global_items
+
+      item_count = -1_int32
+      select case (config%context_mode)
+      case (PT_CONTEXT_POSITIONAL)
+         item_count = neighbor_count
+      case (PT_CONTEXT_HYBRID)
+         item_count = 2_int32 * neighbor_count
+      case (PT_CONTEXT_HIERARCHICAL)
+         item_count = 2_int32 * neighbor_count
+         if (line_active_tokens >= HIERARCHICAL_MIN_ACTIVE_TOKENS) then
+            global_items = min(HIERARCHICAL_GLOBAL_CONTEXT_WEIGHT, HV_BITACC_MAX_ITEMS - item_count)
+            item_count = item_count + global_items
+         end if
+      end select
+   end function openvino_context_item_count
+
+   ! Explicitly split an int64 bit pattern into low/high int32 lanes.  MVbits
+   ! moves representation bits rather than converting a potentially-negative
+   ! numeric value, so the little-endian Python worker never relies on raw
+   ! Fortran storage reinterpretation.
+   pure subroutine pack_hv_u32_lanes(vector, lanes)
+      type(hv_t), intent(in) :: vector
+      integer(int32), intent(out) :: lanes(:)
+      integer(int32) :: word
+
+      lanes = 0_int32
+      if (size(lanes, kind=int32) /= 2_int32 * HV_WORDS) return
+      do word = 1, HV_WORDS
+         call mvbits(vector%bits(word), 0, 32, lanes(2_int32 * word - 1_int32), 0)
+         call mvbits(vector%bits(word), 32, 32, lanes(2_int32 * word), 0)
+      end do
+   end subroutine pack_hv_u32_lanes
+
+   pure subroutine unpack_hv_u32_lanes(lanes, bits)
+      integer(int32), intent(in) :: lanes(:)
+      integer(int64), intent(out) :: bits(HV_WORDS)
+      integer(int32) :: word
+
+      bits = 0_int64
+      if (size(lanes, kind=int32) /= 2_int32 * HV_WORDS) return
+      do word = 1, HV_WORDS
+         call mvbits(lanes(2_int32 * word - 1_int32), 0, 32, bits(word), 0)
+         call mvbits(lanes(2_int32 * word), 0, 32, bits(word), 32)
+      end do
+   end subroutine unpack_hv_u32_lanes
+
+   ! Materialize the exact sequence consumed by hv_bitacc_finalize: position
+   ! permutations first, then the hybrid topical view, then optional bounded
+   ! hierarchical record summary entries.  This has no model writes.
+   subroutine pretrain_build_openvino_items(model, config, token_slots, n_tokens, center_index, &
+                                            line_topic_context, line_active_tokens, experience_before, &
+                                            expected_item_count, item_lanes, tie_lanes, status)
+      type(hdc_pretrain_model_t), intent(in) :: model
+      type(hdc_pretrain_config_t), intent(in) :: config
+      integer(int32), intent(in) :: token_slots(:)
+      integer(int32), intent(in) :: n_tokens, center_index, line_active_tokens
+      type(hv_t), intent(in) :: line_topic_context
+      integer(int64), intent(in) :: experience_before
+      integer(int32), intent(in) :: expected_item_count
+      integer(int32), intent(out) :: item_lanes(:, :), tie_lanes(:)
+      integer(int32), intent(out) :: status
+      type(hv_t) :: neighbor, positioned, tie_breaker
+      integer(int32) :: offset, neighbor_index, neighbor_slot, shift_bits
+      integer(int32) :: item_index, global_items, global_index
+      integer(int64) :: tie_seed
+
+      status = PT_OK
+      item_lanes = 0_int32
+      tie_lanes = 0_int32
+      if (center_index < 1_int32 .or. center_index > n_tokens .or. &
+          size(item_lanes, kind=int32) /= 2_int32 * HV_WORDS * expected_item_count .or. &
+          size(item_lanes, 1, kind=int32) /= 2_int32 * HV_WORDS .or. &
+          size(tie_lanes, kind=int32) /= 2_int32 * HV_WORDS) then
+         status = PT_ERR_INVALID_ARGUMENT
+         return
+      end if
+      if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL .or. token_slots(center_index) == 0_int32) then
+         status = PT_ERR_CONTEXT_PROVIDER
+         return
+      end if
+
+      item_index = 0_int32
+      do offset = -config%context_window, config%context_window
+         if (offset == 0_int32) cycle
+         neighbor_index = center_index + offset
+         if (neighbor_index < 1_int32 .or. neighbor_index > n_tokens) cycle
+         neighbor_slot = token_slots(neighbor_index)
+         if (neighbor_slot == 0_int32) cycle
+         neighbor%bits = model%base_bits(:, neighbor_slot)
+         shift_bits = int(int(offset, int64) * int(config%position_shift_bits, int64), int32)
+         positioned = hv_permute(neighbor, shift_bits)
+         item_index = item_index + 1_int32
+         call pack_hv_u32_lanes(positioned, item_lanes(:, item_index))
+         if (config%context_mode == PT_CONTEXT_HYBRID .or. config%context_mode == PT_CONTEXT_HIERARCHICAL) then
+            item_index = item_index + 1_int32
+            call pack_hv_u32_lanes(neighbor, item_lanes(:, item_index))
+         end if
+      end do
+      if (config%context_mode == PT_CONTEXT_HIERARCHICAL .and. &
+          line_active_tokens >= HIERARCHICAL_MIN_ACTIVE_TOKENS) then
+         global_items = min(HIERARCHICAL_GLOBAL_CONTEXT_WEIGHT, HV_BITACC_MAX_ITEMS - item_index)
+         do global_index = 1, global_items
+            item_index = item_index + 1_int32
+            call pack_hv_u32_lanes(line_topic_context, item_lanes(:, item_index))
+         end do
+      end if
+      if (item_index /= expected_item_count) then
+         status = PT_ERR_CONTEXT_PROVIDER
+         return
+      end if
+      tie_seed = ieor(vocab_seed_for_slot(model%vocabulary, token_slots(center_index)), &
+                      ishftc(experience_before, 19))
+      tie_breaker = hv_from_seed(ieor(config%tie_seed, tie_seed))
+      call pack_hv_u32_lanes(tie_breaker, tie_lanes)
+   end subroutine pretrain_build_openvino_items
+
+   pure logical function openvino_host_is_little_endian()
+      integer(int32) :: marker
+      character(len=4) :: bytes
+
+      marker = 1_int32
+      bytes = transfer(marker, bytes)
+      openvino_host_is_little_endian = iachar(bytes(1:1)) == 1
+   end function openvino_host_is_little_endian
+
+   pure logical function openvino_safe_command_component(value)
+      character(len=*), intent(in) :: value
+
+      openvino_safe_command_component = len_trim(value) > 0 .and. &
+                                       index(value, achar(34)) == 0 .and. &
+                                       index(value, achar(10)) == 0 .and. &
+                                       index(value, achar(13)) == 0
+   end function openvino_safe_command_component
+
+   subroutine openvino_delete_stream_file(path)
+      character(len=*), intent(in) :: path
+      integer :: unit, io_status
+
+      open(newunit=unit, file=trim(path), status='old', action='readwrite', &
+           access='stream', form='unformatted', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+   end subroutine openvino_delete_stream_file
+
+   subroutine openvino_make_work_paths(config, request_path, response_path)
+      type(hdc_pretrain_config_t), intent(in) :: config
+      character(len=*), intent(out) :: request_path, response_path
+      character(len=512) :: directory
+      integer :: trailing_index
+
+      request_path = ''
+      response_path = ''
+      directory = trim(config%openvino_work_dir)
+      trailing_index = len_trim(directory)
+      if (trailing_index <= 0) return
+      if (directory(trailing_index:trailing_index) == '/' .or. directory(trailing_index:trailing_index) == achar(92)) then
+         request_path = trim(directory) // 'vegai-openvino-context-request.bin'
+         response_path = trim(directory) // 'vegai-openvino-context-response.bin'
+      else
+         request_path = trim(directory) // '/vegai-openvino-context-request.bin'
+         response_path = trim(directory) // '/vegai-openvino-context-response.bin'
+      end if
+   end subroutine openvino_make_work_paths
+
+   ! Dispatch all sufficiently numerous equal-line contexts to one OpenVINO
+   ! worker invocation.  The worker itself batches each cardinality shape;
+   ! CPU keeps the serial semantic commit stage.  On any worker/protocol error
+   ! no model mutation has occurred, allowing the caller to choose CPU fallback.
+   subroutine pretrain_construct_line_contexts_openvino(model, config, token_slots, n_tokens, &
+                                                         line_topic_context, line_active_tokens, &
+                                                         update_required, neighbor_counts, experiences_before, &
+                                                         prepared_context_bits, prepared_status, used_provider, &
+                                                         execution, status)
+      type(hdc_pretrain_model_t), intent(in) :: model
+      type(hdc_pretrain_config_t), intent(in) :: config
+      integer(int32), intent(in) :: token_slots(:), n_tokens, line_active_tokens
+      type(hv_t), intent(in) :: line_topic_context
+      logical, intent(in) :: update_required(:)
+      integer(int32), intent(in) :: neighbor_counts(:)
+      integer(int64), intent(in) :: experiences_before(:)
+      integer(int64), intent(inout) :: prepared_context_bits(:, :)
+      integer(int32), intent(inout) :: prepared_status(:)
+      logical, intent(out) :: used_provider
+      type(pretrain_execution_report_t), intent(inout), optional :: execution
+      integer(int32), intent(out) :: status
+      integer(int32) :: group_counts(HV_BITACC_MAX_ITEMS), group_starts(HV_BITACC_MAX_ITEMS)
+      integer(int32) :: group_next(HV_BITACC_MAX_ITEMS), center_order(MAX_TOKENS_PER_LINE)
+      integer(int32) :: center_item_counts(MAX_TOKENS_PER_LINE)
+      integer(int32) :: center_index, item_count, maximum_items, update_count, group_count
+      integer(int32) :: cursor, local_index, output_groups
+      integer(int32) :: protocol_version, lane_count, output_item_count, output_count
+      integer(int32) :: execution_mask
+      integer(int32), allocatable :: item_lanes(:, :, :), tie_lanes(:, :), context_lanes(:, :)
+      integer :: unit, io_status, allocation_status, exit_status, command_status
+      character(len=8) :: input_magic, output_magic
+      character(len=1024) :: request_path, response_path
+      character(len=4096) :: command
+      logical :: stream_open
+
+      status = PT_OK
+      used_provider = .false.
+      stream_open = .false.
+      group_counts = 0_int32
+      group_starts = 0_int32
+      group_next = 0_int32
+      center_item_counts = 0_int32
+      center_order = 0_int32
+      if (config%context_provider /= PT_CONTEXT_PROVIDER_OPENVINO) return
+      if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL) then
+         status = PT_ERR_CONTEXT_PROVIDER
+         return
+      end if
+
+      maximum_items = 2_int32 * config%context_window + HIERARCHICAL_GLOBAL_CONTEXT_WEIGHT
+      if (maximum_items < 1_int32 .or. maximum_items > HV_BITACC_MAX_ITEMS) then
+         status = PT_ERR_CONTEXT_PROVIDER
+         return
+      end if
+      update_count = 0_int32
+      do center_index = 1, n_tokens
+         if (.not. update_required(center_index)) cycle
+         item_count = openvino_context_item_count(config, neighbor_counts(center_index), line_active_tokens)
+         if (item_count < 1_int32 .or. item_count > maximum_items .or. item_count > HV_BITACC_MAX_ITEMS) then
+            status = PT_ERR_CONTEXT_PROVIDER
+            return
+         end if
+         update_count = update_count + 1_int32
+         center_item_counts(center_index) = item_count
+         group_counts(item_count) = group_counts(item_count) + 1_int32
+      end do
+      if (update_count < config%openvino_min_contexts) return
+
+      group_count = 0_int32
+      cursor = 1_int32
+      do item_count = 1, maximum_items
+         if (group_counts(item_count) == 0_int32) cycle
+         group_count = group_count + 1_int32
+         group_starts(item_count) = cursor
+         group_next(item_count) = cursor
+         cursor = cursor + group_counts(item_count)
+      end do
+      if (cursor - 1_int32 /= update_count .or. group_count <= 0_int32) then
+         status = PT_ERR_CONTEXT_PROVIDER
+         return
+      end if
+      do center_index = 1, n_tokens
+         if (.not. update_required(center_index)) cycle
+         item_count = center_item_counts(center_index)
+         center_order(group_next(item_count)) = center_index
+         group_next(item_count) = group_next(item_count) + 1_int32
+      end do
+
+      if (.not. openvino_host_is_little_endian()) then
+         status = PT_ERR_CONTEXT_PROVIDER
+         return
+      end if
+      if (.not. openvino_safe_command_component(config%openvino_python) .or. &
+          .not. openvino_safe_command_component(config%openvino_worker) .or. &
+          .not. openvino_safe_command_component(config%openvino_work_dir) .or. &
+          .not. openvino_safe_command_component(config%openvino_device)) then
+         status = PT_ERR_CONTEXT_PROVIDER
+         return
+      end if
+      call openvino_make_work_paths(config, request_path, response_path)
+      if (len_trim(request_path) == 0 .or. len_trim(response_path) == 0) then
+         status = PT_ERR_CONTEXT_PROVIDER
+         return
+      end if
+      call openvino_delete_stream_file(request_path)
+      call openvino_delete_stream_file(response_path)
+      open(newunit=unit, file=trim(request_path), status='replace', action='write', &
+           access='stream', form='unformatted', iostat=io_status)
+      if (io_status /= 0) then
+         status = PT_ERR_CONTEXT_PROVIDER
+         return
+      end if
+      stream_open = .true.
+
+      input_magic = 'VGHDCI01'
+      write(unit, iostat=io_status) input_magic, 1_int32, group_count, 2_int32 * HV_WORDS, 0_int32
+      if (io_status /= 0) goto 900
+      do item_count = 1, maximum_items
+         if (group_counts(item_count) == 0_int32) cycle
+         write(unit, iostat=io_status) item_count, group_counts(item_count)
+         if (io_status /= 0) goto 900
+         allocate(item_lanes(2_int32 * HV_WORDS, item_count, group_counts(item_count)), &
+                  tie_lanes(2_int32 * HV_WORDS, group_counts(item_count)), stat=allocation_status)
+         if (allocation_status /= 0) then
+            status = PT_ERR_ALLOCATION
+            goto 900
+         end if
+         do local_index = 1, group_counts(item_count)
+            center_index = center_order(group_starts(item_count) + local_index - 1_int32)
+            call pretrain_build_openvino_items(model, config, token_slots, n_tokens, center_index, &
+                                               line_topic_context, line_active_tokens, experiences_before(center_index), &
+                                               item_count, item_lanes(:, :, local_index), tie_lanes(:, local_index), status)
+            if (status /= PT_OK) goto 900
+         end do
+         write(unit, iostat=io_status) item_lanes, tie_lanes
+         deallocate(item_lanes, tie_lanes)
+         if (io_status /= 0) goto 900
+      end do
+      close(unit)
+      stream_open = .false.
+
+      command = '"' // trim(config%openvino_python) // '" "' // trim(config%openvino_worker) // &
+                '" --input "' // trim(request_path) // '" --output "' // trim(response_path) // &
+                '" --device "' // trim(config%openvino_device) // '" --quiet'
+      if (config%openvino_require_accelerator) command = trim(command) // ' --require-accelerator'
+      call execute_command_line(trim(command), wait=.true., exitstat=exit_status, cmdstat=command_status)
+      if (command_status /= 0 .or. exit_status /= 0) then
+         status = PT_ERR_CONTEXT_PROVIDER
+         goto 900
+      end if
+
+      open(newunit=unit, file=trim(response_path), status='old', action='read', &
+           access='stream', form='unformatted', iostat=io_status)
+      if (io_status /= 0) then
+         status = PT_ERR_CONTEXT_PROVIDER
+         goto 900
+      end if
+      stream_open = .true.
+      read(unit, iostat=io_status) output_magic, protocol_version, output_groups, lane_count, execution_mask
+      if (io_status /= 0 .or. output_magic /= 'VGHDCO01' .or. protocol_version /= 1_int32 .or. &
+          output_groups /= group_count .or. lane_count /= 2_int32 * HV_WORDS .or. execution_mask <= 0_int32 .or. &
+          iand(execution_mask, not(7_int32)) /= 0_int32) then
+         status = PT_ERR_CONTEXT_PROVIDER
+         goto 910
+      end if
+      do item_count = 1, maximum_items
+         if (group_counts(item_count) == 0_int32) cycle
+         read(unit, iostat=io_status) output_item_count, output_count
+         if (io_status /= 0 .or. output_item_count /= item_count .or. output_count /= group_counts(item_count)) then
+            status = PT_ERR_CONTEXT_PROVIDER
+            goto 910
+         end if
+         allocate(context_lanes(2_int32 * HV_WORDS, group_counts(item_count)), stat=allocation_status)
+         if (allocation_status /= 0) then
+            status = PT_ERR_ALLOCATION
+            goto 910
+         end if
+         read(unit, iostat=io_status) context_lanes
+         if (io_status /= 0) then
+            deallocate(context_lanes)
+            status = PT_ERR_CONTEXT_PROVIDER
+            goto 910
+         end if
+         do local_index = 1, group_counts(item_count)
+            center_index = center_order(group_starts(item_count) + local_index - 1_int32)
+            call unpack_hv_u32_lanes(context_lanes(:, local_index), prepared_context_bits(:, center_index))
+            prepared_status(center_index) = PT_OK
+         end do
+         deallocate(context_lanes)
+      end do
+      close(unit, status='delete')
+      stream_open = .false.
+      call openvino_delete_stream_file(request_path)
+      used_provider = .true.
+      if (present(execution)) then
+         execution%openvino_contexts = execution%openvino_contexts + int(update_count, int64)
+         execution%openvino_worker_invocations = execution%openvino_worker_invocations + 1_int64
+         execution%openvino_cpu_execution = execution%openvino_cpu_execution .or. &
+                                           (iand(execution_mask, 1_int32) /= 0_int32)
+         execution%openvino_gpu_execution = execution%openvino_gpu_execution .or. &
+                                           (iand(execution_mask, 2_int32) /= 0_int32)
+         execution%openvino_npu_execution = execution%openvino_npu_execution .or. &
+                                           (iand(execution_mask, 4_int32) /= 0_int32)
+      end if
+      return
+
+910   continue
+      if (stream_open) then
+         close(unit, status='delete')
+         stream_open = .false.
+      end if
+900   continue
+      if (stream_open) then
+         close(unit, status='delete')
+         stream_open = .false.
+      end if
+      if (allocated(item_lanes)) deallocate(item_lanes)
+      if (allocated(tie_lanes)) deallocate(tie_lanes)
+      if (allocated(context_lanes)) deallocate(context_lanes)
+      call openvino_delete_stream_file(request_path)
+      call openvino_delete_stream_file(response_path)
+      if (status == PT_OK) status = PT_ERR_CONTEXT_PROVIDER
+   end subroutine pretrain_construct_line_contexts_openvino
+
    ! Apply an already-built context in the exact stream order.  The explicit
    ! experience assertion makes a parallel scheduler bug fail closed rather
    ! than silently changing the deterministic Hebbian schedule.
@@ -910,12 +1388,13 @@ contains
       call add_nonnegative(metrics%center_updates, 1_int64, status)
    end subroutine pretrain_apply_center_update
 
-   subroutine train_one_epoch(model, corpus_path, config, metrics, status)
+   subroutine train_one_epoch(model, corpus_path, config, metrics, status, execution)
       type(hdc_pretrain_model_t), intent(inout) :: model
       character(len=*), intent(in) :: corpus_path
       type(hdc_pretrain_config_t), intent(in) :: config
       type(pretrain_metrics_t), intent(inout) :: metrics
       integer(int32), intent(out) :: status
+      type(pretrain_execution_report_t), intent(inout), optional :: execution
       character(len=MAX_LINE_CHARS) :: line
       character(len=TOKEN_LEN) :: tokens(MAX_TOKENS_PER_LINE)
       integer(int32) :: token_slots(MAX_TOKENS_PER_LINE)
@@ -926,7 +1405,7 @@ contains
       integer(int32), allocatable :: neighbor_counts(:), prepared_status(:)
       logical, allocatable :: update_required(:)
       type(hv_t) :: line_topic_context, prepared_context
-      logical :: eof, found, overlong, truncated
+      logical :: eof, found, overlong, truncated, provider_used
 
       status = PT_OK
       allocate(prepared_context_bits(HV_WORDS, MAX_TOKENS_PER_LINE), &
@@ -1009,29 +1488,57 @@ contains
          if (status /= PT_OK) exit
          prepared_context_bits = 0_int64
          prepared_status = PT_OK
-         if (config%parallel_context_build) then
-            ! Context construction touches immutable base vectors only.  Each
-            ! iteration has its own output column and status element; commits
-            ! below deliberately remain in corpus source order.
+         provider_used = .false.
+         if (config%context_provider == PT_CONTEXT_PROVIDER_OPENVINO) then
+            if (present(execution)) execution%openvino_provider_requested = .true.
+            if (present(execution)) then
+               call pretrain_construct_line_contexts_openvino(model, config, token_slots, n_tokens, &
+                                                              line_topic_context, line_active_tokens, update_required, &
+                                                              neighbor_counts, experiences_before, prepared_context_bits, &
+                                                              prepared_status, provider_used, execution, status)
+            else
+               call pretrain_construct_line_contexts_openvino(model, config, token_slots, n_tokens, &
+                                                              line_topic_context, line_active_tokens, update_required, &
+                                                              neighbor_counts, experiences_before, prepared_context_bits, &
+                                                              prepared_status, provider_used, status=status)
+            end if
+            if (status == PT_ERR_CONTEXT_PROVIDER .and. config%openvino_fallback_cpu) then
+               status = PT_OK
+               if (present(execution)) then
+                  execution%openvino_fallback_contexts = execution%openvino_fallback_contexts + &
+                                                          int(count(update_required(1:n_tokens)), int64)
+               end if
+            else if (status /= PT_OK) then
+               exit
+            end if
+         end if
+         if (.not. provider_used) then
+            if (config%parallel_context_build) then
+               ! Context construction touches immutable base vectors only.  Each
+               ! iteration has its own output column and status element; commits
+               ! below deliberately remain in corpus source order.
 !$omp parallel do schedule(static)
-            do token_index = 1, n_tokens
-               if (.not. update_required(token_index)) cycle
-               call pretrain_construct_center_context(model, config, token_slots, n_tokens, token_index, &
-                                                      line_topic_context, line_active_tokens, &
-                                                      experiences_before(token_index), &
-                                                      prepared_context_bits(:, token_index), &
-                                                      prepared_status(token_index))
-            end do
+               do token_index = 1, n_tokens
+                  if (.not. update_required(token_index)) cycle
+                  call pretrain_construct_center_context(model, config, token_slots, n_tokens, token_index, &
+                                                         line_topic_context, line_active_tokens, &
+                                                         experiences_before(token_index), &
+                                                         prepared_context_bits(:, token_index), &
+                                                         prepared_status(token_index))
+               end do
 !$omp end parallel do
-         else
-            do token_index = 1, n_tokens
-               if (.not. update_required(token_index)) cycle
-               call pretrain_construct_center_context(model, config, token_slots, n_tokens, token_index, &
-                                                      line_topic_context, line_active_tokens, &
-                                                      experiences_before(token_index), &
-                                                      prepared_context_bits(:, token_index), &
-                                                      prepared_status(token_index))
-            end do
+            else
+               do token_index = 1, n_tokens
+                  if (.not. update_required(token_index)) cycle
+                  call pretrain_construct_center_context(model, config, token_slots, n_tokens, token_index, &
+                                                         line_topic_context, line_active_tokens, &
+                                                         experiences_before(token_index), &
+                                                         prepared_context_bits(:, token_index), &
+                                                         prepared_status(token_index))
+               end do
+            end if
+            if (present(execution)) execution%cpu_contexts = execution%cpu_contexts + &
+                                                              int(count(update_required(1:n_tokens)), int64)
          end if
          do token_index = 1, n_tokens
             if (.not. update_required(token_index)) cycle
@@ -1057,15 +1564,17 @@ contains
       deallocate(prepared_context_bits, experiences_before, neighbor_counts, prepared_status, update_required)
    end subroutine train_one_epoch
 
-   subroutine pretrain_train_file(model, corpus_path, config, metrics, status)
+   subroutine pretrain_train_file(model, corpus_path, config, metrics, status, execution)
       type(hdc_pretrain_model_t), intent(inout) :: model
       character(len=*), intent(in) :: corpus_path
       type(hdc_pretrain_config_t), intent(in) :: config
       type(pretrain_metrics_t), intent(out) :: metrics
       integer(int32), intent(out) :: status
+      type(pretrain_execution_report_t), intent(inout), optional :: execution
       integer(int32) :: epoch, tally_status, original_status
 
       call pretrain_metrics_reset(metrics)
+      if (present(execution)) call pretrain_execution_report_reset(execution)
       status = PT_OK
       if (.not. pretrain_model_is_ready(model)) then
          status = PT_ERR_MODEL_NOT_READY
@@ -1091,7 +1600,11 @@ contains
       end if
 
       do epoch = 1, config%epochs
-         call train_one_epoch(model, corpus_path, config, metrics, status)
+         if (present(execution)) then
+            call train_one_epoch(model, corpus_path, config, metrics, status, execution)
+         else
+            call train_one_epoch(model, corpus_path, config, metrics, status)
+         end if
          if (status /= PT_OK) then
             original_status = status
             call add_metrics(model%totals, metrics, tally_status)

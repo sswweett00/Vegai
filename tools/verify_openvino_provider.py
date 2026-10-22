@@ -47,8 +47,10 @@ def main() -> int:
                 fail("OpenVINO probe did not preserve CPU training truth")
             if dispatch.get("gpu_compute_used") is not False or dispatch.get("npu_compute_used") is not False:
                 fail("OpenVINO probe falsely claimed GPU/NPU training dispatch")
-            if dispatch.get("hdc_context_offload_integrated") is not False:
-                fail("OpenVINO probe falsely claimed full HDC context offload")
+            if dispatch.get("openvino_context_provider_implemented") is not True:
+                fail("OpenVINO probe did not report the checked-in context provider")
+            if dispatch.get("probe_is_not_a_train_run") is not True:
+                fail("OpenVINO probe blurred a capability probe with a train-run dispatch report")
 
             if not report["openvino_installed"]:
                 rejected = subprocess.run(

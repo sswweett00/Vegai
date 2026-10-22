@@ -246,9 +246,12 @@ python3 tools/compare_pretraining_threads.py --pretrain-bin ./build/vegai_pretra
 ```
 
 Bu benchmark'ta compile/fixture/harness süresi hariçtir ve hız oranı yalnız
-ölçülen host/workload için geçerlidir. GPU/NPU adapter inventory'si compute
-kullanımı değildir; mevcut backend CPU'dur. Ayrıntılı kaynak ve accelerator
-sınırları için [RESOURCE_AWARE_TRAINING.md](RESOURCE_AWARE_TRAINING.md)'ye
+ölçülen host/workload için geçerlidir. GPU/NPU adapter inventory'si tek başına
+compute kullanımı değildir. Intel Core Ultra için opt-in OpenVINO context
+provider, immutable packed-HDC bundle/finalize aşamasını dispatch ederken
+source-order update'i CPU'da tutar; device mask'i runtime output'ta doğrulanır
+ve CPU-reference checkpoint byte equality zorunludur. Ayrıntılı kaynak ve
+accelerator sınırları için [RESOURCE_AWARE_TRAINING.md](RESOURCE_AWARE_TRAINING.md)'ye
 bakın.
 
 ## 6. Metrikler ve yorum

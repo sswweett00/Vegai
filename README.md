@@ -76,13 +76,15 @@ python3 tools/compare_pretraining_build_profiles.py \
   --repetitions 3 --omp-threads 1
 ```
 
-GPU/iGPU/NPU runtime'ı gerekli değildir; mevcut backend CPU'dur. GPU/NPU
-adapter'ları inventory olarak raporlanır, fakat şu an GPU/NPU compute için
-kullanılmaz; olmayan bir joint accelerator training iddiası yapılmaz. RAM,
+GPU/iGPU/NPU runtime'ı portable CPU/OpenMP yolu için gerekli değildir. GPU/NPU
+adapter inventory'si tek başına compute iddiası değildir. Intel Core Ultra için
+opt-in OpenVINO/oneAPI context provider vardır: immutable packed-HDC context
+bundle işlemini gerçek worker device'ına dispatch eder, source-ordered
+prototype commit'i CPU'da tutar ve checkpoint byte equality ile doğrulanır.
+Provider/runtime yoksa CPU fallback açıkça raporlanır; `--openvino-require-
+accelerator` gerçek GPU/NPU execution yoksa fail closed döner. RAM,
 SSD, dual-channel/NUMA ve çok-core planı için
-[RESOURCE_AWARE_TRAINING.md](docs/RESOURCE_AWARE_TRAINING.md)'ye bakın. Intel
-Core Ultra için optional OpenVINO/oneAPI GPU/NPU readiness probe'u vardır;
-probe başarıyla çalışsa bile mevcut Fortran train dispatch'i CPU'dur. Platform/
+[RESOURCE_AWARE_TRAINING.md](docs/RESOURCE_AWARE_TRAINING.md)'ye; platform/
 CPU/checkpoint sınırları için [HARDWARE_COMPATIBILITY.md](docs/HARDWARE_COMPATIBILITY.md)'ye bakın.
 
 ### CMake / CTest

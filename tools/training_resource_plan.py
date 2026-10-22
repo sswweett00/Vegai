@@ -165,12 +165,13 @@ def build_plan(arguments: argparse.Namespace) -> dict[str, Any]:
         )
     if profile["gpu_adapters"] or profile["npu_adapters"]:
         warnings.append(
-            "GPU/NPU adapters were detected, but the current checked-in training backend remains CPU-only; "
-            "inventory is not accelerator dispatch"
+            "GPU/NPU adapters were detected. This generic static plan does not invoke the optional OpenVINO "
+            "context provider, so inventory is not evidence of accelerator dispatch"
         )
     if arguments.require_accelerator:
         errors.append(
-            "--require-accelerator cannot be satisfied: no validated GPU/NPU training provider is part of this binary"
+            "--require-accelerator cannot be satisfied by a static resource plan: run the OpenVINO provider "
+            "preflight and vegai_pretrain --openvino-require-accelerator to verify real GPU/NPU execution"
         )
 
     ready = not errors
