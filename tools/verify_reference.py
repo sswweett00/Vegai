@@ -3,13 +3,15 @@
 
 This is intentionally a Python model rather than a transcription of Fortran
 control flow.  It validates the mathematical contracts, deterministic seeds,
-exact noise cardinality, and the three end-to-end retrieval workloads used by
-the executable demo.  Native Fortran property tests live in test/test_all.f90.
+exact noise cardinality, Resonator meet-in-the-middle certification, and the
+end-to-end retrieval workloads used by the executable demo. Native Fortran
+property tests live in test/test_all.f90.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import product
 from math import isclose
 
 BITS = 16_384
@@ -179,6 +181,69 @@ def run_unit_properties() -> None:
     require(isclose(similarity(a, a), 1.0), "similarity identity failed")
 
 
+Candidate = tuple[int, str, tuple[int, ...]]
+
+
+def compose(vectors: list[tuple[int, ...]]) -> tuple[int, ...]:
+    result = tuple(0 for _ in range(WORDS))
+    for vector in vectors:
+        result = bind(result, vector)
+    return result
+
+
+def resonator_fingerprint(vector: tuple[int, ...]) -> int:
+    """Same non-cryptographic index fingerprint as the Fortran verifier."""
+    return (
+        vector[0]
+        ^ rotl64(vector[66], 13)
+        ^ rotl64(vector[130], -21)
+        ^ rotl64(vector[192], 37)
+        ^ vector[-1]
+    ) & MASK64
+
+
+def exact_factorize_mitm(
+    target: tuple[int, ...], codebooks: list[list[Candidate]], max_half_combinations: int
+) -> tuple[tuple[int, ...] | None, int]:
+    """Bounded MITM verifier with fingerprint chains and full-vector checks.
+
+    The solution count is intentionally saturated at two, matching the public
+    Fortran ambiguity metadata contract.
+    """
+    require(len(codebooks) >= 2, "factorization requires two or more codebooks")
+    split = len(codebooks) // 2
+    left_books, right_books = codebooks[:split], codebooks[split:]
+    left_size = 1
+    right_size = 1
+    for book in left_books:
+        left_size *= len(book)
+    for book in right_books:
+        right_size *= len(book)
+    require(left_size <= max_half_combinations, "left half exceeds configured verifier bound")
+    require(right_size <= max_half_combinations, "right half exceeds configured verifier bound")
+
+    # The dictionary value is a collision chain. Equality is checked below.
+    right_index: dict[int, list[tuple[tuple[int, ...], tuple[int, ...]]]] = {}
+    for slots in product(*(range(len(book)) for book in right_books)):
+        vector = compose([right_books[index][slot][2] for index, slot in enumerate(slots)])
+        right_index.setdefault(resonator_fingerprint(vector), []).append((slots, vector))
+
+    first_solution: tuple[int, ...] | None = None
+    solution_count = 0
+    for left_slots in product(*(range(len(book)) for book in left_books)):
+        left_vector = compose([left_books[index][slot][2] for index, slot in enumerate(left_slots)])
+        wanted_right = bind(target, left_vector)
+        for right_slots, actual_right in right_index.get(resonator_fingerprint(wanted_right), []):
+            # This full equality check is the collision-safety contract.
+            if wanted_right == actual_right:
+                solution_count = min(2, solution_count + 1)
+                if first_solution is None:
+                    first_solution = tuple(left_slots + right_slots)
+                if solution_count == 2:
+                    return first_solution, solution_count
+    return first_solution, solution_count
+
+
 def encode_frame(roles: list[tuple[int, ...]], fillers: list[tuple[int, ...]]) -> tuple[int, ...]:
     return bundle([bind(role, filler) for role, filler in zip(roles, fillers, strict=True)], 0x5A17F00D3C4B2E19)
 
@@ -235,6 +300,33 @@ def run_end_to_end_demo_contract() -> None:
         require(actual == expected, f"causal chain expected {expected}, got {actual}")
         require(confidence > 0.25, "causal retrieval margin unexpectedly weak")
         state = next(vector for symbol_id, _, vector in memory.entries if symbol_id == actual)
+
+    # The fourth executable workload: slot-specific Resonator factorization.
+    factor_books: list[list[Candidate]] = [
+        [(201, "F1:ALU", alu), (301, "F1:HIPPOCAMPUS", hippocampus), (401, "F1:ANOMALY", anomaly)],
+        [(202, "F2:ARITHMETIC", arithmetic), (302, "F2:CONSOLIDATION", consolidation), (402, "F2:HEAT", heat)],
+        [(203, "F3:FLAGS", flags), (303, "F3:TRACE", long_memory), (403, "F3:PRESSURE", pressure)],
+    ]
+    resonator_target = compose([hippocampus, heat, flags])
+    slots, solution_count = exact_factorize_mitm(resonator_target, factor_books, 64)
+    require(slots is not None and solution_count == 1, "MITM verifier did not find unique tuple")
+    recovered_ids = tuple(factor_books[index][slot][0] for index, slot in enumerate(slots))
+    require(recovered_ids == (301, 402, 203), "Resonator verifier recovered wrong factor IDs")
+    recovered_vectors = [factor_books[index][slot][2] for index, slot in enumerate(slots)]
+    require(compose(recovered_vectors) == resonator_target, "Resonator factors do not rebind to target")
+
+    # Duplicate codewords are semantically ambiguous and must not be hidden.
+    duplicate_a = from_seed(777)
+    duplicate_b = from_seed(888)
+    duplicate_c = from_seed(999)
+    ambiguous_books: list[list[Candidate]] = [
+        [(9001, "DUPLICATE:A1", duplicate_a), (9002, "DUPLICATE:A2", duplicate_a)],
+        [(9101, "UNIQUE:B", duplicate_b)],
+        [(9201, "UNIQUE:C", duplicate_c)],
+    ]
+    ambiguous_target = compose([duplicate_a, duplicate_b, duplicate_c])
+    _, ambiguous_count = exact_factorize_mitm(ambiguous_target, ambiguous_books, 8)
+    require(ambiguous_count == 2, "duplicate factor codewords must report ambiguity")
 
 
 def main() -> None:

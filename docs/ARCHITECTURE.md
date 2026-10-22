@@ -1,7 +1,7 @@
 # Vegai HDS-Fortran mimari sözleşmesi
 
-Bu belge, kaynak kodun koruması gereken semantik ve bellek invariantlarını
-tanımlar. API yorumlarıyla çelişki halinde kaynak kod + native testler
+Bu belge, Fortran 2023 hedefli kaynak kodun koruması gereken semantik ve bellek
+invariantlarını tanımlar. API yorumlarıyla çelişki halinde kaynak kod + native testler
 referanstır; performans iddiaları ise hedef makinede ölçülmelidir.
 
 ## 1. Temsil katmanı
@@ -233,7 +233,49 @@ Bu “zero-shot” transfer, sorgu çiftinin kendisi ayrıca öğretilmeden orta
 structural alignment üzerinden olur. Ancak alignment listesi bilinmelidir;
 hiçbir VSA cebiri semantik correspondence'i yoktan çıkarmaz.
 
-## 5. Paralellik ve performans sınırları
+## 5. Resonator Network factorization
+
+`resonator_network` modülü, farklı semantic slot'lar için ayrı
+`hds_memory_t` codebook'ları kabul eder. Hedef şu formdadır:
+
+```text
+T = F_1 XOR F_2 XOR ... XOR F_N
+```
+
+Her resonator turu, bir slotun güncellemesini diğer güncel tahminlerle
+hesaplar:
+
+```text
+Q_i       = T XOR product(F_j, j != i)
+F_i(next) = exact_cleanup(Codebook_i, Q_i)
+```
+
+`resonator_config_t%synchronous_updates=.true.` iken bütün `Q_i` değerleri
+aynı eski state'ten hesaplanır. `false` değeri ise Gauss-Seidel tarzı in-place
+asynchronous güncelleme kullanır. Her restart için başlangıç slotları seed'den
+üretilir; en düşük composite Hamming residual saklanır.
+
+Binary cleanup seçimi, sürekli-valued klasik resonator ağlardaki projection
+operatorünün ayrık karşılığıdır. Bu nedenle iteratif ağ bir heuristic'tir;
+`network_converged` yalnız network'ün target'a tam ulaşıp ulaşmadığını bildirir.
+Varsayılan bounded exact verifier daha sonra sonucu tam olarak kontrol eder.
+Verifier, factor'ları iki gruba bölüp sağ grup composite'lerini chained
+fingerprint hash'inde saklar. Bir eşleşme ancak tüm 16.384 bit `hv_equal` ile
+doğrulanınca kabul edilir. Fingerprint collision bu yüzden false-positive
+üretemez.
+
+Sonuçta `resonator_result_t` şunları birbirinden ayırır:
+
+- `network_best_distance`: iteratif Resonator fazının en iyi residual'ı;
+- `exact` ve `hamming_distance`: nihai doğrulanmış tuple'ın durumu;
+- `used_exact_verifier`: bounded meet-in-the-middle certificate kullanıldı;
+- `ambiguous` / `exact_solution_count`: en az iki exact tuple bulundu;
+- `search_limit_reached`: verifier'ın her yarı için combination sınırı aşıldı.
+
+Kapsamlı API, complexity ve çalışma örneği için
+[RESONATOR_NETWORK.md](RESONATOR_NETWORK.md) belgesine bakın.
+
+## 6. Paralellik ve performans sınırları
 
 `hv_bind`, `hv_bundle3`, `hv_hamming` ve mask işlemlerinde `!$omp simd`
 ipucu bulunur. `mem_cleanup` global taraması `!$omp parallel do reduction(min:...)`
@@ -244,8 +286,9 @@ Derleyicinin popcount/SIMD seçimi hedefe özgüdür. GNU Fortran'da inceleme i�
 örnek:
 
 ```bash
-gfortran -O3 -march=native -fopenmp -fopt-info-vec-optimized \
-  src/hyper_types.f90 src/symbolic_memory.f90 src/reasoning_core.f90 app/main.f90
+gfortran -O3 -std=f2023 -march=native -fopenmp -fopt-info-vec-optimized \
+  src/hyper_types.f90 src/symbolic_memory.f90 src/resonator_network.f90 \
+  src/reasoning_core.f90 app/main.f90
 objdump -d a.out | grep -Ei 'popcnt|vpopcnt|xor'
 ```
 

@@ -1,21 +1,28 @@
 ! SPDX-License-Identifier: MIT
 !==============================================================================
-!  Executable verification demo for Vegai HDS-Fortran.
+!  Fortran 2023 executable verification demo for Vegai HDS-Fortran.
 !==============================================================================
 program vegai_hds_demo
    use, intrinsic :: iso_fortran_env, only: int32, int64, real64, output_unit
    use hyper_types
    use symbolic_memory
    use reasoning_core
+   use resonator_network
    implicit none
 
    integer(int32), parameter :: MAX_CONCEPTS = 1024_int32
    integer(int32), parameter :: CHAIN_LENGTH = 4_int32
    integer(int32), parameter :: EXPECTED_CHAIN(CHAIN_LENGTH) = [ &
       402_int32, 403_int32, 404_int32, 405_int32 ]
+   integer(int32), parameter :: RESONATOR_FACTORS = 3_int32
+   integer(int32), parameter :: EXPECTED_RESONATOR(RESONATOR_FACTORS) = [ &
+      301_int32, 402_int32, 203_int32 ]
 
    type(hds_memory_t) :: memory
+   type(hds_memory_t) :: resonator_books(RESONATOR_FACTORS)
    type(cleanup_result_t) :: result
+   type(resonator_config_t) :: resonator_config
+   type(resonator_result_t) :: resonator_result
    type(hv_t) :: r_unit, r_function, r_output
    type(hv_t) :: s_alu, s_arithmetic, s_flags
    type(hv_t) :: s_hippocampus, s_consolidation, s_long_memory
@@ -25,6 +32,7 @@ program vegai_hds_demo
    type(hv_t) :: cpu_frame, brain_frame, noisy_cpu_frame, analogy_mapping
    type(hv_t) :: causes(CHAIN_LENGTH), effects(CHAIN_LENGTH)
    type(hv_t) :: causal_bank, current_state, next_state
+   type(hv_t) :: resonator_target
 
    integer(int32) :: status, index, flipped_bits
    integer(int64) :: start_count, end_count, clock_rate
@@ -36,7 +44,7 @@ program vegai_hds_demo
    call require_mem_ok(status, 'mem_init')
 
    write(output_unit, '(A)') '========================================================================'
-   write(output_unit, '(A)') ' VEGAI HDS-FORTRAN | VERIFIED 16,384-BIT SYMBOLIC ENGINE'
+   write(output_unit, '(A)') ' VEGAI HDS-FORTRAN 2023 | VERIFIED 16,384-BIT SYMBOLIC ENGINE'
    write(output_unit, '(A)') '========================================================================'
    write(output_unit, '(A,I0,A)') ' Hypervector dimension       : ', HV_BITS, ' bits'
    write(output_unit, '(A,I0,A)') ' Packed vector payload       : ', HV_BYTES, ' bytes (32 x 64-byte lines)'
@@ -132,6 +140,50 @@ program vegai_hds_demo
       call report_chain_step(index, result, EXPECTED_CHAIN(index), all_passed)
       current_state = next_state
    end do
+   write(output_unit, '(A)') '------------------------------------------------------------------------'
+
+   !==========================================================================
+   ! TEST 4: Three-factor Resonator Network decomposition.  Each factor slot
+   ! owns an independent candidate codebook; the verifier certifies the tuple.
+   !==========================================================================
+   do index = 1_int32, RESONATOR_FACTORS
+      call mem_init(resonator_books(index), 3_int32, status)
+      call require_mem_ok(status, 'resonator codebook initialization')
+   end do
+
+   call mem_register_symbol(resonator_books(1), 201_int32, 'F1:ALU', dummy, status, s_alu)
+   call require_mem_ok(status, 'resonator factor-1 registration')
+   call mem_register_symbol(resonator_books(1), 301_int32, 'F1:HIPPOCAMPUS', dummy, status, s_hippocampus)
+   call require_mem_ok(status, 'resonator factor-1 registration')
+   call mem_register_symbol(resonator_books(1), 401_int32, 'F1:ANOMALY', dummy, status, s_sensor_anomaly)
+   call require_mem_ok(status, 'resonator factor-1 registration')
+
+   call mem_register_symbol(resonator_books(2), 202_int32, 'F2:ARITHMETIC', dummy, status, s_arithmetic)
+   call require_mem_ok(status, 'resonator factor-2 registration')
+   call mem_register_symbol(resonator_books(2), 302_int32, 'F2:CONSOLIDATION', dummy, status, s_consolidation)
+   call require_mem_ok(status, 'resonator factor-2 registration')
+   call mem_register_symbol(resonator_books(2), 402_int32, 'F2:HEAT_RISE', dummy, status, s_heat_rise)
+   call require_mem_ok(status, 'resonator factor-2 registration')
+
+   call mem_register_symbol(resonator_books(3), 203_int32, 'F3:FLAGS', dummy, status, s_flags)
+   call require_mem_ok(status, 'resonator factor-3 registration')
+   call mem_register_symbol(resonator_books(3), 303_int32, 'F3:EPISODIC_TRACE', dummy, status, s_long_memory)
+   call require_mem_ok(status, 'resonator factor-3 registration')
+   call mem_register_symbol(resonator_books(3), 403_int32, 'F3:PRESSURE', dummy, status, s_pressure_spike)
+   call require_mem_ok(status, 'resonator factor-3 registration')
+
+   resonator_target = hv_bind(hv_bind(s_hippocampus, s_heat_rise), s_flags)
+   resonator_config%max_iterations = 16_int32
+   resonator_config%restarts = 4_int32
+   resonator_config%max_exact_combinations = 64_int32
+   resonator_config%synchronous_updates = .true.
+   resonator_config%enable_exact_verifier = .true.
+   call resonator_factorize(resonator_target, resonator_books, resonator_config, &
+                            resonator_result, status)
+   call require_resonator_ok(status, 'three-factor decomposition')
+
+   write(output_unit, '(A)') '[TEST 4] RESONATOR NETWORK MULTI-FACTOR DECOMPOSITION'
+   call report_resonator(resonator_result, EXPECTED_RESONATOR, all_passed)
 
    call system_clock(count=end_count)
    if (clock_rate > 0_int64) then
@@ -153,6 +205,10 @@ program vegai_hds_demo
    end if
    write(output_unit, '(A)') '========================================================================'
 
+   call resonator_result_destroy(resonator_result)
+   do index = 1_int32, RESONATOR_FACTORS
+      call mem_destroy(resonator_books(index))
+   end do
    call mem_destroy(memory)
    if (.not. all_passed) error stop 1
 
@@ -196,6 +252,49 @@ contains
          error stop 4
       end if
    end subroutine require_hv_ok
+
+   subroutine require_resonator_ok(code, operation)
+      integer(int32), intent(in) :: code
+      character(len=*), intent(in) :: operation
+
+      if (code < RN_OK) then
+         write(output_unit, '(A,A,A,I0)') 'FATAL resonator error in ', trim(operation), ': ', code
+         error stop 5
+      end if
+   end subroutine require_resonator_ok
+
+   subroutine report_resonator(network_result, expected_ids, passed)
+      type(resonator_result_t), intent(in) :: network_result
+      integer(int32), intent(in) :: expected_ids(:)
+      logical, intent(inout) :: passed
+      integer(int32) :: factor
+
+      write(output_unit, '(A,L1,A,L1,A,I0,A,I0,A,F7.3)') ' Exact=', network_result%exact, &
+         ' | Network converged=', network_result%network_converged, ' | network Hamming=', &
+         network_result%network_best_distance, ' | final Hamming=', &
+         network_result%hamming_distance, ' | sim=', network_result%similarity
+      write(output_unit, '(A,L1,A,I0,A,I0)') ' Exact verifier=', &
+         network_result%used_exact_verifier, ' | iterations=', network_result%iterations, &
+         ' | restarts=', network_result%restarts_attempted
+      do factor = 1, network_result%n_factors
+         write(output_unit, '(A,I0,A,A,A,I0,A,I0)') ' Factor ', factor, ' -> ', &
+            trim(network_result%factor_labels(factor)), ' [ID=', &
+            network_result%factor_ids(factor), '] slot=', network_result%factor_slots(factor)
+         if (factor > size(expected_ids, kind=int32)) then
+            write(output_unit, '(A)') '   Assertion: FAIL (missing expected factor ID)'
+            passed = .false.
+         else if (network_result%factor_ids(factor) /= expected_ids(factor)) then
+            write(output_unit, '(A)') '   Assertion: FAIL'
+            passed = .false.
+         end if
+      end do
+      if (network_result%exact .and. network_result%hamming_distance == 0_int32) then
+         write(output_unit, '(A)') ' Assertion: PASS'
+      else
+         write(output_unit, '(A)') ' Assertion: FAIL (non-zero resonator residual)'
+         passed = .false.
+      end if
+   end subroutine report_resonator
 
    subroutine report_result(prefix, cleanup, expected_id, passed)
       character(len=*), intent(in) :: prefix

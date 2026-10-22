@@ -2,8 +2,8 @@
 
 [![Fortran verification](https://github.com/sswweett00/Vegai/actions/workflows/ci.yml/badge.svg)](https://github.com/sswweett00/Vegai/actions/workflows/ci.yml)
 
-Vegai, **16.384 boyutlu ikili/bipolar hiper-vektörler** üzerinde çalışan, modern
-Fortran 2018 ile yazılmış küçük ve denetlenebilir bir **Vector Symbolic
+Vegai, **16.384 boyutlu ikili/bipolar hiper-vektörler** üzerinde çalışan,
+**Fortran 2023** hedefli, küçük ve denetlenebilir bir **Vector Symbolic
 Architecture (VSA) / Hyperdimensional Computing (HDC)** çekirdeğidir. Yoğun
 kayan nokta matrisleri yerine `256 × int64` paketli vektörler, XOR bağlama,
 çoğunluk süperpozisyonu, döngüsel permütasyon ve Hamming/`popcnt` rezonansı
@@ -17,6 +17,8 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 - sabit kapasiteli, heap-parçalanmasız, gerçek paketli SoA çağrışımsal bellek;
 - açıkça **exact** ve **yaklaşık LSH** cleanup API'lerinin ayrılması;
 - role–filler çerçeve çözümleme, sıralı n-gram, analoji ve nedensel zincir;
+- çoklu-faktör ayrıştırma için deterministic multi-restart **Resonator Network**
+  ve bounded meet-in-the-middle exact verifier;
 - yerel Fortran özellik/entegrasyon testleri, bağımsız Python referans modeli
   ve GitHub Actions ile denetimli derleme.
 
@@ -31,7 +33,7 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 ### GNU Fortran + Make
 
 ```bash
-# GNU Fortran 12+ ve OpenMP çalışma zamanı gerekir
+# Fortran 2023 modu destekleyen GNU Fortran ve OpenMP çalışma zamanı gerekir
 make test
 make run
 
@@ -59,6 +61,10 @@ ctest --test-dir build --output-on-failure
 OMP_NUM_THREADS=2 ./build/hds_engine
 ```
 
+GNU CMake hedefi `-std=f2023` bayrağını uygulama, test ve kütüphane hedeflerine
+aktarır. Başka bir compiler kullanıyorsanız eşdeğer Fortran 2023 conformance
+bayrağını doğrulayın.
+
 Sınır ve çalışma zamanı kontrolleri için:
 
 ```bash
@@ -72,8 +78,8 @@ ctest --test-dir build-debug --output-on-failure
 ### Fortran Package Manager
 
 ```bash
-fpm test --flag '-std=f2018 -fopenmp' --link-flag '-fopenmp'
-fpm run --flag '-O3 -fopenmp' --link-flag '-fopenmp'
+fpm test --flag '-std=f2023 -fopenmp' --link-flag '-fopenmp'
+fpm run --flag '-O3 -std=f2023 -fopenmp' --link-flag '-fopenmp'
 ```
 
 OpenMP isteğe bağlıdır: direktifleri desteklemeyen veya `-fopenmp` verilmeyen
@@ -86,7 +92,8 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Bit cebiri | `src/hyper_types.f90` | üretim, XOR binding, majority-3, permütasyon, Hamming, exact noise, Hebbian sayaç |
 | Çağrışımsal bellek | `src/symbolic_memory.f90` | sabit kapasiteli SoA store, ID hash, LSH, exact/approximate cleanup |
 | Akıl yürütme | `src/reasoning_core.f90` | role–filler frame, n-gram, kural bankası, analogik transfer |
-| Çalıştırılabilir doğrulama | `app/main.f90` | %25 exact bit gürültüsü, analoji, 4 adımlı nedensel zincir |
+| Resonator Network | `src/resonator_network.f90` | slot-spesifik codebook'larla çoklu-faktör çözümleme ve exact certification |
+| Çalıştırılabilir doğrulama | `app/main.f90` | %25 exact gürültü, analoji, causal chain ve 3-faktör Resonator demo |
 | Native testler | `test/test_all.f90` | cebirsel invariantlar, hata yolları, bellek ve uçtan uca test |
 | Bağımsız oracle | `tools/verify_reference.py` | standart SplitMix64 ve demo sözleşmelerinin Python modeli |
 
@@ -98,6 +105,7 @@ iddia etmiyoruz. Sıfır-kayıplı 64-byte hizalama gerekiyorsa derleyici/ABI'ye
 özel hizalı allocator uygulanmalıdır.
 
 Ayrıntılı tasarım ve invariantlar için [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
+Resonator Network sözleşmesi için [docs/RESONATOR_NETWORK.md](docs/RESONATOR_NETWORK.md),
 ölçülebilir doğrulama planı ve istatistiksel sınırlar için
 [docs/VALIDATION.md](docs/VALIDATION.md) dosyalarına bakın.
 
@@ -140,6 +148,34 @@ inceler. Bu API yüksek hızlı ama **yaklaşıktır**; kova taşması veya gür
 nedeniyle gerçek en yakın komşuyu atlayabilir. İki API'nin ayrı tutulması LSH
 heuristic'ini yanlışlıkla doğrulanmış retrieval olarak kullanmayı önler.
 
+## Resonator Network ile çoklu-faktör çözümleme
+
+`resonator_factorize`, hedef bir bağlı kompozisyonu slot-spesifik codebook'lara
+karşı ayrıştırır:
+
+```text
+T = F₁ XOR F₂ XOR ... XOR Fₙ
+Fᵢ <- Cleanupᵢ(T XOR product(Fⱼ, j ≠ i))
+```
+
+Her iterasyonda bir factor için diğer geçici tahminler unbind edilir ve yalnız
+onun codebook'unda exact cleanup yapılır. Ağ synchronous veya asynchronous
+update, deterministik restart ve en iyi residual kaydı sunar. Binary VSA'da
+rastgele codebook'lar için bu iteratif faz **heuristiktir**; çözüm bulunduğu
+varsayılmaz.
+
+Bu nedenle varsayılan ayarda modül, her yarısı `max_exact_combinations` ile
+sınırlandırılmış bir meet-in-the-middle verifier da çalıştırır. Verifier:
+
+- tam bit eşitliği ile sonucu sertifikalar;
+- 64-bit fingerprint çakışmalarını her hit'te tam `hv_equal` ile eler;
+- en az iki eşdeğer tuple bulursa `RN_WARN_AMBIGUOUS` döndürür;
+- sınır aşılırsa sonucu uydurmak yerine `RN_ERR_SEARCH_LIMIT` bildirir.
+
+Demo, üç bağımsız üçlü candidate codebook'tan `HIPPOCAMPUS ⊗ HEAT_RISE ⊗ FLAGS`
+tuple'ını geri getirir. API, konfigürasyon ve karmaşıklık ayrıntıları
+[Resonator Network belgesinde](docs/RESONATOR_NETWORK.md) verilmiştir.
+
 ## Düzeltilen tasarım riskleri
 
 İlk mimari fikrindeki performans hedefini korurken, üretim kodunda şu
@@ -175,6 +211,10 @@ hatalar/yanıltıcı varsayımlar giderildi:
 - Kural/frame sonucu temizlenmeden tekrar bağlanırsa crosstalk zincir boyunca
   büyür. `infer_causal_step` bu nedenle her adımda cleanup yapıp kaydedilmiş
   vektörü geri alır.
+- Resonator iterasyonları özellikle geniş rastgele codebook'larda yerel sabit
+  noktalara düşebilir. `exact=.true.` veya zero residual sonucu doğrular; aksi
+  durumda çözüm bulunduğu varsayılmamalıdır. Exact verifier sınırı aşıldığında
+  problem boyutunu/slot codebook'larını küçültün ya da ayrı bir search stratejisi kullanın.
 - CPU SIMD komutunun gerçekten AVX-512 `VPOPCNTDQ` veya ARM `CNT` olması
   derleyici, hedef CPU ve bayraklara bağlıdır. Bunu assembly/optimization
   report ile ölçün; kaynak kod tek başına komut sayısı garantilemez.

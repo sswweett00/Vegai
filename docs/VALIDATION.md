@@ -2,8 +2,8 @@
 
 Vegai'nin doğrulaması üç birbirini tamamlayan seviyededir:
 
-1. **native Fortran testleri** (`test/test_all.f90`): derlenen gerçek API'nin
-   contract/property testleri;
+1. **native Fortran 2023 testleri** (`test/test_all.f90`): derlenen gerçek
+   API'nin contract/property testleri;
 2. **bağımsız Python referans modeli** (`tools/verify_reference.py`): bit
    cebiri, standart SplitMix64 oracle'ı ve demo senaryosunun farklı bir dilde
    yeniden hesaplanması;
@@ -21,7 +21,7 @@ yerine geçmez.
 | `make check` | bağımsız reference property + demo | `Python reference verification: PASS` |
 | `make test` | native cebir, error path, memory, reasoning | `Checks: ..., failures: 0` |
 | `make debug` | bounds/runtime/FPE denetimli native test | başarısızlık yok |
-| `make run` | 512+ sembollü demo | üç assertion ve 4 causal adım PASS |
+| `make run` | 512+ sembollü demo | frame, analogy, 4 causal adım ve 3-factor Resonator PASS |
 | `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties` PASS |
 
 CI bunların checked CMake/OpenMP varyantını ve ayrıca optimize Make hedefini
@@ -60,6 +60,21 @@ CI bunların checked CMake/OpenMP varyantını ve ayrıca optimize Make hedefini
 - 3-pair aligned analogy;
 - 4-rule causal bank üzerinden dört ardışık cleanup adımı;
 - 50 distractor ile cleanup marjı.
+
+### `resonator_network`
+
+- üç slotlu, her slotta dört candidate bulunan exact factorization;
+- dönen factor'ların yeniden bind edilip target ile bit-bit eşitliği;
+- network best residual ile final certified residual'ın ayrı metadata'sı;
+- invalid exact-verifier limiti ve uninitialized codebook hata yolları;
+- duplicate hypervector kaynaklı iki exact tuple'ın `RN_WARN_AMBIGUOUS` ile
+  görünür hale gelmesi;
+- result allocatable workspace lifecycle.
+
+Resonator iteratif fazı heuristic olduğundan test, yalnızca pozitif similarity
+ile başarı kabul etmez; final `exact=.true.` ve `hamming_distance=0` şartını
+arar. Bounded verifier birden fazla tuple bulduğunda count değerini ikiye
+saturate ederek ambiguity'yi doğrular.
 
 ## Olasılık modeli ve sayısal marjlar
 
@@ -140,6 +155,7 @@ latency benchmarkı ölçün.
 Bir sonuç raporlanırken en az şu bilgiler saklanmalıdır:
 
 - compiler ve version (`gfortran --version`);
+- Fortran 2023 conformance flag'i (`-std=f2023` veya compiler eşdeğeri);
 - `FFLAGS`, `OMP_NUM_THREADS`, CPU/OS;
 - symbol ID/seed seti;
 - bundle tie seedleri;
@@ -161,5 +177,7 @@ Bir değişiklik merge edilmeden önce:
 - [ ] `cmake` + `ctest` checked build
 - [ ] yeni public API için normal ve hata yolu testi
 - [ ] kaynakta signed-overflow'a dayanan yeni integer aritmetiği yok
+- [ ] Fortran derlemesi `-std=f2023` (veya compiler eşdeğeri) ile geçti
 - [ ] exact ve approximate cleanup sözleşmeleri karıştırılmadı
+- [ ] Resonator sonucunda heuristic network residual ile certified final residual ayrıldı
 - [ ] benchmark iddiası hedef platformda ölçüm çıktısıyla desteklendi

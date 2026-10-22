@@ -4,12 +4,14 @@ program test_all
    use hyper_types
    use symbolic_memory
    use reasoning_core
+   use resonator_network
    use test_support
    implicit none
 
    call test_hypervector_algebra()
    call test_symbolic_memory()
    call test_reasoning_pipeline()
+   call test_resonator_network()
    call finish_tests()
 
 contains
@@ -232,5 +234,85 @@ contains
 
       call mem_destroy(memory)
    end subroutine test_reasoning_pipeline
+
+   subroutine test_resonator_network()
+      type(hds_memory_t) :: codebooks(3), ambiguous_books(3), invalid_books(2)
+      type(resonator_config_t) :: config, invalid_config
+      type(resonator_result_t) :: result, ambiguous_result
+      type(hv_t) :: a1, a2, a3, a4, b1, b2, b3, b4, c1, c2, c3, c4
+      type(hv_t) :: duplicate_a, duplicate_b, duplicate_c, target, reconstructed, dummy
+      integer(int32) :: status, i
+
+      do i = 1, 3
+         call mem_init(codebooks(i), 4_int32, status)
+         call assert_i32_equal(status, MEM_OK, 'resonator codebook initializes')
+      end do
+
+      call mem_register_symbol(codebooks(1), 1001_int32, 'A:ONE', a1, status)
+      call mem_register_symbol(codebooks(1), 1002_int32, 'A:TWO', a2, status)
+      call mem_register_symbol(codebooks(1), 1003_int32, 'A:THREE', a3, status)
+      call mem_register_symbol(codebooks(1), 1004_int32, 'A:FOUR', a4, status)
+      call mem_register_symbol(codebooks(2), 2001_int32, 'B:ONE', b1, status)
+      call mem_register_symbol(codebooks(2), 2002_int32, 'B:TWO', b2, status)
+      call mem_register_symbol(codebooks(2), 2003_int32, 'B:THREE', b3, status)
+      call mem_register_symbol(codebooks(2), 2004_int32, 'B:FOUR', b4, status)
+      call mem_register_symbol(codebooks(3), 3001_int32, 'C:ONE', c1, status)
+      call mem_register_symbol(codebooks(3), 3002_int32, 'C:TWO', c2, status)
+      call mem_register_symbol(codebooks(3), 3003_int32, 'C:THREE', c3, status)
+      call mem_register_symbol(codebooks(3), 3004_int32, 'C:FOUR', c4, status)
+      call assert_i32_equal(status, MEM_OK, 'resonator candidate registration succeeds')
+
+      target = hv_bind(hv_bind(a2, b3), c4)
+      config%max_iterations = 12_int32
+      config%restarts = 4_int32
+      config%max_exact_combinations = 64_int32
+      config%synchronous_updates = .true.
+      config%enable_exact_verifier = .true.
+      call resonator_factorize(target, codebooks, config, result, status)
+      call assert_i32_equal(status, RN_OK, 'resonator exact verification succeeds')
+      call assert_true(result%exact, 'resonator result is exact')
+      call assert_true(result%used_exact_verifier, 'bounded verifier certifies factorization')
+      call assert_i32_equal(result%hamming_distance, 0_int32, 'certified result has zero residual')
+      call assert_i32_equal(result%factor_ids(1), 1002_int32, 'resonator restores first factor')
+      call assert_i32_equal(result%factor_ids(2), 2003_int32, 'resonator restores second factor')
+      call assert_i32_equal(result%factor_ids(3), 3004_int32, 'resonator restores third factor')
+      reconstructed = hv_bind(hv_bind(result%factors(1), result%factors(2)), result%factors(3))
+      call assert_hv_equal(reconstructed, target, 'reported factors rebind to target')
+      call resonator_result_destroy(result)
+      call assert_true(.not. allocated(result%factors), 'resonator result destroy releases workspace')
+
+      invalid_config = config
+      invalid_config%max_exact_combinations = 0_int32
+      call resonator_factorize(target, codebooks, invalid_config, result, status)
+      call assert_i32_equal(status, RN_ERR_INVALID_ARGUMENT, 'invalid verifier bound is rejected')
+      call resonator_factorize(target, invalid_books, config, result, status)
+      call assert_i32_equal(status, RN_ERR_CODEBOOK, 'uninitialized factor codebook is rejected')
+
+      do i = 1, 3
+         call mem_init(ambiguous_books(i), 2_int32, status)
+         call assert_i32_equal(status, MEM_OK, 'ambiguous codebook initializes')
+      end do
+      duplicate_a = hv_from_seed(777_int64)
+      duplicate_b = hv_from_seed(888_int64)
+      duplicate_c = hv_from_seed(999_int64)
+      call mem_register_symbol(ambiguous_books(1), 9001_int32, 'DUPLICATE:A1', dummy, status, duplicate_a)
+      call mem_register_symbol(ambiguous_books(1), 9002_int32, 'DUPLICATE:A2', dummy, status, duplicate_a)
+      call mem_register_symbol(ambiguous_books(2), 9101_int32, 'UNIQUE:B', dummy, status, duplicate_b)
+      call mem_register_symbol(ambiguous_books(3), 9201_int32, 'UNIQUE:C', dummy, status, duplicate_c)
+      call assert_i32_equal(status, MEM_OK, 'ambiguous candidates register successfully')
+      target = hv_bind(hv_bind(duplicate_a, duplicate_b), duplicate_c)
+      config%max_exact_combinations = 8_int32
+      call resonator_factorize(target, ambiguous_books, config, ambiguous_result, status)
+      call assert_i32_equal(status, RN_WARN_AMBIGUOUS, 'verifier reports duplicate exact factorization')
+      call assert_true(ambiguous_result%ambiguous, 'ambiguous result metadata is set')
+      call assert_i32_equal(ambiguous_result%exact_solution_count, 2_int32, &
+                            'ambiguity count is capped at two or more')
+      call resonator_result_destroy(ambiguous_result)
+
+      do i = 1, 3
+         call mem_destroy(codebooks(i))
+         call mem_destroy(ambiguous_books(i))
+      end do
+   end subroutine test_resonator_network
 
 end program test_all

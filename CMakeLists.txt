@@ -5,13 +5,17 @@ project(VegaiHDS VERSION 0.1.0 LANGUAGES Fortran)
 option(VEGAI_ENABLE_OPENMP "Enable OpenMP parallel cleanup scans" ON)
 option(VEGAI_BUILD_TESTS "Build property and integration tests" ON)
 
-set(CMAKE_Fortran_STANDARD 2018)
+# Vegai is specified and continuously compiled as a Fortran 2023 project.
+# GNU Fortran receives an explicit -std=f2023 flag below because CMake does not
+# provide a portable Fortran language-level feature abstraction on every host.
+set(CMAKE_Fortran_STANDARD 2023)
 set(CMAKE_Fortran_STANDARD_REQUIRED ON)
 set(CMAKE_Fortran_EXTENSIONS OFF)
 
 add_library(vegai_hds STATIC
     src/hyper_types.f90
     src/symbolic_memory.f90
+    src/resonator_network.f90
     src/reasoning_core.f90
 )
 
@@ -24,12 +28,17 @@ target_include_directories(vegai_hds PUBLIC
 )
 
 if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(vegai_hds PUBLIC -std=f2023)
     target_compile_options(vegai_hds PRIVATE
         -Wall -Wextra -Wimplicit-interface -Wcharacter-truncation
         -ffree-line-length-none
     )
 elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
+    target_compile_options(vegai_hds PUBLIC -stand f23)
     target_compile_options(vegai_hds PRIVATE -warn all)
+else()
+    message(WARNING
+        "Compiler-specific Fortran 2023 conformance flag is unknown; configure it explicitly.")
 endif()
 
 if(VEGAI_ENABLE_OPENMP)
