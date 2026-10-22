@@ -88,6 +88,7 @@ jobs:
             --format json --output "${RUNNER_TEMP}/training-resource-plan.json" --require-ready > /dev/null
           python3 tools/verify_hardware_compatibility.py
           python3 tools/verify_training_resource_plan.py
+          python3 tools/verify_openvino_provider.py
 
       - name: Compile portable and host-native GNU Make binaries
         run: |

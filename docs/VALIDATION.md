@@ -26,7 +26,8 @@ yerine geçmez.
 | `make native` | yalnız build-host CPU'suna tuned ikili | `build-native/vegai_pretrain` oluşur |
 | `python3 tools/verify_hardware_compatibility.py` | CPU/OS/RAM/GPU/NPU inventory ve CPU-backend truth contract | `hardware compatibility verification: PASS` |
 | `python3 tools/verify_training_resource_plan.py` | bounded RAM/checkpoint storage/OpenMP placement planı ve accelerator fail-closed contract | `training resource plan verification: PASS` |
-| `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties`, `vegai_hardware_compatibility`, `vegai_training_resource_plan`, `vegai_example_pretraining`, `vegai_continuous_pretraining` PASS |
+| `python3 tools/verify_openvino_provider.py` | optional Intel OpenVINO provider truth/fail-closed contract | `OpenVINO provider verification: PASS` |
+| `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties`, `vegai_hardware_compatibility`, `vegai_training_resource_plan`, `vegai_openvino_provider_contract`, `vegai_example_pretraining`, `vegai_continuous_pretraining` PASS |
 
 CI bunların checked CMake/OpenMP varyantını ve ayrıca optimize Make hedefini
 çalıştırır.

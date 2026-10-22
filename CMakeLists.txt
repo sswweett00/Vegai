@@ -122,6 +122,10 @@ if(VEGAI_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_training_resource_plan.py
         )
         add_test(
+            NAME vegai_openvino_provider_contract
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_openvino_provider.py
+        )
+        add_test(
             NAME vegai_example_pretraining
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_example_corpus.py
                     --pretrain-bin $<TARGET_FILE:vegai_pretrain>

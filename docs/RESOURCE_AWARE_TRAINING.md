@@ -164,3 +164,57 @@ NVIDIA için CUDA veya AMD için ROCm. Provider şu sözleşmeleri sağlamadan
 
 Bu sınır, iGPU/NPU bulunan sistemin CPU fallback'ten mahrum kalmamasını ve
 olmayan bir multi-accelerator hızlandırmayı yanlışlıkla iddia etmemeyi sağlar.
+
+## 5. Intel Core Ultra için optional OpenVINO/oneAPI readiness
+
+Intel Core Ultra seçeneği için repository, portable CPU binary'sine zorunlu
+runtime eklemeden bir OpenVINO provider probe'u içerir. Probe yalnız adapter
+listesi değildir; seçilen device üzerinde iki gerçek graph çalıştırır:
+
+1. mixed high/low-bit girdili direct `uint64 XOR` diagnostics; ve
+2. `hv_bitacc_*` ile aynı carry-plane/majority mantığını kullanan `uint32`
+   lane HDC bundle/finalize graph'ları. Default `window=4` için full hybrid
+   16 item, hierarchical ise record-summary ile 19 item test edilir.
+
+```bash
+# Yalnız Intel accelerator denemesi yapılacak makinede:
+python3 -m pip install -r requirements-openvino.txt
+
+# AUTO yalnız device tercihidir; tek graph'ın CPU+GPU+NPU üzerinde aynı anda
+# çalıştığı iddiası değildir.
+python3 tools/openvino_provider.py --device auto --format json \
+  --output openvino-provider.json
+
+# Hedefte GPU/NPU envanteri, exact HDC graph ve graph'ın CPU fallback yerine
+# gerçekten bir accelerator üzerinde execute edilmesi gerekiyorsa:
+python3 tools/openvino_provider.py --device 'AUTO:GPU,NPU,CPU' \
+  --require-openvino --require-gpu --require-npu \
+  --require-hdc-probe --require-hdc-accelerator
+```
+
+Doğrudan `uint64` bitwise ops, bazı OpenVINO plugin/sürümlerinde 64 bitin tümünü
+korumayabilir. Bu nedenle probe'daki direct `uint64` sonucu yalnız diagnostics
+amaçlıdır; başarısız olması tek başına HDC ABI'nin başarısız olduğu anlamına
+gelmez. Aday ABI her Fortran `int64` bit-pattern'i için explicit olarak
+`lane[2*w]=low32(word[w])`, `lane[2*w+1]=high32(word[w])` üretir. Bu `uint32`
+lane'lerde XOR/AND/OR/NOT ve bit-sliced counter her bit için bağımsız çalıştığı
+için packed 16,384-dimensional semantiği koruyabilir. Probe hem lane
+round-trip'i hem de even (seeded tie) / odd majority context sonuçlarını CPU
+oracle ile byte-eşit kontrol eder. Raw byte reinterpretation/endian varsayımı
+sözleşmenin parçası **değildir**.
+
+OpenVINO yalnız optional probe ile import edilir. Paket/device yoksa portable
+Fortran trainer bozulmaz; `--require-*` seçeneği nonzero ile durur. `AUTO`,
+`MULTI` ve `HETERO` OpenVINO device-policy terimleridir: bunlar tek başına bir
+HDC train graph'ının CPU, GPU ve NPU arasında aynı anda doğru/yararlı biçimde
+bölündüğünü kanıtlamaz.
+
+Şu an exact lane probe başarılı olsa dahi `training_dispatch` alanı bilinçli
+olarak `GPU=false`, `NPU=false`, `hdc_context_offload_integrated=false`
+döndürür. Sebep, Fortran trainer'ın source-ordered prototype commit ve
+checkpoint byte-equality sözleşmesini henüz OpenVINO tensor ABI'siyle
+bağlamamış olmasıdır. Bu açık sınır, device göründüğü için yanlış bir
+accelerator training iddiasını engeller. Gerçek Intel context-offload provider
+ancak batched immutable context graph, transfer/memory ownership, fallback,
+serial-vs-provider checkpoint equality ve real target-host timing testleri
+tamamlandığında aktif sayılmalıdır.

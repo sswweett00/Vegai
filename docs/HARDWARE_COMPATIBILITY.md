@@ -113,7 +113,11 @@ python3 tools/training_resource_plan.py --corpus CORPUS.txt \
 ```
 
 Ayrıntılı RAM/SSD/multi-core/quality/accelerator sınırları için
-[RESOURCE_AWARE_TRAINING.md](RESOURCE_AWARE_TRAINING.md)'ye bakın.
+[RESOURCE_AWARE_TRAINING.md](RESOURCE_AWARE_TRAINING.md)'ye bakın. Intel Core
+Ultra target'larında optional `tools/openvino_provider.py`, OpenVINO CPU/GPU/NPU
+plugin inventory'si, direct uint64 diagnostic ve exact uint32-lane HDC
+bundle probe'u sağlar; başarı, henüz GPU/NPU train dispatch'in aktif olduğu
+anlamına gelmez.
 
 ## 4. İşletim sistemi ve compiler yolu
 

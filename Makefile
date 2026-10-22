@@ -83,6 +83,7 @@ check:
 	python3 tools/verify_example_corpus.py
 	python3 tools/verify_hardware_compatibility.py
 	python3 tools/verify_training_resource_plan.py
+	python3 tools/verify_openvino_provider.py
 
 clean:
 	rm -rf $(BUILD_DIR)
