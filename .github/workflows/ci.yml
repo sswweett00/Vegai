@@ -30,7 +30,16 @@ jobs:
             -DCMAKE_Fortran_FLAGS='-std=f2023 -fcheck=all -fbacktrace -ffpe-trap=invalid,zero,overflow'
 
       - name: Compile
-        run: cmake --build build-ci --parallel
+        run: |
+          set +e
+          cmake --build build-ci --parallel > compile-output.txt 2>&1
+          exit_code=$?
+          cat compile-output.txt
+          if [ "$exit_code" -ne 0 ]; then
+            detail=$(tail -n 12 compile-output.txt | tr '\n' ' ' | cut -c1-1900)
+            echo "::error title=Fortran compile diagnostic::$detail"
+          fi
+          exit "$exit_code"
 
       - name: Run native Fortran property and integration tests
         run: ctest --test-dir build-ci --output-on-failure
