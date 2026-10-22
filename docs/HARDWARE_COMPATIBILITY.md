@@ -180,3 +180,10 @@ checkpoint byte equality `True`. Bu bir host-specific CI sonucu olup Ultra 5
 125H, Apple Silicon veya başka CPU'lar için doğrudan throughput vaadi değildir.
 Ayrıntılı önce/sonra tablo için
 [PRETRAINING_MODE_COMPARISON.md](PRETRAINING_MODE_COMPARISON.md)'ye bakın.
+
+Yeni deterministic OpenMP context-build ölçümü
+[run 39839135866](https://github.com/sswweett00/Vegai/actions/runs/39839135866)
+üzerinde AMD EPYC 7763 / Linux hostunda 1 thread `0.538901 s`, 2 thread
+`0.465863 s`, oran `1.1568×` ve checkpoint byte equality `True` verdi. Bu yalnız
+long-record controlled fixture ve 2-thread armı için geçerlidir; herhangi bir
+CPU, RAM channel, SSD veya iGPU/NPU throughput vaadi değildir.

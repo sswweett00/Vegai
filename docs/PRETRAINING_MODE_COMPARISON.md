@@ -95,6 +95,35 @@ signal: same-cluster Top-1 gerilemez ve mean Top-1 similarity gain `> 0.002`
 olur. Bu bilerek tasarlanmış in-corpus cohesion testidir; held-out task
 başarısı değildir.
 
+## V4: deterministic single-core / multi-core context construction
+
+[GitHub Actions run 39839135866](https://github.com/sswweett00/Vegai/actions/runs/39839135866)
+(commit `085d2dc`) yeni immutable-context / source-ordered-commit yolunu gerçek
+GNU Fortran/OpenMP binary ile doğruladı. Host AMD EPYC 7763 / Linux
+`7.0.0-1017-azure` idi; test özellikle long-record fixture için yalnız
+`OMP_NUM_THREADS=1` ve `2` arasını karşılaştırdı. Fixture 16 record,
+record başına 256 token, 2 epoch, toplam 8.192 training token ve 64.896 ordered
+context pair içerir.
+
+| OpenMP thread | Median gerçek train süresi | Yaklaşık training token/s | Checkpoint |
+|---:|---:|---:|---|
+| 1 | 0.538901 s | ≈15,201.308 | regression arm |
+| 2 | 0.465863 s | ≈17,584.569 | **byte-tam eşit** |
+
+Aynı host/workload'da 2-thread yol **1.1568×** (yaklaşık `%15.68`) hızlandı;
+checkpoint bytes ve SHA-256 tam eşitti. Context'ler paralel hazırlanırken
+prototype/experience commit sırası korunduğu için bu, yalnız qualitative
+neighbour çıktısı değil persisted model state için de deterministic bir
+eşitliktir. Bu sonuç 64-core EPYC'nin tamamını kullandığı veya her corpus'un
+lineer ölçekleneceği anlamına gelmez; yalnız istenen 2-thread armın gerçek
+sonucudur. GPU/NPU compute kullanılmadı.
+
+Aynı CI run'da controlled semantic signals korundu: base hybrid mean Top-1
+similarity `0.137414`; long-record hybrid `0.168998`; hierarchical `0.826843`
+ve gain `+0.657845`. Genel fresh `train` varsayılanı artık `hierarchical`tir;
+bu quality default yalnız ≥12 active-token record'larda local hybrid'den ayrılır.
+Bu yine sentetik/in-corpus diagnostic'tir, held-out doğal dil başarısı değildir.
+
 ## Güncel V3 sonucu — portable profile ile doğrulanmış GNU Fortran CI
 
 [GitHub Actions run 39836218246](https://github.com/sswweett00/Vegai/actions/runs/39836218246)

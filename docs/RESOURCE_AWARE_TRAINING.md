@@ -106,6 +106,12 @@ Timing yalnız `vegai_pretrain train` child process'ini kapsar; compile, fixture
 üretimi, checkpoint compare ve harness dışarıdadır. Hız oranı host/workload'a
 özgüdür; core sayısıyla lineer ölçeklenme vaadi değildir.
 
+İlk doğrulanmış gerçek CI ölçümünde ([run 39839135866](https://github.com/sswweett00/Vegai/actions/runs/39839135866),
+AMD EPYC 7763 / Linux) long-record fixture için 1 thread `0.538901 s`, 2 thread
+`0.465863 s` verdi: **1.1568×** hız oranı ve checkpoint byte equality `True`.
+Bu yalnız iki-thread, o runner ve o workload için bir ölçümdür; gerçek corpus ve
+Core Ultra 5 125H gibi hedef hardware üzerinde tekrar ölçülmelidir.
+
 ## 3. Semantic kalite için varsayılan
 
 Yeni `train` varsayılanı `hierarchical` context mode'dur. Bu mod `hybrid`in
