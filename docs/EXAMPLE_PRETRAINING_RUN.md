@@ -32,6 +32,27 @@ plasticity_decay_events     = 8
 strict_tokenization         = true
 ```
 
+## İzole `train` komutu zamanlaması
+
+`tools/measure_example_pretraining.py`, aynı fixture/config ile **tek**
+`vegai_pretrain train` process'ini `perf_counter_ns` ile ölçer. Sayaç process
+spawn'ından hemen önce başlar ve process çıktığında durur; compiler configure,
+derleme, CTest discovery ve önceki CI adımları buna dahil değildir. Komutun
+kendi içindeki vocabulary pass, iki epoch streaming öğrenme ve checkpoint write
+ise `train` subcommand'inin zorunlu parçaları olduğu için dahildir.
+
+```bash
+python3 tools/measure_example_pretraining.py \
+  --pretrain-bin ./build/vegai_pretrain \
+  --checkpoint /tmp/mini-turkish-timed.vgai \
+  --epochs 2 --omp-threads 1
+```
+
+CI bu ölçümü derlemeden sonra ayrı bir adımda çalıştırır ve elapsed süre ile
+training-token/saniye değerini workflow summary ve check-run notice olarak
+yayımlar. Süreler runner, derleyici bayrakları ve CPU'ya bağlıdır; fixture kısa
+olduğu için yalnız reproducible smoke timing olarak yorumlanmalıdır.
+
 ## Input ve vocabulary pass
 
 | Ölçüm | Doğrulanmış değer |

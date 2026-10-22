@@ -74,6 +74,34 @@ jobs:
           ./build-ci/vegai_pretrain resume examples/corpus/toy_hdc_corpus.txt "$checkpoint" \
             --epochs 1 --query queen
 
+      - name: Measure isolated full fixture pretraining command
+        run: |
+          set -euo pipefail
+          report="${RUNNER_TEMP}/isolated-pretraining-timing.json"
+          python3 tools/measure_example_pretraining.py \
+            --pretrain-bin ./build-ci/vegai_pretrain \
+            --checkpoint "${RUNNER_TEMP}/timed-mini-turkish.vgai" \
+            --epochs 2 --omp-threads 1 > "$report"
+          cat "$report"
+          python3 - "$report" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as source:
+              report = json.load(source)
+          message = (
+              f"elapsed_seconds={report['elapsed_seconds']:.9f}; "
+              f"training_tokens={report['training_tokens']}; "
+              f"training_tokens_per_second={report['training_tokens_per_second']:.3f}; "
+              f"epochs={report['epochs']}; omp_threads={report['omp_threads']}"
+          )
+          with open(sys.argv[2], "a", encoding="utf-8") as summary:
+              summary.write("## Isolated fixture pretraining timing\n\n")
+              summary.write("`vegai_pretrain train` wall-clock only; compiler and prior CI work excluded.\n\n")
+              summary.write(f"```text\n{message}\n```\n")
+          print(f"::notice title=Isolated pretraining command timing::{message}")
+          PY
+
       - name: Run independent Python reference verification
         run: python3 tools/verify_reference.py
 
