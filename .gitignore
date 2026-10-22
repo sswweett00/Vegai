@@ -1,0 +1,30 @@
+# Fortran compiler products
+*.mod
+*.smod
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.dylib
+*.gcda
+*.gcno
+
+# Build systems
+/build/
+/cmake-build-*/
+/CMakeFiles/
+/CMakeCache.txt
+/Testing/
+/fpm_build/
+
+# Editors and Python verification environment
+.vscode/
+.idea/
+__pycache__/
+*.py[cod]
+.venv/
+
+# Runtime artifacts
+*.out
+*.prof

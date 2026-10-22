@@ -1,0 +1,20 @@
+name = "vegai-hds"
+version = "0.1.0"
+license = "MIT"
+author = "Vegai contributors"
+maintainer = "Vegai contributors"
+description = "Verified 16,384-bit Vector Symbolic Architecture / Hyperdimensional Computing engine"
+categories = ["artificial-intelligence", "symbolic-reasoning", "high-performance-computing"]
+keywords = ["vsa", "hdc", "hyperdimensional", "fortran", "symbolic-ai"]
+
+[build]
+auto-executables = true
+auto-tests = true
+
+[fortran]
+implicit-typing = false
+implicit-external = false
+source-form = "free"
+
+[install]
+library = true
