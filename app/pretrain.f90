@@ -133,6 +133,12 @@ contains
          case ('--strict')
             parsed_config%strict_tokenization = .true.
             index = index + 1
+         case ('--serial-context-build')
+            parsed_config%parallel_context_build = .false.
+            index = index + 1
+         case ('--parallel-context-build')
+            parsed_config%parallel_context_build = .true.
+            index = index + 1
          case ('--reference-context-kernel')
             parsed_config%reference_context_kernel = .true.
             index = index + 1
@@ -209,6 +215,12 @@ contains
          select case (trim(option))
          case ('--strict')
             parsed_config%strict_tokenization = .true.
+            index = index + 1
+         case ('--serial-context-build')
+            parsed_config%parallel_context_build = .false.
+            index = index + 1
+         case ('--parallel-context-build')
+            parsed_config%parallel_context_build = .true.
             index = index + 1
          case ('--reference-context-kernel')
             parsed_config%reference_context_kernel = .true.
@@ -410,10 +422,12 @@ contains
       write(output_unit, '(A)') '  vegai_pretrain inspect CHECKPOINT [--query TOKEN | --query-file PATH]'
       write(output_unit, '(A)') 'Train options:'
       write(output_unit, '(A)') '  --max-vocab N --min-frequency N --window N --position-shift N --context-mode MODE --epochs N'
-      write(output_unit, '(A)') '  MODE is legacy, positional, hybrid, or hierarchical (default hybrid)'
+      write(output_unit, '(A)') '  MODE is legacy, positional, hybrid, or hierarchical (default hierarchical)'
       write(output_unit, '(A)') '  hierarchical adds bounded whole-record topical evidence for long records'
       write(output_unit, '(A)') '  continue first extends vocabulary from one immutable shard, then trains it'
       write(output_unit, '(A)') '  --initial-plasticity N --minimum-plasticity N --decay-events N --strict --query TOKEN'
+      write(output_unit, '(A)') '  --parallel-context-build (default) builds immutable per-record contexts with OpenMP when available'
+      write(output_unit, '(A)') '  --serial-context-build disables that execution-only parallel stage for diagnosis'
       write(output_unit, '(A)') '  --reference-context-kernel is an exact benchmark/regression implementation switch'
       write(output_unit, '(A)') 'This is streaming distributional HDC learning, not Transformer/LLM pretraining.'
    end subroutine print_usage

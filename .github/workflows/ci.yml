@@ -78,11 +78,16 @@ jobs:
       - name: Run independent Python reference verification
         run: python3 tools/verify_reference.py
 
-      - name: Report portable host compatibility metadata
+      - name: Report portable host compatibility and resource plan
         run: |
           python3 tools/hardware_compatibility.py --format json --require-recognized-os \
             --output "${RUNNER_TEMP}/hardware-profile.json" > /dev/null
+          python3 tools/training_resource_plan.py \
+            --corpus examples/corpus/mini_turkish_ascii_pretrain.txt \
+            --checkpoint "${RUNNER_TEMP}/resource-plan.vgai" --max-vocab 128 \
+            --format json --output "${RUNNER_TEMP}/training-resource-plan.json" --require-ready > /dev/null
           python3 tools/verify_hardware_compatibility.py
+          python3 tools/verify_training_resource_plan.py
 
       - name: Compile portable and host-native GNU Make binaries
         run: |
@@ -153,7 +158,9 @@ jobs:
               print(
                   f"Host: `{hardware['cpu']['model']}` on `{hardware['host']['operating_system']} "
                   f"{hardware['host']['operating_system_release']}` / `{hardware['host']['architecture']}`. "
-                  f"GPU adapters inventoried: {len(hardware['gpu_adapters'])}; GPU compute used: no.",
+                  f"GPU adapters inventoried: {len(hardware['gpu_adapters'])}; "
+                  f"NPU adapters inventoried: {len(hardware['npu_adapters'])}; "
+                  "GPU/NPU compute used: no.",
                   file=summary,
               )
               print(file=summary)
@@ -234,4 +241,64 @@ jobs:
               print(message, file=summary)
               print("```", file=summary)
           print(f"::notice title=Optimized pretraining comparison::{message}")
+          PY
+
+      - name: Compare deterministic single and multicore context construction
+        run: |
+          set -euo pipefail
+          thread_report="${RUNNER_TEMP}/pretraining-thread-comparison.json"
+          python3 tools/compare_pretraining_threads.py \
+            --pretrain-bin ./build/vegai_pretrain --parallel-threads 2 --repetitions 3 \
+            --output "$thread_report" > /dev/null
+          python3 - "$thread_report" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as source:
+              report = json.load(source)
+          hardware = report["hardware"]
+          single = report["single_thread"]
+          parallel = report["parallel"]
+          workload = report["workload"]
+          message = (
+              f"cpu={hardware['cpu']['model']}; "
+              f"single_seconds={single['median_seconds']:.6f}; "
+              f"parallel_seconds={parallel['median_seconds']:.6f}; "
+              f"threads={parallel['omp_threads']}; "
+              f"single_to_parallel_speedup={report['single_to_parallel_speedup']:.4f}x; "
+              f"checkpoint_bytes_identical={report['checkpoint_byte_identical']}"
+          )
+          with open(sys.argv[2], "a", encoding="utf-8") as summary:
+              print("## Deterministic multicore context construction", file=summary)
+              print(file=summary)
+              print(
+                  "Each timing sample covers one `vegai_pretrain train` process only. The workload has "
+                  f"{workload['tokens_per_record']} tokens/record and uses source-ordered commits; fixture creation, "
+                  "compilation, byte comparison, and harness work are excluded.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("| OpenMP threads | Median seconds | Training token/s | Checkpoint bytes |", file=summary)
+              print("|---:|---:|---:|---:|", file=summary)
+              print(
+                  f"| {single['omp_threads']} | {single['median_seconds']:.6f} | "
+                  f"{single['training_tokens_per_second']:.3f} | identical |",
+                  file=summary,
+              )
+              print(
+                  f"| {parallel['omp_threads']} | {parallel['median_seconds']:.6f} | "
+                  f"{parallel['training_tokens_per_second']:.3f} | {report['checkpoint_byte_identical']} |",
+                  file=summary,
+              )
+              print(file=summary)
+              print(
+                  f"Same-host single/parallel ratio: **{report['single_to_parallel_speedup']:.4f}×**. "
+                  "It is a host/workload observation, not a general core-scaling guarantee.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("```text", file=summary)
+              print(message, file=summary)
+              print("```", file=summary)
+          print(f"::notice title=Deterministic multicore pretraining::{message}")
           PY

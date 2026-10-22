@@ -98,7 +98,7 @@ python3 tools/continuous_pretrain.py \
   --manifest data/continual-ledger.json \
   --state-dir state/continual \
   --max-vocab 50000 --min-frequency 1 \
-  --window 4 --position-shift 73 --context-mode hybrid \
+  --window 4 --position-shift 73 --context-mode hierarchical \
   --epochs 1 --initial-plasticity 25 --minimum-plasticity 1 --decay-events 32
 ```
 

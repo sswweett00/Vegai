@@ -27,7 +27,7 @@ import sys
 from typing import Any, Iterable
 
 
-SCHEMA = "vegai-hardware-compatibility/v1"
+SCHEMA = "vegai-hardware-compatibility/v2"
 RECOGNIZED_OPERATING_SYSTEMS = {"Linux", "Darwin", "Windows"}
 DISPLAY_PATTERNS = ("vga compatible controller", "3d controller", "display controller")
 
@@ -227,22 +227,233 @@ def _darwin_gpu_adapters() -> list[dict[str, str]]:
     return adapters
 
 
+
+def _coerce_positive_int(value: object) -> int | None:
+    try:
+        rendered = str(value).strip().replace(",", "")
+        candidate = int(rendered)
+    except (TypeError, ValueError):
+        return None
+    return candidate if candidate > 0 else None
+
+
+def _linux_lscpu_fields() -> dict[str, str]:
+    rendered = _command_text(["lscpu", "--json"])
+    if rendered is None:
+        return {}
+    try:
+        payload = json.loads(rendered)
+    except json.JSONDecodeError:
+        return {}
+    values: dict[str, str] = {}
+    for entry in payload.get("lscpu", []):
+        if not isinstance(entry, dict):
+            continue
+        field = str(entry.get("field", "")).strip().rstrip(":").casefold()
+        value = str(entry.get("data", "")).strip()
+        if field and value:
+            values[field] = value
+    return values
+
+
+def _linux_cpu_topology() -> dict[str, Any]:
+    fields = _linux_lscpu_fields()
+    logical = _coerce_positive_int(fields.get("cpu(s)")) or os.cpu_count()
+    cores_per_socket = _coerce_positive_int(fields.get("core(s) per socket"))
+    sockets = _coerce_positive_int(fields.get("socket(s)"))
+    threads_per_core = _coerce_positive_int(fields.get("thread(s) per core"))
+    physical_cores = None
+    if cores_per_socket is not None and sockets is not None:
+        physical_cores = cores_per_socket * sockets
+    numa_directories = [
+        node
+        for node in Path("/sys/devices/system/node").glob("node[0-9]*")
+        if re.fullmatch(r"node[0-9]+", node.name)
+    ]
+    numa_nodes = len(numa_directories) or _coerce_positive_int(fields.get("numa node(s)"))
+    return {
+        "logical_processors": logical,
+        "physical_cores": physical_cores,
+        "sockets": sockets,
+        "threads_per_core": threads_per_core,
+        "numa_nodes": numa_nodes,
+        "source": "lscpu/sysfs",
+    }
+
+
+def _windows_cpu_topology() -> dict[str, Any]:
+    payload = _windows_powershell_json(
+        "Get-CimInstance Win32_Processor | "
+        "Measure-Object -Property NumberOfCores -Sum | "
+        "Select-Object @{N='physical_cores';E={$_.Sum}} | ConvertTo-Json -Compress"
+    )
+    physical = _coerce_positive_int(payload.get("physical_cores")) if isinstance(payload, dict) else None
+    return {
+        "logical_processors": os.cpu_count(),
+        "physical_cores": physical,
+        "sockets": None,
+        "threads_per_core": None,
+        "numa_nodes": None,
+        "source": "Win32_Processor",
+    }
+
+
+def _darwin_cpu_topology() -> dict[str, Any]:
+    return {
+        "logical_processors": _coerce_positive_int(_command_text(["sysctl", "-n", "hw.logicalcpu"])) or os.cpu_count(),
+        "physical_cores": _coerce_positive_int(_command_text(["sysctl", "-n", "hw.physicalcpu"])),
+        "sockets": None,
+        "threads_per_core": None,
+        "numa_nodes": None,
+        "source": "sysctl",
+    }
+
+
+def _linux_memory() -> dict[str, Any]:
+    values: dict[str, int] = {}
+    source = _read_text(Path("/proc/meminfo"))
+    if source is not None:
+        for line in source.splitlines():
+            match = re.match(r"^([A-Za-z_]+):\s*(\d+)\s*kB$", line)
+            if match:
+                values[match.group(1)] = int(match.group(2)) * 1024
+    return {
+        "total_bytes": values.get("MemTotal"),
+        "available_bytes": values.get("MemAvailable"),
+        "swap_total_bytes": values.get("SwapTotal"),
+        "swap_free_bytes": values.get("SwapFree"),
+        "memory_channel_configuration": "not-detected-without-privileged-firmware-inventory",
+        "source": "/proc/meminfo",
+    }
+
+
+def _windows_memory() -> dict[str, Any]:
+    payload = _windows_powershell_json(
+        "Get-CimInstance Win32_OperatingSystem | "
+        "Select-Object TotalVisibleMemorySize,FreePhysicalMemory,TotalVirtualMemorySize,FreeVirtualMemory | "
+        "ConvertTo-Json -Compress"
+    )
+    def kibibytes(field: str) -> int | None:
+        if not isinstance(payload, dict):
+            return None
+        value = _coerce_positive_int(payload.get(field))
+        return None if value is None else value * 1024
+    return {
+        "total_bytes": kibibytes("TotalVisibleMemorySize"),
+        "available_bytes": kibibytes("FreePhysicalMemory"),
+        "swap_total_bytes": kibibytes("TotalVirtualMemorySize"),
+        "swap_free_bytes": kibibytes("FreeVirtualMemory"),
+        "memory_channel_configuration": "not-detected-without-privileged-firmware-inventory",
+        "source": "Win32_OperatingSystem",
+    }
+
+
+def _darwin_memory() -> dict[str, Any]:
+    return {
+        "total_bytes": _coerce_positive_int(_command_text(["sysctl", "-n", "hw.memsize"])),
+        "available_bytes": None,
+        "swap_total_bytes": None,
+        "swap_free_bytes": None,
+        "memory_channel_configuration": "not-exposed-by-portable-sysctl-query",
+        "source": "sysctl",
+    }
+
+
+def _linux_npu_adapters() -> list[dict[str, str]]:
+    adapters: list[dict[str, str]] = []
+    for accelerator in sorted(Path("/sys/class/accel").glob("accel[0-9]*")):
+        if re.fullmatch(r"accel[0-9]+", accelerator.name) is None:
+            continue
+        entry = _normalise_adapter({"source": "linux-accel", "adapter": accelerator.name})
+        if entry:
+            adapters.append(entry)
+    pci = _command_text(["lspci", "-nn"])
+    if pci is not None:
+        patterns = ("neural", "npu", "ai accelerator", "processing accelerators")
+        for line in pci.splitlines():
+            if any(pattern in line.casefold() for pattern in patterns):
+                entry = _normalise_adapter({"source": "lspci", "description": line})
+                if entry and entry not in adapters:
+                    adapters.append(entry)
+    return adapters
+
+
+def _windows_npu_adapters() -> list[dict[str, str]]:
+    payload = _windows_powershell_json(
+        "Get-CimInstance Win32_PnPEntity | "
+        "Where-Object {$_.Name -match 'NPU|Neural|AI Accelerator'} | "
+        "Select-Object Name,Manufacturer,Status | ConvertTo-Json -Compress"
+    )
+    if isinstance(payload, dict):
+        payload = [payload]
+    if not isinstance(payload, list):
+        return []
+    adapters: list[dict[str, str]] = []
+    for item in payload:
+        if isinstance(item, dict):
+            entry = _normalise_adapter(
+                {"source": "win32-pnp", "name": item.get("Name"), "vendor": item.get("Manufacturer"), "status": item.get("Status")}
+            )
+            if entry:
+                adapters.append(entry)
+    return adapters
+
+
+def _darwin_npu_adapters() -> list[dict[str, str]]:
+    # Apple Silicon's Neural Engine is not exposed as a portable, separately
+    # dispatchable adapter in system_profiler.  Do not infer a provider merely
+    # from the presence of an Apple SoC.
+    return []
+
+
 def collect_hardware_profile() -> dict[str, Any]:
-    """Collect stable, best-effort host metadata without requiring drivers."""
+    """Collect stable, best-effort host metadata without requiring drivers.
+
+    Inventory tells an operator what is physically visible.  It never changes
+    Vegai's execution backend by itself: actual accelerator dispatch requires a
+    separately validated provider and is reported as disabled until then.
+    """
     operating_system = platform.system() or "unknown"
     if operating_system == "Linux":
         cpu_model = _linux_cpu_model()
         gpu_adapters = _linux_gpu_adapters()
+        npu_adapters = _linux_npu_adapters()
+        cpu_topology = _linux_cpu_topology()
+        memory = _linux_memory()
     elif operating_system == "Windows":
         cpu_model = _windows_cpu_model()
         gpu_adapters = _windows_gpu_adapters()
+        npu_adapters = _windows_npu_adapters()
+        cpu_topology = _windows_cpu_topology()
+        memory = _windows_memory()
     elif operating_system == "Darwin":
         cpu_model = _darwin_cpu_model()
         gpu_adapters = _darwin_gpu_adapters()
+        npu_adapters = _darwin_npu_adapters()
+        cpu_topology = _darwin_cpu_topology()
+        memory = _darwin_memory()
     else:
         cpu_model = None
         gpu_adapters = []
+        npu_adapters = []
+        cpu_topology = {
+            "logical_processors": os.cpu_count(),
+            "physical_cores": None,
+            "sockets": None,
+            "threads_per_core": None,
+            "numa_nodes": None,
+            "source": "unknown",
+        }
+        memory = {
+            "total_bytes": None,
+            "available_bytes": None,
+            "swap_total_bytes": None,
+            "swap_free_bytes": None,
+            "memory_channel_configuration": "unknown",
+            "source": "unknown",
+        }
 
+    logical_processors = cpu_topology.get("logical_processors") or os.cpu_count()
     return {
         "schema": SCHEMA,
         "host": {
@@ -254,16 +465,26 @@ def collect_hardware_profile() -> dict[str, Any]:
         },
         "cpu": {
             "model": cpu_model or platform.processor() or "unknown",
-            "logical_processors": os.cpu_count(),
+            "logical_processors": logical_processors,
+            "topology": cpu_topology,
         },
+        "memory": memory,
         "gpu_adapters": gpu_adapters,
+        "npu_adapters": npu_adapters,
         "execution_backend": {
             "kind": "portable-cpu",
+            "cpu_compute_used": True,
             "gpu_compute_used": False,
+            "npu_compute_used": False,
             "gpu_runtime_required": False,
+            "npu_runtime_required": False,
             "integrated_gpu_contract": (
                 "No GPU compute API is loaded. Integrated graphics can coexist with Vegai; "
                 "execution remains on the host CPU without a vendor GPU runtime."
+            ),
+            "accelerator_dispatch_contract": (
+                "Detected GPU/NPU adapters are inventory only. The current binary does not silently dispatch "
+                "training work to them; a separately validated provider is required before compute use is claimed."
             ),
         },
         "portability": {
@@ -282,7 +503,6 @@ def collect_hardware_profile() -> dict[str, Any]:
         },
     }
 
-
 def compact_hardware_summary(profile: dict[str, Any]) -> str:
     host = profile["host"]
     cpu = profile["cpu"]
@@ -290,7 +510,8 @@ def compact_hardware_summary(profile: dict[str, Any]) -> str:
     return (
         f"os={host['operating_system']} {host['operating_system_release']}; "
         f"arch={host['architecture']}; cpu={cpu['model']}; logical_cpus={cpu['logical_processors']}; "
-        f"gpu_adapters={len(adapters)}; backend=portable-cpu"
+        f"physical_cores={cpu['topology'].get('physical_cores')}; gpu_adapters={len(adapters)}; "
+        f"npu_adapters={len(profile['npu_adapters'])}; backend=portable-cpu"
     )
 
 
@@ -304,16 +525,28 @@ def render_text(profile: dict[str, Any]) -> str:
         f"Architecture: {host['architecture']}",
         f"CPU: {cpu['model']}",
         f"Logical processors: {cpu['logical_processors']}",
+        f"Physical cores (best effort): {cpu['topology'].get('physical_cores')}",
+        f"NUMA nodes (best effort): {cpu['topology'].get('numa_nodes')}",
+        f"RAM total bytes: {profile['memory'].get('total_bytes')}",
+        f"RAM available bytes: {profile['memory'].get('available_bytes')}",
+        "RAM channel note: " + str(profile['memory'].get('memory_channel_configuration')),
         f"Execution backend: {backend['kind']}",
+        "CPU compute used: yes",
         "GPU compute used: no",
+        "NPU compute used: no",
         f"GPU adapters detected: {len(profile['gpu_adapters'])}",
+        f"NPU adapters detected: {len(profile['npu_adapters'])}",
     ]
     for adapter in profile["gpu_adapters"]:
         rendered = ", ".join(f"{key}={value}" for key, value in sorted(adapter.items()))
-        lines.append(f"  - {rendered}")
+        lines.append(f"  GPU - {rendered}")
+    for adapter in profile["npu_adapters"]:
+        rendered = ", ".join(f"{key}={value}" for key, value in sorted(adapter.items()))
+        lines.append(f"  NPU - {rendered}")
     lines.extend(
         [
             "Integrated GPU policy: " + backend["integrated_gpu_contract"],
+            "Accelerator dispatch policy: " + backend["accelerator_dispatch_contract"],
             "Portable build policy: " + profile["portability"]["portable_build_contract"],
             "Checkpoint policy: " + profile["portability"]["checkpoint_contract"],
         ]

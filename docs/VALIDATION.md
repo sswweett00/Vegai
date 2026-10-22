@@ -24,8 +24,9 @@ yerine geçmez.
 | `make run` | 512+ sembollü demo | frame, analogy, 4 causal adım ve 3-factor Resonator PASS |
 | `make pretrain` | HDC corpus CLI derlemesi | portable `build/vegai_pretrain` oluşur |
 | `make native` | yalnız build-host CPU'suna tuned ikili | `build-native/vegai_pretrain` oluşur |
-| `python3 tools/verify_hardware_compatibility.py` | CPU/OS/iGPU inventory ve CPU-backend contract | `hardware compatibility verification: PASS` |
-| `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties`, `vegai_hardware_compatibility`, `vegai_example_pretraining`, `vegai_continuous_pretraining` PASS |
+| `python3 tools/verify_hardware_compatibility.py` | CPU/OS/RAM/GPU/NPU inventory ve CPU-backend truth contract | `hardware compatibility verification: PASS` |
+| `python3 tools/verify_training_resource_plan.py` | bounded RAM/checkpoint storage/OpenMP placement planı ve accelerator fail-closed contract | `training resource plan verification: PASS` |
+| `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties`, `vegai_hardware_compatibility`, `vegai_training_resource_plan`, `vegai_example_pretraining`, `vegai_continuous_pretraining` PASS |
 
 CI bunların checked CMake/OpenMP varyantını ve ayrıca optimize Make hedefini
 çalıştırır.
@@ -83,8 +84,11 @@ saturate ederek ambiguity'yi doğrular.
 
 - fixed fixture corpus üzerinde exact unique/active vocabulary, raw/active/OOV
   token sayaçları ve ordered-window context pair sayısı;
-- aynı input/config ile iki bağımsız `hybrid` run'ın base plane, semantic plane
-  ve experience counter bakımından bit-tam eşitliği;
+- aynı input/config ile iki bağımsız default `hierarchical` run'ın base plane,
+  semantic plane ve experience counter bakımından bit-tam eşitliği;
+- repeated center token içeren record üzerinde serial ve OpenMP context-build
+  run'larının base plane, semantic plane ve experience counter bakımından
+  bit-tam eşitliği;
 - `legacy` signed-counter ve hızlı `positional` bit-sliced encoder'ın
   bit-tam semantic-plane eşitliği;
 - semantic prototype lookup ve self-excluded nearest-neighbour diagnostic;
@@ -105,24 +109,32 @@ bit-tam çift checkpoint ve `train → inspect → resume` integration zincirini
 SHA-256 shard mutation rejection, append-only manifest prefix, OOV=0 ve
 idempotent restart journal davranışını ayrıca sınar.
 
-CI önce `tools/hardware_compatibility.py` ile CPU/OS/mimari/iGPU inventory
-metadata'sını kaydeder; GPU compute kullanılmadığını da açıkça raporlar. Ardından
-portable varsayılan Make binary ile aynı host için opt-in `native` binary'yi
-`tools/compare_pretraining_build_profiles.py` üzerinden ölçer. İki profile'ın
-checkpoint byte eşitliği zorunludur; süre oranı yalnız o host için anlamlıdır.
+CI önce `tools/hardware_compatibility.py` ile CPU/OS/mimari/RAM/GPU/NPU
+inventory metadata'sını, sonra `tools/training_resource_plan.py` ile bounded
+RAM/checkpoint-storage/OpenMP placement planını kaydeder. GPU/NPU compute
+kullanılmadığı açıkça raporlanır; accelerator talebi provider yoksa fail-closed
+döner. Ardından portable varsayılan Make binary ile aynı host için opt-in
+`native` binary'yi `tools/compare_pretraining_build_profiles.py` üzerinden
+ölçer. İki profile'ın checkpoint byte eşitliği zorunludur; süre oranı yalnız o
+host için anlamlıdır.
 
 Native testler fused raw-word/permuted/pair accumulator plane bit-eşitliğini,
-fused/reference hybrid ile hierarchical replay eşitliğini ve hierarchical
-checkpoint round-trip'ini denetler. `tools/compare_pretraining_modes.py` ise
-portable binary üzerinde yalnız her bir gerçek `vegai_pretrain train`
-child-process wall-clock'ını raporlar: compiler, CI setup, fixture construction,
-inspect ve harness süresi ölçüye girmez. Workflow summary; portable/native
-profil oranını, `legacy → positional → fused hybrid` temel karşılaştırmasını,
-fused/reference hybrid checkpoint byte eşitliği + hız oranını ve ayrı
-16-token-record controlled `hybrid → hierarchical` topical-cohesion
-diagnostic'ini yazar. Bu fixture'lar yalnız pipeline doğrulaması ve sınırlı
-retrieval diagnostic'idir; semantic kalite, doğal dil yeteneği veya production
-throughput benchmarkı değildir.
+fused/reference hybrid ile hierarchical replay eşitliğini, repeated-center
+serial/OpenMP context-build eşitliğini ve hierarchical checkpoint round-trip'ini
+denetler. `tools/compare_pretraining_modes.py` portable binary üzerinde yalnız
+her bir gerçek `vegai_pretrain train` child-process wall-clock'ını raporlar:
+compiler, CI setup, fixture construction, inspect ve harness süresi ölçüye
+girmez. Workflow summary; portable/native profil oranını,
+`legacy → positional → fused hybrid` temel karşılaştırmasını, fused/reference
+hybrid checkpoint byte eşitliği + hız oranını ve ayrı 16-token-record controlled
+`hybrid → hierarchical` topical-cohesion diagnostic'ini yazar.
+
+`tools/compare_pretraining_threads.py`, ayrıca uzun-record fixture'da
+`OMP_NUM_THREADS=1` ile 2 arasında gerçek train timing'i ölçer ve checkpoint
+byte equality'yi zorunlu kılar. Hız oranı kayıt altına alınır, ama hiçbir
+minimum speedup veya lineer core-scaling kabul kriteri değildir. Bu fixture'lar
+yalnız pipeline doğrulaması ve sınırlı retrieval diagnostic'idir; semantic
+kalite, doğal dil yeteneği veya production throughput benchmarkı değildir.
 
 ## Olasılık modeli ve sayısal marjlar
 
@@ -236,4 +248,7 @@ Bir değişiklik merge edilmeden önce:
 - [ ] checkpoint save/load + resume sonucu hedef compiler/ABI üzerinde doğrulandı
 - [ ] continual iş varsa immutable SHA-256 manifest, `min_frequency=1`, state journal ve restart/fault senaryosu doğrulandı
 - [ ] pretraining semantic kalite iddiası held-out görev ve baseline ile ölçüldü
+- [ ] `--max-vocab` / checkpoint path için resource plan ve gerçek RAM/storage headroom incelendi
+- [ ] multi-core iddiasında serial/parallel checkpoint byte equality doğrulandı
+- [ ] GPU/NPU adapter inventory ile actual compute dispatch birbirinden ayrıldı; provider yoksa accelerator iddiası yapılmadı
 - [ ] benchmark iddiası hedef platformda ölçüm çıktısıyla desteklendi

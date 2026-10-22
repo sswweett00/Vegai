@@ -303,7 +303,7 @@ def default_policy(arguments: argparse.Namespace) -> dict[str, Any]:
         "min_frequency": 1 if arguments.min_frequency is None else arguments.min_frequency,
         "context_window": 4 if arguments.window is None else arguments.window,
         "position_shift_bits": 73 if arguments.position_shift is None else arguments.position_shift,
-        "context_mode": "hybrid" if arguments.context_mode is None else arguments.context_mode,
+        "context_mode": "hierarchical" if arguments.context_mode is None else arguments.context_mode,
         "epochs_per_shard": 1 if arguments.epochs is None else arguments.epochs,
         "initial_plasticity_percent": 25 if arguments.initial_plasticity is None else arguments.initial_plasticity,
         "minimum_plasticity_percent": 1 if arguments.minimum_plasticity is None else arguments.minimum_plasticity,

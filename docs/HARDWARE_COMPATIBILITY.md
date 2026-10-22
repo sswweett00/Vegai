@@ -8,7 +8,9 @@ ile ARM64 gibi başka mimarilerde aynı kaynak kodunun derlenebilmesini hedefler
 > “Uyumlu” burada portable profile ile derlenebilme ve CPU üzerinde doğru
 > çalışabilme anlamındadır. Her CPU/OS/compiler kombinasyonunda aynı throughput,
 > aynı SIMD genişliği veya aynı checkpoint dosya ABI'si vaat edilmez. Benchmark
-> sonucu ancak ölçüldüğü host için geçerlidir.
+> sonucu ancak ölçüldüğü host için geçerlidir. Mevcut default training mode,
+> uzun records için quality-oriented `hierarchical`tir; kısa records için local
+> `hybrid` semantiğini korur.
 
 ## 1. CPU profilleri
 
@@ -68,10 +70,14 @@ zorunluluğu yoktur. Prize takılı bir sistemde local hız istenirse `make nati
 ile ayrıca host-tuned ikili üretilebilir; portable/native benchmark sonucu
 mutlaka aynı bilgisayarda ölçülmelidir.
 
-Pretraining'in hot path'i şu an deterministic packed-bit/SIMD kodudur. OpenMP
-cleanup scan'leri için isteğe bağlıdır; `OMP_NUM_THREADS` değerini artırmak,
-pretraining corpus loop'unu otomatik olarak core sayısı kadar bölmez. Bu nedenle
-125H'nin core/thread sayısından doğrusal hızlanma varsayılmamalıdır.
+Pretraining'in hot path'i deterministic packed-bit/SIMD context assembly'dir.
+OpenMP artık bir record içindeki immutable center context'lerini paralel
+hazırlayabilir; prototype/experience commit'i bit-tam determinism için kaynak
+sırasında kalır. `OMP_NUM_THREADS` gerçek CPU multi-core kullanımını etkiler,
+ama kısa records, memory bandwidth, I/O, power/thermal state ve scheduler
+nedeniyle 125H'nin core/thread sayısıyla doğrusal hızlanma varsayılmamalıdır.
+`tools/compare_pretraining_threads.py` ile aynı hostta byte equality + gerçek
+child-process sürelerini ölçün.
 
 ## 3. Entegre grafik, discrete GPU ve NPU
 
@@ -81,11 +87,13 @@ Vulkan compute veya vendor NPU runtime'ı yüklenmez. Sonuç olarak:
 - Intel Arc/iGPU, AMD Radeon iGPU, Apple integrated GPU veya discrete GPU'nun
   varlığı CPU execution için önkoşul değildir;
 - ekran sürücüsünün vendor API desteği yoksa bile portable CPU backend çalışır;
-- GPU inventory yalnız benchmark provenance amacıyla kaydedilir, GPU
-  hızlandırması iddiası değildir;
-- ileride GPU backend eklenirse ayrı numerical determinism, driver ve fallback
-  sözleşmesi gerekir; mevcut CPU checkpoint equality garantisi otomatik olarak
-  GPU backend'e taşınmış sayılmaz.
+- GPU ve NPU inventory yalnız benchmark/resource provenance amacıyla kaydedilir,
+  GPU/NPU hızlandırması iddiası değildir;
+- `--require-accelerator` resource plan'da fail-closed davranır; adapter
+  tespitinin compute dispatch'e dönüştüğünü varsaymaz;
+- ileride GPU/NPU backend eklenirse ayrı numerical determinism, driver,
+  transfer, fallback ve checkpoint sözleşmesi gerekir; mevcut CPU checkpoint
+  equality garantisi otomatik olarak accelerator backend'e taşınmış sayılmaz.
 
 Host bilgisini güvenli/taşınabilir bir JSON olarak kaydetmek için:
 
@@ -94,15 +102,26 @@ python3 tools/hardware_compatibility.py --format json \
   --require-recognized-os --output hardware-profile.json
 ```
 
-Araç Linux, macOS ve Windows için best-effort CPU/GPU adapter inventory üretir;
-hostname, MAC, serial number veya tam environment dump kaydetmez.
+Araç Linux, macOS ve Windows için best-effort CPU topology, RAM availability,
+RAM-channel discovery policy, GPU/NPU adapter inventory üretir; hostname, MAC,
+serial number veya tam environment dump kaydetmez. RAM/SSD checkpoint path,
+NUMA ve OpenMP placement için gerçek preflight ise:
+
+```bash
+python3 tools/training_resource_plan.py --corpus CORPUS.txt \
+  --checkpoint checkpoints/model.vgai --max-vocab 50000 --require-ready
+```
+
+Ayrıntılı RAM/SSD/multi-core/quality/accelerator sınırları için
+[RESOURCE_AWARE_TRAINING.md](RESOURCE_AWARE_TRAINING.md)'ye bakın.
 
 ## 4. İşletim sistemi ve compiler yolu
 
 ### Linux
 
 GNU Fortran + CMake/Ninja ile portable profile CI'da gerçek olarak doğrulanır.
-OpenMP bulunamazsa derleme başarısız olmaz; cleanup scan doğru ama serial kalır.
+OpenMP bulunamazsa derleme başarısız olmaz; cleanup scan ve context construction
+doğru fakat serial kalır.
 
 ### macOS
 

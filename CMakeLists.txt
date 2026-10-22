@@ -77,7 +77,7 @@ if(VEGAI_CPU_TARGET STREQUAL "native")
     endif()
 endif()
 message(STATUS "Vegai CPU target profile: ${VEGAI_CPU_TARGET}")
-message(STATUS "Vegai execution backend: portable CPU; no GPU runtime is required")
+message(STATUS "Vegai execution backend: portable CPU; GPU/NPU inventory is not accelerator dispatch and no vendor runtime is required")
 
 if(VEGAI_ENABLE_OPENMP)
     find_package(OpenMP COMPONENTS Fortran)
@@ -116,6 +116,10 @@ if(VEGAI_BUILD_TESTS)
         add_test(
             NAME vegai_hardware_compatibility
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_hardware_compatibility.py
+        )
+        add_test(
+            NAME vegai_training_resource_plan
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_training_resource_plan.py
         )
         add_test(
             NAME vegai_example_pretraining

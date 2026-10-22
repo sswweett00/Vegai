@@ -44,7 +44,7 @@ def main() -> int:
             if not output.is_file():
                 fail("hardware reporter did not create requested JSON output")
             profile = json.loads(output.read_text(encoding="utf-8"))
-            if profile.get("schema") != "vegai-hardware-compatibility/v1":
+            if profile.get("schema") != "vegai-hardware-compatibility/v2":
                 fail(f"unexpected profile schema: {profile.get('schema')!r}")
             host = profile.get("host")
             cpu = profile.get("cpu")
@@ -62,10 +62,22 @@ def main() -> int:
                 fail("hardware profile omitted CPU model fallback")
             if backend.get("kind") != "portable-cpu":
                 fail(f"unexpected backend kind: {backend.get('kind')!r}")
+            if backend.get("cpu_compute_used") is not True:
+                fail("portable backend did not identify active CPU compute")
             if backend.get("gpu_compute_used") is not False or backend.get("gpu_runtime_required") is not False:
                 fail("portable backend incorrectly claims GPU compute/runtime use")
-            if not isinstance(profile.get("gpu_adapters"), list):
-                fail("GPU inventory is not a list")
+            if backend.get("npu_compute_used") is not False or backend.get("npu_runtime_required") is not False:
+                fail("portable backend incorrectly claims NPU compute/runtime use")
+            if not isinstance(profile.get("gpu_adapters"), list) or not isinstance(profile.get("npu_adapters"), list):
+                fail("GPU/NPU inventory is not a list")
+            topology = cpu.get("topology")
+            memory = profile.get("memory")
+            if not isinstance(topology, dict) or not isinstance(memory, dict):
+                fail("hardware profile omitted CPU topology or memory object")
+            if topology.get("logical_processors") is not None and not isinstance(topology["logical_processors"], int):
+                fail("hardware profile logical processor topology is malformed")
+            if not isinstance(memory.get("memory_channel_configuration"), str):
+                fail("hardware profile omitted RAM channel discovery policy")
 
             # The distribution default must stay free of host-only ISA flags;
             # native tuning belongs to the explicit opt-in profile only.
@@ -83,7 +95,7 @@ def main() -> int:
         print(f"hardware compatibility verification: FAIL: {error}", file=sys.stderr)
         return 1
 
-    print("hardware compatibility verification: PASS (portable CPU backend, optional GPU inventory)")
+    print("hardware compatibility verification: PASS (portable CPU backend, RAM/topology metadata, optional GPU/NPU inventory)")
     return 0
 
 

@@ -23,8 +23,10 @@ Her aktif sözlük token'ı `w` için iki adet 16.384-bit hiper-vektör vardır:
 
 Bir satırdaki aktif center token `wᵢ` için, `r ∈ [-W, W] \ {0}` konumlarındaki
 aktif komşular alınır. Konum bilgisi bir dairesel permütasyonla kodlanır.
-Varsayılan **hybrid** encoder, positional syntax sinyalini ve order-invariant
-topical co-occurrence sinyalini aynı deterministic bundle içinde birleştirir:
+Varsayılan **hierarchical** encoder, `hybrid`in positional syntax sinyalini ve
+order-invariant topical co-occurrence sinyalini aynı deterministic bundle içinde
+birleştirir; yalnız yeterince uzun records için ayrıca bounded whole-record
+topical evidence ekler. Local hybrid çekirdeği şöyledir:
 
 ```text
 Vpos = { Π^(r × P)(B(wᵢ₊ᵣ)) ; her geçerli r için }
@@ -39,9 +41,13 @@ S(wᵢ) ← replace_exact_fraction(S(wᵢ), Cᵢ, learning_rate(experience(wᵢ)
 bit-sliced accumulator kapasitesi tarafından üstten sınırlandırılır.
 
 - `W`, context window; `P`, `position_shift_bits` değeridir.
-- `hybrid` varsayılandır: left/right role bilgisini `Vpos` içinde korurken,
-  aynı topical neighbourhood'u paylaşan token'ların `Vtopic` sayesinde daha
-  güçlü semantic cohesion üretmesini hedefler.
+- `hierarchical` varsayılandır: `hybrid`in left/right role bilgisini `Vpos`
+  içinde ve topical neighbourhood sinyalini `Vtopic` içinde korur; yalnız ≥12
+  active-token record için aşağıdaki bounded whole-record evidence'i ekler.
+  Kısa record'larda bit-tam `hybrid` ile aynıdır.
+- `hybrid`, explicit local-only baseline/reproducibility seçeneğidir: positional
+  syntax ve order-invariant topical sinyali birleştirir, fakat whole-record
+  channel eklemez.
 - `positional`, yalnız `Vpos` kullanır. Bu modun bit-sliced implementation'ı,
   eski `legacy` signed-counter implementation'ı ile unit-weight context için
   bit-tam eşdeğerdir.
@@ -153,7 +159,7 @@ cmake --build build --parallel
 # Yeni iki-pass model
 ./build/vegai_pretrain train CORPUS.txt model.vgai \
   --max-vocab 50000 --min-frequency 3 --window 4 --position-shift 73 \
-  --context-mode hybrid --epochs 3 --initial-plasticity 25 --minimum-plasticity 1 \
+  --context-mode hierarchical --epochs 3 --initial-plasticity 25 --minimum-plasticity 1 \
   --decay-events 32 --query token
 
 # Checkpoint semantic configuration ile uyumlu ek epoch (vocabulary değiştirmez)
@@ -177,22 +183,25 @@ cmake --build build --parallel
 | `--min-frequency N` | 2 | active vocabulary threshold |
 | `--window N` | 4 | her yönde context yarıçapı |
 | `--position-shift N` | 73 | relative position başına bit shift |
-| `--context-mode MODE` | `hybrid` | `legacy`, bit-tam hızlı `positional`, positional+topical `hybrid` veya yalnız ≥12 active-token kayıtta bounded whole-record topical evidence ekleyen `hierarchical` |
+| `--context-mode MODE` | `hierarchical` | `legacy`, bit-tam hızlı `positional`, local positional+topical `hybrid` veya `hybrid`e yalnız ≥12 active-token kayıtta bounded whole-record topical evidence ekleyen kalite-odaklı `hierarchical` |
+| `--parallel-context-build` | açık | immutable per-record context construction için OpenMP; source-ordered prototype commit sayesinde thread count checkpoint semantiğini değiştirmez |
+| `--serial-context-build` | kapalı | yalnız debug/regression için parallel context hazırlığını kapatır; checkpoint state değildir |
 | `--epochs N` | 1 | ikinci corpus geçişi sayısı |
 | `--initial-plasticity N` | 25 | başlangıç selected-dimension yüzdesi |
 | `--minimum-plasticity N` | 1 | schedule alt sınırı |
 | `--decay-events N` | 32 | token başına ilk schedule eşiği |
 | `--strict` | kapalı | drop/truncation durumunu hata yap |
-| `--reference-context-kernel` | kapalı | yalnız benchmark/regression için önceki rotate-then-add kernelini kullanır; fused varsayılanla checkpoint byte'ları bit-tam eşit olmalıdır |
+| `--reference-context-kernel` | kapalı | yalnız benchmark/regression için önceki rotate-then-add kernelini kullanır; varsayılan fused implementation ile checkpoint byte'ları bit-tam eşit olmalıdır |
 | `--query TOKEN` | yok | eğitimden sonra veya `inspect` sırasında bir semantic neighbour göster |
 | `inspect --query-file PATH` | yok | her nonblank satırdaki tek token için tek checkpoint load ile batch nearest-neighbour diagnostic |
 
 `resume`, checkpoint'ten vocabulary threshold/capacity, `window`, shift,
 context encoder, plasticity ve tie seed'ini geri alır; yalnız `--epochs`,
-`--strict`, `--query` ve implementation-only `--reference-context-kernel`
-kabul eder ve vocabulary'yi değiştirmez. Reference switch checkpoint semantiği
-veya payload değildir; `continue` için de sadece benchmark/regression amacıyla
-kullanılabilir. `continue` aynı
+`--strict`, `--query` ve execution-only `--reference-context-kernel`,
+`--parallel-context-build` / `--serial-context-build` seçeneklerini kabul eder
+ve vocabulary'yi değiştirmez. Bu implementation/execution switches checkpoint
+semantiği veya payload değildir; reference switch `continue` için de yalnız
+benchmark/regression amacıyla kullanılabilir. `continue` aynı
 uyumlu config'i geri alır, önce yeni shard'ın token'larını vocabulary'ye ekler,
 yalnız newly-active slotları başlatır, ardından shard'ı train eder. Öğrenme
 semantiğini checkpoint'ten farklı bir config ile sürdürme
@@ -212,7 +221,37 @@ manifest digest'i ve gerçek `train → inspect → resume` CLI testiyle doğrul
 [EXAMPLE_PRETRAINING_RUN.md](EXAMPLE_PRETRAINING_RUN.md)'dedir. Hiçbiri
 semantic kalite benchmarkı değildir.
 
-## 5. Metrikler ve yorum
+## 5. Kaynak-duyarlı çalışma ve çok çekirdek
+
+Corpus streaming olduğundan RAM gereksinimi corpus file boyutundan çok
+`--max-vocab` ve HDC model capacity'sine bağlıdır. Eğitimden önce aynı corpus,
+checkpoint path ve capacity ile aşağıdaki preflight'i çalıştırın:
+
+```bash
+python3 tools/training_resource_plan.py --corpus CORPUS.txt \
+  --checkpoint checkpoints/model.vgai --max-vocab 50000 --require-ready
+```
+
+Araç RAM/storage lower-bound estimate'i, CPU topology, NUMA/RAM-channel
+best-effort telemetry ve OpenMP placement önerisi üretir. SSD/HDD ve dual-RAM
+channel seçimi OS/firmware tarafından yönetilir; Vegai bunları zorlamaz.
+Deterministic OpenMP context construction, immutable base vectors üzerinde
+paralel çalışır; model update'leri kaynak sırası ile commit edilir. Bu yüzden
+`OMP_NUM_THREADS=1` ve çok-thread run checkpoint byte'ları eşit olmalıdır.
+
+```bash
+export OMP_NUM_THREADS=8 OMP_PROC_BIND=close OMP_PLACES=cores
+python3 tools/compare_pretraining_threads.py --pretrain-bin ./build/vegai_pretrain \
+  --parallel-threads 2 --repetitions 3
+```
+
+Bu benchmark'ta compile/fixture/harness süresi hariçtir ve hız oranı yalnız
+ölçülen host/workload için geçerlidir. GPU/NPU adapter inventory'si compute
+kullanımı değildir; mevcut backend CPU'dur. Ayrıntılı kaynak ve accelerator
+sınırları için [RESOURCE_AWARE_TRAINING.md](RESOURCE_AWARE_TRAINING.md)'ye
+bakın.
+
+## 6. Metrikler ve yorum
 
 CLI ve `pretrain_metrics_t` aşağıdaki sayıları verir:
 
@@ -234,7 +273,7 @@ satırda tek active token varsa context oluşmaz. Metrikler corpus kalitesini ve
 semantic accuracy'yi tek başına ölçmez; ingest ve öğrenme kapsamını kanıtlayan
 telemetridir.
 
-## 6. Checkpoint ve resume sözleşmesi
+## 7. Checkpoint ve resume sözleşmesi
 
 `pretrain_checkpoint_save` stream-unformatted bir `.vgai` dosyası yazar;
 `pretrain_checkpoint_load` magic/version, shape, counter sign, vocabulary
@@ -269,7 +308,7 @@ Uygulamalar kesintisiz/atomik checkpoint ihtiyacı varsa dışarıda versioned
 checkpoint path kullanmalı ve başarılı save sonrası manifest pointer'ını
 atomik biçimde güncellemelidir.
 
-## 7. Data governance ve deney manifesti
+## 8. Data governance ve deney manifesti
 
 Vegai corpus indirme, scraping veya lisans doğrulama yapmaz. Kullanıcı input
 verisi için sorumludur. Gerçek eğitim öncesi aşağıdaki minimum kontroller
@@ -319,7 +358,7 @@ CPU/OS, OMP_NUM_THREADS, full CLI config, evaluation protocol/results.
 ignore eder. Lisansı ve dağıtım izni açık olmayan gerçek corpus/checkpoint'leri
 bu depoya commit etmeyin.
 
-## 8. Doğrulama ve kabul sınırları
+## 9. Doğrulama ve kabul sınırları
 
 Native testler şunları kontrol eder:
 
@@ -331,6 +370,8 @@ Native testler şunları kontrol eder:
   plane ve sample count için bit eşitliği; pair overflow'unda atomic state;
 - fused `hybrid` corpus run'ının rotate-then-add reference kernel ile semantic
   plane, base plane ve learning schedule bakımından bit-tam eşitliği;
+- repeated center token'lı record üzerinde serial ve OpenMP context construction
+  run'larının base/semantic plane ve experience counter bakımından bit-tam eşitliği;
 - ≥12 active-token controlled record üzerinde `hierarchical` replay
   determinismi, local-only hybrid'den ayrışması ve checkpoint round-trip'i;
 - windowed context count ve active/OOV telemetry;

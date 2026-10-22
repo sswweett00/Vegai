@@ -57,7 +57,7 @@ module hdc_pretraining
       integer(int64) :: min_frequency = 2_int64
       integer(int32) :: context_window = 4_int32
       integer(int32) :: position_shift_bits = 73_int32
-      integer(int32) :: context_mode = PT_CONTEXT_HYBRID
+      integer(int32) :: context_mode = PT_CONTEXT_HIERARCHICAL
       integer(int32) :: epochs = 1_int32
       integer(int32) :: initial_plasticity_percent = 25_int32
       integer(int32) :: minimum_plasticity_percent = 1_int32
@@ -68,6 +68,12 @@ module hdc_pretraining
       ! It is deliberately not checkpoint state, so a fast resume can continue
       ! a checkpoint originally trained with the reference implementation.
       logical :: reference_context_kernel = .false.
+      ! Execution-only switch.  Context construction for one input record can
+      ! run under OpenMP, while prototype commits remain source-ordered.  This
+      ! retains byte-identical semantic state even when repeated tokens occur
+      ! on the same line.  A compiler without OpenMP ignores the directives and
+      ! remains serial; this flag is intentionally not checkpoint state.
+      logical :: parallel_context_build = .true.
    end type hdc_pretrain_config_t
 
    type, public :: pretrain_metrics_t
@@ -678,26 +684,105 @@ contains
       end if
    end subroutine pretrain_build_line_topic_context
 
-   subroutine pretrain_update_center(model, config, token_slots, n_tokens, center_index, &
-                                     line_topic_context, line_active_tokens, metrics, status)
-      type(hdc_pretrain_model_t), intent(inout) :: model
+   ! Determine which centers will update and the exact experience counter that
+   ! each update must observe.  Context vectors depend only on immutable base
+   ! identities plus this counter-derived tie seed; prototype mutation happens
+   ! later in source order.  Preplanning lets context construction run safely in
+   ! parallel without changing repeated-token semantics.
+   subroutine pretrain_plan_line_updates(model, config, token_slots, n_tokens, update_required, &
+                                         neighbor_counts, experiences_before, status)
+      type(hdc_pretrain_model_t), intent(in) :: model
+      type(hdc_pretrain_config_t), intent(in) :: config
+      integer(int32), intent(in) :: token_slots(:)
+      integer(int32), intent(in) :: n_tokens
+      logical, intent(out) :: update_required(:)
+      integer(int32), intent(out) :: neighbor_counts(:)
+      integer(int64), intent(out) :: experiences_before(:)
+      integer(int32), intent(out) :: status
+      integer(int32) :: center_index, neighbor_index, center_slot, neighbor_slot, previous_index
+      integer(int32) :: neighbours
+      integer(int64) :: expected_experience
+
+      status = PT_OK
+      update_required = .false.
+      neighbor_counts = 0_int32
+      experiences_before = 0_int64
+      if (n_tokens < 0_int32 .or. n_tokens > size(token_slots, kind=int32) .or. &
+          n_tokens > size(update_required, kind=int32) .or. n_tokens > size(neighbor_counts, kind=int32) .or. &
+          n_tokens > size(experiences_before, kind=int32)) then
+         status = PT_ERR_INVALID_ARGUMENT
+         return
+      end if
+
+      do center_index = 1, n_tokens
+         center_slot = token_slots(center_index)
+         if (center_slot == 0_int32) cycle
+         neighbours = 0_int32
+         do neighbor_index = max(1_int32, center_index - config%context_window), &
+                             min(n_tokens, center_index + config%context_window)
+            if (neighbor_index == center_index) cycle
+            neighbor_slot = token_slots(neighbor_index)
+            if (neighbor_slot /= 0_int32) neighbours = neighbours + 1_int32
+         end do
+         if (neighbours > 0_int32) then
+            update_required(center_index) = .true.
+            neighbor_counts(center_index) = neighbours
+         end if
+      end do
+
+      ! At most MAX_TOKENS_PER_LINE centers exist, so a bounded source-order
+      ! scan avoids a capacity-sized scratch table and preserves an exact
+      ! counter value even when one token is repeated many times in a record.
+      do center_index = 1, n_tokens
+         if (.not. update_required(center_index)) cycle
+         center_slot = token_slots(center_index)
+         expected_experience = model%experience_count(center_slot)
+         do previous_index = 1, center_index - 1
+            if (update_required(previous_index) .and. token_slots(previous_index) == center_slot) then
+               if (expected_experience == huge(0_int64)) then
+                  status = PT_ERR_COUNTER_OVERFLOW
+                  return
+               end if
+               expected_experience = expected_experience + 1_int64
+            end if
+         end do
+         if (expected_experience == huge(0_int64)) then
+            status = PT_ERR_COUNTER_OVERFLOW
+            return
+         end if
+         experiences_before(center_index) = expected_experience
+      end do
+   end subroutine pretrain_plan_line_updates
+
+   ! Build one center's immutable HDC context only.  It has no writes to model
+   ! state and is therefore OpenMP-safe.  Its output is committed separately in
+   ! source order by pretrain_apply_center_update.
+   subroutine pretrain_construct_center_context(model, config, token_slots, n_tokens, center_index, &
+                                                line_topic_context, line_active_tokens, experience_before, &
+                                                context_bits, status)
+      type(hdc_pretrain_model_t), intent(in) :: model
       type(hdc_pretrain_config_t), intent(in) :: config
       integer(int32), intent(in) :: token_slots(:)
       integer(int32), intent(in) :: n_tokens, center_index
       type(hv_t), intent(in) :: line_topic_context
       integer(int32), intent(in) :: line_active_tokens
-      type(pretrain_metrics_t), intent(inout) :: metrics
+      integer(int64), intent(in) :: experience_before
+      integer(int64), intent(out) :: context_bits(HV_WORDS)
       integer(int32), intent(out) :: status
       type(hv_acc_t) :: legacy_accumulator
       type(hv_bitacc_t) :: bit_accumulator
-      type(hv_t) :: neighbor, positioned, context, prototype, updated
+      type(hv_t) :: neighbor, positioned, context
       integer(int32) :: center_slot, offset, neighbor_index, neighbor_slot
-      integer(int32) :: add_status, update_status, shift_bits, neighbors, global_items, global_index
-      integer(int32) :: plasticity_percent
+      integer(int32) :: add_status, shift_bits, neighbors, global_items, global_index
       integer(int64) :: tie_seed
       logical :: reference_kernel, topic_mode
 
       status = PT_OK
+      context_bits = 0_int64
+      if (center_index < 1_int32 .or. center_index > n_tokens) then
+         status = PT_ERR_INVALID_ARGUMENT
+         return
+      end if
       center_slot = token_slots(center_index)
       if (center_slot == 0_int32) return
 
@@ -761,8 +846,6 @@ contains
             end if
          end if
          neighbors = neighbors + 1_int32
-         call add_nonnegative(metrics%context_pairs, 1_int64, status)
-         if (status /= PT_OK) return
       end do
       if (neighbors == 0_int32) return
 
@@ -779,28 +862,53 @@ contains
          end do
       end if
 
-      tie_seed = ieor(vocab_seed_for_slot(model%vocabulary, center_slot), &
-                      ishftc(model%experience_count(center_slot), 19))
+      tie_seed = ieor(vocab_seed_for_slot(model%vocabulary, center_slot), ishftc(experience_before, 19))
       if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL) then
          context = hv_acc_finalize(legacy_accumulator, ieor(config%tie_seed, tie_seed))
       else
          context = hv_bitacc_finalize(bit_accumulator, ieor(config%tie_seed, tie_seed))
       end if
+      context_bits = context%bits
+   end subroutine pretrain_construct_center_context
+
+   ! Apply an already-built context in the exact stream order.  The explicit
+   ! experience assertion makes a parallel scheduler bug fail closed rather
+   ! than silently changing the deterministic Hebbian schedule.
+   subroutine pretrain_apply_center_update(model, center_slot, context_bits, experience_before, metrics, status)
+      type(hdc_pretrain_model_t), intent(inout) :: model
+      integer(int32), intent(in) :: center_slot
+      integer(int64), intent(in) :: context_bits(HV_WORDS)
+      integer(int64), intent(in) :: experience_before
+      type(pretrain_metrics_t), intent(inout) :: metrics
+      integer(int32), intent(out) :: status
+      type(hv_t) :: context, prototype, updated
+      integer(int32) :: update_status, plasticity_percent
+      integer(int64) :: tie_seed
+
+      status = PT_OK
+      if (center_slot < 1_int32 .or. center_slot > model%vocabulary%count .or. &
+          .not. model%vocabulary%active(center_slot) .or. &
+          model%experience_count(center_slot) /= experience_before) then
+         status = PT_ERR_HYPERVECTOR
+         return
+      end if
+      if (experience_before == huge(0_int64)) then
+         status = PT_ERR_COUNTER_OVERFLOW
+         return
+      end if
+      context%bits = context_bits
       prototype%bits = model%semantic_bits(:, center_slot)
-      plasticity_percent = scheduled_plasticity_percent(model, model%experience_count(center_slot))
+      tie_seed = ieor(vocab_seed_for_slot(model%vocabulary, center_slot), ishftc(experience_before, 19))
+      plasticity_percent = scheduled_plasticity_percent(model, experience_before)
       call hv_hebbian_update_percent(prototype, context, plasticity_percent, tie_seed, updated, update_status)
       if (update_status /= HV_OK) then
          status = PT_ERR_HYPERVECTOR
          return
       end if
-      if (model%experience_count(center_slot) == huge(0_int64)) then
-         status = PT_ERR_COUNTER_OVERFLOW
-         return
-      end if
       model%semantic_bits(:, center_slot) = updated%bits
-      model%experience_count(center_slot) = model%experience_count(center_slot) + 1_int64
+      model%experience_count(center_slot) = experience_before + 1_int64
       call add_nonnegative(metrics%center_updates, 1_int64, status)
-   end subroutine pretrain_update_center
+   end subroutine pretrain_apply_center_update
 
    subroutine train_one_epoch(model, corpus_path, config, metrics, status)
       type(hdc_pretrain_model_t), intent(inout) :: model
@@ -811,16 +919,28 @@ contains
       character(len=MAX_LINE_CHARS) :: line
       character(len=TOKEN_LEN) :: tokens(MAX_TOKENS_PER_LINE)
       integer(int32) :: token_slots(MAX_TOKENS_PER_LINE)
-      integer :: unit, io_status
+      integer :: unit, io_status, allocation_status
       integer(int32) :: token_index, n_tokens, slot, vocab_status, line_active_tokens
       integer(int64) :: non_ascii_count
-      type(hv_t) :: line_topic_context
+      integer(int64), allocatable :: prepared_context_bits(:, :), experiences_before(:)
+      integer(int32), allocatable :: neighbor_counts(:), prepared_status(:)
+      logical, allocatable :: update_required(:)
+      type(hv_t) :: line_topic_context, prepared_context
       logical :: eof, found, overlong, truncated
 
       status = PT_OK
+      allocate(prepared_context_bits(HV_WORDS, MAX_TOKENS_PER_LINE), &
+               experiences_before(MAX_TOKENS_PER_LINE), neighbor_counts(MAX_TOKENS_PER_LINE), &
+               prepared_status(MAX_TOKENS_PER_LINE), update_required(MAX_TOKENS_PER_LINE), &
+               stat=allocation_status)
+      if (allocation_status /= 0) then
+         status = PT_ERR_ALLOCATION
+         return
+      end if
       open(newunit=unit, file=trim(corpus_path), status='old', action='read', &
            form='formatted', iostat=io_status)
       if (io_status /= 0) then
+         deallocate(prepared_context_bits, experiences_before, neighbor_counts, prepared_status, update_required)
          status = PT_ERR_IO
          return
       end if
@@ -883,14 +1003,58 @@ contains
                                                    line_active_tokens, status)
             if (status /= PT_OK) exit
          end if
+
+         call pretrain_plan_line_updates(model, config, token_slots, n_tokens, update_required, &
+                                         neighbor_counts, experiences_before, status)
+         if (status /= PT_OK) exit
+         prepared_context_bits = 0_int64
+         prepared_status = PT_OK
+         if (config%parallel_context_build) then
+            ! Context construction touches immutable base vectors only.  Each
+            ! iteration has its own output column and status element; commits
+            ! below deliberately remain in corpus source order.
+!$omp parallel do schedule(static)
+            do token_index = 1, n_tokens
+               if (.not. update_required(token_index)) cycle
+               call pretrain_construct_center_context(model, config, token_slots, n_tokens, token_index, &
+                                                      line_topic_context, line_active_tokens, &
+                                                      experiences_before(token_index), &
+                                                      prepared_context_bits(:, token_index), &
+                                                      prepared_status(token_index))
+            end do
+!$omp end parallel do
+         else
+            do token_index = 1, n_tokens
+               if (.not. update_required(token_index)) cycle
+               call pretrain_construct_center_context(model, config, token_slots, n_tokens, token_index, &
+                                                      line_topic_context, line_active_tokens, &
+                                                      experiences_before(token_index), &
+                                                      prepared_context_bits(:, token_index), &
+                                                      prepared_status(token_index))
+            end do
+         end if
          do token_index = 1, n_tokens
-            call pretrain_update_center(model, config, token_slots, n_tokens, token_index, &
-                                        line_topic_context, line_active_tokens, metrics, status)
+            if (.not. update_required(token_index)) cycle
+            if (prepared_status(token_index) /= PT_OK) then
+               status = prepared_status(token_index)
+               exit
+            end if
+         end do
+         if (status /= PT_OK) exit
+
+         do token_index = 1, n_tokens
+            if (.not. update_required(token_index)) cycle
+            call add_nonnegative(metrics%context_pairs, int(neighbor_counts(token_index), int64), status)
+            if (status /= PT_OK) exit
+            prepared_context%bits = prepared_context_bits(:, token_index)
+            call pretrain_apply_center_update(model, token_slots(token_index), prepared_context%bits, &
+                                              experiences_before(token_index), metrics, status)
             if (status /= PT_OK) exit
          end do
          if (status /= PT_OK) exit
       end do
       close(unit)
+      deallocate(prepared_context_bits, experiences_before, neighbor_counts, prepared_status, update_required)
    end subroutine train_one_epoch
 
    subroutine pretrain_train_file(model, corpus_path, config, metrics, status)

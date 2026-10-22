@@ -82,6 +82,7 @@ check:
 	python3 tools/verify_reference.py
 	python3 tools/verify_example_corpus.py
 	python3 tools/verify_hardware_compatibility.py
+	python3 tools/verify_training_resource_plan.py
 
 clean:
 	rm -rf $(BUILD_DIR)

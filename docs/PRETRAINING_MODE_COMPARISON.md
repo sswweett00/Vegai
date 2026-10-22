@@ -56,8 +56,9 @@ Ordered context pair/run  6,656
 Vocabulary                64 active token
 ```
 
-Burada `legacy`, bit-tam hızlı `positional` ve fused varsayılan `hybrid`
-çalıştırılır. Her checkpoint gerçek CLI üzerinden 64 self-excluded Top-1 query
+Burada `legacy`, bit-tam hızlı `positional` ve explicit local fused `hybrid`
+çalıştırılır. Genel `train` varsayılanı artık `hierarchical`tir; bu 8-token
+fixture hierarchy eşiğinin altında olduğundan local hybrid ile bit-tam aynıdır. Her checkpoint gerçek CLI üzerinden 64 self-excluded Top-1 query
 ile okunur. `positional` nearest-neighbour çıktısının `legacy` ile tam eşit
 olması gerekir; `hybrid` aynı-küme hit'i geriletmemeli ve mean Top-1 similarity
 artışı `> 0.01` olmalıdır.

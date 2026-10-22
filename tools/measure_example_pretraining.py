@@ -43,8 +43,8 @@ def main() -> int:
     parser.add_argument(
         "--context-mode",
         choices=("legacy", "positional", "hybrid", "hierarchical"),
-        default="hybrid",
-        help="context encoder used by the timed train command (default: hybrid)",
+        default="hierarchical",
+        help="context encoder used by the timed train command (default: hierarchical)",
     )
     parser.add_argument("--omp-threads", type=int, default=1, help="OMP_NUM_THREADS for the child command")
     parser.add_argument(

@@ -22,6 +22,8 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 - iki-pass vocabulary, allocation-free ASCII ingest, streaming positional-context
   Hebbian öğrenme, checkpoint/resume telemetry ve SHA-256 journal'lı continual
   shard pretraining içeren HDC/VSA corpus pipeline;
+- immutable context construction + source-ordered commit ile checkpoint-bit-tam
+  deterministic OpenMP multi-core training; RAM/SSD/NUMA resource preflight;
 - yerel Fortran özellik/entegrasyon testleri, bağımsız Python referans modeli
   ve GitHub Actions ile denetimli derleme.
 
@@ -33,8 +35,9 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 >
 > **Corpus pretraining notu:** `vegai_pretrain`, Transformer/LLM eğitimi değil;
 > deterministik positional + order-invariant hybrid context'lerden HDC semantic
-> prototype öğrenimidir; `hierarchical` yalnız uzun kayıtlara bounded whole-record
-> topical evidence ekleyen kontrollü bir moddur. Unicode corpus'lar ön-tokenization
+> prototype öğrenimidir. Varsayılan `hierarchical`, uzun kayıtlarda bounded
+> whole-record topical evidence ekler ve kısa kayıtlarda `hybrid` ile bit-tam
+> aynıdır. Unicode corpus'lar ön-tokenization
 > ister; veri yönetişimi, checkpoint ve sınırlar [PRETRAINING.md](docs/PRETRAINING.md)'de, immutable
 > shard'larla crash-safe continual çalışma ise
 > [CONTINUOUS_PRETRAINING.md](docs/CONTINUOUS_PRETRAINING.md)'de açıkça tanımlıdır.
@@ -73,9 +76,12 @@ python3 tools/compare_pretraining_build_profiles.py \
   --repetitions 3 --omp-threads 1
 ```
 
-GPU/iGPU/NPU runtime'ı gerekli değildir; mevcut backend CPU'dur. Entegre grafik
-kartları sistemde bulunabilir ama şu an GPU compute için kullanılmaz. Tam
-platform/CPU/checkpoint sınırları için [HARDWARE_COMPATIBILITY.md](docs/HARDWARE_COMPATIBILITY.md)'ye bakın.
+GPU/iGPU/NPU runtime'ı gerekli değildir; mevcut backend CPU'dur. GPU/NPU
+adapter'ları inventory olarak raporlanır, fakat şu an GPU/NPU compute için
+kullanılmaz; olmayan bir joint accelerator training iddiası yapılmaz. RAM,
+SSD, dual-channel/NUMA ve çok-core planı için
+[RESOURCE_AWARE_TRAINING.md](docs/RESOURCE_AWARE_TRAINING.md), platform/CPU/
+checkpoint sınırları için [HARDWARE_COMPATIBILITY.md](docs/HARDWARE_COMPATIBILITY.md)'ye bakın.
 
 ### CMake / CTest
 
@@ -91,8 +97,12 @@ OMP_NUM_THREADS=2 ./build/hds_engine
 ./build/vegai_pretrain inspect toy.vgai --query dog
 
 # Dengeli, Türkçe-ASCII sentetik fixture ile checkpoint/resume örneği
+python3 tools/training_resource_plan.py \
+  --corpus examples/corpus/mini_turkish_ascii_pretrain.txt --checkpoint mini.vgai \
+  --max-vocab 128 --require-ready
+export OMP_NUM_THREADS=2 OMP_PROC_BIND=close OMP_PLACES=cores
 ./build/vegai_pretrain train examples/corpus/mini_turkish_ascii_pretrain.txt mini.vgai \
-  --max-vocab 128 --min-frequency 8 --window 2 --context-mode hybrid \
+  --max-vocab 128 --min-frequency 8 --window 2 --context-mode hierarchical \
   --epochs 2 --strict --query okul
 python3 tools/verify_example_corpus.py --pretrain-bin ./build/vegai_pretrain
 python3 tools/compare_pretraining_modes.py --pretrain-bin ./build/vegai_pretrain \
@@ -107,7 +117,7 @@ python3 tools/continuous_shard_manifest.py data/shards/000001.txt data/shards/00
   --output data/continual-ledger.json --source 'dataset version' --license 'license ID'
 python3 tools/continuous_pretrain.py --pretrain-bin ./build/vegai_pretrain \
   --manifest data/continual-ledger.json --state-dir state/continual \
-  --max-vocab 50000 --min-frequency 1 --context-mode hybrid --epochs 1
+  --max-vocab 50000 --min-frequency 1 --context-mode hierarchical --epochs 1
 ```
 
 GNU CMake hedefi `-std=f2023` bayrağını uygulama, test ve kütüphane hedeflerine
@@ -143,12 +153,13 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Akıl yürütme | `src/reasoning_core.f90` | role–filler frame, n-gram, kural bankası, analogik transfer |
 | Resonator Network | `src/resonator_network.f90` | slot-spesifik codebook'larla çoklu-faktör çözümleme ve exact certification |
 | Corpus ingest | `src/text_tokenizer.f90`, `src/vocabulary.f90` | bounded ASCII canonicalization, collision-safe frequency vocabulary |
-| HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, shard vocabulary extension, position-context prototype update, metrics, checkpoint/resume |
-| Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect` ve nearest semantic diagnostic |
+| HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, hierarchical default, deterministic OpenMP context preparation + source-ordered commit, metrics, checkpoint/resume |
+| Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect`, context-build execution switch ve nearest semantic diagnostic |
 | Continual transaction | `tools/continuous_shard_manifest.py`, `tools/continuous_pretrain.py` | immutable SHA-256 ledger, strict ingest gate, candidate generation, atomic state journal |
+| Kaynak preflight | `tools/training_resource_plan.py` | bounded RAM/checkpoint storage estimate, CPU/NUMA/OpenMP recommendation, accelerator truth contract |
 | Çalıştırılabilir doğrulama | `app/main.f90` | %25 exact gürültü, analoji, causal chain ve 3-faktör Resonator demo |
-| Native testler | `test/test_all.f90` | cebirsel invariantlar, hata yolları, bellek, pretraining ve uçtan uca test |
-| Donanım/OS profili | `tools/hardware_compatibility.py` | privacy-conscious CPU/OS/iGPU inventory, portable CPU backend sözleşmesi |
+| Native testler | `test/test_all.f90` | cebirsel invariantlar, hata yolları, serial/OpenMP pretraining eşitliği ve uçtan uca test |
+| Donanım/OS profili | `tools/hardware_compatibility.py` | privacy-conscious CPU/RAM/GPU/NPU inventory, portable CPU backend sözleşmesi |
 | Bağımsız oracle | `tools/verify_reference.py` | standart SplitMix64 ve demo sözleşmelerinin Python modeli |
 
 Bir hiper-vektörün payload'u tam olarak `256 × 8 = 2048` bayttır. Bu, 64-byte
@@ -168,7 +179,9 @@ telemetrisi için [docs/EXAMPLE_PRETRAINING_RUN.md](docs/EXAMPLE_PRETRAINING_RUN
 önce/sonra hız ve controlled semantic-cohesion sonuçları için
 [docs/PRETRAINING_MODE_COMPARISON.md](docs/PRETRAINING_MODE_COMPARISON.md),
 CPU/iGPU/OS portable build sözleşmesi için
-[docs/HARDWARE_COMPATIBILITY.md](docs/HARDWARE_COMPATIBILITY.md),
+[docs/HARDWARE_COMPATIBILITY.md](docs/HARDWARE_COMPATIBILITY.md), RAM/SSD,
+çok-core, quality default ve GPU/NPU dispatch sınırları için
+[docs/RESOURCE_AWARE_TRAINING.md](docs/RESOURCE_AWARE_TRAINING.md),
 ölçülebilir doğrulama planı ve istatistiksel sınırlar için
 [docs/VALIDATION.md](docs/VALIDATION.md) dosyalarına bakın.
 

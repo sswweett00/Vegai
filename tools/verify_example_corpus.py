@@ -232,7 +232,7 @@ def verify_cli(binary: Path) -> None:
         require_values(inspect_output, "min frequency", [8])
         require_values(inspect_output, "context window", [2])
         require_values(inspect_output, "positional shift", [41])
-        require("context mode: hybrid" in inspect_output, "checkpoint did not preserve hybrid context mode")
+        require("context mode: hierarchical" in inspect_output, "checkpoint did not preserve default hierarchical context mode")
         require_values(inspect_output, "completed epochs", [2])
         require_values(inspect_output, "total prototype updates", [EXPECTED_RAW_TOKENS * 2])
         require("query: teknoloji" in inspect_output, "inspect query did not execute")

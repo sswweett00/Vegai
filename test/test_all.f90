@@ -427,10 +427,13 @@ contains
       character(len=*), parameter :: CONTINUATION_A_PATH = 'vegai_continuation_a.txt'
       character(len=*), parameter :: CONTINUATION_B_PATH = 'vegai_continuation_b.txt'
       character(len=*), parameter :: HIERARCHICAL_PATH = 'vegai_hierarchical_context.txt'
+      character(len=*), parameter :: PARALLEL_CONTEXT_PATH = 'vegai_parallel_context.txt'
       type(hdc_pretrain_model_t) :: model_a, model_b, restored, legacy_model, positional_model, continuation_model
       type(hdc_pretrain_model_t) :: hierarchical_model, local_only_model, hierarchical_replay, short_hierarchical_model
+      type(hdc_pretrain_model_t) :: context_serial_model, context_parallel_model
       type(hdc_pretrain_config_t) :: config, resumed_config, strict_config, legacy_config, positional_config, continuation_config
       type(hdc_pretrain_config_t) :: reference_config, hierarchical_config, local_only_config
+      type(hdc_pretrain_config_t) :: context_serial_config, context_parallel_config
       type(pretrain_metrics_t) :: vocabulary_metrics, train_metrics, extension_metrics
       type(hv_t) :: semantic_hv, semantic_before_extension, semantic_after_extension
       character(len=TOKEN_LEN) :: nearest_token
@@ -460,9 +463,9 @@ contains
       config%initial_plasticity_percent = 25_int32
       config%minimum_plasticity_percent = 1_int32
       config%plasticity_decay_events = 4_int32
-      call assert_i32_equal(config%context_mode, PT_CONTEXT_HYBRID, &
-                            'hybrid context encoder is the quality-oriented default')
-      call assert_true(trim(pretrain_context_mode_name(config%context_mode)) == 'hybrid', &
+      call assert_i32_equal(config%context_mode, PT_CONTEXT_HIERARCHICAL, &
+                            'hierarchical context encoder is the long-record quality default')
+      call assert_true(trim(pretrain_context_mode_name(config%context_mode)) == 'hierarchical', &
                        'context encoder exposes a stable human-readable name')
 
       call pretrain_build_vocabulary(model_a, CORPUS_PATH, config, vocabulary_metrics, status)
@@ -511,6 +514,43 @@ contains
                        'fused hybrid kernel remains bit-identical to the reference implementation')
       call assert_true(all(model_a%experience_count == model_b%experience_count), &
                        'fused hybrid kernel preserves deterministic learning schedule counters')
+
+      ! OpenMP context construction is an execution optimization, not a second
+      ! training algorithm.  Repeated centers in one record exercise the
+      ! planned experience-counter path, so a serial and a parallel build must
+      ! leave exactly the same checkpoint-relevant state.
+      open(newunit=unit, file=PARALLEL_CONTEXT_PATH, status='replace', action='write', &
+           form='formatted', iostat=io_status)
+      call assert_true(io_status == 0, 'parallel context fixture opens')
+      if (io_status == 0) then
+         write(unit, '(A)') 'alpha beta alpha gamma alpha beta gamma alpha'
+         write(unit, '(A)') 'gamma alpha beta alpha gamma beta alpha gamma'
+         write(unit, '(A)') 'alpha beta alpha gamma alpha beta gamma alpha'
+         close(unit)
+      end if
+      context_serial_config = config
+      context_serial_config%max_vocabulary = 16_int32
+      context_serial_config%min_frequency = 1_int64
+      context_serial_config%strict_tokenization = .true.
+      context_serial_config%parallel_context_build = .false.
+      context_parallel_config = context_serial_config
+      context_parallel_config%parallel_context_build = .true.
+      call pretrain_build_vocabulary(context_serial_model, PARALLEL_CONTEXT_PATH, context_serial_config, &
+                                     vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'serial context fixture vocabulary succeeds')
+      call pretrain_train_file(context_serial_model, PARALLEL_CONTEXT_PATH, context_serial_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'serial context fixture training succeeds')
+      call pretrain_build_vocabulary(context_parallel_model, PARALLEL_CONTEXT_PATH, context_parallel_config, &
+                                     vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'parallel context fixture vocabulary succeeds')
+      call pretrain_train_file(context_parallel_model, PARALLEL_CONTEXT_PATH, context_parallel_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'parallel context fixture training succeeds')
+      call assert_true(all(context_serial_model%base_bits == context_parallel_model%base_bits), &
+                       'parallel context construction preserves base identities')
+      call assert_true(all(context_serial_model%semantic_bits == context_parallel_model%semantic_bits), &
+                       'parallel context construction is bit-identical with repeated centers')
+      call assert_true(all(context_serial_model%experience_count == context_parallel_model%experience_count), &
+                       'parallel context construction preserves source-ordered experiences')
 
       ! The ordinary eight-token fixture is intentionally below the hierarchy
       ! threshold, so hierarchical mode must reduce exactly to local hybrid.
@@ -605,8 +645,8 @@ contains
       call assert_i32_equal(status, PT_OK, 'pretraining checkpoint load succeeds')
       call assert_i32_equal(restored%vocabulary%active_count, model_a%vocabulary%active_count, &
                             'checkpoint rebuild restores active vocabulary count')
-      call assert_i32_equal(restored%context_mode, PT_CONTEXT_HYBRID, &
-                            'checkpoint preserves hybrid encoder semantics')
+      call assert_i32_equal(restored%context_mode, PT_CONTEXT_HIERARCHICAL, &
+                            'checkpoint preserves default hierarchical encoder semantics')
       call assert_true(all(restored%base_bits == model_a%base_bits), 'checkpoint restores base hypervectors')
       call assert_true(all(restored%semantic_bits == model_a%semantic_bits), &
                        'checkpoint restores semantic hypervectors')
@@ -745,6 +785,10 @@ contains
       call pretrain_model_destroy(local_only_model)
       call pretrain_model_destroy(hierarchical_replay)
       call pretrain_model_destroy(short_hierarchical_model)
+      call pretrain_model_destroy(context_serial_model)
+      call pretrain_model_destroy(context_parallel_model)
+      open(newunit=unit, file=PARALLEL_CONTEXT_PATH, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
       open(newunit=unit, file=HIERARCHICAL_PATH, status='old', iostat=io_status)
       if (io_status == 0) close(unit, status='delete')
       open(newunit=unit, file=CONTINUATION_A_PATH, status='old', iostat=io_status)

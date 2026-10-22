@@ -25,7 +25,7 @@ max_vocabulary              = 128
 min_frequency               = 8
 context_window              = 2
 position_shift_bits         = 41
-context_mode                = hybrid
+context_mode                = hierarchical
 epochs                      = 2
 initial_plasticity_percent  = 25
 minimum_plasticity_percent  = 1
@@ -41,19 +41,21 @@ spawn'ından hemen önce başlar ve process çıktığında durur; compiler conf
 derleme, CTest discovery ve önceki CI adımları buna dahil değildir. Komutun
 kendi içindeki vocabulary pass, iki epoch streaming öğrenme ve checkpoint write
 ise `train` subcommand'inin zorunlu parçaları olduğu için dahildir. JSON raporu
-ayrıca privacy-conscious CPU/OS/mimari/iGPU inventory metadata'sı taşır; GPU
+ayrıca privacy-conscious CPU/OS/mimari/RAM/GPU/NPU inventory metadata'sı taşır; GPU
 compute kullanılmaz.
 
 ```bash
 python3 tools/measure_example_pretraining.py \
   --pretrain-bin ./build/vegai_pretrain \
   --checkpoint /tmp/mini-turkish-timed.vgai \
-  --context-mode hybrid --epochs 2 --omp-threads 1
+  --context-mode hierarchical --epochs 2 --omp-threads 1
 ```
 
 CI derlemeden sonra bu timing kapsamını `tools/compare_pretraining_modes.py`
-içinde `legacy`, bit-tam hızlı `positional` ve varsayılan fused `hybrid` için
-üçer tekrar ile çalıştırır. Aynı config/corpus ile `--reference-context-kernel`
+içinde `legacy`, bit-tam hızlı `positional` ve explicit local fused `hybrid`
+için üçer tekrar ile çalıştırır. Genel CLI varsayılanı `hierarchical`tir; bu
+sekiz-token fixture eşiğin altında kaldığı için aynı local semantic path'i
+kullanır. Aynı config/corpus ile `--reference-context-kernel`
 rotate-then-add yolu da ayrıca ölçülür ve fused checkpoint ile **byte-tam eşit**
 olması zorunludur. Araç ayrıca normal sekiz-token fixture'ın eşiğinin altında
 kaldığını açıkça koruyarak, ayrı üretilmiş 16-token-record controlled fixture
