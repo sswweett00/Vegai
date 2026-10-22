@@ -35,7 +35,18 @@ jobs:
         run: ctest --test-dir build-ci --output-on-failure
 
       - name: Run executable end-to-end verification
-        run: OMP_NUM_THREADS=2 ./build-ci/hds_engine
+        run: |
+          set +e
+          OMP_NUM_THREADS=2 ./build-ci/hds_engine > demo-output.txt 2>&1
+          exit_code=$?
+          cat demo-output.txt
+          {
+            echo '## HDS executable verification output'
+            echo '```text'
+            cat demo-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$exit_code"
 
       - name: Run independent Python reference verification
         run: python3 tools/verify_reference.py
