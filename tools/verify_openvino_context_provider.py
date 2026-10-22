@@ -94,18 +94,25 @@ def main() -> int:
             )
             output, provider_seconds = run(provider_command, "OpenVINO context-provider training")
             dispatched_contexts = metric(output, "OpenVINO-dispatched contexts")
+            worker_sessions = metric(output, "OpenVINO resident worker sessions")
+            worker_requests = metric(output, "OpenVINO worker requests")
             require(dispatched_contexts > 0, "worker never received a context")
+            require(worker_sessions == 1, f"expected one resident worker session, got {worker_sessions}")
+            require(worker_requests == 2, f"expected one worker request per corpus record, got {worker_requests}")
+            require(metric(output, "OpenVINO native-CPU bypass contexts") == 0, "strict provider unexpectedly bypassed OpenVINO")
             require(metric(output, "OpenVINO CPU-fallback contexts") == 0, "provider unexpectedly used CPU fallback")
             require("OpenVINO execution devices: CPU=T GPU=F NPU=F" in output, "provider execution truth was not CPU")
             require(cpu_checkpoint.read_bytes() == provider_checkpoint.read_bytes(), "CPU and OpenVINO checkpoints differ")
             report = {
-                "schema": "vegai-openvino-context-provider-verification/v1",
+                "schema": "vegai-openvino-context-provider-verification/v2",
                 "runtime": "OpenVINO CPU plugin",
                 "workload": {"records": 2, "active_tokens": 30, "context_mode": "hierarchical", "window": 4},
                 "cpu_reference_train_seconds": cpu_seconds,
                 "openvino_context_provider_train_seconds": provider_seconds,
                 "openvino_to_cpu_time_ratio": provider_seconds / cpu_seconds if cpu_seconds > 0.0 else None,
                 "openvino_dispatched_contexts": dispatched_contexts,
+                "openvino_resident_worker_sessions": worker_sessions,
+                "openvino_worker_requests": worker_requests,
                 "checkpoint_byte_identical": True,
             }
             if arguments.report is not None:

@@ -164,21 +164,36 @@ def run_direct_uint64_xor_diagnostic(openvino: Any, numpy: Any, selected_device:
         return failed_probe(str(error))
 
 
-def build_u32_bundle_model(openvino: Any, numpy: Any, item_count: int, batch_size: int = 1) -> Any:
+def build_u32_bundle_model(openvino: Any, numpy: Any, item_count: int, batch_size: int | None = 1) -> Any:
     """Build exact bit-sliced HDC bundle/finalize for pre-permuted lane vectors.
 
     The graph receives ``[batch, item_count, 512]`` uint32 items and
-    ``[batch, 1, 512]`` seeded tie breakers. It is algebraically the same
-    carry-plane counter and majority finalization as ``hv_bitacc_*`` in
-    ``src/hyper_types.f90``. The input items are already positioned; this makes
-    the graph's ABI explicit and lets a future batched provider choose whether
-    rotations happen on host or device.
+    ``[batch, 1, 512]`` seeded tie breakers.  ``batch_size=None`` creates a
+    dynamic-batch graph.  That form is important for the resident worker: a
+    compiled graph is then reusable for every record having the same item
+    cardinality, rather than being recompiled for every record length.
+
+    It is algebraically the same carry-plane counter and majority finalization
+    as ``hv_bitacc_*`` in ``src/hyper_types.f90``. The input items are already
+    positioned; this makes the graph's ABI explicit and lets a future batched
+    provider choose whether rotations happen on host or device.
     """
+    require(1 <= item_count <= (1 << HDC_BITACC_PLANES) - 1, f"invalid HDC item count {item_count}")
+    if batch_size is not None:
+        require(batch_size > 0, f"invalid HDC batch size {batch_size}")
     ops = openvino.opset13
-    words = ops.parameter([batch_size, item_count, HDC_LANES], openvino.Type.u32, name="prepositioned_u32_lanes")
-    tie_breaker = ops.parameter([batch_size, 1, HDC_LANES], openvino.Type.u32, name="tie_breaker_u32_lanes")
-    zero = ops.constant(numpy.zeros((batch_size, 1, HDC_LANES), dtype=numpy.uint32))
+    batch_dimension = -1 if batch_size is None else batch_size
+    words = ops.parameter([batch_dimension, item_count, HDC_LANES], openvino.Type.u32, name="prepositioned_u32_lanes")
+    tie_breaker = ops.parameter([batch_dimension, 1, HDC_LANES], openvino.Type.u32, name="tie_breaker_u32_lanes")
     item_axis = ops.constant(numpy.array(1, dtype=numpy.int64))
+    if batch_size is None:
+        # A dynamic-shape Constant cannot express the batch axis.  Deriving a
+        # zero tensor from the first immutable item retains exact uint32 bit
+        # semantics and has the desired [batch, 1, lanes] shape.
+        first_item = ops.gather(words, ops.constant(numpy.array([0], dtype=numpy.int64)), item_axis)
+        zero = ops.bitwise_xor(first_item, first_item)
+    else:
+        zero = ops.constant(numpy.zeros((batch_size, 1, HDC_LANES), dtype=numpy.uint32))
     planes = [zero for _ in range(HDC_BITACC_PLANES)]
 
     for item_index in range(item_count):

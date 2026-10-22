@@ -160,7 +160,7 @@ contains
          case ('--max-vocab', '--min-frequency', '--window', '--position-shift', '--context-mode', '--epochs', &
                '--initial-plasticity', '--minimum-plasticity', '--decay-events', '--query', '--context-provider', &
                '--openvino-worker', '--openvino-python', '--openvino-device', '--openvino-work-dir', &
-               '--openvino-min-contexts')
+               '--openvino-min-contexts', '--openvino-timeout-ms')
             if (index == last_argument) then
                parse_status = PT_ERR_INVALID_ARGUMENT
                return
@@ -228,6 +228,8 @@ contains
                io_status = 0
             case ('--openvino-min-contexts')
                read(value, *, iostat=io_status) parsed_config%openvino_min_contexts
+            case ('--openvino-timeout-ms')
+               read(value, *, iostat=io_status) parsed_config%openvino_timeout_milliseconds
             end select
             if (io_status /= 0) then
                parse_status = PT_ERR_INVALID_ARGUMENT
@@ -282,7 +284,7 @@ contains
             parsed_config%openvino_require_accelerator = .false.
             index = index + 1
          case ('--epochs', '--query', '--context-provider', '--openvino-worker', '--openvino-python', &
-               '--openvino-device', '--openvino-work-dir', '--openvino-min-contexts')
+               '--openvino-device', '--openvino-work-dir', '--openvino-min-contexts', '--openvino-timeout-ms')
             if (index == last_argument) then
                parse_status = PT_ERR_INVALID_ARGUMENT
                return
@@ -319,6 +321,8 @@ contains
                io_status = 0
             case ('--openvino-min-contexts')
                read(value, *, iostat=io_status) parsed_config%openvino_min_contexts
+            case ('--openvino-timeout-ms')
+               read(value, *, iostat=io_status) parsed_config%openvino_timeout_milliseconds
             end select
             if (io_status /= 0) then
                parse_status = PT_ERR_INVALID_ARGUMENT
@@ -411,7 +415,9 @@ contains
                                     trim(pretrain_context_provider_name(active_config%context_provider))
          write(output_unit, '(A,I0)') '  CPU-built contexts: ', execution%cpu_contexts
          write(output_unit, '(A,I0)') '  OpenVINO-dispatched contexts: ', execution%openvino_contexts
-         write(output_unit, '(A,I0)') '  OpenVINO worker invocations: ', execution%openvino_worker_invocations
+         write(output_unit, '(A,I0)') '  OpenVINO resident worker sessions: ', execution%openvino_worker_sessions
+         write(output_unit, '(A,I0)') '  OpenVINO worker requests: ', execution%openvino_worker_invocations
+         write(output_unit, '(A,I0)') '  OpenVINO native-CPU bypass contexts: ', execution%openvino_cpu_bypass_contexts
          write(output_unit, '(A,I0)') '  OpenVINO CPU-fallback contexts: ', execution%openvino_fallback_contexts
          write(output_unit, '(A,L1,A,L1,A,L1)') '  OpenVINO execution devices: CPU=', &
               execution%openvino_cpu_execution, ' GPU=', execution%openvino_gpu_execution, &
@@ -528,7 +534,7 @@ contains
       write(output_unit, '(A)') '  --serial-context-build disables that execution-only parallel stage for diagnosis'
       write(output_unit, '(A)') '  --reference-context-kernel is an exact benchmark/regression implementation switch'
       write(output_unit, '(A)') '  --context-provider cpu|openvino --openvino-worker PATH --openvino-python CMD --openvino-device DEVICE'
-      write(output_unit, '(A)') '  --openvino-work-dir DIR --openvino-min-contexts N [--openvino-fallback-cpu|--openvino-required]'
+      write(output_unit, '(A)') '  --openvino-work-dir DIR --openvino-min-contexts N --openvino-timeout-ms N [--openvino-fallback-cpu|--openvino-required]'
       write(output_unit, '(A)') '  --openvino-require-accelerator rejects OpenVINO CPU fallback; immutable contexts only, commits stay ordered on CPU'
       write(output_unit, '(A)') 'This is streaming distributional HDC learning, not Transformer/LLM pretraining.'
    end subroutine print_usage
