@@ -128,6 +128,11 @@ python3 tools/continuous_pretrain.py --pretrain-bin ./build/vegai_pretrain \
   --manifest data/continual-ledger.json --state-dir state/continual \
   --max-vocab 50000 --min-frequency 1 --context-mode hierarchical --epochs 1
 
+# Controller çalıştırmadan completed journal/checkpoint/shard health audit'i
+python3 tools/continuous_pretrain_status.py \
+  --manifest data/continual-ledger.json --state-dir state/continual \
+  --verify-shards --require-complete --require-unlocked --format text
+
 # Production data foundry + record-level held-out leakage gate + auditable run
 python3 tools/production_dataset.py --input governed-corpus.txt \
   --output-dir production-datasets/release-v1 \
@@ -176,7 +181,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Corpus ingest | `src/text_tokenizer.f90`, `src/vocabulary.f90` | bounded ASCII canonicalization, collision-safe frequency vocabulary |
 | HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, hierarchical default, deterministic OpenMP / optional OpenVINO immutable-context preparation + source-ordered CPU commit, metrics, checkpoint/resume |
 | Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect`, CPU/OpenVINO context-provider execution switch ve nearest semantic diagnostic |
-| Continual transaction | `tools/continuous_shard_manifest.py`, `tools/continuous_pretrain.py` | immutable SHA-256 ledger, strict ingest gate, candidate generation, atomic state journal |
+| Continual transaction + health audit | `tools/continuous_shard_manifest.py`, `tools/continuous_pretrain.py`, `tools/continuous_pretrain_status.py` | immutable SHA-256 ledger, strict ingest gate, candidate generation, atomic state journal, read-only checkpoint/prefix/payload audit |
 | Production data/run control | `tools/production_dataset.py`, `tools/production_pretrain.py` | disk-backed exact record/token dedupe, deterministic held-out split, content-addressed shard package, exact leakage + vocabulary-capacity gate, immutable binary/data/policy provenance, real exactly-once run wrapper |
 | Kaynak preflight | `tools/training_resource_plan.py` | bounded RAM/checkpoint storage estimate, CPU/NUMA/OpenMP recommendation, static accelerator truth contract |
 | OpenVINO context worker | `tools/openvino_context_worker.py` | optional Intel uint32-lane immutable-context bridge; resident per-train service, dynamic-batch compiled-graph cache, execution mask / native-CPU bypass contract |

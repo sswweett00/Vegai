@@ -423,6 +423,25 @@ def validate_state_journal(state_directory: Path, state: dict[str, Any]) -> None
                 f"state applied shard {expected_generation} has invalid preflight values")
         require(entry_preflight["accepted_tokens"] == entry["accepted_tokens"],
                 f"state applied shard {expected_generation} token count disagrees with preflight")
+        verified_metrics = entry.get("verified_metrics")
+        expected_metrics = {
+            "vocabulary_observed_tokens",
+            "training_raw_tokens",
+            "training_active_tokens",
+            "training_oov_tokens",
+        }
+        require(isinstance(verified_metrics, dict) and set(verified_metrics) == expected_metrics,
+                f"state applied shard {expected_generation} has malformed verified metrics")
+        require(all(type(verified_metrics[key]) is int and verified_metrics[key] >= 0 for key in expected_metrics),
+                f"state applied shard {expected_generation} has invalid verified metrics")
+        expected_training_tokens = entry["accepted_tokens"] * state["policy"]["epochs_per_shard"]
+        require(
+            verified_metrics["vocabulary_observed_tokens"] == entry["accepted_tokens"]
+            and verified_metrics["training_raw_tokens"] == expected_training_tokens
+            and verified_metrics["training_active_tokens"] == expected_training_tokens
+            and verified_metrics["training_oov_tokens"] == 0,
+            f"state applied shard {expected_generation} verified metrics violate the lossless training contract",
+        )
         entry_path = resolve_inside(state_directory, entry.get("checkpoint"), "applied checkpoint")
         require(entry_path.is_file(), f"applied checkpoint is missing: {entry_path}")
         require(is_sha256(entry.get("checkpoint_sha256")),

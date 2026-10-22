@@ -135,7 +135,42 @@ otomatik geçirir. Aynı state directory üzerinde tek controller çalışabilir
 O_EXCL lock kalırsa önce gerçek owner'ı inceleyin; yalnız stale olduğu
 operatörce doğrulandıktan sonra `--recover-lock` kullanın.
 
-## 5. Durable transaction protokolü
+## 5. Read-only durum ve integrity health check
+
+Resume, backup/restore, checkpoint retention veya handoff öncesinde controller
+çalıştırmadan state'i denetleyin:
+
+```bash
+python3 tools/continuous_pretrain_status.py \
+  --manifest data/continual-ledger.json \
+  --state-dir state/continual \
+  --expect-manifest-sha256 MANIFEST_SHA256 \
+  --verify-shards --require-complete --require-unlocked --format text
+```
+
+Bu araç **read-only**'dir: `vegai_pretrain` başlatmaz, checkpoint/state yazmaz,
+private dosya silmez ve stale lock'u asla otomatik kaldırmaz. Her published
+`applied_shards` generation'ının checkpoint SHA-256'sını, state journal
+şeklini/policy'sini, persisted CLI token/OOV coverage metric'lerinin shard ve
+epoch policy ile ilişkisini ve manifestin ordered committed prefix'ini doğrular.
+`--verify-shards` ayrıca tüm mevcut payload'ları yeniden strict ASCII/LF
+preflight + SHA-256 ile tarar; büyük corpus'larda I/O maliyeti nedeniyle
+bilinçli olarak explicit'tir. Bu flagsiz rapor payload'ların ledger metadata'sını
+gösterir ancak payload byte'larını yeniden taramaz.
+
+`--require-complete`, manifestte pending shard kalırsa; `--require-unlocked`,
+controller lock mevcutsa fail-closed olur. Normal JSON report; immutable manifest
+digesti, generation/record/token sayıları, latest checkpoint digest'i, payload
+verification modu, private candidate dosya sayısı ve best-effort local PID lock
+gözlemini içerir. PID gözlemi lock silme yetkisi değildir. State journal okuma
+sırasında atomik replace olursa araç tutarsız rapor vermek yerine retry ister.
+Aktif writer için gözlemsel report alınabilir, fakat release/handoff gate'i için
+writer bittiğinde `--require-unlocked` kullanın.
+
+Bu audit transaction bütünlüğünü kanıtlar; HDC semantic quality, held-out görev
+başarısı veya LLM/LMM model sağlığı kanıtı değildir.
+
+## 6. Durable transaction protokolü
 
 Her pending shard için controller aşağıdaki sırayı uygular:
 
@@ -170,7 +205,7 @@ atomiklik garantileri deployment'ın local durable filesystem'ine bağlıdır;
 state dizinini güvenilir, tek-writer bir volume üzerinde tutun ve generation
 checkpoint'lerini manuel olarak silmeyin.
 
-## 6. Doğrulama
+## 7. Doğrulama
 
 CMake/CTest içindeki `vegai_continuous_pretraining` testi gerçek derlenmiş
 CLI ile iki shard çalıştırır. Test şunları denetler:
@@ -181,8 +216,13 @@ CLI ile iki shard çalıştırır. Test şunları denetler:
 - mutation edilmiş pending shard'ın SHA-256 nedeniyle CLI çağrılmadan reddi;
 - iki shard için `training_oov_tokens = 0` ve accepted-token accounting;
 - completed epoch sayısının iki olması;
-- completed state ile tekrar çalıştırmanın state/checkpoint byte'larını
-  değiştirmemesi;
+- crash'ten kalmış private candidate/snapshot dosyalarının restart'ta committed
+  state/checkpoint'e dokunmadan temizlenmesi ve completed state ile tekrar
+  çalıştırmanın byte'ları değiştirmemesi;
+- read-only status aracının complete/unlocked state'i, persisted CLI coverage
+  metric'lerini, tüm payload'ları ve historical checkpoint'leri doğrulaması;
+  pending-shard, journal-metric veya committed checkpoint mutation'ını
+  fail-closed reddetmesi;
 - committed manifest prefix'inin reordering ile reddi;
 - non-ASCII ve CRLF shard'ların manifest authoring aşamasında reddi ile
   manifest output'unun input shard'ı overwrite etmesine karşı koruma.

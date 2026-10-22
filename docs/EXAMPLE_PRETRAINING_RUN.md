@@ -4,8 +4,9 @@ Bu rapor, `examples/corpus/mini_turkish_ascii_pretrain.txt` için
 `tools/verify_example_corpus.py --pretrain-bin …` tarafından gerçek
 `vegai_pretrain` executable'ının stdout'ından doğrulanan contract
 istatistiklerini açıklar. Test iki bağımsız `train` çalıştırır, checkpoint
-byte'larını karşılaştırır, `inspect` çağırır ve aynı checkpoint'i bir epoch
-`resume` eder.
+byte'larını karşılaştırır, `inspect` çağırır, ikinci checkpoint'in trailing
+checksum byte'ını flip ederek integrity rejection'ını denetler ve aynı sağlam
+checkpoint'i bir epoch `resume` eder.
 
 Bu, gerçek Fortran/HDC pipeline yürütmesidir; ancak input kasıtlı olarak küçük,
 dengeli ve sentetik bir fixture'dır. Sonuçlar doğal dil kalite benchmarkı,
@@ -136,9 +137,12 @@ checkpoint byte dizilerinin bit-tam eşit olduğunu doğrular. Ardından checkpo
 üzerinde `inspect --query teknoloji` çalışır; active vocabulary, frequency,
 window ve positional shift değerleri kontrol edilir. Query'nin nearest-neighbour
 etiketi semantic kalite iddiası olarak assert edilmez, yalnız gerçek semantic
-retrieval yolunun çalıştığı doğrulanır.
+retrieval yolunun çalıştığı doğrulanır. Ayrı identical checkpoint kopyasının
+son checksum byte'ı flip edildiğinde gerçek `inspect` CLI'ı nonzero ile
+`checkpoint schema or integrity failure` vermek zorundadır; bozuk kopya resume
+base olarak kullanılmaz.
 
-Aynı checkpoint bir epoch daha resume edildiğinde:
+Aynı sağlam checkpoint bir epoch daha resume edildiğinde:
 
 | Ölçüm | Resume çağrısı | Checkpoint toplamı |
 |---|---:|---:|

@@ -157,8 +157,8 @@ python3 tools/production_dataset.py \
 CI `tools/verify_production_pretraining.py` daha küçük bir generated fixture
 ile iki bağımsız foundry run'ın byte-identical output'unu, exact dedupe'i,
 tampered shard rejection'ını, intentional train/validation overlap rejection'ını,
-gerçek compiled HDC binary ile checkpoint generation'larını ve idempotent resume'ı
-doğrular.
+gerçek compiled HDC binary ile checkpoint generation'larını, read-only completed
+state/payload health audit'ini ve idempotent resume'ı doğrular.
 
 ## Kendi production dataset'inizi yayınlama
 
@@ -239,6 +239,28 @@ veya inner controller stale lock bırakmışsa, owner'ın gerçekten çalışmad
 inceledikten sonra yalnız explicit `--recover-locks` ile resume edin. Bu flag
 outer production lock'u ve `continuous_pretrain.py --recover-lock` yolunu
 birlikte açar; canlı bir writer varken kullanmak güvenli değildir.
+
+### Read-only post-run health gate
+
+Release, evaluation, backup veya retention işleminden önce inner exactly-once
+journal'ı ayrıca read-only doğrulayın. `TRAIN_LEDGER_SHA256`, immutable
+`dataset.json` içindeki `train.ledger_sha256` değeri olmalıdır:
+
+```bash
+python3 tools/continuous_pretrain_status.py \
+  --manifest production-datasets/news-v2026-10/train/ledger.json \
+  --state-dir production-runs/news-v2026-10-hdc/state \
+  --expect-manifest-sha256 "$TRAIN_LEDGER_SHA256" \
+  --verify-shards --require-complete --require-unlocked --format json
+```
+
+Araç tüm committed generation checkpoint digest'lerini, manifest prefix'ini ve
+isteğe bağlı olarak her source shard'ın SHA/preflight'ını denetler; checkpoint,
+state, lock veya result manifest'i yazmaz/değiştirmez. Lock görürse yalnız
+raporlar; stale-lock silme kararı operatördedir. Bu gate transactional HDC
+state'in resume-safe olduğunu denetler, held-out semantic kalite veya neural
+LLM/LMM sağlığı ölçümü değildir. Ayrıntılı flags/race davranışı
+[CONTINUOUS_PRETRAINING.md](CONTINUOUS_PRETRAINING.md)'dedir.
 
 ## Kaynaklar, dual RAM, CPU/GPU/NPU ve ölçüm sınırı
 

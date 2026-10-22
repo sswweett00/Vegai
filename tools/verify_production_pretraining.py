@@ -23,6 +23,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 DATASET_TOOL = ROOT / "tools" / "production_dataset.py"
 RUN_TOOL = ROOT / "tools" / "production_pretrain.py"
+STATUS_TOOL = ROOT / "tools" / "continuous_pretrain_status.py"
 
 
 def fail(message: str) -> None:
@@ -70,6 +71,14 @@ def run_command(
     if resume:
         command.append("--resume-run")
     return command
+
+
+def status_command(ledger: Path, state_directory: Path, ledger_sha256: str) -> list[str]:
+    return [
+        sys.executable, str(STATUS_TOOL), "--manifest", str(ledger), "--state-dir", str(state_directory),
+        "--expect-manifest-sha256", ledger_sha256, "--verify-shards", "--require-complete",
+        "--require-unlocked", "--format", "json",
+    ]
 
 
 def select_fixture_rows() -> tuple[list[str], list[str]]:
@@ -153,6 +162,38 @@ def main() -> int:
                 fail("production controller did not publish a nonempty final checkpoint")
             if not (run_directory / "run.json").is_file() or not (run_directory / "result.json").is_file():
                 fail("production controller omitted atomic provenance/result manifests")
+
+            train_metadata = dataset.get("train")
+            if not isinstance(train_metadata, dict) or not isinstance(train_metadata.get("ledger_sha256"), str):
+                fail(f"production dataset omitted the train-ledger release digest: {dataset}")
+            health = output_json(
+                run(
+                    status_command(
+                        dataset_a / "train" / "ledger.json",
+                        run_directory / "state",
+                        train_metadata["ledger_sha256"],
+                    )
+                )
+            )
+            health_progress = health.get("progress")
+            health_verification = health.get("verification")
+            health_lock = health.get("controller_lock")
+            if (
+                health.get("schema") != "vegai-continuous-pretraining-status/v1"
+                or health.get("state_initialized") is not True
+                or not isinstance(health_progress, dict)
+                or health_progress.get("generation") != 2
+                or health_progress.get("pending_shards") != 0
+                or health_progress.get("complete") is not True
+                or not isinstance(health_verification, dict)
+                or health_verification.get("state_journal_and_all_committed_checkpoints") is not True
+                or health_verification.get("manifest_prefix") is not True
+                or health_verification.get("shard_payloads") != "verified"
+                or health_verification.get("verified_shards") != 2
+                or not isinstance(health_lock, dict)
+                or health_lock.get("present") is not False
+            ):
+                fail(f"production state health report is inconsistent: {health}")
 
             state_before_resume = (run_directory / "state" / "state.json").read_bytes()
             second = output_json(run(run_command(binary, dataset_a / "dataset.json", run_directory, resume=True)))
@@ -238,7 +279,7 @@ def main() -> int:
 
     print(
         "production pretraining verification: PASS "
-        "(deterministic foundry, exact dedupe/leakage gate, real exactly-once HDC run, provenance, idempotent resume)"
+        "(deterministic foundry, exact dedupe/leakage gate, real exactly-once HDC run, read-only state health audit, provenance, idempotent resume)"
     )
     return 0
 

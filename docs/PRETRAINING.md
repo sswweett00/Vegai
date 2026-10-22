@@ -216,8 +216,8 @@ private candidate + journal transaction garantisinin yerini tutmaz.
 
 Küçük smoke corpus ve dengeli Türkçe-ASCII fixture için
 [`examples/`](../examples/README.md) altındaki örneğe bakın. İkinci fixture,
-manifest digest'i ve gerçek `train → inspect → resume` CLI testiyle doğrulanır;
-çalıştırılan counter, schedule ve checkpoint ayrıntıları
+manifest digest'i, checksum-bit corruption rejection ve gerçek `train → inspect → resume`
+CLI testiyle doğrulanır; çalıştırılan counter, schedule ve checkpoint ayrıntıları
 [EXAMPLE_PRETRAINING_RUN.md](EXAMPLE_PRETRAINING_RUN.md)'dedir. Hiçbiri
 semantic kalite benchmarkı değildir.
 

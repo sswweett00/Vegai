@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -22,6 +23,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_TOOL = ROOT / "tools" / "continuous_shard_manifest.py"
 CONTROLLER = ROOT / "tools" / "continuous_pretrain.py"
+STATUS_TOOL = ROOT / "tools" / "continuous_pretrain_status.py"
 
 
 def fail(message: str) -> None:
@@ -60,6 +62,31 @@ def controller_command(binary: Path, manifest: Path, state_dir: Path) -> list[st
         "--state-dir",
         str(state_dir),
     ]
+
+
+def status_command(manifest: Path, state_dir: Path, manifest_digest: str) -> list[str]:
+    return [
+        sys.executable,
+        str(STATUS_TOOL),
+        "--manifest",
+        str(manifest),
+        "--state-dir",
+        str(state_dir),
+        "--expect-manifest-sha256",
+        manifest_digest,
+        "--format",
+        "json",
+    ]
+
+
+def parse_status(output: str) -> dict[str, object]:
+    try:
+        report = json.loads(output)
+    except json.JSONDecodeError as error:
+        fail(f"status tool did not emit JSON: {error}\n{output}")
+    if not isinstance(report, dict):
+        fail(f"status tool did not emit a JSON object: {report!r}")
+    return report
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -150,6 +177,9 @@ def main() -> int:
             # A pending shard must remain immutable under the SHA identity in
             # the ledger.  Its mutation is rejected before the real CLI sees it.
             shard_b.write_bytes(b"beta rewritten\nrewritten beta\n")
+            status_rejected = run(status_command(manifest, state_dir, manifest_digest) + ["--verify-shards"], expected=1)
+            if "wrong digest" not in status_rejected.stdout:
+                fail(f"status tool did not diagnose the rewritten pending shard\n{status_rejected.stdout}")
             rejected = run(controller_command(binary, manifest, state_dir), expected=1)
             if "wrong digest" not in rejected.stdout:
                 fail(f"pending-shard mutation was not diagnosed as an integrity failure\n{rejected.stdout}")
@@ -178,6 +208,84 @@ def main() -> int:
             inspect = run([str(binary), "inspect", str(checkpoint), "--query", "gamma"])
             if "query: gamma" not in inspect.stdout or "completed epochs: 2" not in inspect.stdout:
                 fail(f"continued checkpoint does not contain vocabulary growth and two epochs\n{inspect.stdout}")
+
+            # A crash can leave only private candidate/snapshot names.  A
+            # restart removes those non-durable artifacts but must not replay
+            # a shard or alter either committed byte stream.
+            generations = state_dir / "generations"
+            orphan_candidate = generations / ".candidate-crash.vgai"
+            orphan_snapshot = generations / ".shard-crash.txt"
+            orphan_candidate.write_bytes(b"not a committed checkpoint")
+            orphan_snapshot.write_bytes(b"not a committed shard snapshot\n")
+            state_before_recovery = state_path.read_bytes()
+            checkpoint_before_recovery = checkpoint.read_bytes()
+            recovered = run(controller_command(binary, manifest, state_dir))
+            if "committed generation=" in recovered.stdout:
+                fail(f"recovery unexpectedly replayed a shard\n{recovered.stdout}")
+            if orphan_candidate.exists() or orphan_snapshot.exists():
+                fail("restart did not remove stale private candidate artifacts")
+            if state_path.read_bytes() != state_before_recovery or checkpoint.read_bytes() != checkpoint_before_recovery:
+                fail("private-artifact recovery changed the committed model or journal")
+
+            # Status reports a lock conservatively and never removes it.  A
+            # release gate can require the controller to be unlocked.
+            lock_path = state_dir / ".continuous-pretrain.lock"
+            lock_path.write_text(f"pid={os.getpid()}\n", encoding="ascii")
+            locked_status = run(status_command(manifest, state_dir, manifest_digest) + ["--require-unlocked"], expected=1)
+            if "lock is present" not in locked_status.stdout or not lock_path.exists():
+                fail(f"status lock gate was not conservative\n{locked_status.stdout}")
+            lock_path.unlink()
+
+            complete_status = run(
+                status_command(manifest, state_dir, manifest_digest)
+                + ["--verify-shards", "--require-complete", "--require-unlocked"]
+            )
+            status_report = parse_status(complete_status.stdout)
+            progress = status_report.get("progress")
+            verification = status_report.get("verification")
+            controller_lock = status_report.get("controller_lock")
+            if (
+                status_report.get("schema") != "vegai-continuous-pretraining-status/v1"
+                or status_report.get("state_initialized") is not True
+                or not isinstance(progress, dict)
+                or progress.get("generation") != 2
+                or progress.get("committed_shards") != 2
+                or progress.get("pending_shards") != 0
+                or progress.get("committed_accepted_tokens") != 8
+                or progress.get("complete") is not True
+                or not isinstance(verification, dict)
+                or verification.get("state_journal_and_all_committed_checkpoints") is not True
+                or verification.get("manifest_prefix") is not True
+                or verification.get("shard_payloads") != "verified"
+                or verification.get("verified_shards") != 2
+                or verification.get("stale_private_candidate_files") != 0
+                or not isinstance(controller_lock, dict)
+                or controller_lock.get("present") is not False
+            ):
+                fail(f"complete health report is inconsistent: {status_report}")
+
+            # The journal's verified CLI coverage metrics are durable evidence,
+            # not decorative JSON.  Their relation to the committed shard and
+            # immutable policy is checked before status or resume can proceed.
+            state_before_metric_tamper = state_path.read_bytes()
+            metric_tamper = json.loads(state_before_metric_tamper)
+            metric_tamper["applied_shards"][0]["verified_metrics"]["training_oov_tokens"] = 1
+            state_path.write_text(json.dumps(metric_tamper), encoding="utf-8")
+            tampered_metrics_status = run(status_command(manifest, state_dir, manifest_digest), expected=1)
+            if "verified metrics violate the lossless training contract" not in tampered_metrics_status.stdout:
+                fail(f"status did not reject tampered journal metrics\n{tampered_metrics_status.stdout}")
+            state_path.write_bytes(state_before_metric_tamper)
+
+            # A status check validates every historical committed checkpoint,
+            # so a damaged old generation is rejected before an operator can
+            # mistake the state for resume-safe.  Restore the fixture bytes to
+            # continue exercising idempotency and prefix rejection.
+            checkpoint_original = checkpoint.read_bytes()
+            checkpoint.write_bytes(b"!" + checkpoint_original[1:])
+            tampered_status = run(status_command(manifest, state_dir, manifest_digest), expected=1)
+            if "applied checkpoint digest mismatch" not in tampered_status.stdout:
+                fail(f"status did not reject a tampered committed checkpoint\n{tampered_status.stdout}")
+            checkpoint.write_bytes(checkpoint_original)
 
             # A normal restart after commit is a true no-op: no replay and no
             # new checkpoint/state bytes are emitted.
@@ -233,7 +341,7 @@ def main() -> int:
         print(f"continuous pretraining verification: FAIL: {error}", file=sys.stderr)
         return 1
 
-    print("continuous pretraining verification: PASS (immutable shards, exactly-once journal, idempotent restart)")
+    print("continuous pretraining verification: PASS (immutable shards, checkpoint health audit, exactly-once recovery, idempotent restart)")
     return 0
 
 

@@ -156,6 +156,22 @@ def run_command(command: list[str], environment: dict[str, str]) -> str:
     return result.stdout
 
 
+def run_rejected_command(command: list[str], environment: dict[str, str]) -> str:
+    """Require the compiled CLI to fail rather than testing a Python surrogate."""
+    result = subprocess.run(
+        command,
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode == 0:
+        raise AssertionError(f"command unexpectedly succeeded: {' '.join(command)}\n{result.stdout}")
+    return result.stdout
+
+
 def train_command(binary: Path, checkpoint: Path) -> list[str]:
     return [
         str(binary),
@@ -236,6 +252,21 @@ def verify_cli(binary: Path) -> None:
         require_values(inspect_output, "completed epochs", [2])
         require_values(inspect_output, "total prototype updates", [EXPECTED_RAW_TOKENS * 2])
         require("query: teknoloji" in inspect_output, "inspect query did not execute")
+
+        # Exercise the real CLI's checkpoint checksum boundary, not only the
+        # in-process Fortran API: flipping a trailing checksum bit must reject
+        # inspection before it could be trusted as a resume base.
+        tampered_checkpoint = temporary_path / "example-tampered.vgai"
+        tampered_bytes = checkpoint_b.read_bytes()
+        require(len(tampered_bytes) > 0, "checkpoint is unexpectedly empty before tamper test")
+        tampered_checkpoint.write_bytes(tampered_bytes[:-1] + bytes((tampered_bytes[-1] ^ 1,)))
+        tampered_output = run_rejected_command(
+            [str(binary), "inspect", str(tampered_checkpoint)], environment
+        )
+        require(
+            "checkpoint schema or integrity failure" in tampered_output,
+            f"tampered checkpoint was not rejected as an integrity failure\n{tampered_output}",
+        )
 
         resume_output = run_command(
             [

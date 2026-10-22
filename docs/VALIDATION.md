@@ -107,15 +107,16 @@ saturate ederek ambiguity'yi doğrular.
 
 CI, küçük `toy_hdc_corpus.txt` ile `train → inspect → resume` smoke zincirini
 ve `mini_turkish_ascii_pretrain.txt` ile manifest, dengeli-token cardinality,
-bit-tam çift checkpoint ve `train → inspect → resume` integration zincirini
-çalıştırır. CTest'in `vegai_continuous_pretraining` entegrasyonu gerçek CLI ile
+bit-tam çift checkpoint, checksum-bit mutation rejection ve `train → inspect → resume`
+integration zincirini çalıştırır. CTest'in `vegai_continuous_pretraining` entegrasyonu gerçek CLI ile
 SHA-256 shard mutation rejection, immutable manifest digest pin'i, append-only
-manifest prefix, OOV=0 ve idempotent restart journal davranışını ayrıca sınar.
+manifest prefix, OOV=0, stale private-candidate cleanup, idempotent restart ve
+read-only status aracının shard/checkpoint/lock integrity gate'ini ayrıca sınar.
 `vegai_production_pretraining`, gerçek compiled CLI ile deterministic foundry
 byte equality, disk-backed exact record dedupe, `min_frequency=1` exact
 vocabulary-capacity preflight, immutable shard/path rejection, record-level
-train/validation leakage rejection, exactly-once generation ve idempotent
-production resume'ı sınar. `vegai_example_production_dataset_preflight`,
+train/validation leakage rejection, exactly-once generation, completed
+state/payload health audit'i ve idempotent production resume'ı sınar. `vegai_example_production_dataset_preflight`,
 source-controlled sentetik package'ın ledger/content-address/leakage contract'ını
 ayrıca doğrular.
 
@@ -231,7 +232,9 @@ latency benchmarkı ölçün.
 | production dataset shard/path/ledger replacement | package SHA/content-address contract ve runner preflight'i reddeder |
 | production train/validation raw-record overlap | exact SQLite leakage gate child training başlamadan reddeder |
 | production `max-vocab` exact unique train token sayısından küçük | runner training başlamadan capacity hatası verir |
-| candidate checkpoint sonrası crash | state journal eski generation'da kalır; orphan candidate durable commit sayılmaz |
+| candidate checkpoint sonrası crash | state journal eski generation'da kalır; orphan candidate durable commit sayılmaz ve normal restart private artifact'ı temizler |
+| committed journal coverage metric veya historical checkpoint byte mutation | `continuous_pretrain_status.py` ve controller contract/digest mismatch ile fail-closed olur; resume-safe rapor üretmez |
+| health gate sırasında controller lock | `--require-unlocked` fail-closed olur; status aracı lock'u hiçbir zaman silmez |
 
 ## Reproducibility kaydı
 
@@ -266,7 +269,7 @@ Bir değişiklik merge edilmeden önce:
 - [ ] pretraining corpus manifesti, lisans/PII/retention değerlendirmesi ve digest'i kaydedildi
 - [ ] tokenizer/overlong-record telemetry'si incelendi; strict veya kabul politikası açıklandı
 - [ ] checkpoint save/load + resume sonucu hedef compiler/ABI üzerinde doğrulandı
-- [ ] continual iş varsa immutable SHA-256 manifest, `min_frequency=1`, state journal ve restart/fault senaryosu doğrulandı
+- [ ] continual iş varsa immutable SHA-256 manifest, `min_frequency=1`, state journal, restart/fault senaryosu ve `continuous_pretrain_status.py --verify-shards --require-complete --require-unlocked` health gate'i doğrulandı
 - [ ] production package kullanılıyorsa exact dedupe, train/validation leakage audit, content-addressed ledger pin'i ve exact `max-vocab` capacity preflight geçti
 - [ ] pretraining semantic kalite iddiası held-out görev ve baseline ile ölçüldü
 - [ ] `--max-vocab` / checkpoint path için resource plan ve gerçek RAM/storage headroom incelendi
