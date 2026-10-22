@@ -215,6 +215,7 @@ contains
       write(output_unit, '(A,I0)') '  unique tokens: ', trained_model%vocabulary%count
       write(output_unit, '(A,I0)') '  active tokens: ', trained_model%vocabulary%active_count
       write(output_unit, '(A,I0)') '  tokenizer truncations: ', metrics%tokenizer_truncations
+      write(output_unit, '(A,I0)') '  non-ASCII input bytes: ', metrics%non_ascii_bytes
       write(output_unit, '(A,I0)') '  dropped overlong records: ', metrics%overlong_records
    end subroutine print_vocabulary_summary
 
@@ -231,6 +232,7 @@ contains
       write(output_unit, '(A,I0)') '  ordered context pairs: ', metrics%context_pairs
       write(output_unit, '(A,I0)') '  prototype updates: ', metrics%center_updates
       write(output_unit, '(A,I0)') '  tokenizer truncations: ', metrics%tokenizer_truncations
+      write(output_unit, '(A,I0)') '  non-ASCII input bytes: ', metrics%non_ascii_bytes
       write(output_unit, '(A,I0)') '  dropped overlong records: ', metrics%overlong_records
    end subroutine print_training_summary
 

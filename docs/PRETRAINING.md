@@ -94,7 +94,8 @@ Tokenizer bilerek Unicode tokenizer değildir. Her byte ASCII olarak ele alını
 
 - token karakterleri `A-Z`, `a-z`, `0-9`, `_`, `'`;
 - `A-Z` ASCII lowercase'e dönüşür;
-- UTF-8 multibyte byte'ları delimiter davranışı gösterir;
+- UTF-8 multibyte byte'ları delimiter davranışı gösterir ve kısa kayıtlar için
+  `non_ascii_bytes` telemetrisi artırılır;
 - token uzunluğu en çok 48 byte, satırda en çok 1.024 token ve fiziksel satır
   en çok 8.192 byte olabilir.
 
@@ -176,6 +177,7 @@ CLI ve `pretrain_metrics_t` aşağıdaki sayıları verir:
 | `context_pairs` | position-permuted neighbor katkılarının sayısı |
 | `center_updates` | en az bir active neighbor bulan center update sayısı |
 | `tokenizer_truncations` | düşürülen long-token / excess-token kaydı |
+| `non_ascii_bytes` | in-contract kayıtlarda gözlenen `>127` byte sayısı; Unicode kalite sinyali, hata değildir |
 | `overlong_records` | tamamı düşürülen >8.192-byte fiziksel kayıt |
 
 `active_tokens + oov_tokens = raw_tokens` ikinci geçiş için beklenen temel
@@ -189,7 +191,7 @@ telemetridir.
 `pretrain_checkpoint_save` stream-unformatted bir `.vgai` dosyası yazar;
 `pretrain_checkpoint_load` magic/version, shape, counter sign, vocabulary
 frequency/active invariantları, rebuilt hash index ve payload checksum kontrolü
-yapar. Versiyon şu an **2**dir. Checksum yalnız accidental corruption tespiti
+yapar. Versiyon şu an **3**tür. Checksum yalnız accidental corruption tespiti
 içindir; kriptografik bütünlük/imza değildir.
 
 Checkpoint aşağıdakileri taşır:

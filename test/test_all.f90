@@ -410,6 +410,8 @@ contains
       call assert_true(vocabulary_metrics%raw_tokens == 24_int64, 'vocabulary pass counts raw tokens')
       call assert_true(vocabulary_metrics%tokenizer_truncations == 0_int64, &
                        'fixture corpus has no tokenizer truncation')
+      call assert_true(vocabulary_metrics%non_ascii_bytes == 0_int64, &
+                       'fixture corpus has no non-ASCII input bytes')
       call assert_true(pretrain_model_is_ready(model_a), 'vocabulary pass initializes trainable model')
       call assert_true(pretrain_model_footprint_bytes(model_a) > 0_int64, &
                        'pretraining model reports resident footprint')

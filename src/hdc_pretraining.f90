@@ -33,7 +33,7 @@ module hdc_pretraining
    integer(int32), parameter, public :: PT_ERR_RECORD_TOO_LONG = -512_int32
 
    character(len=8), parameter :: CHECKPOINT_MAGIC = 'VGHDC001'
-   integer(int32), parameter :: CHECKPOINT_VERSION = 2_int32
+   integer(int32), parameter :: CHECKPOINT_VERSION = 3_int32
 
    type, public :: hdc_pretrain_config_t
       integer(int32) :: max_vocabulary = 20000_int32
@@ -56,6 +56,7 @@ module hdc_pretraining
       integer(int64) :: context_pairs = 0_int64
       integer(int64) :: center_updates = 0_int64
       integer(int64) :: tokenizer_truncations = 0_int64
+      integer(int64) :: non_ascii_bytes = 0_int64
       integer(int64) :: overlong_records = 0_int64
    end type pretrain_metrics_t
 
@@ -104,6 +105,7 @@ contains
       metrics%context_pairs = 0_int64
       metrics%center_updates = 0_int64
       metrics%tokenizer_truncations = 0_int64
+      metrics%non_ascii_bytes = 0_int64
       metrics%overlong_records = 0_int64
    end subroutine pretrain_metrics_reset
 
@@ -180,7 +182,8 @@ contains
       if (source%corpus_lines < 0_int64 .or. source%raw_tokens < 0_int64 .or. &
           source%active_tokens < 0_int64 .or. source%oov_tokens < 0_int64 .or. &
           source%context_pairs < 0_int64 .or. source%center_updates < 0_int64 .or. &
-          source%tokenizer_truncations < 0_int64 .or. source%overlong_records < 0_int64) then
+          source%tokenizer_truncations < 0_int64 .or. source%non_ascii_bytes < 0_int64 .or. &
+          source%overlong_records < 0_int64) then
          status = PT_ERR_COUNTER_OVERFLOW
          return
       end if
@@ -191,6 +194,7 @@ contains
           destination%context_pairs > huge(0_int64) - source%context_pairs .or. &
           destination%center_updates > huge(0_int64) - source%center_updates .or. &
           destination%tokenizer_truncations > huge(0_int64) - source%tokenizer_truncations .or. &
+          destination%non_ascii_bytes > huge(0_int64) - source%non_ascii_bytes .or. &
           destination%overlong_records > huge(0_int64) - source%overlong_records) then
          status = PT_ERR_COUNTER_OVERFLOW
          return
@@ -202,6 +206,7 @@ contains
       destination%context_pairs = destination%context_pairs + source%context_pairs
       destination%center_updates = destination%center_updates + source%center_updates
       destination%tokenizer_truncations = destination%tokenizer_truncations + source%tokenizer_truncations
+      destination%non_ascii_bytes = destination%non_ascii_bytes + source%non_ascii_bytes
       destination%overlong_records = destination%overlong_records + source%overlong_records
    end subroutine add_metrics
 
@@ -320,6 +325,7 @@ contains
       character(len=TOKEN_LEN) :: tokens(MAX_TOKENS_PER_LINE)
       integer :: unit, io_status
       integer(int32) :: token_index, n_tokens, vocab_status
+      integer(int64) :: non_ascii_count
       logical :: eof, overlong, truncated
 
       call pretrain_model_destroy(model)
@@ -365,7 +371,9 @@ contains
             end if
             cycle
          end if
-         call tokenize_ascii_line(line, tokens, n_tokens, truncated)
+         call tokenize_ascii_line(line, tokens, n_tokens, truncated, non_ascii_count)
+         call add_nonnegative(metrics%non_ascii_bytes, non_ascii_count, status)
+         if (status /= PT_OK) exit
          if (truncated) then
             call add_nonnegative(metrics%tokenizer_truncations, 1_int64, status)
             if (status /= PT_OK) exit
@@ -509,6 +517,7 @@ contains
       integer(int32) :: token_slots(MAX_TOKENS_PER_LINE)
       integer :: unit, io_status
       integer(int32) :: token_index, n_tokens, slot, vocab_status
+      integer(int64) :: non_ascii_count
       logical :: eof, found, overlong, truncated
 
       status = PT_OK
@@ -537,7 +546,9 @@ contains
             end if
             cycle
          end if
-         call tokenize_ascii_line(line, tokens, n_tokens, truncated)
+         call tokenize_ascii_line(line, tokens, n_tokens, truncated, non_ascii_count)
+         call add_nonnegative(metrics%non_ascii_bytes, non_ascii_count, status)
+         if (status /= PT_OK) exit
          if (truncated) then
             call add_nonnegative(metrics%tokenizer_truncations, 1_int64, status)
             if (status /= PT_OK) exit
@@ -793,6 +804,7 @@ contains
       checksum = checkpoint_mix(checksum, model%totals%context_pairs)
       checksum = checkpoint_mix(checksum, model%totals%center_updates)
       checksum = checkpoint_mix(checksum, model%totals%tokenizer_truncations)
+      checksum = checkpoint_mix(checksum, model%totals%non_ascii_bytes)
       checksum = checkpoint_mix(checksum, model%totals%overlong_records)
       do slot = 1, model%vocabulary%capacity
          do character_index = 1, TOKEN_LEN
@@ -846,7 +858,8 @@ contains
       if (io_status == 0) write(unit, iostat=io_status) model%training_epochs_completed
       if (io_status == 0) write(unit, iostat=io_status) model%totals%corpus_lines, model%totals%raw_tokens, &
          model%totals%active_tokens, model%totals%oov_tokens, model%totals%context_pairs, &
-         model%totals%center_updates, model%totals%tokenizer_truncations, model%totals%overlong_records
+         model%totals%center_updates, model%totals%tokenizer_truncations, &
+         model%totals%non_ascii_bytes, model%totals%overlong_records
       if (io_status == 0) write(unit, iostat=io_status) model%vocabulary%tokens
       if (io_status == 0) write(unit, iostat=io_status) model%vocabulary%frequencies
       if (io_status == 0) write(unit, iostat=io_status) model%vocabulary%active
@@ -923,7 +936,8 @@ contains
       if (io_status == 0) read(unit, iostat=io_status) model%training_epochs_completed
       if (io_status == 0) read(unit, iostat=io_status) model%totals%corpus_lines, model%totals%raw_tokens, &
          model%totals%active_tokens, model%totals%oov_tokens, model%totals%context_pairs, &
-         model%totals%center_updates, model%totals%tokenizer_truncations, model%totals%overlong_records
+         model%totals%center_updates, model%totals%tokenizer_truncations, &
+         model%totals%non_ascii_bytes, model%totals%overlong_records
       if (io_status == 0) read(unit, iostat=io_status) model%vocabulary%tokens
       if (io_status == 0) read(unit, iostat=io_status) model%vocabulary%frequencies
       if (io_status == 0) read(unit, iostat=io_status) model%vocabulary%active
@@ -948,7 +962,8 @@ contains
           model%totals%corpus_lines < 0_int64 .or. model%totals%raw_tokens < 0_int64 .or. &
           model%totals%active_tokens < 0_int64 .or. model%totals%oov_tokens < 0_int64 .or. &
           model%totals%context_pairs < 0_int64 .or. model%totals%center_updates < 0_int64 .or. &
-          model%totals%tokenizer_truncations < 0_int64 .or. model%totals%overlong_records < 0_int64 .or. &
+          model%totals%tokenizer_truncations < 0_int64 .or. model%totals%non_ascii_bytes < 0_int64 .or. &
+          model%totals%overlong_records < 0_int64 .or. &
           model%totals%active_tokens > model%totals%raw_tokens .or. &
           model%totals%oov_tokens > model%totals%raw_tokens .or. &
           model%totals%center_updates > model%totals%active_tokens) then

@@ -9,7 +9,7 @@
 !  into an ASCII-safe representation or use a future Unicode tokenizer.
 !==============================================================================
 module text_tokenizer
-   use, intrinsic :: iso_fortran_env, only: int32
+   use, intrinsic :: iso_fortran_env, only: int32, int64
    implicit none
    private
 
@@ -47,24 +47,30 @@ contains
 
    ! Tokenizes a single record into caller-owned fixed buffers.  A long token
    ! or excess token is dropped rather than truncated, avoiding vocabulary-key
-   ! aliasing.  The caller can turn truncated=.true. into a strict-data error.
-   pure subroutine tokenize_ascii_line(line, tokens, n_tokens, truncated)
+   ! aliasing.  The caller can turn truncated=.true. into a strict-data error;
+   ! optional non_ascii_bytes records UTF-8/high-byte input telemetry.
+   pure subroutine tokenize_ascii_line(line, tokens, n_tokens, truncated, non_ascii_bytes)
       character(len=*), intent(in) :: line
       character(len=TOKEN_LEN), intent(out) :: tokens(:)
       integer(int32), intent(out) :: n_tokens
       logical, intent(out) :: truncated
+      integer(int64), intent(out), optional :: non_ascii_bytes
       character(len=TOKEN_LEN) :: current
-      integer(int32) :: position, current_length
+      integer(int32) :: position, current_length, code
+      integer(int64) :: counted_non_ascii_bytes
       logical :: token_too_long
 
       tokens = ''
       n_tokens = 0_int32
       truncated = .false.
+      counted_non_ascii_bytes = 0_int64
       current = ''
       current_length = 0_int32
       token_too_long = .false.
 
       do position = 1, len_trim(line)
+         code = int(iachar(line(position:position)), int32)
+         if (code > 127_int32) counted_non_ascii_bytes = counted_non_ascii_bytes + 1_int64
          if (is_token_character(line(position:position))) then
             if (current_length < TOKEN_LEN) then
                current_length = current_length + 1_int32
@@ -80,6 +86,7 @@ contains
          end if
       end do
       call emit_current_token(current, current_length, token_too_long, tokens, n_tokens, truncated)
+      if (present(non_ascii_bytes)) non_ascii_bytes = counted_non_ascii_bytes
    end subroutine tokenize_ascii_line
 
    pure subroutine emit_current_token(current, current_length, token_too_long, tokens, n_tokens, truncated)
