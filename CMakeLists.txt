@@ -75,4 +75,15 @@ if(VEGAI_BUILD_TESTS)
     endif()
 
     add_test(NAME vegai_fortran_properties COMMAND vegai_tests)
+
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(
+            NAME vegai_example_pretraining
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_example_corpus.py
+                    --pretrain-bin $<TARGET_FILE:vegai_pretrain>
+        )
+    else()
+        message(WARNING "Python3 was not found; example corpus integration test is not registered.")
+    endif()
 endif()

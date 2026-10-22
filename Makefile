@@ -57,6 +57,7 @@ debug:
 
 check:
 	python3 tools/verify_reference.py
+	python3 tools/verify_example_corpus.py
 
 clean:
 	rm -rf $(BUILD_DIR)

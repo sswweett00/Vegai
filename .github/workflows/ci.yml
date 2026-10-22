@@ -55,13 +55,14 @@ jobs:
           fi
           exit "$exit_code"
 
-      - name: Validate sample corpus manifest and ingest contract
+      - name: Validate sample corpus manifests and ingest contracts
         run: |
           python3 tools/corpus_manifest.py examples/corpus/toy_hdc_corpus.txt \
             --output "${RUNNER_TEMP}/toy-manifest.json" \
             --source 'repository smoke fixture' --license MIT \
             --retrieved-at 'source-controlled fixture' --preprocessing none --strict-contract
           python3 -m json.tool "${RUNNER_TEMP}/toy-manifest.json" > /dev/null
+          python3 tools/verify_example_corpus.py
 
       - name: Run HDC pretraining CLI smoke test
         run: |

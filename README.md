@@ -74,6 +74,11 @@ OMP_NUM_THREADS=2 ./build/hds_engine
   --max-vocab 64 --min-frequency 2 --epochs 2 --query king
 ./build/vegai_pretrain inspect toy.vgai --query dog
 
+# Dengeli, Türkçe-ASCII sentetik fixture ile checkpoint/resume örneği
+./build/vegai_pretrain train examples/corpus/mini_turkish_ascii_pretrain.txt mini.vgai \
+  --max-vocab 128 --min-frequency 8 --window 2 --epochs 2 --strict --query okul
+python3 tools/verify_example_corpus.py --pretrain-bin ./build/vegai_pretrain
+
 # Gerçek corpus'u eğitmeden önce local digest + ingest preflight
 python3 tools/corpus_manifest.py CORPUS.txt --output corpus-manifest.json \
   --source 'dataset URI/version' --license 'license ID' --strict-contract

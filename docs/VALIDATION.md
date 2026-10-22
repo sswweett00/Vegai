@@ -92,9 +92,11 @@ saturate ederek ambiguity'yi doğrular.
 - exact-rate Hebbian update için complement input altında %25 = 4.096 Hamming
   flip property.
 
-CI ayrıca `examples/corpus/toy_hdc_corpus.txt` ile `train → inspect → resume`
-CLI smoke zincirini çalıştırır. Bu test corpus'u yalnız pipeline doğrulamasıdır;
-semantic kalite veya dil yeteneği benchmarkı değildir.
+CI, küçük `toy_hdc_corpus.txt` ile `train → inspect → resume` smoke zincirini
+ve `mini_turkish_ascii_pretrain.txt` ile manifest, dengeli-token cardinality,
+bit-tam çift checkpoint ve `train → inspect → resume` integration zincirini
+çalıştırır. Bu fixture'lar yalnız pipeline doğrulamasıdır; semantic kalite veya
+dil yeteneği benchmarkı değildir.
 
 ## Olasılık modeli ve sayısal marjlar
 
