@@ -74,6 +74,9 @@ python3 tools/verify_example_corpus.py --pretrain-bin ./build/vegai_pretrain
 `resume` çalışmasını ve beklenen corpus telemetrisini doğrular. Semantic nearest
 neighbour etiketi özellikle assert edilmez: HDC context prototype'ı için bu
 fixture ancak diagnostic sinyal üretir, anlam doğruluğu sertifikası değildir.
+Gerçek executable run'ın counter/schedule/checkpoint ayrıntıları
+[`docs/EXAMPLE_PRETRAINING_RUN.md`](../docs/EXAMPLE_PRETRAINING_RUN.md)
+belgesindedir.
 
 ## Veri yönetişimi
 

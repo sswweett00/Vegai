@@ -164,7 +164,9 @@ token kabul eder.
 Küçük smoke corpus ve dengeli Türkçe-ASCII fixture için
 [`examples/`](../examples/README.md) altındaki örneğe bakın. İkinci fixture,
 manifest digest'i ve gerçek `train → inspect → resume` CLI testiyle doğrulanır;
-hiçbiri semantik kalite benchmarkı değildir.
+çalıştırılan counter, schedule ve checkpoint ayrıntıları
+[EXAMPLE_PRETRAINING_RUN.md](EXAMPLE_PRETRAINING_RUN.md)'dedir. Hiçbiri
+semantic kalite benchmarkı değildir.
 
 ## 5. Metrikler ve yorum
 

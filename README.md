@@ -133,8 +133,10 @@ iddia etmiyoruz. Sıfır-kayıplı 64-byte hizalama gerekiyorsa derleyici/ABI'ye
 Ayrıntılı tasarım ve invariantlar için [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
 Resonator Network sözleşmesi için [docs/RESONATOR_NETWORK.md](docs/RESONATOR_NETWORK.md),
 corpus veri hattı, yönetişim ve checkpoint sözleşmesi için
-[docs/PRETRAINING.md](docs/PRETRAINING.md), ölçülebilir doğrulama planı ve
-istatistiksel sınırlar için [docs/VALIDATION.md](docs/VALIDATION.md) dosyalarına bakın.
+[docs/PRETRAINING.md](docs/PRETRAINING.md), fixture üzerinde gerçek yürütme
+telemetrisi için [docs/EXAMPLE_PRETRAINING_RUN.md](docs/EXAMPLE_PRETRAINING_RUN.md),
+ölçülebilir doğrulama planı ve istatistiksel sınırlar için
+[docs/VALIDATION.md](docs/VALIDATION.md) dosyalarına bakın.
 
 ## Temel işlem sözleşmeleri
 
