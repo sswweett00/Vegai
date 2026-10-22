@@ -16,10 +16,16 @@ contains
 
    subroutine test_hypervector_algebra()
       type(hv_t) :: a, b, c, d, zero, noisy, noisy_again, bundled, expected
-      type(hv_t) :: ones, before, updated_a, updated_b
+      type(hv_t) :: ones, before, updated_a, updated_b, splitmix_zero
       type(hv_acc_t) :: accumulator, accumulator_before
       integer(int32) :: status, distance
       real :: similarity
+
+      splitmix_zero = hv_from_seed(0_int64)
+      call assert_true(splitmix_zero%bits(1) == int(z'E220A8397B1DCDAF', int64), &
+                       'portable SplitMix64 first word matches standard oracle')
+      call assert_true(hv_seed_from_id(-1_int32) /= hv_seed_from_id(0_int32), &
+                       'ID seed mixer preserves distinct signed IDs')
 
       a = hv_from_seed(12345_int64)
       b = hv_from_seed(67890_int64)

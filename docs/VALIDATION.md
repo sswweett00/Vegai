@@ -31,7 +31,8 @@ CI bunların checked CMake/OpenMP varyantını ve ayrıca optimize Make hedefini
 
 ### `hyper_types`
 
-- aynı seed → bit-bit aynı hiper-vektör;
+- standart SplitMix64 seed-0 ilk kelime oracle'ı (`E220A8397B1DCDAF`), aynı
+  seed → bit-bit aynı hiper-vektör ve signed-ID seed ayrışması;
 - farklı seed'ler için Hamming mesafesinin geniş ama anlamlı near-orthogonal
   aralığı (`7000 < H < 9400`);
 - XOR identity ve self-inverse unbinding;
