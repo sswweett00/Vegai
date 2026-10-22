@@ -92,15 +92,47 @@ positional'a göre similarity gain'i `+0.064046` idi. Bunlar tarihsel baseline
 olarak saklanır; CPU/runner/derleyici farklı olduğunda mutlak saniye veya
 token/s değerlerini doğrudan karşılaştırmayın.
 
-## Güncel v2 sonucu
+## Güncel v2 sonucu — doğrulanmış GNU Fortran CI
 
-Bu kaynak değişikliğinin doğrulanmış GNU Fortran CI sonucu, commit ile birlikte
-workflow summary'den bu bölüme kaydedilir. Raporda aşağıdaki üç ayrı sonuç
-bulunmalıdır:
+[GitHub Actions run 39830774456](https://github.com/sswweett00/Vegai/actions/runs/39830774456)
+(commit `515aec8`, optimized GNU Make binary, üç repetition, `OMP_NUM_THREADS=1`)
+tüm checked native property/integration testleri, executable/continual CLI
+verifier'ları ve yeni benchmark adımıyla başarılı tamamlandı.
 
-1. fused/reference hybrid checkpoint byte equality ve hız oranı;
-2. base fixture `legacy → positional → fused hybrid` medyanları;
-3. long-record `hybrid → hierarchical` controlled cohesion sonucu.
+### Base fixture: önce / sonra encoder süreleri
+
+| Encoder | Median train süresi | Training token/s | Legacy'ye göre |
+|---|---:|---:|---:|
+| `legacy` | 0.467324 s | 4,382.399 | 1.0000× |
+| `positional` | 0.160000 s | 12,800.000 | 2.9208× |
+| fused `hybrid` | 0.162482 s | 12,604.473 | 2.8762× |
+
+Current fused hybrid'in base controlled mean Top-1 similarity değeri `0.137414` oldu.
+Bu, fused kernelin hybrid semantic contract'i değiştirmediğine dair ayrı
+checkpoint-byte testinin yanında yalnız yardımcı controlled retrieval sinyalidir.
+
+### Aynı hybrid semantiğinde gerçek before/after kernel ölçümü
+
+| Uygulama | Median train süresi | Training token/s | Sonuç |
+|---|---:|---:|---|
+| reference rotate-then-add | 0.165942 s | 12,341.662 | regression oracle |
+| fused raw SoA/pair | 0.162482 s | 12,604.473 | **1.0213×** daha hızlı |
+
+İki run'ın checkpoint byte dizisi ve SHA-256'sı tam eşit bulundu
+(`checkpoint_bytes_identical=True`). Bu, yalnız Top-1 output'u değil tüm
+persisted model state'inin bit-tam korunduğu anlamına gelir.
+
+### Long-record hierarchical controlled cohesion diagnostic
+
+| Mode | Mean Top-1 similarity | Hybrid'e göre |
+|---|---:|---:|
+| local `hybrid` | 0.168998 | — |
+| `hierarchical` | 0.826843 | **+0.657845** (+389.262%) |
+
+Aynı-küme Top-1 hit gerilememe koşulu da geçti. Bu belirgin marj,
+özellikle her record'un aynı disjoint topical kümeyi iki kez taşıdığı tasarlanmış
+16-token fixture için geçerlidir; doğal metin, held-out task veya production
+semantic-quality sonucu olarak genellenemez.
 
 Her zaman aynı runner içindeki oranları yorumlayın. Cache, CPU frequency/termal
 state, filesystem, compiler sürümü/flag'leri ve OpenMP ayarı mutlak ölçümü
