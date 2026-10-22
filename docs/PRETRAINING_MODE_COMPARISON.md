@@ -1,15 +1,18 @@
-# HDC pretraining: önce / sonra karşılaştırması
+# HDC pretraining: bit-tam hız ve controlled semantic-cohesion karşılaştırması
 
-Bu belge, bit-sliced context accumulator ve varsayılan `hybrid` context encoder
-sonrası gerçek executable ile alınan kontrollü karşılaştırmayı kaydeder.
-Ölçüm [GitHub Actions run 39823123909](https://github.com/sswweett00/Vegai/actions/runs/39823123909)
-üzerinde, commit `922eac5` için başarıyla tamamlandı.
+Bu belge `tools/compare_pretraining_modes.py` ile üretilen sınırlı ölçüm
+protokolünü tanımlar. Araç gerçek `vegai_pretrain train` executable'ını çalıştırır
+ve ölçümü yalnız o child process'in başlatılması ile bitişi arasında alır.
+Compiler/configure, CI setup, fixture üretimi, checkpoint inspect, JSON yazımı
+ve Python harness süresi **ölçüye dahil değildir**. Vocabulary pass, streaming
+öğrenme ve checkpoint write ise `train` komutunun parçası oldukları için dahildir.
 
-> Bu sonuçlar sentetik, dengeli ve corpus-içi bir diagnostic'tir. Transformer
-> performansı, genel Türkçe dil anlama, held-out task accuracy veya production
-> throughput garantisi değildir.
+> Bu sonuçlar repository-authored, dengeli, sentetik ve corpus-içi controlled
+> diagnostic'tir. Doğal dil zekâsı, held-out task accuracy, genel Türkçe anlama
+> veya production throughput garantisi değildir. Gerçek corpus için ayrı
+> held-out/de-duplicated evaluation manifesti gerekir.
 
-## Ölçüm protokolü
+## V2 protokolü
 
 ```bash
 make clean && make all
@@ -17,88 +20,104 @@ python3 tools/compare_pretraining_modes.py \
   --pretrain-bin ./build/vegai_pretrain --repetitions 3 --omp-threads 1
 ```
 
-Her mode için aynı corpus/config ile üç bağımsız `vegai_pretrain train` process'i
-çalıştırıldı; tabloda wall-clock medyanı vardır.
+Her varyant üç bağımsız train process'i ile ölçülür; tablo değeri wall-clock
+medyandır. Sabit `OMP_NUM_THREADS=1`, `max-vocab=128`, `min-frequency=8`,
+window `2`, positional shift `41`, plasticity `25 → 1`, decay `8` kullanılır.
+
+### A. Base encoder diagnostic
+
+`mini_turkish_ascii_pretrain.txt` sekiz disjoint topical kümeden oluşur:
 
 ```text
-Corpus                 mini_turkish_ascii_pretrain.txt
-Training token/run     2.048
-Epoch/run              2
-Ordered context pair   6.656
-Vocabulary             64 active token
-OMP_NUM_THREADS        1
-Compiler target        GNU Make -O3 -march=native -fopenmp
-Timer scope            tek train process; compiler/test/harness hariç
-Train process scope    vocabulary pass + streaming learning + checkpoint write dahil
+Corpus                    mini_turkish_ascii_pretrain.txt
+Record length             8 active token
+Training token/run        2,048
+Epoch/run                 2
+Ordered context pair/run  6,656
+Vocabulary                64 active token
 ```
 
-## Hız karşılaştırması
+Burada `legacy`, bit-tam hızlı `positional` ve fused varsayılan `hybrid`
+çalıştırılır. Her checkpoint gerçek CLI üzerinden 64 self-excluded Top-1 query
+ile okunur. `positional` nearest-neighbour çıktısının `legacy` ile tam eşit
+olması gerekir; `hybrid` aynı-küme hit'i geriletmemeli ve mean Top-1 similarity
+artışı `> 0.01` olmalıdır.
 
-| Encoder | Median train süresi | Training token/s | Legacy'ye göre |
-|---|---:|---:|---:|
-| `legacy` | 0,332480 s | 6.159,771 | 1,0000× |
-| `positional` | 0,098175 s | 20.860,690 | **3,3866×** |
-| `hybrid` | 0,100236 s | 20.431,707 | **3,3170×** |
+### B. Fused/reference semantic-preservation hız karşılaştırması
 
-### Yorum
+Aynı base corpus/config ile iki `hybrid` varyant çalışır:
 
-- `positional`, önceki signed-counter positional öğrenme semantiğini
-  bit-tam korur; buna rağmen word-parallel `hv_bitacc_t` sayesinde **3,3866×**
-  daha hızlıdır.
-- Varsayılan `hybrid`, positional kanala unpermuted topical context view ekler.
-  Bu ek semantic kanala rağmen `legacy` yolundan **3,3170×** daha hızlı kaldı.
-- `hybrid`, saf hızlı positional encoder'dan yalnızca **0,002061 s** (%2,10)
-  daha uzun sürdü; semantic-cohesion kazanımı bu kontrollü fixture'da aşağıda
-  görünürdür.
+- **reference:** `--reference-context-kernel` ile eski allocate/permute/iki-add
+  yolu;
+- **fused:** varsayılan raw SoA-word + fused positional/topic pair yolu.
 
-## Controlled semantic-cohesion karşılaştırması
+İki checkpoint'in tüm byte dizisi ve SHA-256'sı **eşit** olmak zorundadır. Bu
+kural Top-1 diagnostic eşitliğinden daha güçlüdür: vocabulary, base plane,
+semantic plane, experience sayaçları, totals ve v5 checksum'ın tamamının aynı
+olduğunu doğrular. Hız oranı `reference_median / fused_median` olarak verilir.
 
-Her checkpoint bir kez yüklendi; `--query-file` ile 64 fixture token'ının
-her biri için self-excluded Top-1 semantic neighbour sorgulandı. Her fixture
-kümesi sekiz topical token içerir.
+### C. Long-record hierarchical controlled diagnostic
 
-| Encoder | Aynı-küme Top-1 | Mean Top-1 bipolar similarity | Positional'a göre gain |
-|---|---:|---:|---:|
-| `legacy` | 64 / 64 (%100) | 0,073368 | — |
-| `positional` | 64 / 64 (%100) | 0,073368 | 0,000000 |
-| `hybrid` | 64 / 64 (%100) | **0,137414** | **+0,064046** (%87,29) |
+Normal fixture kasıtlı olarak sekiz-token satırlıdır ve `hierarchical` eşiği
+olan 12 active token'ın altında kalır. Araç geçici, ASCII-only bir fixture üretir:
+her biri aynı disjoint topical kümenin sekiz token'ını iki kez içeren **16-token**
+kayıtlar; küme başına 16 kayıt, toplam 128 kayıt. İki epoch için:
 
-`legacy` ve hızlı `positional` modlarının Top-1 neighbour output'ları testte
-tam eşit bulundu; bu, hız optimizasyonunun positional model davranışını
-değiştirmediğini gösterir. Fixture zaten üç modda da %100 Top-1 cluster hit
-verdiği için kaliteli sinyal, accuracy artışı değil doğru topical komşuya olan
-**similarity marjının** %87,29 artmasıdır.
+```text
+Training token/run        4,096
+Ordered context pair/run  14,848
+```
 
-## Yapılan iyileştirmeler
+`hierarchical`, local `hybrid` representation'ı korur ve yalnız bu uzun
+kayıtlarda satır-base-vector majority özetini üç bounded katkı olarak ekler.
+Bu nedenle comparison `hybrid` ile `hierarchical` arasında yapılır. Acceptance
+signal: same-cluster Top-1 gerilemez ve mean Top-1 similarity gain `> 0.002`
+olur. Bu bilerek tasarlanmış in-corpus cohesion testidir; held-out task
+başarısı değildir.
 
-1. **Bit-sliced unit-weight bundling:** `hv_bitacc_t`, 16.384 ayrı bit için
-   signed-counter/branch döngüsü yerine 64-bit word başına XOR/AND carry
-   planes kullanır. `legacy` ve `positional` equivalence'ı native ve bağımsız
-   Python reference testlerinde sınanır.
-2. **Üç açık context mode:**
-   - `legacy`: eski signed-counter positional regression referansı;
-   - `positional`: aynı öğrenme sonucunu üreten hızlı yol;
-   - `hybrid` (varsayılan): positional ve order-invariant topical evidence
-     birleşimi.
-3. **Resume güvenliği:** context mode checkpoint v4 payload/checksum'ına girer;
-   farklı mode ile resume `PT_ERR_INCOMPATIBLE_CONFIG` verir.
-4. **Batch semantic diagnostic:** `vegai_pretrain inspect --query-file PATH`,
-   bir checkpoint'i tek kez yükleyerek her nonblank satırdaki query için
-   nearest-neighbour raporu üretir. Bu hem benchmark overhead'ini düşürür hem
-   operatör değerlendirmesini hızlandırır.
-5. **CI karşılaştırması:** optimized binary üzerinde üç mode, üç repetition ve
-   gerçek checkpoint query'leriyle hız/cohesion raporu workflow summary ve
-   check-run annotation olarak üretilir.
+## Önceki baseline (fused-pair değişikliğinden önce)
 
-## Sınırlar ve tekrar üretim
+[GitHub Actions run 39826604165](https://github.com/sswweett00/Vegai/actions/runs/39826604165)
+üzerindeki son önceki optimized GNU Make run'ı, o dönemin `legacy`, positional
+ve pre-fused hybrid implementasyonunu şu şekilde raporladı:
 
-Süreler CPU modeli, compiler sürümü/flags, filesystem cache, termal/frequency
-state ve `OMP_NUM_THREADS` değerine duyarlıdır. Farklı makinede mutlak token/s
-sayısı değişebilir; karşılaştırmada esas alınması gereken aynı runner üzerindeki
-mode-to-mode oranıdır.
+| Encoder | Median train süresi | Training token/s | Legacy'ye göre | Mean Top-1 similarity |
+|---|---:|---:|---:|---:|
+| `legacy` | 0.466586 s | 4,389.331 | 1.0000× | — |
+| `positional` | 0.160154 s | 12,787.702 | 2.9134× | 0.073368 |
+| `hybrid` | 0.165548 s | 12,371.067 | 2.8184× | 0.137414 |
 
-Gerçek corpus kullanırken bu fixture sonucunu production semantic kalite iddiası
-olarak kullanmayın. Lisanslı corpus, held-out task, leakage/dedup kontrolü,
-robustness, bias/privacy ve hedef donanım benchmark'ı ile ayrı bir deney
-manifesti oluşturun. Ayrıntılı veri sözleşmesi için
-[PRETRAINING.md](PRETRAINING.md)'ye bakın.
+Base fixture'ın Top-1 cluster hit'i üç mode için `%100` idi; hybrid'in
+positional'a göre similarity gain'i `+0.064046` idi. Bunlar tarihsel baseline
+olarak saklanır; CPU/runner/derleyici farklı olduğunda mutlak saniye veya
+token/s değerlerini doğrudan karşılaştırmayın.
+
+## Güncel v2 sonucu
+
+Bu kaynak değişikliğinin doğrulanmış GNU Fortran CI sonucu, commit ile birlikte
+workflow summary'den bu bölüme kaydedilir. Raporda aşağıdaki üç ayrı sonuç
+bulunmalıdır:
+
+1. fused/reference hybrid checkpoint byte equality ve hız oranı;
+2. base fixture `legacy → positional → fused hybrid` medyanları;
+3. long-record `hybrid → hierarchical` controlled cohesion sonucu.
+
+Her zaman aynı runner içindeki oranları yorumlayın. Cache, CPU frequency/termal
+state, filesystem, compiler sürümü/flag'leri ve OpenMP ayarı mutlak ölçümü
+değiştirir.
+
+## Uygulama notları
+
+- `hv_bitacc_add_words`, `hv_bitacc_add_permuted_words` ve
+  `hv_bitacc_add_permuted_pair_words`, geçici `hv_t` kopyasını kaldırarak aynı
+  bit-sliced population-counter arithmetic'ini doğrudan vocabulary'nin SoA
+  column'unda uygular.
+- Native property testleri negatif/pozitif shift, bütün counter plane'leri,
+  sample count ve pair-overflow atomicity'sini kontrol eder.
+- `--reference-context-kernel` checkpoint formatına yazılmaz; yalnız benchmark
+  ve regression oracle'dır. Aynı semantic config ile fused/reference checkpoint
+  byte eşitliği bu nedenle zorunludur.
+- Checkpoint writer v5'tir; reader v4/v5 kabul eder ve checksum'ı dosyanın
+  kendi version değeriyle doğrular.
+- Hierarchical global signal satırda bir kez üretilir, yalnız ≥12 active token
+  için etkinleşir ve local context accumulator kapasitesiyle bounded kalır.

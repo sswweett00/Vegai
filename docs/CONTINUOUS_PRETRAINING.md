@@ -103,8 +103,11 @@ python3 tools/continuous_pretrain.py \
 ```
 
 State var olduktan sonra policy option'ları verilirse mevcut immutable değerle
-aynı olmak zorundadır; aksi halde çağrı başarısız olur. Sıradan restart için
-aynı üç temel argüman yeterlidir:
+aynı olmak zorundadır; aksi halde çağrı başarısız olur. `context_mode` policy
+allowlist'i `legacy`, `positional`, `hybrid` ve `hierarchical` değerlerini
+kabul eder; hierarchical mode yalnız ≥12 active-token içeren shard kayıtlarında
+bounded whole-record signal ekler. Sıradan restart için aynı üç temel argüman
+yeterlidir:
 
 ```bash
 python3 tools/continuous_pretrain.py \

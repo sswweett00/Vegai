@@ -50,11 +50,16 @@ python3 tools/measure_example_pretraining.py \
 ```
 
 CI derlemeden sonra bu timing kapsamını `tools/compare_pretraining_modes.py`
-içinde `legacy`, bit-tam hızlı `positional` ve varsayılan `hybrid` için üçer
-tekrar ile çalıştırır; medyan elapsed süre, training-token/saniye ve controlled
-semantic-cohesion karşılaştırmasını workflow summary/check-run notice olarak
-yayımlar. Süreler runner, derleyici bayrakları ve CPU'ya bağlıdır; fixture kısa
-olduğu için yalnız reproducible smoke timing olarak yorumlanmalıdır.
+içinde `legacy`, bit-tam hızlı `positional` ve varsayılan fused `hybrid` için
+üçer tekrar ile çalıştırır. Aynı config/corpus ile `--reference-context-kernel`
+rotate-then-add yolu da ayrıca ölçülür ve fused checkpoint ile **byte-tam eşit**
+olması zorunludur. Araç ayrıca normal sekiz-token fixture'ın eşiğinin altında
+kaldığını açıkça koruyarak, ayrı üretilmiş 16-token-record controlled fixture
+üzerinde `hybrid` ile `hierarchical` topical-cohesion diagnostic'ini raporlar.
+Medyan elapsed süre, training-token/saniye ve dar semantic diagnostic workflow
+summary/check-run notice'a yazılır. Süreler runner, derleyici bayrakları ve
+CPU'ya bağlıdır; bunlar doğal dil kalitesi veya production throughput iddiası
+olmayan reproducible smoke/controlled timing'lerdir.
 
 ## Input ve vocabulary pass
 

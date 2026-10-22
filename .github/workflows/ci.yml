@@ -96,32 +96,88 @@ jobs:
           speed = report["speed"]
           quality = report["quality"]
           comparison = report["comparison"]
+          fused = report["fused_kernel"]
+          long_context = report["long_context_diagnostic"]
+          long_speed = long_context["speed"]
+          long_quality = long_context["quality"]
           message = (
               f"legacy_seconds={speed['legacy']['median_seconds']:.6f}; "
               f"positional_seconds={speed['positional']['median_seconds']:.6f}; "
-              f"hybrid_seconds={speed['hybrid']['median_seconds']:.6f}; "
-              f"legacy_tps={speed['legacy']['training_tokens_per_second']:.3f}; "
-              f"positional_tps={speed['positional']['training_tokens_per_second']:.3f}; "
-              f"hybrid_tps={speed['hybrid']['training_tokens_per_second']:.3f}; "
-              f"positional_speedup={comparison['positional_speedup_vs_legacy']:.4f}x; "
-              f"hybrid_speedup={comparison['hybrid_speedup_vs_legacy']:.4f}x; "
-              f"legacy_similarity={quality['legacy']['mean_top1_similarity']:.6f}; "
-              f"hybrid_similarity={quality['hybrid']['mean_top1_similarity']:.6f}; "
-              f"hybrid_top1={quality['hybrid']['same_cluster_top1_percent']:.3f}%; "
-              f"semantic_similarity_gain={comparison['hybrid_mean_top1_similarity_gain_vs_positional']:.6f}"
+              f"fused_hybrid_seconds={speed['hybrid']['median_seconds']:.6f}; "
+              f"reference_hybrid_seconds={fused['reference']['median_seconds']:.6f}; "
+              f"fused_speedup={comparison['fused_hybrid_speedup_vs_reference']:.4f}x; "
+              f"checkpoint_bytes_identical={fused['checkpoint_byte_identical']}; "
+              f"base_hybrid_similarity={quality['hybrid']['mean_top1_similarity']:.6f}; "
+              f"long_hybrid_similarity={long_quality['hybrid']['mean_top1_similarity']:.6f}; "
+              f"long_hierarchical_similarity={long_quality['hierarchical']['mean_top1_similarity']:.6f}; "
+              f"hierarchical_similarity_gain="
+              f"{comparison['hierarchical_long_record_mean_top1_similarity_gain_vs_hybrid']:.6f}"
           )
           with open(sys.argv[2], "a", encoding="utf-8") as summary:
-              summary.write("## Optimized pretraining comparison\n\n")
-              summary.write("Optimized Make binary; each timing sample covers one `vegai_pretrain train` process only.\n\n")
-              summary.write("| Mode | Median seconds | Training token/s | Controlled Top-1 cluster | Mean Top-1 similarity |\n")
-              summary.write("|---|---:|---:|---:|---:|\n")
+              print("## Optimized pretraining comparison", file=summary)
+              print(file=summary)
+              print(
+                  "Each timing sample covers one `vegai_pretrain train` process only; compilation, CI setup, "
+                  "fixture construction, inspection, and Python harness work are excluded.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("### Base controlled fixture", file=summary)
+              print(file=summary)
+              print("| Mode | Median seconds | Training token/s | Controlled Top-1 cluster | Mean Top-1 similarity |", file=summary)
+              print("|---|---:|---:|---:|---:|", file=summary)
               for mode in ("legacy", "positional", "hybrid"):
-                  summary.write(
+                  print(
                       f"| {mode} | {speed[mode]['median_seconds']:.6f} | "
                       f"{speed[mode]['training_tokens_per_second']:.3f} | "
                       f"{quality[mode]['same_cluster_top1_percent']:.3f}% | "
-                      f"{quality[mode]['mean_top1_similarity']:.6f} |\n"
+                      f"{quality[mode]['mean_top1_similarity']:.6f} |",
+                      file=summary,
                   )
-              summary.write(f"\n```text\n{message}\n```\n")
+              print(file=summary)
+              print("### Bit-exact hybrid kernel comparison", file=summary)
+              print(file=summary)
+              print("| Implementation | Median seconds | Training token/s | Checkpoint bytes |", file=summary)
+              print("|---|---:|---:|---:|", file=summary)
+              print(
+                  f"| reference rotate-then-add | {fused['reference']['median_seconds']:.6f} | "
+                  f"{fused['reference']['training_tokens_per_second']:.3f} | identical to fused |",
+                  file=summary,
+              )
+              print(
+                  f"| fused SoA/pair kernel | {fused['fused']['median_seconds']:.6f} | "
+                  f"{fused['fused']['training_tokens_per_second']:.3f} | "
+                  f"{fused['checkpoint_byte_identical']} |",
+                  file=summary,
+              )
+              print(file=summary)
+              print(
+                  f"Fused/reference speed ratio: **{fused['fused_speedup_vs_reference']:.4f}×**. "
+                  "Byte equality is an exact semantic-regression condition, not just a retrieval comparison.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("### Long-record controlled hierarchy diagnostic", file=summary)
+              print(file=summary)
+              print(
+                  "This generated fixture has disjoint topical clusters and 16 active tokens per record; it is not a "
+                  "natural-language or production-quality benchmark.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("| Mode | Median seconds | Training token/s | Controlled Top-1 cluster | Mean Top-1 similarity |", file=summary)
+              print("|---|---:|---:|---:|---:|", file=summary)
+              for mode in ("hybrid", "hierarchical"):
+                  print(
+                      f"| {mode} | {long_speed[mode]['median_seconds']:.6f} | "
+                      f"{long_speed[mode]['training_tokens_per_second']:.3f} | "
+                      f"{long_quality[mode]['same_cluster_top1_percent']:.3f}% | "
+                      f"{long_quality[mode]['mean_top1_similarity']:.6f} |",
+                      file=summary,
+                  )
+              print(file=summary)
+              print("```text", file=summary)
+              print(message, file=summary)
+              print("```", file=summary)
           print(f"::notice title=Optimized pretraining comparison::{message}")
           PY

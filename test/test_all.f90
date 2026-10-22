@@ -25,7 +25,7 @@ contains
       type(hv_t) :: a, b, c, d, zero, noisy, noisy_again, bundled, expected
       type(hv_t) :: ones, before, updated_a, updated_b, splitmix_zero
       type(hv_acc_t) :: accumulator, accumulator_before
-      type(hv_bitacc_t) :: bit_accumulator
+      type(hv_bitacc_t) :: bit_accumulator, fused_accumulator, fused_before
       type(hv_t) :: bundle_inputs(8)
       integer(int32) :: status, distance, i
       real :: similarity
@@ -83,6 +83,40 @@ contains
                               hv_acc_finalize(accumulator, 991_int64), &
                               'bit-sliced bundle matches signed accumulator at every cardinality')
       end do
+
+      ! The fused raw-SoA kernels must preserve every counter plane, not merely
+      ! the final bundled vector.  This is the optimization used by fast HDC
+      ! pretraining context updates.
+      call hv_bitacc_reset(bit_accumulator)
+      call hv_bitacc_reset(fused_accumulator)
+      call hv_bitacc_add(bit_accumulator, hv_permute(bundle_inputs(1), -97_int32), status)
+      call assert_i32_equal(status, HV_OK, 'reference permuted bit-sliced add succeeds')
+      call hv_bitacc_add_permuted_words(fused_accumulator, bundle_inputs(1)%bits, -97_int32, status)
+      call assert_i32_equal(status, HV_OK, 'fused permuted bit-sliced add succeeds')
+      call assert_true(all(fused_accumulator%planes == bit_accumulator%planes), &
+                       'fused permuted add preserves every population-counter plane')
+      call assert_i32_equal(fused_accumulator%sample_count, bit_accumulator%sample_count, &
+                            'fused permuted add preserves sample count')
+
+      call hv_bitacc_reset(bit_accumulator)
+      call hv_bitacc_reset(fused_accumulator)
+      call hv_bitacc_add(bit_accumulator, hv_permute(bundle_inputs(2), 129_int32), status)
+      call assert_i32_equal(status, HV_OK, 'reference first pair add succeeds')
+      call hv_bitacc_add(bit_accumulator, bundle_inputs(2), status)
+      call assert_i32_equal(status, HV_OK, 'reference second pair add succeeds')
+      call hv_bitacc_add_permuted_pair_words(fused_accumulator, bundle_inputs(2)%bits, 129_int32, status)
+      call assert_i32_equal(status, HV_OK, 'fused positional-topic pair add succeeds')
+      call assert_true(all(fused_accumulator%planes == bit_accumulator%planes), &
+                       'fused pair add preserves every population-counter plane')
+      call assert_i32_equal(fused_accumulator%sample_count, bit_accumulator%sample_count, &
+                            'fused pair add preserves sample count')
+      fused_accumulator%sample_count = HV_BITACC_MAX_ITEMS - 1_int32
+      fused_before = fused_accumulator
+      call hv_bitacc_add_permuted_pair_words(fused_accumulator, bundle_inputs(2)%bits, 1_int32, status)
+      call assert_i32_equal(status, HV_ERR_ACCUMULATOR_OVERFLOW, 'fused pair preflight reports capacity overflow')
+      call assert_true(all(fused_accumulator%planes == fused_before%planes) .and. &
+                       fused_accumulator%sample_count == fused_before%sample_count, &
+                       'failed fused pair add is atomic')
 
       ones%bits = not(0_int64)
       call hv_acc_reset(accumulator)
@@ -392,8 +426,11 @@ contains
       character(len=*), parameter :: CHECKPOINT_PATH = 'vegai_pretraining_test_checkpoint.vgai'
       character(len=*), parameter :: CONTINUATION_A_PATH = 'vegai_continuation_a.txt'
       character(len=*), parameter :: CONTINUATION_B_PATH = 'vegai_continuation_b.txt'
+      character(len=*), parameter :: HIERARCHICAL_PATH = 'vegai_hierarchical_context.txt'
       type(hdc_pretrain_model_t) :: model_a, model_b, restored, legacy_model, positional_model, continuation_model
+      type(hdc_pretrain_model_t) :: hierarchical_model, local_only_model, hierarchical_replay, short_hierarchical_model
       type(hdc_pretrain_config_t) :: config, resumed_config, strict_config, legacy_config, positional_config, continuation_config
+      type(hdc_pretrain_config_t) :: reference_config, hierarchical_config, local_only_config
       type(pretrain_metrics_t) :: vocabulary_metrics, train_metrics, extension_metrics
       type(hv_t) :: semantic_hv, semantic_before_extension, semantic_after_extension
       character(len=TOKEN_LEN) :: nearest_token
@@ -460,15 +497,34 @@ contains
       call assert_true(nearest_slot /= slot .and. len_trim(nearest_token) > 0, &
                        'nearest semantic search excludes the requested token')
 
-      call pretrain_build_vocabulary(model_b, CORPUS_PATH, config, vocabulary_metrics, status)
-      call assert_i32_equal(status, PT_OK, 'second deterministic vocabulary pass succeeds')
-      call pretrain_train_file(model_b, CORPUS_PATH, config, train_metrics, status)
-      call assert_i32_equal(status, PT_OK, 'second deterministic training pass succeeds')
+      ! The fused fast hybrid kernel must be bit-identical to the retained
+      ! rotate-then-add reference path.  The implementation selector is not
+      ! model semantics and therefore does not enter checkpoint compatibility.
+      reference_config = config
+      reference_config%reference_context_kernel = .true.
+      call pretrain_build_vocabulary(model_b, CORPUS_PATH, reference_config, vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'reference-kernel vocabulary pass succeeds')
+      call pretrain_train_file(model_b, CORPUS_PATH, reference_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'reference-kernel training pass succeeds')
       call assert_true(all(model_a%base_bits == model_b%base_bits), 'base hypervectors are reproducible')
       call assert_true(all(model_a%semantic_bits == model_b%semantic_bits), &
-                       'streaming semantic prototypes are reproducible')
+                       'fused hybrid kernel remains bit-identical to the reference implementation')
       call assert_true(all(model_a%experience_count == model_b%experience_count), &
-                       'experience counters are reproducible')
+                       'fused hybrid kernel preserves deterministic learning schedule counters')
+
+      ! The ordinary eight-token fixture is intentionally below the hierarchy
+      ! threshold, so hierarchical mode must reduce exactly to local hybrid.
+      hierarchical_config = config
+      hierarchical_config%context_mode = PT_CONTEXT_HIERARCHICAL
+      call assert_true(trim(pretrain_context_mode_name(hierarchical_config%context_mode)) == 'hierarchical', &
+                       'hierarchical context encoder exposes a stable human-readable name')
+      call pretrain_build_vocabulary(short_hierarchical_model, CORPUS_PATH, hierarchical_config, &
+                                     vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'short-record hierarchical vocabulary pass succeeds')
+      call pretrain_train_file(short_hierarchical_model, CORPUS_PATH, hierarchical_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'short-record hierarchical training succeeds')
+      call assert_true(all(short_hierarchical_model%semantic_bits == model_a%semantic_bits), &
+                       'hierarchical threshold leaves short-record hybrid semantics unchanged')
 
       ! The fast positional encoder is an implementation-only optimization: it
       ! must preserve the legacy semantic plane exactly.  Hybrid adds a second,
@@ -492,6 +548,56 @@ contains
                        'fast positional encoder preserves learning schedule counters')
       call assert_true(any(model_a%semantic_bits /= positional_model%semantic_bits), &
                        'hybrid encoder contributes distinct order-invariant semantic evidence')
+
+      ! Hierarchical mode adds a whole-record topical summary only for long
+      ! records.  The controlled fixture has twelve active tokens, beyond the
+      ! threshold, so it must differ from local-only hybrid while remaining
+      ! deterministic across replay and checkpoint round-trip.
+      open(newunit=unit, file=HIERARCHICAL_PATH, status='replace', action='write', &
+           form='formatted', iostat=io_status)
+      call assert_true(io_status == 0, 'hierarchical context fixture opens')
+      if (io_status == 0) then
+         write(unit, '(A)') 'amber birch cedar dahlia ember fern granite harbor indigo juniper kestrel lilac'
+         write(unit, '(A)') 'amber birch cedar dahlia ember fern granite harbor indigo juniper kestrel lilac'
+         close(unit)
+      end if
+      hierarchical_config = config
+      hierarchical_config%max_vocabulary = 16_int32
+      hierarchical_config%min_frequency = 1_int64
+      hierarchical_config%epochs = 1_int32
+      hierarchical_config%strict_tokenization = .true.
+      hierarchical_config%context_mode = PT_CONTEXT_HIERARCHICAL
+      local_only_config = hierarchical_config
+      local_only_config%context_mode = PT_CONTEXT_HYBRID
+      call pretrain_build_vocabulary(hierarchical_model, HIERARCHICAL_PATH, hierarchical_config, &
+                                     vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'hierarchical vocabulary pass succeeds')
+      call pretrain_train_file(hierarchical_model, HIERARCHICAL_PATH, hierarchical_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'hierarchical long-record training succeeds')
+      call pretrain_build_vocabulary(local_only_model, HIERARCHICAL_PATH, local_only_config, &
+                                     vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'local-only comparison vocabulary pass succeeds')
+      call pretrain_train_file(local_only_model, HIERARCHICAL_PATH, local_only_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'local-only comparison training succeeds')
+      call assert_true(any(hierarchical_model%semantic_bits /= local_only_model%semantic_bits), &
+                       'hierarchical long-record summary changes learned semantic prototypes')
+      reference_config = hierarchical_config
+      reference_config%reference_context_kernel = .true.
+      call pretrain_build_vocabulary(hierarchical_replay, HIERARCHICAL_PATH, reference_config, &
+                                     vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'hierarchical reference vocabulary pass succeeds')
+      call pretrain_train_file(hierarchical_replay, HIERARCHICAL_PATH, reference_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'hierarchical reference training succeeds')
+      call assert_true(all(hierarchical_model%semantic_bits == hierarchical_replay%semantic_bits), &
+                       'hierarchical fused local context remains bit-identical to reference learning')
+      call pretrain_checkpoint_save(hierarchical_model, CHECKPOINT_PATH, status)
+      call assert_i32_equal(status, PT_OK, 'hierarchical checkpoint save succeeds')
+      call pretrain_checkpoint_load(CHECKPOINT_PATH, restored, status)
+      call assert_i32_equal(status, PT_OK, 'hierarchical checkpoint load succeeds')
+      call assert_i32_equal(restored%context_mode, PT_CONTEXT_HIERARCHICAL, &
+                            'checkpoint preserves hierarchical encoder semantics')
+      call assert_true(all(restored%semantic_bits == hierarchical_model%semantic_bits), &
+                       'hierarchical checkpoint restores semantic prototypes')
 
       call pretrain_checkpoint_save(model_a, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'pretraining checkpoint save succeeds')
@@ -635,6 +741,12 @@ contains
       call pretrain_model_destroy(legacy_model)
       call pretrain_model_destroy(positional_model)
       call pretrain_model_destroy(continuation_model)
+      call pretrain_model_destroy(hierarchical_model)
+      call pretrain_model_destroy(local_only_model)
+      call pretrain_model_destroy(hierarchical_replay)
+      call pretrain_model_destroy(short_hierarchical_model)
+      open(newunit=unit, file=HIERARCHICAL_PATH, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
       open(newunit=unit, file=CONTINUATION_A_PATH, status='old', iostat=io_status)
       if (io_status == 0) close(unit, status='delete')
       open(newunit=unit, file=CONTINUATION_B_PATH, status='old', iostat=io_status)

@@ -33,6 +33,11 @@ Cᵢ = majority_tie_seeded(Vpos ∪ Vtopic)
 S(wᵢ) ← replace_exact_fraction(S(wᵢ), Cᵢ, learning_rate(experience(wᵢ)))
 ```
 
+`hierarchical` modunda, bir satırda en az 12 active token olduğunda önce bir kez
+`L = majority_tie_seeded({B(wⱼ)})` kurulur ve her center için `Cᵢ` bundle'ına
+`L, L, L` eklenir. Bu üç katkı sabittir; context satır sınırını geçmez ve
+bit-sliced accumulator kapasitesi tarafından üstten sınırlandırılır.
+
 - `W`, context window; `P`, `position_shift_bits` değeridir.
 - `hybrid` varsayılandır: left/right role bilgisini `Vpos` içinde korurken,
   aynı topical neighbourhood'u paylaşan token'ların `Vtopic` sayesinde daha
@@ -40,6 +45,11 @@ S(wᵢ) ← replace_exact_fraction(S(wᵢ), Cᵢ, learning_rate(experience(wᵢ)
 - `positional`, yalnız `Vpos` kullanır. Bu modun bit-sliced implementation'ı,
   eski `legacy` signed-counter implementation'ı ile unit-weight context için
   bit-tam eşdeğerdir.
+- `hierarchical`, `hybrid` yerel bundle'ını aynen korur; yalnız bir kayıtta
+  en az 12 active token varsa bütün kaydın base-vector majority özetini üç
+  bounded katkı olarak her eligible center'a ekler. Bu uzun-kayıt topical
+  cohesion için kontrollü bir seçenektir; document understanding iddiası
+  değildir. Sekiz-token örnek fixture bu eşiğin altında kalır ve etkilenmez.
 - `legacy`, önceki positional signed-counter yolu için regression/benchmark
   referansıdır; yeni eğitimler için önerilmez.
 - `majority_tie_seeded`, yeni modlarda word-parallel `hv_bitacc_t` binary
@@ -167,18 +177,22 @@ cmake --build build --parallel
 | `--min-frequency N` | 2 | active vocabulary threshold |
 | `--window N` | 4 | her yönde context yarıçapı |
 | `--position-shift N` | 73 | relative position başına bit shift |
-| `--context-mode MODE` | `hybrid` | `legacy`, bit-tam hızlı `positional` veya positional+topical `hybrid` encoder |
+| `--context-mode MODE` | `hybrid` | `legacy`, bit-tam hızlı `positional`, positional+topical `hybrid` veya yalnız ≥12 active-token kayıtta bounded whole-record topical evidence ekleyen `hierarchical` |
 | `--epochs N` | 1 | ikinci corpus geçişi sayısı |
 | `--initial-plasticity N` | 25 | başlangıç selected-dimension yüzdesi |
 | `--minimum-plasticity N` | 1 | schedule alt sınırı |
 | `--decay-events N` | 32 | token başına ilk schedule eşiği |
 | `--strict` | kapalı | drop/truncation durumunu hata yap |
+| `--reference-context-kernel` | kapalı | yalnız benchmark/regression için önceki rotate-then-add kernelini kullanır; fused varsayılanla checkpoint byte'ları bit-tam eşit olmalıdır |
 | `--query TOKEN` | yok | eğitimden sonra veya `inspect` sırasında bir semantic neighbour göster |
 | `inspect --query-file PATH` | yok | her nonblank satırdaki tek token için tek checkpoint load ile batch nearest-neighbour diagnostic |
 
 `resume`, checkpoint'ten vocabulary threshold/capacity, `window`, shift,
 context encoder, plasticity ve tie seed'ini geri alır; yalnız `--epochs`,
-`--strict`, `--query` kabul eder ve vocabulary'yi değiştirmez. `continue` aynı
+`--strict`, `--query` ve implementation-only `--reference-context-kernel`
+kabul eder ve vocabulary'yi değiştirmez. Reference switch checkpoint semantiği
+veya payload değildir; `continue` için de sadece benchmark/regression amacıyla
+kullanılabilir. `continue` aynı
 uyumlu config'i geri alır, önce yeni shard'ın token'larını vocabulary'ye ekler,
 yalnız newly-active slotları başlatır, ardından shard'ı train eder. Öğrenme
 semantiğini checkpoint'ten farklı bir config ile sürdürme
@@ -225,11 +239,15 @@ telemetridir.
 `pretrain_checkpoint_save` stream-unformatted bir `.vgai` dosyası yazar;
 `pretrain_checkpoint_load` magic/version, shape, counter sign, vocabulary
 frequency/active invariantları, rebuilt hash index ve payload checksum kontrolü
-yapar. Versiyon şu an **4**tür; v4, context encoder semantiğini payload ve
-checksum'a dahil eder. Önceki v3 checkpoint'ler v4 executable ile resume
-edilmez; corpus manifesti ve source commit ile yeniden train edilmelidir.
-Checksum yalnız accidental corruption tespiti içindir; kriptografik
-bütünlük/imza değildir.
+yapar. Writer sürümü şu an **5**tir. v5, `hierarchical` context-mode enum'unu
+kabul eder ve v5 header değeriyle checksum üretir; reader hem v4 hem v5
+checkpoint'i, checkpoint'in kendi version değeriyle checksum hesaplayarak
+okur. Böylece mevcut v4 payload layout'u okunabilir kalır; v3 ve daha eski
+checkpoint'ler reddedilir ve corpus manifesti + source commit ile yeniden train
+edilmelidir. `--reference-context-kernel` bilerek checkpoint state
+olmadığından fused/reference run'ları aynı semantic model için byte-tam aynı
+checkpoint üretmelidir. Checksum yalnız accidental corruption tespiti içindir;
+kriptografik bütünlük/imza değildir.
 
 Checkpoint aşağıdakileri taşır:
 
@@ -309,7 +327,12 @@ Native testler şunları kontrol eder:
   Hamming değişimi);
 - bit-sliced `positional` bundle'ın legacy signed-counter bundle ile her
   cardinality'de bit eşitliği ve aynı corpus run'ında semantic plane eşitliği;
-- iki aynı `hybrid` corpus run'ının base/prototype/experience bit eşitliği;
+- fused raw-SoA/permuted/pair accumulator'ın reference eklemeyle her counter
+  plane ve sample count için bit eşitliği; pair overflow'unda atomic state;
+- fused `hybrid` corpus run'ının rotate-then-add reference kernel ile semantic
+  plane, base plane ve learning schedule bakımından bit-tam eşitliği;
+- ≥12 active-token controlled record üzerinde `hierarchical` replay
+  determinismi, local-only hybrid'den ayrışması ve checkpoint round-trip'i;
 - windowed context count ve active/OOV telemetry;
 - checkpoint round-trip ve uninterrupted run ile checkpoint-resume run'ın
   bit-tam eşitliği;
@@ -317,12 +340,15 @@ Native testler şunları kontrol eder:
   yolları.
 
 CI ayrıca küçük corpus ile `train → inspect → resume` CLI smoke testini ve
-optimized Make binary üzerinde `tools/compare_pretraining_modes.py` ile
-`legacy → positional → hybrid` karşılaştırmasını çalıştırır. Karşılaştırma,
-aynı 64-token sentetik fixture üzerinde doğrudan `vegai_pretrain train`
-wall-clock medyanını ve gerçek checkpoint/CLI ile controlled Top-1 semantic
-cohesion sinyalini raporlar. Bu kontrollü tanı, doğal dil yeteneği veya
-production throughput garantisi değildir.
+optimized Make binary üzerinde `tools/compare_pretraining_modes.py` çalıştırır.
+Araç, yalnız gerçek `vegai_pretrain train` child-process wall-clock'ını ölçer:
+compiler/CI setup, fixture construction, inspect ve Python harness süreleri
+hariçtir. Base 64-token fixture üzerinde `legacy → positional → fused hybrid`
+oranlarını; aynı hybrid config için reference rotate-then-add ile fused kernel
+checkpoint byte eşitliği + süre oranını; ayrıca 16-token-record kontrollü
+fixture üzerinde `hybrid → hierarchical` Top-1 cohesion diagnostic'ini
+raporlar. Bunlar kontrollü tanılardır; doğal dil yeteneği veya production
+throughput garantisi değildir.
 
 ```bash
 python3 tools/compare_pretraining_modes.py \

@@ -53,7 +53,8 @@ module hyper_types
    public :: hv_bind, hv_bundle3, hv_permute
    public :: hv_hamming, hv_similarity, hv_hamming_zscore, hv_equal
    public :: hv_acc_reset, hv_acc_add, hv_acc_finalize
-   public :: hv_bitacc_reset, hv_bitacc_add, hv_bitacc_finalize
+   public :: hv_bitacc_reset, hv_bitacc_add, hv_bitacc_add_words
+   public :: hv_bitacc_add_permuted_words, hv_bitacc_add_permuted_pair_words, hv_bitacc_finalize
    public :: hv_hebbian_update, hv_hebbian_update_percent
    public :: hv_inject_noise_exact, hv_inject_noise_percent
 
@@ -388,11 +389,20 @@ contains
 
    ! Adds a binary hypervector to each independent bit counter.  The carry
    ! chain is a ripple adder over bit planes, but each plane contains 64 HDC
-   ! dimensions at once.  Preflighting sample_count keeps a rejected overflow
-   ! atomic, just as hv_acc_add does.
+   ! dimensions at once.  The raw-word entry point lets high-throughput callers
+   ! consume a column of a structure-of-arrays model without creating a 2 KiB
+   ! temporary hv_t.
    pure subroutine hv_bitacc_add(acc, vector, status)
       type(hv_bitacc_t), intent(inout) :: acc
       type(hv_t), intent(in) :: vector
+      integer(int32), intent(out) :: status
+
+      call hv_bitacc_add_words(acc, vector%bits, status)
+   end subroutine hv_bitacc_add
+
+   pure subroutine hv_bitacc_add_words(acc, vector_words, status)
+      type(hv_bitacc_t), intent(inout) :: acc
+      integer(int64), intent(in) :: vector_words(HV_WORDS)
       integer(int32), intent(out) :: status
       integer(int64) :: carry, previous
       integer(int32) :: word, plane
@@ -404,7 +414,7 @@ contains
       end if
 
       do word = 1, HV_WORDS
-         carry = vector%bits(word)
+         carry = vector_words(word)
          do plane = 1, HV_BITACC_PLANES
             previous = acc%planes(plane, word)
             acc%planes(plane, word) = ieor(previous, carry)
@@ -412,7 +422,90 @@ contains
          end do
       end do
       acc%sample_count = acc%sample_count + 1_int32
-   end subroutine hv_bitacc_add
+   end subroutine hv_bitacc_add_words
+
+   ! Fuses hv_permute(vector, shift_bits) with one bit-sliced add.  It is
+   ! deliberately bit-identical to the two public primitives, but avoids an
+   ! intermediate hypervector allocation/copy for each ordered context edge.
+   pure subroutine hv_bitacc_add_permuted_words(acc, vector_words, shift_bits, status)
+      type(hv_bitacc_t), intent(inout) :: acc
+      integer(int64), intent(in) :: vector_words(HV_WORDS)
+      integer(int32), intent(in) :: shift_bits
+      integer(int32), intent(out) :: status
+      integer(int64) :: carry, previous, permuted_word
+      integer(int32) :: total_shift, word_shift, bit_shift, word, plane, source_hi, source_lo
+
+      status = HV_OK
+      if (acc%sample_count >= HV_BITACC_MAX_ITEMS) then
+         status = HV_ERR_ACCUMULATOR_OVERFLOW
+         return
+      end if
+
+      total_shift = modulo(shift_bits, HV_BITS)
+      word_shift = total_shift / WORD_BITS
+      bit_shift = modulo(total_shift, WORD_BITS)
+      do word = 1, HV_WORDS
+         source_hi = modulo(word - 1_int32 - word_shift, HV_WORDS) + 1_int32
+         if (bit_shift == 0_int32) then
+            permuted_word = vector_words(source_hi)
+         else
+            source_lo = modulo(word - 2_int32 - word_shift, HV_WORDS) + 1_int32
+            permuted_word = ior(ishft(vector_words(source_hi), bit_shift), &
+                                ishft(vector_words(source_lo), bit_shift - WORD_BITS))
+         end if
+         carry = permuted_word
+         do plane = 1, HV_BITACC_PLANES
+            previous = acc%planes(plane, word)
+            acc%planes(plane, word) = ieor(previous, carry)
+            carry = iand(previous, carry)
+         end do
+      end do
+      acc%sample_count = acc%sample_count + 1_int32
+   end subroutine hv_bitacc_add_permuted_words
+
+   ! Adds a position-permuted vector and its unpermuted identity view in one
+   ! binary-counter pass.  For plane zero the carry is the three-input majority
+   ! of old_count, permuted bit and topical bit; higher planes receive that
+   ! carry normally.  The result is exactly equivalent to two sequential adds.
+   pure subroutine hv_bitacc_add_permuted_pair_words(acc, vector_words, shift_bits, status)
+      type(hv_bitacc_t), intent(inout) :: acc
+      integer(int64), intent(in) :: vector_words(HV_WORDS)
+      integer(int32), intent(in) :: shift_bits
+      integer(int32), intent(out) :: status
+      integer(int64) :: carry, previous, permuted_word, topical_word
+      integer(int32) :: total_shift, word_shift, bit_shift, word, plane, source_hi, source_lo
+
+      status = HV_OK
+      if (acc%sample_count > HV_BITACC_MAX_ITEMS - 2_int32) then
+         status = HV_ERR_ACCUMULATOR_OVERFLOW
+         return
+      end if
+
+      total_shift = modulo(shift_bits, HV_BITS)
+      word_shift = total_shift / WORD_BITS
+      bit_shift = modulo(total_shift, WORD_BITS)
+      do word = 1, HV_WORDS
+         source_hi = modulo(word - 1_int32 - word_shift, HV_WORDS) + 1_int32
+         if (bit_shift == 0_int32) then
+            permuted_word = vector_words(source_hi)
+         else
+            source_lo = modulo(word - 2_int32 - word_shift, HV_WORDS) + 1_int32
+            permuted_word = ior(ishft(vector_words(source_hi), bit_shift), &
+                                ishft(vector_words(source_lo), bit_shift - WORD_BITS))
+         end if
+         topical_word = vector_words(word)
+         previous = acc%planes(1, word)
+         acc%planes(1, word) = ieor(ieor(previous, permuted_word), topical_word)
+         carry = ior(iand(previous, permuted_word), &
+                     ior(iand(previous, topical_word), iand(permuted_word, topical_word)))
+         do plane = 2, HV_BITACC_PLANES
+            previous = acc%planes(plane, word)
+            acc%planes(plane, word) = ieor(previous, carry)
+            carry = iand(previous, carry)
+         end do
+      end do
+      acc%sample_count = acc%sample_count + 2_int32
+   end subroutine hv_bitacc_add_permuted_pair_words
 
    ! Thresholds bit-sliced binary population counters without unpacking any of
    ! the 16,384 dimensions.  For even cardinalities equality with N/2 gets the

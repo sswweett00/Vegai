@@ -111,6 +111,8 @@ def main() -> int:
                 "1",
                 "--window",
                 "2",
+                "--context-mode",
+                "hierarchical",
                 "--epochs",
                 "1",
                 "--max-shards",
@@ -124,6 +126,8 @@ def main() -> int:
             state_one = load_state(state_path)
             if state_one.get("generation") != 1 or len(state_one.get("applied_shards", [])) != 1:
                 fail(f"first state does not contain exactly one commit: {state_one}")
+            if state_one.get("policy", {}).get("context_mode") != "hierarchical":
+                fail(f"continuous policy did not preserve hierarchical mode: {state_one}")
 
             # A pending shard must remain immutable under the SHA identity in
             # the ledger.  Its mutation is rejected before the real CLI sees it.

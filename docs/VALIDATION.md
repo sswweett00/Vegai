@@ -101,13 +101,20 @@ ve `mini_turkish_ascii_pretrain.txt` ile manifest, dengeli-token cardinality,
 bit-tam çift checkpoint ve `train → inspect → resume` integration zincirini
 çalıştırır. CTest'in `vegai_continuous_pretraining` entegrasyonu gerçek CLI ile
 SHA-256 shard mutation rejection, append-only manifest prefix, OOV=0 ve
-idempotent restart journal davranışını ayrıca sınar. CI ayrıca optimized Make
-binary ile aynı corpus/config üzerinde `tools/compare_pretraining_modes.py`
-çalıştırır; `legacy → positional → hybrid`
-modlarının isolate edilmiş `train` wall-clock medyanını, token/saniyesini ve
-checkpoint üzerinden controlled Top-1 topical-cohesion ölçümünü workflow
-summary'ye yazar. Bu fixture'lar yalnız pipeline doğrulaması ve kontrollü
-retrieval diagnostic'idir; semantic kalite veya dil yeteneği benchmarkı değildir.
+idempotent restart journal davranışını ayrıca sınar.
+
+CI ayrıca optimized Make binary ile `tools/compare_pretraining_modes.py`
+çalıştırır. Native testler fused raw-word/permuted/pair accumulator plane
+bit-eşitliğini, fused/reference hybrid ile hierarchical replay eşitliğini ve
+hierarchical checkpoint round-trip'ini denetler. Python comparison aracı ise
+sadece her bir gerçek `vegai_pretrain train` child-process wall-clock'ını
+raporlar: compiler, CI setup, fixture construction, inspect ve harness süresi
+ölçüye girmez. Workflow summary; `legacy → positional → fused hybrid` temel
+karşılaştırmasını, fused/reference hybrid checkpoint byte eşitliği + hız
+oranını ve ayrı 16-token-record controlled `hybrid → hierarchical` topical
+cohesion diagnostic'ini yazar. Bu fixture'lar yalnız pipeline doğrulaması ve
+sınırlı retrieval diagnostic'idir; semantic kalite, doğal dil yeteneği veya
+production throughput benchmarkı değildir.
 
 ## Olasılık modeli ve sayısal marjlar
 

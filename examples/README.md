@@ -76,8 +76,9 @@ neighbour etiketi özellikle assert edilmez: HDC context prototype'ı için bu
 fixture ancak diagnostic sinyal üretir, anlam doğruluğu sertifikası değildir.
 Gerçek executable run'ın counter/schedule/checkpoint ayrıntıları
 [`docs/EXAMPLE_PRETRAINING_RUN.md`](../docs/EXAMPLE_PRETRAINING_RUN.md)
-belgesindedir. `legacy`, bit-tam hızlı `positional` ve varsayılan `hybrid`
-encoder'ın eğitim hızı ile controlled topical-cohesion karşılaştırması için:
+belgesindedir. `legacy`, bit-tam hızlı `positional`, fused varsayılan `hybrid`
+ve ayrı long-record `hierarchical` controlled diagnostic'i ile fused/reference
+checkpoint byte-eşitliği karşılaştırması için:
 
 ```bash
 python3 tools/compare_pretraining_modes.py \

@@ -40,11 +40,16 @@ def main() -> int:
     parser.add_argument("--epochs", type=int, default=2, help="complete fixture epochs to train (default: 2)")
     parser.add_argument(
         "--context-mode",
-        choices=("legacy", "positional", "hybrid"),
+        choices=("legacy", "positional", "hybrid", "hierarchical"),
         default="hybrid",
         help="context encoder used by the timed train command (default: hybrid)",
     )
     parser.add_argument("--omp-threads", type=int, default=1, help="OMP_NUM_THREADS for the child command")
+    parser.add_argument(
+        "--reference-context-kernel",
+        action="store_true",
+        help="time the exact rotate-then-add regression kernel instead of the fused default",
+    )
     arguments = parser.parse_args()
 
     if arguments.epochs <= 0:
@@ -85,6 +90,8 @@ def main() -> int:
         "8",
         "--strict",
     ]
+    if arguments.reference_context_kernel:
+        command.append("--reference-context-kernel")
     environment = os.environ.copy()
     environment["OMP_NUM_THREADS"] = str(arguments.omp_threads)
 
@@ -131,6 +138,7 @@ def main() -> int:
         "compile_or_test_time_included": False,
         "epochs": completed_epochs,
         "context_mode": arguments.context_mode,
+        "reference_context_kernel": arguments.reference_context_kernel,
         "training_tokens": raw_tokens,
         "active_training_tokens": active_tokens,
         "context_pairs": context_pairs,

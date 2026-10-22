@@ -36,13 +36,21 @@ module hdc_pretraining
    ! contracts.  LEGACY_POSITIONAL retains the original signed-counter path for
    ! regression comparison; POSITIONAL is its bit-identical bit-sliced fast
    ! implementation; HYBRID adds an order-invariant semantic view alongside
-   ! the positional view to strengthen topical retrieval.
+   ! the positional view to strengthen topical retrieval; HIERARCHICAL adds a
+   ! bounded whole-record view only for sufficiently long records.
    integer(int32), parameter, public :: PT_CONTEXT_LEGACY_POSITIONAL = 1_int32
    integer(int32), parameter, public :: PT_CONTEXT_POSITIONAL = 2_int32
    integer(int32), parameter, public :: PT_CONTEXT_HYBRID = 3_int32
+   ! HIERARCHICAL retains hybrid's local positional/topic evidence and adds a
+   ! bounded whole-record topical summary for records with many active tokens.
+   integer(int32), parameter, public :: PT_CONTEXT_HIERARCHICAL = 4_int32
+
+   integer(int32), parameter :: HIERARCHICAL_MIN_ACTIVE_TOKENS = 12_int32
+   integer(int32), parameter :: HIERARCHICAL_GLOBAL_CONTEXT_WEIGHT = 3_int32
 
    character(len=8), parameter :: CHECKPOINT_MAGIC = 'VGHDC001'
-   integer(int32), parameter :: CHECKPOINT_VERSION = 4_int32
+   integer(int32), parameter :: CHECKPOINT_VERSION = 5_int32
+   integer(int32), parameter :: CHECKPOINT_MIN_VERSION = 4_int32
 
    type, public :: hdc_pretrain_config_t
       integer(int32) :: max_vocabulary = 20000_int32
@@ -56,6 +64,10 @@ module hdc_pretraining
       integer(int32) :: plasticity_decay_events = 32_int32
       integer(int64) :: tie_seed = int(z'6A09E667F3BCC909', int64)
       logical :: strict_tokenization = .false.
+      ! Benchmark/regression switch only: both paths are semantically exact.
+      ! It is deliberately not checkpoint state, so a fast resume can continue
+      ! a checkpoint originally trained with the reference implementation.
+      logical :: reference_context_kernel = .false.
    end type hdc_pretrain_config_t
 
    type, public :: pretrain_metrics_t
@@ -117,6 +129,8 @@ contains
          name = 'positional'
       case (PT_CONTEXT_HYBRID)
          name = 'hybrid'
+      case (PT_CONTEXT_HIERARCHICAL)
+         name = 'hierarchical'
       case default
          name = 'invalid'
       end select
@@ -176,7 +190,8 @@ contains
       end if
       if (config%context_mode /= PT_CONTEXT_LEGACY_POSITIONAL .and. &
           config%context_mode /= PT_CONTEXT_POSITIONAL .and. &
-          config%context_mode /= PT_CONTEXT_HYBRID) then
+          config%context_mode /= PT_CONTEXT_HYBRID .and. &
+          config%context_mode /= PT_CONTEXT_HIERARCHICAL) then
          status = PT_ERR_INVALID_ARGUMENT
          return
       end if
@@ -628,28 +643,71 @@ contains
       end if
    end function scheduled_plasticity_percent
 
-   subroutine pretrain_update_center(model, config, token_slots, n_tokens, center_index, metrics, status)
+   ! A hierarchical record summary is built once per input line, then shared
+   ! by all eligible centers on that line.  It is a bounded topical signal, not
+   ! an unbounded document memory: only records with at least twelve active
+   ! tokens activate it, and the local update later caps its multiplicity by
+   ! the bit-sliced accumulator capacity.
+   subroutine pretrain_build_line_topic_context(model, token_slots, n_tokens, line_context, &
+                                                active_count, status)
+      type(hdc_pretrain_model_t), intent(in) :: model
+      integer(int32), intent(in) :: token_slots(:)
+      integer(int32), intent(in) :: n_tokens
+      type(hv_t), intent(out) :: line_context
+      integer(int32), intent(out) :: active_count
+      integer(int32), intent(out) :: status
+      type(hv_bitacc_t) :: line_accumulator
+      integer(int32) :: token_index, slot, add_status
+
+      line_context = hv_zero()
+      active_count = 0_int32
+      status = PT_OK
+      call hv_bitacc_reset(line_accumulator)
+      do token_index = 1, n_tokens
+         slot = token_slots(token_index)
+         if (slot == 0_int32) cycle
+         call hv_bitacc_add_words(line_accumulator, model%base_bits(:, slot), add_status)
+         if (add_status /= HV_OK) then
+            status = PT_ERR_HYPERVECTOR
+            return
+         end if
+         active_count = active_count + 1_int32
+      end do
+      if (active_count >= HIERARCHICAL_MIN_ACTIVE_TOKENS) then
+         line_context = hv_bitacc_finalize(line_accumulator, model%tie_seed)
+      end if
+   end subroutine pretrain_build_line_topic_context
+
+   subroutine pretrain_update_center(model, config, token_slots, n_tokens, center_index, &
+                                     line_topic_context, line_active_tokens, metrics, status)
       type(hdc_pretrain_model_t), intent(inout) :: model
       type(hdc_pretrain_config_t), intent(in) :: config
       integer(int32), intent(in) :: token_slots(:)
       integer(int32), intent(in) :: n_tokens, center_index
+      type(hv_t), intent(in) :: line_topic_context
+      integer(int32), intent(in) :: line_active_tokens
       type(pretrain_metrics_t), intent(inout) :: metrics
       integer(int32), intent(out) :: status
       type(hv_acc_t) :: legacy_accumulator
       type(hv_bitacc_t) :: bit_accumulator
       type(hv_t) :: neighbor, positioned, context, prototype, updated
       integer(int32) :: center_slot, offset, neighbor_index, neighbor_slot
-      integer(int32) :: add_status, update_status, shift_bits, neighbors
+      integer(int32) :: add_status, update_status, shift_bits, neighbors, global_items, global_index
       integer(int32) :: plasticity_percent
       integer(int64) :: tie_seed
+      logical :: reference_kernel, topic_mode
 
       status = PT_OK
       center_slot = token_slots(center_index)
       if (center_slot == 0_int32) return
 
-      ! The legacy path is retained as a regression oracle.  New positional
-      ! and hybrid modes use the bit-sliced accumulator, whose unit-weight
-      ! majority is bit-identical to hv_acc_t without per-dimension branches.
+      ! LEGACY is the signed-counter oracle.  The reference switch retains the
+      ! previous bit-sliced rotate-then-add implementation for fair before/after
+      ! timing, while the default fuses the same arithmetic directly over the
+      ! vocabulary's word-major SoA column.
+      reference_kernel = config%reference_context_kernel
+      topic_mode = config%context_mode == PT_CONTEXT_HYBRID .or. &
+                   config%context_mode == PT_CONTEXT_HIERARCHICAL
       if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL) then
          call hv_acc_reset(legacy_accumulator)
       else
@@ -663,25 +721,40 @@ contains
          neighbor_slot = token_slots(neighbor_index)
          if (neighbor_slot == 0_int32) cycle
 
-         neighbor%bits = model%base_bits(:, neighbor_slot)
          shift_bits = int(int(offset, int64) * int(config%position_shift_bits, int64), int32)
-         positioned = hv_permute(neighbor, shift_bits)
-         if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL) then
-            call hv_acc_add(legacy_accumulator, positioned, add_status)
+         if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL .or. reference_kernel) then
+            neighbor%bits = model%base_bits(:, neighbor_slot)
+            positioned = hv_permute(neighbor, shift_bits)
+            if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL) then
+               call hv_acc_add(legacy_accumulator, positioned, add_status)
+            else
+               call hv_bitacc_add(bit_accumulator, positioned, add_status)
+            end if
+            if (add_status /= HV_OK) then
+               status = PT_ERR_HYPERVECTOR
+               return
+            end if
+            if (topic_mode) then
+               call hv_bitacc_add(bit_accumulator, neighbor, add_status)
+               if (add_status /= HV_OK) then
+                  status = PT_ERR_HYPERVECTOR
+                  return
+               end if
+            end if
+         else if (config%context_mode == PT_CONTEXT_POSITIONAL) then
+            call hv_bitacc_add_permuted_words(bit_accumulator, model%base_bits(:, neighbor_slot), &
+                                               shift_bits, add_status)
+            if (add_status /= HV_OK) then
+               status = PT_ERR_HYPERVECTOR
+               return
+            end if
          else
-            call hv_bitacc_add(bit_accumulator, positioned, add_status)
-         end if
-         if (add_status /= HV_OK) then
-            status = PT_ERR_HYPERVECTOR
-            return
-         end if
-
-         ! Hybrid learning adds a second, unpermuted identity view.  Position
-         ! remains encoded by the first view, while the second causes tokens
-         ! sharing a topical neighbourhood to converge rather than treating
-         ! left/right rotations as unrelated semantic evidence.
-         if (config%context_mode == PT_CONTEXT_HYBRID) then
-            call hv_bitacc_add(bit_accumulator, neighbor, add_status)
+            ! HYBRID and HIERARCHICAL share the exact local positional+topic
+            ! representation.  The pair kernel is algebraically identical to
+            ! two adds but eliminates both a 2 KiB rotate temporary and a
+            ! second carry pass.
+            call hv_bitacc_add_permuted_pair_words(bit_accumulator, model%base_bits(:, neighbor_slot), &
+                                                    shift_bits, add_status)
             if (add_status /= HV_OK) then
                status = PT_ERR_HYPERVECTOR
                return
@@ -692,6 +765,19 @@ contains
          if (status /= PT_OK) return
       end do
       if (neighbors == 0_int32) return
+
+      if (config%context_mode == PT_CONTEXT_HIERARCHICAL .and. &
+          line_active_tokens >= HIERARCHICAL_MIN_ACTIVE_TOKENS) then
+         global_items = min(HIERARCHICAL_GLOBAL_CONTEXT_WEIGHT, &
+                            HV_BITACC_MAX_ITEMS - bit_accumulator%sample_count)
+         do global_index = 1, global_items
+            call hv_bitacc_add(bit_accumulator, line_topic_context, add_status)
+            if (add_status /= HV_OK) then
+               status = PT_ERR_HYPERVECTOR
+               return
+            end if
+         end do
+      end if
 
       tie_seed = ieor(vocab_seed_for_slot(model%vocabulary, center_slot), &
                       ishftc(model%experience_count(center_slot), 19))
@@ -726,8 +812,9 @@ contains
       character(len=TOKEN_LEN) :: tokens(MAX_TOKENS_PER_LINE)
       integer(int32) :: token_slots(MAX_TOKENS_PER_LINE)
       integer :: unit, io_status
-      integer(int32) :: token_index, n_tokens, slot, vocab_status
+      integer(int32) :: token_index, n_tokens, slot, vocab_status, line_active_tokens
       integer(int64) :: non_ascii_count
+      type(hv_t) :: line_topic_context
       logical :: eof, found, overlong, truncated
 
       status = PT_OK
@@ -789,8 +876,16 @@ contains
          end do
          if (status /= PT_OK) exit
 
+         line_topic_context = hv_zero()
+         line_active_tokens = 0_int32
+         if (config%context_mode == PT_CONTEXT_HIERARCHICAL) then
+            call pretrain_build_line_topic_context(model, token_slots, n_tokens, line_topic_context, &
+                                                   line_active_tokens, status)
+            if (status /= PT_OK) exit
+         end if
          do token_index = 1, n_tokens
-            call pretrain_update_center(model, config, token_slots, n_tokens, token_index, metrics, status)
+            call pretrain_update_center(model, config, token_slots, n_tokens, token_index, &
+                                        line_topic_context, line_active_tokens, metrics, status)
             if (status /= PT_OK) exit
          end do
          if (status /= PT_OK) exit
@@ -995,13 +1090,14 @@ contains
       mixed = ieor(mixed, ishftc(state, -27))
    end function checkpoint_mix
 
-   pure function model_checkpoint_checksum(model) result(checksum)
+   pure function model_checkpoint_checksum(model, checkpoint_version) result(checksum)
       type(hdc_pretrain_model_t), intent(in) :: model
+      integer(int32), intent(in) :: checkpoint_version
       integer(int64) :: checksum
       integer(int32) :: slot, word, character_index
 
       checksum = int(z'BB67AE8584CAA73B', int64)
-      checksum = checkpoint_mix(checksum, int(CHECKPOINT_VERSION, int64))
+      checksum = checkpoint_mix(checksum, int(checkpoint_version, int64))
       checksum = checkpoint_mix(checksum, int(model%vocabulary%capacity, int64))
       checksum = checkpoint_mix(checksum, int(model%vocabulary%count, int64))
       checksum = checkpoint_mix(checksum, int(model%vocabulary%active_count, int64))
@@ -1084,7 +1180,7 @@ contains
       if (io_status == 0) write(unit, iostat=io_status) model%semantic_bits
       if (io_status == 0) write(unit, iostat=io_status) model%experience_count
       if (io_status == 0) then
-         checksum = model_checkpoint_checksum(model)
+         checksum = model_checkpoint_checksum(model, CHECKPOINT_VERSION)
          write(unit, iostat=io_status) checksum
       end if
       close(unit)
@@ -1120,7 +1216,8 @@ contains
          status = PT_ERR_CHECKPOINT
          return
       end if
-      if (magic /= CHECKPOINT_MAGIC .or. version /= CHECKPOINT_VERSION) then
+      if (magic /= CHECKPOINT_MAGIC .or. version < CHECKPOINT_MIN_VERSION .or. &
+          version > CHECKPOINT_VERSION) then
          close(unit)
          status = PT_ERR_CHECKPOINT
          return
@@ -1225,7 +1322,7 @@ contains
          return
       end if
       if (any(model%experience_count < 0_int64) .or. &
-          stored_checksum /= model_checkpoint_checksum(model)) then
+          stored_checksum /= model_checkpoint_checksum(model, version)) then
          status = PT_ERR_CHECKPOINT
          call pretrain_model_destroy(model)
          return

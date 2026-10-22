@@ -33,8 +33,9 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 >
 > **Corpus pretraining notu:** `vegai_pretrain`, Transformer/LLM eğitimi değil;
 > deterministik positional + order-invariant hybrid context'lerden HDC semantic
-> prototype öğrenimidir. Unicode corpus'lar ön-tokenization ister; veri yönetişimi,
-> checkpoint ve sınırlar [PRETRAINING.md](docs/PRETRAINING.md)'de, immutable
+> prototype öğrenimidir; `hierarchical` yalnız uzun kayıtlara bounded whole-record
+> topical evidence ekleyen kontrollü bir moddur. Unicode corpus'lar ön-tokenization
+> ister; veri yönetişimi, checkpoint ve sınırlar [PRETRAINING.md](docs/PRETRAINING.md)'de, immutable
 > shard'larla crash-safe continual çalışma ise
 > [CONTINUOUS_PRETRAINING.md](docs/CONTINUOUS_PRETRAINING.md)'de açıkça tanımlıdır.
 

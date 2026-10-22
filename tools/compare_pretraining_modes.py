@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Compare legacy, fast positional, and hybrid HDC pretraining modes.
+"""Compare exact fused HDC kernels and controlled context encoders.
 
-The benchmark runs complete ``vegai_pretrain train`` processes with a fixed,
-repository-authored corpus and times only those child processes.  It also asks
-the executable for every fixture token's nearest semantic neighbour, so its
-quality diagnostics use the real checkpoint and CLI instead of a Python model.
+Every elapsed sample in this report is one complete ``vegai_pretrain train``
+child process.  Compilation, test setup, fixture construction, checkpoint
+inspection, JSON rendering, and the Python harness are deliberately outside the
+timed interval.  The train process itself necessarily includes its vocabulary
+scan, streaming learning epochs, and checkpoint write.
 
-This is a controlled in-corpus semantic-cohesion diagnostic, not a natural
-language benchmark or a production throughput promise.  It is intended to
-make the optimization and hybrid-context trade-off inspectable in CI.
+The semantic measurements are deliberately narrow controlled diagnostics over
+repository-authored, disjoint topical token sets.  They are useful regression
+signals for this HDC/VSA implementation; they are not claims about natural
+language intelligence, held-out task accuracy, or production throughput.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -29,9 +32,13 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "examples" / "corpus" / "mini_turkish_ascii_pretrain.txt"
-EPOCHS = 2
-TRAINING_TOKENS = 2_048
-CONTEXT_PAIRS = 6_656
+BASE_EPOCHS = 2
+BASE_TRAINING_TOKENS = 2_048
+BASE_CONTEXT_PAIRS = 6_656
+BASE_MODES = ("legacy", "positional", "hybrid")
+LONG_CONTEXT_MODES = ("hybrid", "hierarchical")
+LONG_RECORDS_PER_CLUSTER = 16
+LONG_EPOCHS = 2
 
 CLUSTERS: tuple[tuple[str, ...], ...] = (
     ("okul", "ogrenci", "ogretmen", "ders", "kitap", "sinif", "odev", "bilgi"),
@@ -45,7 +52,6 @@ CLUSTERS: tuple[tuple[str, ...], ...] = (
 )
 TOKEN_TO_CLUSTER = {token: index for index, cluster in enumerate(CLUSTERS) for token in cluster}
 TOKENS = tuple(token for cluster in CLUSTERS for token in cluster)
-MODES = ("legacy", "positional", "hybrid")
 
 
 def fail(message: str) -> None:
@@ -64,6 +70,7 @@ def metric(output: str, label: str) -> int:
 
 
 def run(command: list[str], environment: dict[str, str]) -> tuple[str, float]:
+    """Run one command; callers only retain elapsed time for train commands."""
     started_ns = time.perf_counter_ns()
     result = subprocess.run(
         command,
@@ -80,11 +87,19 @@ def run(command: list[str], environment: dict[str, str]) -> tuple[str, float]:
     return result.stdout, elapsed_seconds
 
 
-def train_command(binary: Path, checkpoint: Path, mode: str) -> list[str]:
-    return [
+def train_command(
+    binary: Path,
+    corpus: Path,
+    checkpoint: Path,
+    mode: str,
+    epochs: int,
+    *,
+    reference_context_kernel: bool = False,
+) -> list[str]:
+    command = [
         str(binary),
         "train",
-        str(CORPUS),
+        str(corpus),
         str(checkpoint),
         "--max-vocab",
         "128",
@@ -97,7 +112,7 @@ def train_command(binary: Path, checkpoint: Path, mode: str) -> list[str]:
         "--context-mode",
         mode,
         "--epochs",
-        str(EPOCHS),
+        str(epochs),
         "--initial-plasticity",
         "25",
         "--minimum-plasticity",
@@ -106,34 +121,66 @@ def train_command(binary: Path, checkpoint: Path, mode: str) -> list[str]:
         "8",
         "--strict",
     ]
+    if reference_context_kernel:
+        command.append("--reference-context-kernel")
+    return command
 
 
-def validate_train_output(output: str) -> None:
+def validate_train_output(
+    output: str,
+    *,
+    epochs: int,
+    training_tokens: int,
+    context_pairs: int,
+) -> None:
     require("phase: vocabulary" in output, "training output omitted vocabulary phase")
     require("phase: streaming HDC context learning" in output, "training output omitted learning phase")
     _, training = output.split("phase: streaming HDC context learning", maxsplit=1)
-    require(metric(training, "completed epochs") == EPOCHS, "unexpected completed epoch count")
-    require(metric(training, "raw tokens") == TRAINING_TOKENS, "unexpected training token count")
-    require(metric(training, "active tokens") == TRAINING_TOKENS, "unexpected active training token count")
+    require(metric(training, "completed epochs") == epochs, "unexpected completed epoch count")
+    require(metric(training, "raw tokens") == training_tokens, "unexpected training token count")
+    require(metric(training, "active tokens") == training_tokens, "unexpected active training token count")
     require(metric(training, "out-of-vocabulary tokens") == 0, "fixture produced OOV training tokens")
-    require(metric(training, "ordered context pairs") == CONTEXT_PAIRS, "unexpected context-pair count")
-    require(metric(training, "prototype updates") == TRAINING_TOKENS, "unexpected prototype-update count")
+    require(metric(training, "ordered context pairs") == context_pairs, "unexpected context-pair count")
+    require(metric(training, "prototype updates") == training_tokens, "unexpected prototype-update count")
 
 
-def benchmark_mode(
+def benchmark_train(
     binary: Path,
+    corpus: Path,
     mode: str,
+    epochs: int,
+    training_tokens: int,
+    context_pairs: int,
     repetitions: int,
     workdir: Path,
     environment: dict[str, str],
+    *,
+    label: str,
+    reference_context_kernel: bool = False,
 ) -> tuple[dict[str, Any], Path]:
+    """Time only real train subprocesses and retain the final checkpoint."""
     samples: list[float] = []
-    checkpoint = workdir / f"{mode}-last.vgai"
+    checkpoint = workdir / f"{label}-last.vgai"
     for repetition in range(repetitions):
-        candidate = workdir / f"{mode}-{repetition}.vgai"
-        output, elapsed_seconds = run(train_command(binary, candidate, mode), environment)
-        validate_train_output(output)
-        require(candidate.is_file(), f"{mode} run did not write a checkpoint")
+        candidate = workdir / f"{label}-{repetition}.vgai"
+        output, elapsed_seconds = run(
+            train_command(
+                binary,
+                corpus,
+                candidate,
+                mode,
+                epochs,
+                reference_context_kernel=reference_context_kernel,
+            ),
+            environment,
+        )
+        validate_train_output(
+            output,
+            epochs=epochs,
+            training_tokens=training_tokens,
+            context_pairs=context_pairs,
+        )
+        require(candidate.is_file(), f"{label} run did not write a checkpoint")
         samples.append(elapsed_seconds)
         checkpoint = candidate
 
@@ -143,8 +190,9 @@ def benchmark_mode(
             "repetitions": repetitions,
             "samples_seconds": [round(value, 9) for value in samples],
             "median_seconds": round(median_seconds, 9),
-            "training_tokens": TRAINING_TOKENS,
-            "training_tokens_per_second": round(TRAINING_TOKENS / median_seconds, 3),
+            "training_tokens": training_tokens,
+            "training_tokens_per_second": round(training_tokens / median_seconds, 3),
+            "reference_context_kernel": reference_context_kernel,
         },
         checkpoint,
     )
@@ -157,6 +205,7 @@ def inspect_top1_quality(
     query_file: Path,
     environment: dict[str, str],
 ) -> dict[str, Any]:
+    """Use the real checkpoint/query path, but never include it in timing."""
     output, _ = run([str(binary), "inspect", str(checkpoint), "--query-file", str(query_file)], environment)
     require(f"context mode: {mode}" in output, f"checkpoint mode mismatch for {mode}")
     blocks = re.findall(
@@ -186,10 +235,37 @@ def inspect_top1_quality(
         "top1_neighbours": [[token, neighbour, round(similarity, 5)] for token, neighbour, similarity in matches],
     }
 
+
+def write_long_context_fixture(path: Path) -> tuple[int, int, int]:
+    """Create an explicit long-record controlled topical diagnostic fixture.
+
+    Each record repeats the eight tokens of exactly one disjoint cluster, making
+    sixteen active tokens per record.  It intentionally crosses the hierarchical
+    encoder's twelve-token threshold but contains no hidden linguistic claim.
+    """
+    record_token_count = 2 * len(CLUSTERS[0])
+    context_pairs_per_record = sum(
+        min(2, index) + min(2, record_token_count - 1 - index)
+        for index in range(record_token_count)
+    )
+    records = len(CLUSTERS) * LONG_RECORDS_PER_CLUSTER
+    with path.open("w", encoding="ascii", newline="\n") as destination:
+        for cluster in CLUSTERS:
+            record = " ".join((*cluster, *cluster))
+            for _ in range(LONG_RECORDS_PER_CLUSTER):
+                destination.write(record + "\n")
+    tokens_per_epoch = records * record_token_count
+    return tokens_per_epoch * LONG_EPOCHS, records, context_pairs_per_record * records * LONG_EPOCHS
+
+
+def checkpoint_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pretrain-bin", required=True, type=Path, help="compiled vegai_pretrain executable")
-    parser.add_argument("--repetitions", type=int, default=3, help="complete train processes per mode (default: 3)")
+    parser.add_argument("--repetitions", type=int, default=3, help="complete train processes per variant (default: 3)")
     parser.add_argument("--omp-threads", type=int, default=1, help="OMP_NUM_THREADS for each child (default: 1)")
     parser.add_argument("--output", type=Path, help="optional JSON output file; stdout remains JSON")
     arguments = parser.parse_args()
@@ -207,17 +283,28 @@ def main() -> int:
             workdir = Path(temporary)
             query_file = workdir / "fixture-queries.txt"
             query_file.write_text("\n".join(TOKENS) + "\n", encoding="ascii")
+
+            # Historical encoder comparison, retained so the positional
+            # regression oracle and hybrid cohesion diagnostic remain visible.
             speed: dict[str, dict[str, Any]] = {}
             checkpoints: dict[str, Path] = {}
-            for mode in MODES:
-                speed[mode], checkpoints[mode] = benchmark_mode(
-                    binary, mode, arguments.repetitions, workdir, environment
+            for mode in BASE_MODES:
+                speed[mode], checkpoints[mode] = benchmark_train(
+                    binary,
+                    CORPUS,
+                    mode,
+                    BASE_EPOCHS,
+                    BASE_TRAINING_TOKENS,
+                    BASE_CONTEXT_PAIRS,
+                    arguments.repetitions,
+                    workdir,
+                    environment,
+                    label=f"base-{mode}",
                 )
             quality = {
                 mode: inspect_top1_quality(binary, checkpoints[mode], mode, query_file, environment)
-                for mode in MODES
+                for mode in BASE_MODES
             }
-
             legacy_pairs = quality["legacy"]["top1_neighbours"]
             require(
                 quality["positional"]["top1_neighbours"] == legacy_pairs,
@@ -227,27 +314,123 @@ def main() -> int:
                 quality["hybrid"]["same_cluster_top1_hits"] >= quality["legacy"]["same_cluster_top1_hits"],
                 "hybrid encoder regressed controlled top-1 cluster retrieval",
             )
-            semantic_gain = (
+            hybrid_semantic_gain = (
                 quality["hybrid"]["mean_top1_similarity"]
                 - quality["positional"]["mean_top1_similarity"]
             )
             require(
-                semantic_gain > 0.01,
-                f"hybrid semantic cohesion gain was unexpectedly small: {semantic_gain:.6f}",
+                hybrid_semantic_gain > 0.01,
+                f"hybrid semantic cohesion gain was unexpectedly small: {hybrid_semantic_gain:.6f}",
+            )
+
+            # A true before/after optimization comparison: only the hidden
+            # implementation switch differs.  The emitted checkpoints must be
+            # byte-identical, proving bit-exact semantics rather than merely
+            # matching a qualitative neighbour metric.
+            reference_speed, reference_checkpoint = benchmark_train(
+                binary,
+                CORPUS,
+                "hybrid",
+                BASE_EPOCHS,
+                BASE_TRAINING_TOKENS,
+                BASE_CONTEXT_PAIRS,
+                arguments.repetitions,
+                workdir,
+                environment,
+                label="reference-hybrid",
+                reference_context_kernel=True,
+            )
+            fused_checkpoint = checkpoints["hybrid"]
+            reference_checksum = checkpoint_sha256(reference_checkpoint)
+            fused_checksum = checkpoint_sha256(fused_checkpoint)
+            require(
+                reference_checkpoint.read_bytes() == fused_checkpoint.read_bytes(),
+                "fused and reference hybrid kernels produced different checkpoint bytes",
+            )
+
+            # A separate long-record, controlled diagnostic for the bounded
+            # hierarchical channel.  The regular fixture has eight-token
+            # records and deliberately stays below this channel's threshold.
+            long_corpus = workdir / "long-context-controlled.txt"
+            long_training_tokens, long_records, long_context_pairs = write_long_context_fixture(long_corpus)
+            long_speed: dict[str, dict[str, Any]] = {}
+            long_checkpoints: dict[str, Path] = {}
+            for mode in LONG_CONTEXT_MODES:
+                long_speed[mode], long_checkpoints[mode] = benchmark_train(
+                    binary,
+                    long_corpus,
+                    mode,
+                    LONG_EPOCHS,
+                    long_training_tokens,
+                    long_context_pairs,
+                    arguments.repetitions,
+                    workdir,
+                    environment,
+                    label=f"long-{mode}",
+                )
+            long_quality = {
+                mode: inspect_top1_quality(binary, long_checkpoints[mode], mode, query_file, environment)
+                for mode in LONG_CONTEXT_MODES
+            }
+            hierarchical_similarity_gain = (
+                long_quality["hierarchical"]["mean_top1_similarity"]
+                - long_quality["hybrid"]["mean_top1_similarity"]
+            )
+            require(
+                long_quality["hierarchical"]["same_cluster_top1_hits"]
+                >= long_quality["hybrid"]["same_cluster_top1_hits"],
+                "hierarchical mode regressed controlled long-record top-1 cohesion",
+            )
+            require(
+                hierarchical_similarity_gain > 0.002,
+                "hierarchical long-record cohesion gain was unexpectedly small: "
+                f"{hierarchical_similarity_gain:.6f}",
             )
 
             report: dict[str, Any] = {
-                "schema": "vegai-pretraining-mode-comparison/v1",
+                "schema": "vegai-pretraining-mode-comparison/v2",
+                "timing_scope": (
+                    "one vegai_pretrain train process per sample; compilation, CI setup, fixture construction, "
+                    "inspection, and harness work excluded"
+                ),
                 "workload": {
                     "corpus": str(CORPUS.relative_to(ROOT)),
-                    "epochs": EPOCHS,
-                    "training_tokens_per_mode_run": TRAINING_TOKENS,
-                    "context_pairs_per_mode_run": CONTEXT_PAIRS,
+                    "epochs": BASE_EPOCHS,
+                    "training_tokens_per_mode_run": BASE_TRAINING_TOKENS,
+                    "context_pairs_per_mode_run": BASE_CONTEXT_PAIRS,
                     "omp_threads": arguments.omp_threads,
-                    "timing_scope": "single vegai_pretrain train process; compilation and harness work excluded",
                 },
                 "speed": speed,
                 "quality": quality,
+                "fused_kernel": {
+                    "mode": "hybrid",
+                    "reference": reference_speed,
+                    "fused": speed["hybrid"],
+                    "checkpoint_byte_identical": True,
+                    "reference_checkpoint_sha256": reference_checksum,
+                    "fused_checkpoint_sha256": fused_checksum,
+                    "fused_speedup_vs_reference": round(
+                        reference_speed["median_seconds"] / speed["hybrid"]["median_seconds"], 4
+                    ),
+                },
+                "long_context_diagnostic": {
+                    "records": long_records,
+                    "tokens_per_record": 2 * len(CLUSTERS[0]),
+                    "hierarchical_min_active_tokens": 12,
+                    "epochs": LONG_EPOCHS,
+                    "training_tokens_per_mode_run": long_training_tokens,
+                    "context_pairs_per_mode_run": long_context_pairs,
+                    "speed": long_speed,
+                    "quality": long_quality,
+                    "hierarchical_mean_top1_similarity_gain_vs_hybrid": round(
+                        hierarchical_similarity_gain, 6
+                    ),
+                    "hierarchical_speedup_vs_hybrid": round(
+                        long_speed["hybrid"]["median_seconds"]
+                        / long_speed["hierarchical"]["median_seconds"],
+                        4,
+                    ),
+                },
                 "comparison": {
                     "positional_speedup_vs_legacy": round(
                         speed["legacy"]["median_seconds"] / speed["positional"]["median_seconds"], 4
@@ -255,11 +438,18 @@ def main() -> int:
                     "hybrid_speedup_vs_legacy": round(
                         speed["legacy"]["median_seconds"] / speed["hybrid"]["median_seconds"], 4
                     ),
-                    "hybrid_mean_top1_similarity_gain_vs_positional": round(semantic_gain, 6),
+                    "hybrid_mean_top1_similarity_gain_vs_positional": round(hybrid_semantic_gain, 6),
                     "hybrid_mean_top1_similarity_relative_gain_percent": round(
-                        100.0 * semantic_gain / quality["positional"]["mean_top1_similarity"], 3
+                        100.0 * hybrid_semantic_gain / quality["positional"]["mean_top1_similarity"], 3
                     ),
                     "positional_neighbour_outputs_match_legacy": True,
+                    "fused_checkpoint_byte_identical_to_reference": True,
+                    "fused_hybrid_speedup_vs_reference": round(
+                        reference_speed["median_seconds"] / speed["hybrid"]["median_seconds"], 4
+                    ),
+                    "hierarchical_long_record_mean_top1_similarity_gain_vs_hybrid": round(
+                        hierarchical_similarity_gain, 6
+                    ),
                 },
             }
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:

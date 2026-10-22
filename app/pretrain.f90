@@ -133,6 +133,9 @@ contains
          case ('--strict')
             parsed_config%strict_tokenization = .true.
             index = index + 1
+         case ('--reference-context-kernel')
+            parsed_config%reference_context_kernel = .true.
+            index = index + 1
          case ('--max-vocab', '--min-frequency', '--window', '--position-shift', '--context-mode', '--epochs', &
                '--initial-plasticity', '--minimum-plasticity', '--decay-events', '--query')
             if (index == last_argument) then
@@ -159,6 +162,9 @@ contains
                   io_status = 0
                case ('hybrid')
                   parsed_config%context_mode = PT_CONTEXT_HYBRID
+                  io_status = 0
+               case ('hierarchical')
+                  parsed_config%context_mode = PT_CONTEXT_HIERARCHICAL
                   io_status = 0
                case default
                   io_status = 1
@@ -203,6 +209,9 @@ contains
          select case (trim(option))
          case ('--strict')
             parsed_config%strict_tokenization = .true.
+            index = index + 1
+         case ('--reference-context-kernel')
+            parsed_config%reference_context_kernel = .true.
             index = index + 1
          case ('--epochs', '--query')
             if (index == last_argument) then
@@ -395,13 +404,17 @@ contains
       write(output_unit, '(A)') 'Usage:'
       write(output_unit, '(A)') '  vegai_pretrain train CORPUS CHECKPOINT [options]'
       write(output_unit, '(A)') '  vegai_pretrain resume CORPUS CHECKPOINT [--epochs N] [--strict] [--query TOKEN]'
+      write(output_unit, '(A)') '    [--reference-context-kernel]'
       write(output_unit, '(A)') '  vegai_pretrain continue SHARD CHECKPOINT [--epochs N] [--strict] [--query TOKEN]'
+      write(output_unit, '(A)') '    [--reference-context-kernel]'
       write(output_unit, '(A)') '  vegai_pretrain inspect CHECKPOINT [--query TOKEN | --query-file PATH]'
       write(output_unit, '(A)') 'Train options:'
       write(output_unit, '(A)') '  --max-vocab N --min-frequency N --window N --position-shift N --context-mode MODE --epochs N'
-      write(output_unit, '(A)') '  MODE is legacy, positional, or hybrid (default hybrid)'
+      write(output_unit, '(A)') '  MODE is legacy, positional, hybrid, or hierarchical (default hybrid)'
+      write(output_unit, '(A)') '  hierarchical adds bounded whole-record topical evidence for long records'
       write(output_unit, '(A)') '  continue first extends vocabulary from one immutable shard, then trains it'
       write(output_unit, '(A)') '  --initial-plasticity N --minimum-plasticity N --decay-events N --strict --query TOKEN'
+      write(output_unit, '(A)') '  --reference-context-kernel is an exact benchmark/regression implementation switch'
       write(output_unit, '(A)') 'This is streaming distributional HDC learning, not Transformer/LLM pretraining.'
    end subroutine print_usage
 
