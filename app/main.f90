@@ -203,7 +203,7 @@ contains
       integer(int32), intent(in) :: expected_id
       logical, intent(inout) :: passed
 
-      write(output_unit, '(A,A,A,I0,A,F7.3,A,I0)') trim(prefix), ' -> ', &
+      write(output_unit, '(A,A,A,A,I0,A,F7.3,A,I0)') trim(prefix), ' -> ', &
          trim(cleanup%label), ' [ID=', cleanup%id, '] sim=', cleanup%similarity, &
          ' distance=', cleanup%distance
       if (cleanup%id == expected_id) then
