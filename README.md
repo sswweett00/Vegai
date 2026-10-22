@@ -56,18 +56,31 @@ make debug
 make check
 ```
 
-Varsayılan Make derlemesi `-O3 -march=native -fopenmp` kullanır. Taşınabilir
-bir ikili için örneğin:
+Varsayılan Make derlemesi artık host-ISA bağımsız portable `-O3` profilidir;
+`-march=native` varsayılan değildir. Bu, Intel Core Ultra 5 125H dahil uyumlu
+CPU'larda aynı binary'nin illegal-instruction riski olmadan çalıştırılabilmesi
+içindir. Aynı hostta opsiyonel tuning için ayrı native binary üretin:
 
 ```bash
-make clean
-make engine OPT_FLAGS='-O3' OPENMP_FLAGS=''
+make clean-all
+make all                    # ./build/vegai_pretrain — portable profil
+make native                 # ./build-native/vegai_pretrain — yalnız build hostu için
+
+python3 tools/hardware_compatibility.py --format text --require-recognized-os
+python3 tools/compare_pretraining_build_profiles.py \
+  --portable-pretrain-bin ./build/vegai_pretrain \
+  --native-pretrain-bin ./build-native/vegai_pretrain \
+  --repetitions 3 --omp-threads 1
 ```
+
+GPU/iGPU/NPU runtime'ı gerekli değildir; mevcut backend CPU'dur. Entegre grafik
+kartları sistemde bulunabilir ama şu an GPU compute için kullanılmaz. Tam
+platform/CPU/checkpoint sınırları için [HARDWARE_COMPATIBILITY.md](docs/HARDWARE_COMPATIBILITY.md)'ye bakın.
 
 ### CMake / CTest
 
 ```bash
-cmake -S . -B build -DVEGAI_ENABLE_OPENMP=ON -DVEGAI_BUILD_TESTS=ON
+cmake -S . -B build -DVEGAI_CPU_TARGET=portable -DVEGAI_ENABLE_OPENMP=ON -DVEGAI_BUILD_TESTS=ON
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 OMP_NUM_THREADS=2 ./build/hds_engine
@@ -135,6 +148,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Continual transaction | `tools/continuous_shard_manifest.py`, `tools/continuous_pretrain.py` | immutable SHA-256 ledger, strict ingest gate, candidate generation, atomic state journal |
 | Çalıştırılabilir doğrulama | `app/main.f90` | %25 exact gürültü, analoji, causal chain ve 3-faktör Resonator demo |
 | Native testler | `test/test_all.f90` | cebirsel invariantlar, hata yolları, bellek, pretraining ve uçtan uca test |
+| Donanım/OS profili | `tools/hardware_compatibility.py` | privacy-conscious CPU/OS/iGPU inventory, portable CPU backend sözleşmesi |
 | Bağımsız oracle | `tools/verify_reference.py` | standart SplitMix64 ve demo sözleşmelerinin Python modeli |
 
 Bir hiper-vektörün payload'u tam olarak `256 × 8 = 2048` bayttır. Bu, 64-byte
@@ -153,6 +167,8 @@ crash-safe exactly-once continual pretraining için
 telemetrisi için [docs/EXAMPLE_PRETRAINING_RUN.md](docs/EXAMPLE_PRETRAINING_RUN.md),
 önce/sonra hız ve controlled semantic-cohesion sonuçları için
 [docs/PRETRAINING_MODE_COMPARISON.md](docs/PRETRAINING_MODE_COMPARISON.md),
+CPU/iGPU/OS portable build sözleşmesi için
+[docs/HARDWARE_COMPATIBILITY.md](docs/HARDWARE_COMPATIBILITY.md),
 ölçülebilir doğrulama planı ve istatistiksel sınırlar için
 [docs/VALIDATION.md](docs/VALIDATION.md) dosyalarına bakın.
 

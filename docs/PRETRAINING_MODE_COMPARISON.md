@@ -12,10 +12,18 @@ ve Python harness süresi **ölçüye dahil değildir**. Vocabulary pass, stream
 > veya production throughput garantisi değildir. Gerçek corpus için ayrı
 > held-out/de-duplicated evaluation manifesti gerekir.
 
-## V2 protokolü
+## V3 protokolü: portable CPU provenance + gerçek train timing
 
 ```bash
-make clean && make all
+make clean-all
+make all                         # portable default: ./build/vegai_pretrain
+make native                      # host-only: ./build-native/vegai_pretrain
+python3 tools/hardware_compatibility.py --format json --require-recognized-os \
+  --output hardware-profile.json
+python3 tools/compare_pretraining_build_profiles.py \
+  --portable-pretrain-bin ./build/vegai_pretrain \
+  --native-pretrain-bin ./build-native/vegai_pretrain \
+  --repetitions 3 --omp-threads 1
 python3 tools/compare_pretraining_modes.py \
   --pretrain-bin ./build/vegai_pretrain --repetitions 3 --omp-threads 1
 ```
@@ -23,8 +31,19 @@ python3 tools/compare_pretraining_modes.py \
 Her varyant üç bağımsız train process'i ile ölçülür; tablo değeri wall-clock
 medyandır. Sabit `OMP_NUM_THREADS=1`, `max-vocab=128`, `min-frequency=8`,
 window `2`, positional shift `41`, plasticity `25 → 1`, decay `8` kullanılır.
+JSON provenance CPU modeli, OS, mimari, logical CPU sayısı ve GPU adapter
+inventory'sini taşır; GPU compute kullanılmaz. Hardware discovery, compilation,
+fixture setup, inspect ve harness süreleri timing kapsamı dışındadır.
 
-### A. Base encoder diagnostic
+### A. Portable/native build-profile diagnostic
+
+Portable binary host-ISA flag'i taşımaz; native binary aynı host için opt-in
+`-march=native` tuning kullanır. İki binary, aynı deterministic `hybrid` train
+komutunda **checkpoint byte-tam eşitliği** üretmek zorundadır. Hız oranı
+`portable_median / native_median` olarak raporlanır ve yalnız ölçülen CPU/OS
+hostu için yorumlanır. Bu test iGPU/GPU performans ölçümü değildir.
+
+### B. Base encoder diagnostic
 
 `mini_turkish_ascii_pretrain.txt` sekiz disjoint topical kümeden oluşur:
 
@@ -43,7 +62,7 @@ ile okunur. `positional` nearest-neighbour çıktısının `legacy` ile tam eşi
 olması gerekir; `hybrid` aynı-küme hit'i geriletmemeli ve mean Top-1 similarity
 artışı `> 0.01` olmalıdır.
 
-### B. Fused/reference semantic-preservation hız karşılaştırması
+### C. Fused/reference semantic-preservation hız karşılaştırması
 
 Aynı base corpus/config ile iki `hybrid` varyant çalışır:
 
@@ -56,7 +75,7 @@ kural Top-1 diagnostic eşitliğinden daha güçlüdür: vocabulary, base plane,
 semantic plane, experience sayaçları, totals ve v5 checksum'ın tamamının aynı
 olduğunu doğrular. Hız oranı `reference_median / fused_median` olarak verilir.
 
-### C. Long-record hierarchical controlled diagnostic
+### D. Long-record hierarchical controlled diagnostic
 
 Normal fixture kasıtlı olarak sekiz-token satırlıdır ve `hierarchical` eşiği
 olan 12 active token'ın altında kalır. Araç geçici, ASCII-only bir fixture üretir:
@@ -92,7 +111,7 @@ positional'a göre similarity gain'i `+0.064046` idi. Bunlar tarihsel baseline
 olarak saklanır; CPU/runner/derleyici farklı olduğunda mutlak saniye veya
 token/s değerlerini doğrudan karşılaştırmayın.
 
-## Güncel v2 sonucu — doğrulanmış GNU Fortran CI
+## Önceki v2 sonucu — doğrulanmış GNU Fortran CI
 
 [GitHub Actions run 39830774456](https://github.com/sswweett00/Vegai/actions/runs/39830774456)
 (commit `515aec8`, optimized GNU Make binary, üç repetition, `OMP_NUM_THREADS=1`)
@@ -136,7 +155,9 @@ semantic-quality sonucu olarak genellenemez.
 
 Her zaman aynı runner içindeki oranları yorumlayın. Cache, CPU frequency/termal
 state, filesystem, compiler sürümü/flag'leri ve OpenMP ayarı mutlak ölçümü
-değiştirir.
+değiştirir. V3 portable/native gerçek ölçümü sonraki doğrulanmış CI run'ı ile
+bu belgeye eklenir; bu değerler eski v2 native-default sonucu ile doğrudan
+cross-run throughput iddiası olarak karşılaştırılmamalıdır.
 
 ## Uygulama notları
 

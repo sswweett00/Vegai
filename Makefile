@@ -1,15 +1,23 @@
 # SPDX-License-Identifier: MIT
-# Portable GNU Fortran convenience build.  CMake is recommended for IDE/CI use.
+# GNU Fortran convenience build.  The default is deliberately ISA-portable;
+# use `make native` only for a binary that stays on the build host's CPU family.
+# For Windows, macOS, non-GNU compilers, and cross-platform builds, prefer CMake.
 
 # Command-line overrides still win over this default (for example: make FC=ifx).
 FC = gfortran
 BUILD_DIR ?= build
 OPENMP_FLAGS ?= -fopenmp
-OPT_FLAGS ?= -O3 -march=native -mtune=native -funroll-loops
+# Do not use -march=native by default: it can emit instructions unavailable on
+# another x86 CPU and is not meaningful for ARM or other architectures.
+OPT_FLAGS ?= -O3
 WARN_FLAGS ?= -std=f2023 -Wall -Wextra -Wimplicit-interface -Wcharacter-truncation
 COMMON_FLAGS ?= -ffree-line-length-none
 FFLAGS ?= $(OPT_FLAGS) $(WARN_FLAGS) $(COMMON_FLAGS) $(OPENMP_FLAGS)
 LDFLAGS ?= $(OPENMP_FLAGS)
+
+PORTABLE_BUILD_DIR ?= build-portable
+NATIVE_BUILD_DIR ?= build-native
+NATIVE_OPT_FLAGS ?= -O3 -march=native -mtune=native -funroll-loops
 
 SOURCES := src/hyper_types.f90 src/text_tokenizer.f90 src/vocabulary.f90 \
            src/symbolic_memory.f90 src/resonator_network.f90 src/reasoning_core.f90 \
@@ -21,8 +29,9 @@ ENGINE := $(BUILD_DIR)/hds_engine
 PRETRAIN := $(BUILD_DIR)/vegai_pretrain
 TEST_BINARY := $(BUILD_DIR)/vegai_tests
 
-.PHONY: all engine pretrain test run run-pretrain check clean debug
+.PHONY: all engine pretrain test run run-pretrain check clean clean-all debug portable native portable-test native-test
 
+# Default target: portable optimized GNU binary without host-only ISA flags.
 all: engine pretrain
 
 $(BUILD_DIR):
@@ -50,6 +59,20 @@ run: $(ENGINE)
 run-pretrain: $(PRETRAIN)
 	$(PRETRAIN) help
 
+# Explicit profiles keep portable and host-tuned binaries in distinct folders,
+# avoiding accidental reuse of incompatible module/object files.
+portable:
+	$(MAKE) all BUILD_DIR=$(PORTABLE_BUILD_DIR) OPT_FLAGS='-O3'
+
+native:
+	$(MAKE) all BUILD_DIR=$(NATIVE_BUILD_DIR) OPT_FLAGS='$(NATIVE_OPT_FLAGS)'
+
+portable-test:
+	$(MAKE) test BUILD_DIR=$(PORTABLE_BUILD_DIR) OPT_FLAGS='-O3'
+
+native-test:
+	$(MAKE) test BUILD_DIR=$(NATIVE_BUILD_DIR) OPT_FLAGS='$(NATIVE_OPT_FLAGS)'
+
 # Debug build with bounds, undefined floating-point, and backtrace checks.
 debug:
 	$(MAKE) clean
@@ -58,6 +81,10 @@ debug:
 check:
 	python3 tools/verify_reference.py
 	python3 tools/verify_example_corpus.py
+	python3 tools/verify_hardware_compatibility.py
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+clean-all:
+	rm -rf build $(PORTABLE_BUILD_DIR) $(NATIVE_BUILD_DIR)

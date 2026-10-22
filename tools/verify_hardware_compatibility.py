@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""Contract test for the portable hardware/OS metadata reporter."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+
+ROOT = Path(__file__).resolve().parents[1]
+REPORTER = ROOT / "tools" / "hardware_compatibility.py"
+
+
+def fail(message: str) -> None:
+    raise AssertionError(message)
+
+
+def main() -> int:
+    try:
+        with tempfile.TemporaryDirectory(prefix="vegai-hardware-profile-") as temporary:
+            output = Path(temporary) / "profile.json"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPORTER),
+                    "--format",
+                    "json",
+                    "--require-recognized-os",
+                    "--output",
+                    str(output),
+                ],
+                cwd=ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+            if result.returncode != 0:
+                fail(f"hardware reporter failed ({result.returncode})\n{result.stdout}")
+            if not output.is_file():
+                fail("hardware reporter did not create requested JSON output")
+            profile = json.loads(output.read_text(encoding="utf-8"))
+            if profile.get("schema") != "vegai-hardware-compatibility/v1":
+                fail(f"unexpected profile schema: {profile.get('schema')!r}")
+            host = profile.get("host")
+            cpu = profile.get("cpu")
+            backend = profile.get("execution_backend")
+            portability = profile.get("portability")
+            if not isinstance(host, dict) or not isinstance(cpu, dict) or not isinstance(backend, dict):
+                fail("hardware profile omitted required host/cpu/backend objects")
+            if not isinstance(portability, dict) or not portability.get("recognized_operating_system"):
+                fail("hardware profile did not recognize the current CI operating system")
+            if not isinstance(host.get("operating_system"), str) or not host["operating_system"]:
+                fail("hardware profile omitted operating system")
+            if not isinstance(host.get("architecture"), str) or not host["architecture"]:
+                fail("hardware profile omitted architecture")
+            if not isinstance(cpu.get("model"), str) or not cpu["model"]:
+                fail("hardware profile omitted CPU model fallback")
+            if backend.get("kind") != "portable-cpu":
+                fail(f"unexpected backend kind: {backend.get('kind')!r}")
+            if backend.get("gpu_compute_used") is not False or backend.get("gpu_runtime_required") is not False:
+                fail("portable backend incorrectly claims GPU compute/runtime use")
+            if not isinstance(profile.get("gpu_adapters"), list):
+                fail("GPU inventory is not a list")
+
+            # The distribution default must stay free of host-only ISA flags;
+            # native tuning belongs to the explicit opt-in profile only.
+            makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+            cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+            if "OPT_FLAGS ?= -O3" not in makefile:
+                fail("Make portable default no longer uses the architecture-neutral O3 profile")
+            if "NATIVE_OPT_FLAGS ?= -O3 -march=native -mtune=native" not in makefile:
+                fail("Make native profile no longer declares host tuning separately")
+            if 'set(VEGAI_CPU_TARGET "portable"' not in cmake:
+                fail("CMake CPU target does not default to portable")
+            if 'VEGAI_CPU_TARGET STREQUAL "native"' not in cmake:
+                fail("CMake no longer exposes an opt-in native CPU profile")
+    except (AssertionError, OSError, json.JSONDecodeError) as error:
+        print(f"hardware compatibility verification: FAIL: {error}", file=sys.stderr)
+        return 1
+
+    print("hardware compatibility verification: PASS (portable CPU backend, optional GPU inventory)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

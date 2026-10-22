@@ -10,7 +10,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -24,6 +24,7 @@ jobs:
         run: |
           cmake -S . -B build-ci -G Ninja \
             -DVEGAI_ENABLE_OPENMP=ON \
+            -DVEGAI_CPU_TARGET=portable \
             -DVEGAI_BUILD_TESTS=ON \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_Fortran_FLAGS='-std=f2023 -fcheck=all -fbacktrace -ffpe-trap=invalid,zero,overflow'
@@ -77,21 +78,37 @@ jobs:
       - name: Run independent Python reference verification
         run: python3 tools/verify_reference.py
 
-      - name: Compile optimized GNU Make binaries
-        run: make clean && make all
+      - name: Report portable host compatibility metadata
+        run: |
+          python3 tools/hardware_compatibility.py --format json --require-recognized-os \
+            --output "${RUNNER_TEMP}/hardware-profile.json" > /dev/null
+          python3 tools/verify_hardware_compatibility.py
 
-      - name: Compare optimized pretraining speed and semantic cohesion
+      - name: Compile portable and host-native GNU Make binaries
+        run: |
+          make clean-all
+          make all
+          make native
+
+      - name: Compare portable/native pretraining binaries and semantic cohesion
         run: |
           set -euo pipefail
-          report="${RUNNER_TEMP}/pretraining-mode-comparison.json"
+          profile_report="${RUNNER_TEMP}/pretraining-build-profile-comparison.json"
+          mode_report="${RUNNER_TEMP}/pretraining-mode-comparison.json"
+          python3 tools/compare_pretraining_build_profiles.py \
+            --portable-pretrain-bin ./build/vegai_pretrain \
+            --native-pretrain-bin ./build-native/vegai_pretrain \
+            --repetitions 3 --omp-threads 1 --output "$profile_report" > /dev/null
           python3 tools/compare_pretraining_modes.py \
             --pretrain-bin ./build/vegai_pretrain \
-            --repetitions 3 --omp-threads 1 --output "$report" > /dev/null
-          python3 - "$report" "$GITHUB_STEP_SUMMARY" <<'PY'
+            --repetitions 3 --omp-threads 1 --output "$mode_report" > /dev/null
+          python3 - "$profile_report" "$mode_report" "$GITHUB_STEP_SUMMARY" <<'PY'
           import json
           import sys
 
           with open(sys.argv[1], encoding="utf-8") as source:
+              build_profile = json.load(source)
+          with open(sys.argv[2], encoding="utf-8") as source:
               report = json.load(source)
           speed = report["speed"]
           quality = report["quality"]
@@ -100,7 +117,16 @@ jobs:
           long_context = report["long_context_diagnostic"]
           long_speed = long_context["speed"]
           long_quality = long_context["quality"]
+          hardware = build_profile["hardware"]
+          portable = build_profile["portable"]
+          native = build_profile["native"]
           message = (
+              f"cpu={hardware['cpu']['model']}; "
+              f"os={hardware['host']['operating_system']} {hardware['host']['operating_system_release']}; "
+              f"portable_seconds={portable['median_seconds']:.6f}; "
+              f"native_seconds={native['median_seconds']:.6f}; "
+              f"native_speedup={build_profile['native_speedup_vs_portable']:.4f}x; "
+              f"portable_native_bytes_identical={build_profile['checkpoint_byte_identical']}; "
               f"legacy_seconds={speed['legacy']['median_seconds']:.6f}; "
               f"positional_seconds={speed['positional']['median_seconds']:.6f}; "
               f"fused_hybrid_seconds={speed['hybrid']['median_seconds']:.6f}; "
@@ -113,12 +139,40 @@ jobs:
               f"hierarchical_similarity_gain="
               f"{comparison['hierarchical_long_record_mean_top1_similarity_gain_vs_hybrid']:.6f}"
           )
-          with open(sys.argv[2], "a", encoding="utf-8") as summary:
+          with open(sys.argv[3], "a", encoding="utf-8") as summary:
               print("## Optimized pretraining comparison", file=summary)
               print(file=summary)
               print(
                   "Each timing sample covers one `vegai_pretrain train` process only; compilation, CI setup, "
                   "fixture construction, inspection, and Python harness work are excluded.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("### Portable/native build-profile comparison", file=summary)
+              print(file=summary)
+              print(
+                  f"Host: `{hardware['cpu']['model']}` on `{hardware['host']['operating_system']} "
+                  f"{hardware['host']['operating_system_release']}` / `{hardware['host']['architecture']}`. "
+                  f"GPU adapters inventoried: {len(hardware['gpu_adapters'])}; GPU compute used: no.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("| Build profile | Median seconds | Training token/s | Checkpoint bytes |", file=summary)
+              print("|---|---:|---:|---:|", file=summary)
+              print(
+                  f"| portable (no host ISA) | {portable['median_seconds']:.6f} | "
+                  f"{portable['training_tokens_per_second']:.3f} | identical to native |",
+                  file=summary,
+              )
+              print(
+                  f"| native (host tuned) | {native['median_seconds']:.6f} | "
+                  f"{native['training_tokens_per_second']:.3f} | "
+                  f"{build_profile['checkpoint_byte_identical']} |",
+                  file=summary,
+              )
+              print(
+                  f"Portable/native speed ratio: **{build_profile['native_speedup_vs_portable']:.4f}×**. "
+                  "This is one-host evidence, not a cross-CPU throughput claim.",
                   file=summary,
               )
               print(file=summary)

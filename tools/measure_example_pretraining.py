@@ -19,6 +19,8 @@ import subprocess
 import sys
 import time
 
+from hardware_compatibility import collect_hardware_profile
+
 
 ROOT = Path(__file__).resolve().parent.parent
 CORPUS = ROOT / "examples" / "corpus" / "mini_turkish_ascii_pretrain.txt"
@@ -136,6 +138,7 @@ def main() -> int:
     report = {
         "measurement": "single vegai_pretrain train process wall clock",
         "compile_or_test_time_included": False,
+        "hardware": collect_hardware_profile(),
         "epochs": completed_epochs,
         "context_mode": arguments.context_mode,
         "reference_context_kernel": arguments.reference_context_kernel,

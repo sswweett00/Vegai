@@ -40,7 +40,9 @@ strict_tokenization         = true
 spawn'ından hemen önce başlar ve process çıktığında durur; compiler configure,
 derleme, CTest discovery ve önceki CI adımları buna dahil değildir. Komutun
 kendi içindeki vocabulary pass, iki epoch streaming öğrenme ve checkpoint write
-ise `train` subcommand'inin zorunlu parçaları olduğu için dahildir.
+ise `train` subcommand'inin zorunlu parçaları olduğu için dahildir. JSON raporu
+ayrıca privacy-conscious CPU/OS/mimari/iGPU inventory metadata'sı taşır; GPU
+compute kullanılmaz.
 
 ```bash
 python3 tools/measure_example_pretraining.py \

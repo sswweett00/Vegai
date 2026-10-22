@@ -29,6 +29,8 @@ import tempfile
 import time
 from typing import Any
 
+from hardware_compatibility import collect_hardware_profile, compact_hardware_summary
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "examples" / "corpus" / "mini_turkish_ascii_pretrain.txt"
@@ -388,7 +390,8 @@ def main() -> int:
             )
 
             report: dict[str, Any] = {
-                "schema": "vegai-pretraining-mode-comparison/v2",
+                "schema": "vegai-pretraining-mode-comparison/v3",
+                "hardware": collect_hardware_profile(),
                 "timing_scope": (
                     "one vegai_pretrain train process per sample; compilation, CI setup, fixture construction, "
                     "inspection, and harness work excluded"
@@ -461,6 +464,7 @@ def main() -> int:
     if arguments.output is not None:
         arguments.output.parent.mkdir(parents=True, exist_ok=True)
         arguments.output.write_text(rendered + "\n", encoding="utf-8")
+    print("Pretraining mode comparison hardware: " + compact_hardware_summary(report["hardware"]), file=sys.stderr)
     return 0
 
 

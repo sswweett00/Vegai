@@ -22,8 +22,10 @@ yerine geçmez.
 | `make test` | native cebir, error path, memory, reasoning | `Checks: ..., failures: 0` |
 | `make debug` | bounds/runtime/FPE denetimli native test | başarısızlık yok |
 | `make run` | 512+ sembollü demo | frame, analogy, 4 causal adım ve 3-factor Resonator PASS |
-| `make pretrain` | HDC corpus CLI derlemesi | `build/vegai_pretrain` oluşur |
-| `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties`, `vegai_example_pretraining`, `vegai_continuous_pretraining` PASS |
+| `make pretrain` | HDC corpus CLI derlemesi | portable `build/vegai_pretrain` oluşur |
+| `make native` | yalnız build-host CPU'suna tuned ikili | `build-native/vegai_pretrain` oluşur |
+| `python3 tools/verify_hardware_compatibility.py` | CPU/OS/iGPU inventory ve CPU-backend contract | `hardware compatibility verification: PASS` |
+| `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties`, `vegai_hardware_compatibility`, `vegai_example_pretraining`, `vegai_continuous_pretraining` PASS |
 
 CI bunların checked CMake/OpenMP varyantını ve ayrıca optimize Make hedefini
 çalıştırır.
@@ -103,18 +105,24 @@ bit-tam çift checkpoint ve `train → inspect → resume` integration zincirini
 SHA-256 shard mutation rejection, append-only manifest prefix, OOV=0 ve
 idempotent restart journal davranışını ayrıca sınar.
 
-CI ayrıca optimized Make binary ile `tools/compare_pretraining_modes.py`
-çalıştırır. Native testler fused raw-word/permuted/pair accumulator plane
-bit-eşitliğini, fused/reference hybrid ile hierarchical replay eşitliğini ve
-hierarchical checkpoint round-trip'ini denetler. Python comparison aracı ise
-sadece her bir gerçek `vegai_pretrain train` child-process wall-clock'ını
-raporlar: compiler, CI setup, fixture construction, inspect ve harness süresi
-ölçüye girmez. Workflow summary; `legacy → positional → fused hybrid` temel
-karşılaştırmasını, fused/reference hybrid checkpoint byte eşitliği + hız
-oranını ve ayrı 16-token-record controlled `hybrid → hierarchical` topical
-cohesion diagnostic'ini yazar. Bu fixture'lar yalnız pipeline doğrulaması ve
-sınırlı retrieval diagnostic'idir; semantic kalite, doğal dil yeteneği veya
-production throughput benchmarkı değildir.
+CI önce `tools/hardware_compatibility.py` ile CPU/OS/mimari/iGPU inventory
+metadata'sını kaydeder; GPU compute kullanılmadığını da açıkça raporlar. Ardından
+portable varsayılan Make binary ile aynı host için opt-in `native` binary'yi
+`tools/compare_pretraining_build_profiles.py` üzerinden ölçer. İki profile'ın
+checkpoint byte eşitliği zorunludur; süre oranı yalnız o host için anlamlıdır.
+
+Native testler fused raw-word/permuted/pair accumulator plane bit-eşitliğini,
+fused/reference hybrid ile hierarchical replay eşitliğini ve hierarchical
+checkpoint round-trip'ini denetler. `tools/compare_pretraining_modes.py` ise
+portable binary üzerinde yalnız her bir gerçek `vegai_pretrain train`
+child-process wall-clock'ını raporlar: compiler, CI setup, fixture construction,
+inspect ve harness süresi ölçüye girmez. Workflow summary; portable/native
+profil oranını, `legacy → positional → fused hybrid` temel karşılaştırmasını,
+fused/reference hybrid checkpoint byte eşitliği + hız oranını ve ayrı
+16-token-record controlled `hybrid → hierarchical` topical-cohesion
+diagnostic'ini yazar. Bu fixture'lar yalnız pipeline doğrulaması ve sınırlı
+retrieval diagnostic'idir; semantic kalite, doğal dil yeteneği veya production
+throughput benchmarkı değildir.
 
 ## Olasılık modeli ve sayısal marjlar
 

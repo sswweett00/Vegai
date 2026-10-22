@@ -12,6 +12,8 @@
 
 # Build systems
 /build/
+/build-portable/
+/build-native/
 /cmake-build-*/
 /CMakeFiles/
 /CMakeCache.txt

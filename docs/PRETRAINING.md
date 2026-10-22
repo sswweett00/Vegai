@@ -356,7 +356,9 @@ python3 tools/compare_pretraining_modes.py \
 ```
 
 Kayıtlı optimized CI sonucu ve yorum için
-[PRETRAINING_MODE_COMPARISON.md](PRETRAINING_MODE_COMPARISON.md)'ye bakın.
+[PRETRAINING_MODE_COMPARISON.md](PRETRAINING_MODE_COMPARISON.md)'ye; portable/native
+CPU profilinin, iGPU fallback sınırlarının ve OS build yolunun ayrıntıları için
+[HARDWARE_COMPATIBILITY.md](HARDWARE_COMPATIBILITY.md)'ye bakın.
 
 Bu kontroller semantic usefulness, bias, güvenlik, gerçek dünya language quality
 veya herhangi bir throughput iddiası değildir. Üretim kullanımı için kendi

@@ -320,15 +320,25 @@ ipucu bulunur. `mem_cleanup` global taraması `!$omp parallel do reduction(min:.
 kullanabilir. OpenMP kapalıysa direktifler yorum satırıdır ve semantik aynı
 kalır.
 
-Derleyicinin popcount/SIMD seçimi hedefe özgüdür. GNU Fortran'da inceleme için
-örnek:
+Derleyicinin popcount/SIMD seçimi hedefe özgüdür. Dağıtılabilir varsayılan
+profil host-ISA flag'i kullanmaz; CPU-specific inspection yalnız native host
+binary üzerinde yapılmalıdır:
 
 ```bash
+make native
+objdump -d build-native/vegai_pretrain | grep -Ei 'popcnt|vpopcnt|xor'
+
+# GNU Fortran vectorization raporu için, sadece build hostunda:
 gfortran -O3 -std=f2023 -march=native -fopenmp -fopt-info-vec-optimized \
   src/hyper_types.f90 src/symbolic_memory.f90 src/resonator_network.f90 \
   src/reasoning_core.f90 app/main.f90
-objdump -d a.out | grep -Ei 'popcnt|vpopcnt|xor'
 ```
+
+`VEGAI_CPU_TARGET=portable` / varsayılan `make all` Intel Core Ultra 5 125H
+dahil compatible CPU'lar için CPU fallback'tir; GPU/iGPU/NPU API'sine bağlı
+değildir. Portable/native profile sözleşmesi, OS build yolları ve checkpoint
+ABI sınırları için [HARDWARE_COMPATIBILITY.md](HARDWARE_COMPATIBILITY.md)'ye
+bakın.
 
 Performans ölçümü için warm-up, CPU frekans ölçekleme kontrolü, `OMP_NUM_THREADS`
 sabitleme ve gerçek sözlük/workload dağılımı gereklidir. Tek bir clock-cycle

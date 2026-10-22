@@ -4,10 +4,17 @@ project(VegaiHDS VERSION 0.1.0 LANGUAGES Fortran)
 
 option(VEGAI_ENABLE_OPENMP "Enable OpenMP parallel cleanup scans" ON)
 option(VEGAI_BUILD_TESTS "Build property and integration tests" ON)
+set(VEGAI_CPU_TARGET "portable" CACHE STRING
+    "CPU code-generation profile: portable (no host ISA) or native (host-tuned)")
+set_property(CACHE VEGAI_CPU_TARGET PROPERTY STRINGS portable native)
+
+if(NOT VEGAI_CPU_TARGET STREQUAL "portable" AND NOT VEGAI_CPU_TARGET STREQUAL "native")
+    message(FATAL_ERROR "VEGAI_CPU_TARGET must be portable or native, got: ${VEGAI_CPU_TARGET}")
+endif()
 
 # Vegai is specified and continuously compiled as a Fortran 2023 project.
-# GNU Fortran receives an explicit -std=f2023 flag below because CMake does not
-# provide a portable Fortran language-level feature abstraction on every host.
+# CMake has no universally portable feature abstraction for every compiler, so
+# known compiler families receive their explicit conformance flags below.
 set(CMAKE_Fortran_STANDARD 2023)
 set(CMAKE_Fortran_STANDARD_REQUIRED ON)
 set(CMAKE_Fortran_EXTENSIONS OFF)
@@ -37,12 +44,40 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
         -ffree-line-length-none
     )
 elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
-    target_compile_options(vegai_hds PUBLIC -stand f23)
-    target_compile_options(vegai_hds PRIVATE -warn all)
+    if(WIN32)
+        target_compile_options(vegai_hds PUBLIC /stand:f23)
+        target_compile_options(vegai_hds PRIVATE /warn:all)
+    else()
+        target_compile_options(vegai_hds PUBLIC -stand f23)
+        target_compile_options(vegai_hds PRIVATE -warn all)
+    endif()
 else()
     message(WARNING
         "Compiler-specific Fortran 2023 conformance flag is unknown; configure it explicitly.")
 endif()
+
+# The portable profile intentionally emits no host-ISA flags.  A binary built
+# this way relies only on the compiler's architecture baseline and can be moved
+# among compatible CPUs (for example Core Ultra, older x86-64, and supported
+# non-x86 targets when compiled by an appropriate Fortran compiler).  The
+# native profile is opt-in and must only be distributed to the build host's
+# compatible CPU family.
+if(VEGAI_CPU_TARGET STREQUAL "native")
+    if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(vegai_hds PRIVATE -march=native -mtune=native)
+    elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
+        if(WIN32)
+            target_compile_options(vegai_hds PRIVATE /QxHost)
+        else()
+            target_compile_options(vegai_hds PRIVATE -xHost)
+        endif()
+    else()
+        message(WARNING
+            "Native CPU profile requested, but no safe compiler-specific host-tuning flag is known; using portable code generation.")
+    endif()
+endif()
+message(STATUS "Vegai CPU target profile: ${VEGAI_CPU_TARGET}")
+message(STATUS "Vegai execution backend: portable CPU; no GPU runtime is required")
 
 if(VEGAI_ENABLE_OPENMP)
     find_package(OpenMP COMPONENTS Fortran)
@@ -79,6 +114,10 @@ if(VEGAI_BUILD_TESTS)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
         add_test(
+            NAME vegai_hardware_compatibility
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_hardware_compatibility.py
+        )
+        add_test(
             NAME vegai_example_pretraining
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_example_corpus.py
                     --pretrain-bin $<TARGET_FILE:vegai_pretrain>
@@ -89,6 +128,6 @@ if(VEGAI_BUILD_TESTS)
                     --pretrain-bin $<TARGET_FILE:vegai_pretrain>
         )
     else()
-        message(WARNING "Python3 was not found; Python corpus/continuous integration tests are not registered.")
+        message(WARNING "Python3 was not found; Python hardware/corpus integration tests are not registered.")
     endif()
 endif()
