@@ -103,9 +103,19 @@ jobs:
       - name: Verify optional OpenVINO context-provider bridge
         run: |
           python3 -m pip install --disable-pip-version-check -r requirements-openvino.txt
-          python3 tools/verify_openvino_provider.py
-          python3 tools/verify_openvino_context_worker.py
-          python3 tools/verify_openvino_context_provider.py --pretrain-bin ./build-ci/vegai_pretrain
+          set +e
+          {
+            python3 tools/verify_openvino_provider.py
+            python3 tools/verify_openvino_context_worker.py
+            python3 tools/verify_openvino_context_provider.py --pretrain-bin ./build-ci/vegai_pretrain
+          } > openvino-bridge-output.txt 2>&1
+          exit_code=$?
+          cat openvino-bridge-output.txt
+          if [ "$exit_code" -ne 0 ]; then
+            detail=$(tail -n 24 openvino-bridge-output.txt | tr '\n' ' ' | cut -c1-1900)
+            echo "::error title=OpenVINO context-provider diagnostic::$detail"
+          fi
+          exit "$exit_code"
 
       - name: Compile portable and host-native GNU Make binaries
         run: |
