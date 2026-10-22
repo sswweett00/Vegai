@@ -150,19 +150,29 @@ def benchmark_mode(
     )
 
 
-def inspect_top1_quality(binary: Path, checkpoint: Path, mode: str, environment: dict[str, str]) -> dict[str, Any]:
+def inspect_top1_quality(
+    binary: Path,
+    checkpoint: Path,
+    mode: str,
+    query_file: Path,
+    environment: dict[str, str],
+) -> dict[str, Any]:
+    output, _ = run([str(binary), "inspect", str(checkpoint), "--query-file", str(query_file)], environment)
+    require(f"context mode: {mode}" in output, f"checkpoint mode mismatch for {mode}")
+    blocks = re.findall(
+        r"^query:\s*(\S+)\s*\n\s*nearest semantic neighbour:\s*(\S+)\s*"
+        r"\n\s*bipolar similarity:\s*(-?\d+\.\d+)\s*$",
+        output,
+        re.MULTILINE,
+    )
+    require(len(blocks) == len(TOKENS), f"expected {len(TOKENS)} batch query results, got {len(blocks)}\n{output}")
+
     matches: list[tuple[str, str, float]] = []
-    for token in TOKENS:
-        output, _ = run([str(binary), "inspect", str(checkpoint), "--query", token], environment)
-        require(f"context mode: {mode}" in output, f"checkpoint mode mismatch for {mode}")
-        neighbour_match = re.search(r"^\s*nearest semantic neighbour:\s*(\S+)\s*$", output, re.MULTILINE)
-        similarity_match = re.search(r"^\s*bipolar similarity:\s*(-?\d+\.\d+)\s*$", output, re.MULTILINE)
-        require(neighbour_match is not None, f"missing nearest neighbour for {token}\n{output}")
-        require(similarity_match is not None, f"missing similarity for {token}\n{output}")
-        neighbour = neighbour_match.group(1)
-        similarity = float(similarity_match.group(1))
+    for token, neighbour, rendered_similarity in blocks:
+        require(token in TOKEN_TO_CLUSTER, f"unexpected query {token!r}")
         require(neighbour in TOKEN_TO_CLUSTER, f"unexpected neighbour {neighbour!r} for {token!r}")
-        matches.append((token, neighbour, similarity))
+        matches.append((token, neighbour, float(rendered_similarity)))
+    require(tuple(entry[0] for entry in matches) == TOKENS, "batch query output reordered or omitted fixture tokens")
 
     correct = [entry for entry in matches if TOKEN_TO_CLUSTER[entry[0]] == TOKEN_TO_CLUSTER[entry[1]]]
     similarities = [entry[2] for entry in matches]
@@ -175,7 +185,6 @@ def inspect_top1_quality(binary: Path, checkpoint: Path, mode: str, environment:
         "maximum_top1_similarity": round(max(similarities), 6),
         "top1_neighbours": [[token, neighbour, round(similarity, 5)] for token, neighbour, similarity in matches],
     }
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -196,6 +205,8 @@ def main() -> int:
 
         with tempfile.TemporaryDirectory(prefix="vegai-mode-comparison-") as temporary:
             workdir = Path(temporary)
+            query_file = workdir / "fixture-queries.txt"
+            query_file.write_text("\n".join(TOKENS) + "\n", encoding="ascii")
             speed: dict[str, dict[str, Any]] = {}
             checkpoints: dict[str, Path] = {}
             for mode in MODES:
@@ -203,7 +214,7 @@ def main() -> int:
                     binary, mode, arguments.repetitions, workdir, environment
                 )
             quality = {
-                mode: inspect_top1_quality(binary, checkpoints[mode], mode, environment)
+                mode: inspect_top1_quality(binary, checkpoints[mode], mode, query_file, environment)
                 for mode in MODES
             }
 

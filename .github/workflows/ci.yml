@@ -97,11 +97,16 @@ jobs:
           quality = report["quality"]
           comparison = report["comparison"]
           message = (
+              f"legacy_seconds={speed['legacy']['median_seconds']:.6f}; "
+              f"positional_seconds={speed['positional']['median_seconds']:.6f}; "
+              f"hybrid_seconds={speed['hybrid']['median_seconds']:.6f}; "
               f"legacy_tps={speed['legacy']['training_tokens_per_second']:.3f}; "
               f"positional_tps={speed['positional']['training_tokens_per_second']:.3f}; "
               f"hybrid_tps={speed['hybrid']['training_tokens_per_second']:.3f}; "
               f"positional_speedup={comparison['positional_speedup_vs_legacy']:.4f}x; "
               f"hybrid_speedup={comparison['hybrid_speedup_vs_legacy']:.4f}x; "
+              f"legacy_similarity={quality['legacy']['mean_top1_similarity']:.6f}; "
+              f"hybrid_similarity={quality['hybrid']['mean_top1_similarity']:.6f}; "
               f"hybrid_top1={quality['hybrid']['same_cluster_top1_percent']:.3f}%; "
               f"semantic_similarity_gain={comparison['hybrid_mean_top1_similarity_gain_vs_positional']:.6f}"
           )

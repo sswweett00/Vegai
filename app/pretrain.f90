@@ -1,13 +1,13 @@
 ! SPDX-License-Identifier: MIT
 ! Command-line entry point for deterministic HDC/VSA corpus pretraining.
 program vegai_pretrain
-   use, intrinsic :: iso_fortran_env, only: int32, int64, output_unit, error_unit, real32
+   use, intrinsic :: iso_fortran_env, only: int32, int64, output_unit, error_unit, real32, iostat_end
    use hyper_types, only: hv_t
    use text_tokenizer, only: TOKEN_LEN, MAX_TOKENS_PER_LINE, tokenize_ascii_line
    use hdc_pretraining
    implicit none
 
-   character(len=512) :: command, corpus_path, checkpoint_path, query
+   character(len=512) :: command, corpus_path, checkpoint_path, query, query_file
    type(hdc_pretrain_model_t) :: model
    type(hdc_pretrain_config_t) :: config
    type(pretrain_metrics_t) :: vocabulary_metrics, training_metrics
@@ -67,12 +67,17 @@ program vegai_pretrain
       if (argument_count < 2) call fail_usage()
       call get_command_argument(2, checkpoint_path)
       query = ''
-      call parse_inspect_options(3, argument_count, query, status)
+      query_file = ''
+      call parse_inspect_options(3, argument_count, query, query_file, status)
       if (status /= PT_OK) call fail_with_status('invalid inspect option', status)
       call pretrain_checkpoint_load(trim(checkpoint_path), model, status)
       if (status /= PT_OK) call fail_with_status('checkpoint load failed', status)
       call print_model_summary(model)
-      call maybe_query(model, query, status)
+      if (len_trim(query_file) > 0) then
+         call maybe_query_file(model, trim(query_file), status)
+      else
+         call maybe_query(model, query, status)
+      end if
       if (status /= PT_OK) call fail_with_status('query failed', status)
 
    case ('help', '--help', '-h')
@@ -198,25 +203,43 @@ contains
       end do
    end subroutine parse_resume_options
 
-   subroutine parse_inspect_options(first_argument, last_argument, parsed_query, parse_status)
+   subroutine parse_inspect_options(first_argument, last_argument, parsed_query, parsed_query_file, parse_status)
       integer, intent(in) :: first_argument, last_argument
-      character(len=*), intent(out) :: parsed_query
+      character(len=*), intent(out) :: parsed_query, parsed_query_file
       integer(int32), intent(out) :: parse_status
-      character(len=512) :: option
+      character(len=512) :: option, value
+      integer :: index
 
       parsed_query = ''
+      parsed_query_file = ''
       parse_status = PT_OK
-      if (first_argument > last_argument) return
-      if (first_argument + 1 /= last_argument) then
-         parse_status = PT_ERR_INVALID_ARGUMENT
-         return
-      end if
-      call get_command_argument(first_argument, option)
-      if (trim(option) /= '--query') then
-         parse_status = PT_ERR_INVALID_ARGUMENT
-         return
-      end if
-      call get_command_argument(last_argument, parsed_query)
+      index = first_argument
+      do while (index <= last_argument)
+         if (index == last_argument) then
+            parse_status = PT_ERR_INVALID_ARGUMENT
+            return
+         end if
+         call get_command_argument(index, option)
+         call get_command_argument(index + 1, value)
+         select case (trim(option))
+         case ('--query')
+            if (len_trim(parsed_query_file) > 0 .or. len_trim(parsed_query) > 0) then
+               parse_status = PT_ERR_INVALID_ARGUMENT
+               return
+            end if
+            parsed_query = value
+         case ('--query-file')
+            if (len_trim(parsed_query) > 0 .or. len_trim(parsed_query_file) > 0) then
+               parse_status = PT_ERR_INVALID_ARGUMENT
+               return
+            end if
+            parsed_query_file = value
+         case default
+            parse_status = PT_ERR_INVALID_ARGUMENT
+            return
+         end select
+         index = index + 2
+      end do
    end subroutine parse_inspect_options
 
    subroutine print_vocabulary_summary(trained_model, metrics)
@@ -266,6 +289,38 @@ contains
       write(output_unit, '(A,I0)') '  estimated resident bytes: ', pretrain_model_footprint_bytes(trained_model)
    end subroutine print_model_summary
 
+   ! Batch diagnostic path for benchmark and operator workflows.  Each nonblank
+   ! physical record supplies exactly one tokenizer-valid query token; output
+   ! remains the same three-line query block used by --query.
+   subroutine maybe_query_file(trained_model, requested_query_file, query_status)
+      type(hdc_pretrain_model_t), intent(in) :: trained_model
+      character(len=*), intent(in) :: requested_query_file
+      integer(int32), intent(out) :: query_status
+      character(len=512) :: query_line
+      integer :: unit, io_status
+
+      query_status = PT_OK
+      if (len_trim(requested_query_file) == 0) return
+      open(newunit=unit, file=trim(requested_query_file), status='old', action='read', &
+           form='formatted', iostat=io_status)
+      if (io_status /= 0) then
+         query_status = PT_ERR_IO
+         return
+      end if
+      do
+         read(unit, '(A)', iostat=io_status) query_line
+         if (io_status == iostat_end) exit
+         if (io_status /= 0) then
+            query_status = PT_ERR_IO
+            exit
+         end if
+         if (len_trim(query_line) == 0) cycle
+         call maybe_query(trained_model, trim(query_line), query_status)
+         if (query_status /= PT_OK) exit
+      end do
+      close(unit)
+   end subroutine maybe_query_file
+
    subroutine maybe_query(trained_model, requested_query, query_status)
       type(hdc_pretrain_model_t), intent(in) :: trained_model
       character(len=*), intent(in) :: requested_query
@@ -311,7 +366,7 @@ contains
       write(output_unit, '(A)') 'Usage:'
       write(output_unit, '(A)') '  vegai_pretrain train CORPUS CHECKPOINT [options]'
       write(output_unit, '(A)') '  vegai_pretrain resume CORPUS CHECKPOINT [--epochs N] [--strict] [--query TOKEN]'
-      write(output_unit, '(A)') '  vegai_pretrain inspect CHECKPOINT [--query TOKEN]'
+      write(output_unit, '(A)') '  vegai_pretrain inspect CHECKPOINT [--query TOKEN | --query-file PATH]'
       write(output_unit, '(A)') 'Train options:'
       write(output_unit, '(A)') '  --max-vocab N --min-frequency N --window N --position-shift N --context-mode MODE --epochs N'
       write(output_unit, '(A)') '  MODE is legacy, positional, or hybrid (default hybrid)'

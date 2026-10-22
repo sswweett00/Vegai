@@ -150,6 +150,9 @@ cmake --build build --parallel
 
 # Eğitim yapmadan metadata ve tek nearest-neighbour sorgusu
 ./build/vegai_pretrain inspect model.vgai --query token
+
+# Tek checkpoint load ile dosyadaki her nonblank token için batch diagnostic
+./build/vegai_pretrain inspect model.vgai --query-file evaluation-queries.txt
 ```
 
 `train` options:
@@ -166,7 +169,8 @@ cmake --build build --parallel
 | `--minimum-plasticity N` | 1 | schedule alt sınırı |
 | `--decay-events N` | 32 | token başına ilk schedule eşiği |
 | `--strict` | kapalı | drop/truncation durumunu hata yap |
-| `--query TOKEN` | yok | eğitimden sonra bir semantic neighbour göster |
+| `--query TOKEN` | yok | eğitimden sonra veya `inspect` sırasında bir semantic neighbour göster |
+| `inspect --query-file PATH` | yok | her nonblank satırdaki tek token için tek checkpoint load ile batch nearest-neighbour diagnostic |
 
 `resume`, checkpoint'ten vocabulary threshold/capacity, `window`, shift,
 context encoder, plasticity ve tie seed'ini geri alır; yalnız `--epochs`,
