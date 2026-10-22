@@ -57,6 +57,7 @@ module hdc_pretraining
 
    integer(int32), parameter :: HIERARCHICAL_MIN_ACTIVE_TOKENS = 12_int32
    integer(int32), parameter :: HIERARCHICAL_GLOBAL_CONTEXT_WEIGHT = 3_int32
+   integer(int64), parameter :: OPENVINO_LOW32_MASK = int(z'00000000FFFFFFFF', int64)
 
    character(len=8), parameter :: CHECKPOINT_MAGIC = 'VGHDC001'
    integer(int32), parameter :: CHECKPOINT_VERSION = 5_int32
@@ -978,20 +979,24 @@ contains
       end select
    end function openvino_context_item_count
 
-   ! Explicitly split an int64 bit pattern into low/high int32 lanes.  MVbits
-   ! moves representation bits rather than converting a potentially-negative
-   ! numeric value, so the little-endian Python worker never relies on raw
-   ! Fortran storage reinterpretation.
+   ! Explicitly split an int64 bit pattern into low/high int32 lanes.  The
+   ! high bit of either lane is created/read with bit intrinsics, never with an
+   ! out-of-range numeric conversion.  Stream files still reject big-endian
+   ! hosts at dispatch time because the Python protocol is little-endian.
    pure subroutine pack_hv_u32_lanes(vector, lanes)
       type(hv_t), intent(in) :: vector
       integer(int32), intent(out) :: lanes(:)
-      integer(int32) :: word
+      integer(int32) :: word, low_lane, high_lane
 
       lanes = 0_int32
       if (size(lanes, kind=int32) /= 2_int32 * HV_WORDS) return
       do word = 1, HV_WORDS
-         call mvbits(vector%bits(word), 0, 32, lanes(2_int32 * word - 1_int32), 0)
-         call mvbits(vector%bits(word), 32, 32, lanes(2_int32 * word), 0)
+         low_lane = int(ibits(vector%bits(word), 0, 31), int32)
+         if (btest(vector%bits(word), 31)) low_lane = ibset(low_lane, 31)
+         high_lane = int(ibits(vector%bits(word), 32, 31), int32)
+         if (btest(vector%bits(word), 63)) high_lane = ibset(high_lane, 31)
+         lanes(2_int32 * word - 1_int32) = low_lane
+         lanes(2_int32 * word) = high_lane
       end do
    end subroutine pack_hv_u32_lanes
 
@@ -999,12 +1004,14 @@ contains
       integer(int32), intent(in) :: lanes(:)
       integer(int64), intent(out) :: bits(HV_WORDS)
       integer(int32) :: word
+      integer(int64) :: low_lane, high_lane
 
       bits = 0_int64
       if (size(lanes, kind=int32) /= 2_int32 * HV_WORDS) return
       do word = 1, HV_WORDS
-         call mvbits(lanes(2_int32 * word - 1_int32), 0, 32, bits(word), 0)
-         call mvbits(lanes(2_int32 * word), 0, 32, bits(word), 32)
+         low_lane = iand(int(lanes(2_int32 * word - 1_int32), int64), OPENVINO_LOW32_MASK)
+         high_lane = iand(int(lanes(2_int32 * word), int64), OPENVINO_LOW32_MASK)
+         bits(word) = ior(low_lane, ishft(high_lane, 32))
       end do
    end subroutine unpack_hv_u32_lanes
 
