@@ -29,7 +29,7 @@ yerine geçmez.
 | `python3 tools/verify_openvino_provider.py` | optional Intel OpenVINO provider preflight/truth contract | `OpenVINO provider verification: PASS` |
 | `python3 tools/verify_openvino_context_worker.py` | uint32-lane worker protocol, neutral tie/complement padding, resident graph-cache reuse; runtime yoksa fail-closed | `OpenVINO context worker verification: PASS` |
 | `python3 tools/verify_openvino_context_provider.py --pretrain-bin build/vegai_pretrain` | native-CPU bypass timing/equality guard + strict resident OpenVINO graph checkpoint equality (runtime yoksa SKIP) | `OpenVINO context provider verification: PASS` |
-| `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties`, `vegai_hardware_compatibility`, `vegai_training_resource_plan`, `vegai_openvino_provider_contract`, `vegai_openvino_context_worker_contract`, `vegai_openvino_context_provider`, `vegai_example_pretraining`, `vegai_continuous_pretraining` PASS |
+| `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties`, donanım/OpenVINO contract testleri, `vegai_example_pretraining`, `vegai_continuous_pretraining`, `vegai_production_pretraining`, `vegai_example_production_dataset_preflight` PASS |
 
 CI bunların checked CMake/OpenMP varyantını ve ayrıca optimize Make hedefini
 çalıştırır.
@@ -109,8 +109,15 @@ CI, küçük `toy_hdc_corpus.txt` ile `train → inspect → resume` smoke zinci
 ve `mini_turkish_ascii_pretrain.txt` ile manifest, dengeli-token cardinality,
 bit-tam çift checkpoint ve `train → inspect → resume` integration zincirini
 çalıştırır. CTest'in `vegai_continuous_pretraining` entegrasyonu gerçek CLI ile
-SHA-256 shard mutation rejection, append-only manifest prefix, OOV=0 ve
-idempotent restart journal davranışını ayrıca sınar.
+SHA-256 shard mutation rejection, immutable manifest digest pin'i, append-only
+manifest prefix, OOV=0 ve idempotent restart journal davranışını ayrıca sınar.
+`vegai_production_pretraining`, gerçek compiled CLI ile deterministic foundry
+byte equality, disk-backed exact record dedupe, `min_frequency=1` exact
+vocabulary-capacity preflight, immutable shard/path rejection, record-level
+train/validation leakage rejection, exactly-once generation ve idempotent
+production resume'ı sınar. `vegai_example_production_dataset_preflight`,
+source-controlled sentetik package'ın ledger/content-address/leakage contract'ını
+ayrıca doğrular.
 
 CI önce `tools/hardware_compatibility.py` ile CPU/OS/mimari/RAM/GPU/NPU
 inventory metadata'sını, sonra `tools/training_resource_plan.py` ile bounded
@@ -220,6 +227,10 @@ latency benchmarkı ölçün.
 | LSH bucket boş | `MEM_ERR_NO_LSH_CANDIDATE` yalnız approximate API'de |
 | continuous shard SHA/preflight uyuşmazlığı | controller child CLI çağrısından önce shard'ı reddeder; committed state değişmez |
 | continuous manifest committed prefix rewrite | controller reddeder; önceki generation replay edilmez |
+| pinned immutable manifest byte replacement | `--expect-manifest-sha256` child/shard işleminden önce reddeder |
+| production dataset shard/path/ledger replacement | package SHA/content-address contract ve runner preflight'i reddeder |
+| production train/validation raw-record overlap | exact SQLite leakage gate child training başlamadan reddeder |
+| production `max-vocab` exact unique train token sayısından küçük | runner training başlamadan capacity hatası verir |
 | candidate checkpoint sonrası crash | state journal eski generation'da kalır; orphan candidate durable commit sayılmaz |
 
 ## Reproducibility kaydı
@@ -256,6 +267,7 @@ Bir değişiklik merge edilmeden önce:
 - [ ] tokenizer/overlong-record telemetry'si incelendi; strict veya kabul politikası açıklandı
 - [ ] checkpoint save/load + resume sonucu hedef compiler/ABI üzerinde doğrulandı
 - [ ] continual iş varsa immutable SHA-256 manifest, `min_frequency=1`, state journal ve restart/fault senaryosu doğrulandı
+- [ ] production package kullanılıyorsa exact dedupe, train/validation leakage audit, content-addressed ledger pin'i ve exact `max-vocab` capacity preflight geçti
 - [ ] pretraining semantic kalite iddiası held-out görev ve baseline ile ölçüldü
 - [ ] `--max-vocab` / checkpoint path için resource plan ve gerçek RAM/storage headroom incelendi
 - [ ] multi-core iddiasında serial/parallel checkpoint byte equality doğrulandı

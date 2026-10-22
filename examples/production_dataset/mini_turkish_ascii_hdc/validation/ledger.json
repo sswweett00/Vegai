@@ -1,0 +1,35 @@
+{
+  "declared_provenance": {
+    "license": "MIT",
+    "preprocessing": "ASCII-safe Turkish transliteration; deterministic cluster rotations",
+    "retrieved_at": "source-controlled fixture",
+    "source": "Vegai repository-authored synthetic fixture"
+  },
+  "schema": "vegai-continuous-shard-manifest/v1",
+  "shards": [
+    {
+      "bytes": 731,
+      "id": "7471c8aa0ecaa13fd45b4b7c6f5aed52bec7033a14bf7d3aa000509f040db958",
+      "path": "shards/7471c8aa0ecaa13fd45b4b7c6f5aed52bec7033a14bf7d3aa000509f040db958.txt",
+      "physical_lf_records": 14,
+      "preflight": {
+        "accepted_tokens": 112,
+        "crlf_records": 0,
+        "dropped_tokens": 0,
+        "maximum_record_bytes": 58,
+        "non_ascii_bytes": 0,
+        "overlong_records": 0,
+        "records_with_tokenizer_truncation": 0
+      },
+      "sha256": "7471c8aa0ecaa13fd45b4b7c6f5aed52bec7033a14bf7d3aa000509f040db958"
+    }
+  ],
+  "vegai_ascii_ingest_contract": {
+    "max_line_bytes": 8192,
+    "max_tokens_per_line": 1024,
+    "require_ascii_only": true,
+    "require_lf_only": true,
+    "require_no_dropped_tokens": true,
+    "token_length_bytes": 48
+  }
+}

@@ -313,6 +313,17 @@ checksum saklanır.
 Ayrıntılı contract ve data governance için [PRETRAINING.md](PRETRAINING.md)'ye
 bakın.
 
+Bu Fortran data plane'in üstünde Python production control plane bulunur:
+`production_dataset.py`, strict ASCII/LF record'ları disk-backed exact SHA-256
+dedupe, exact min-frequency-1 train vocabulary count ve deterministic held-out
+split ile immutable shard package olarak atomik yayınlar.
+`production_pretrain.py` dataset/binary/policy identity'sini kaydeder, run
+öncesi exact record-level train/validation leakage + max-vocabulary capacity
+audit ile resource plan yapar ve var olan
+`continuous_pretrain.py` candidate-generation/state-journal protokolünü çağırır. Kontrol katmanı model semantiğini veya checkpoint data
+plane'ini değiştirmez; Transformer/LMM runtime değildir. Tam operation/failure
+contract için [PRODUCTION_PRETRAINING.md](PRODUCTION_PRETRAINING.md)'ye bakın.
+
 ## 7. Paralellik ve performans sınırları
 
 `hv_bind`, `hv_bundle3`, `hv_hamming` ve mask işlemlerinde `!$omp simd`

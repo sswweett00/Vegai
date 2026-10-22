@@ -350,6 +350,15 @@ python3 tools/corpus_manifest.py /secure/path/corpus.txt \
 `--expect-sha256` ile daha önce kaydedilmiş input digest'i yeniden doğrulanabilir.
 Tool streaming scan yapar ve gerçek corpus'u manifest içine kopyalamaz.
 
+Strict ASCII corpus'u content-addressed immutable shard'lara bölmek, disk-backed
+exact record dedupe uygulamak, deterministic held-out split yayınlamak ve run
+öncesi exact record-level train/validation leakage audit yapmak için
+`tools/production_dataset.py` + `tools/production_pretrain.py` kullanılabilir.
+Bu production HDC control plane'in atomic publish/exactly-once/provenance
+sözleşmesi [PRODUCTION_PRETRAINING.md](PRODUCTION_PRETRAINING.md)'de tanımlıdır.
+Bu araçlar LLM/LMM runtime, semantic near-duplicate detection veya lisans/PII
+uyumluluğunun yerine geçmez.
+
 Her run için version-control dışındaki bir manifestte en az şunlar bulunmalıdır:
 
 ```text

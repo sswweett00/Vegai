@@ -1,0 +1,63 @@
+{
+  "declared_provenance": {
+    "license": "MIT",
+    "preprocessing": "ASCII-safe Turkish transliteration; deterministic cluster rotations",
+    "retrieved_at": "source-controlled fixture",
+    "source": "Vegai repository-authored synthetic fixture"
+  },
+  "deduplication": {
+    "duplicates_removed": 0,
+    "identity": "sha256(raw-record-without-lf)",
+    "mode": "exact",
+    "retained_records": 128,
+    "sqlite_index_schema": "vegai-exact-record-dedup/v1"
+  },
+  "schema": "vegai-production-dataset/v1",
+  "source": {
+    "bytes": 6544,
+    "empty_or_punctuation_records_filtered": 0,
+    "input_filename": "mini_turkish_ascii_pretrain.txt",
+    "physical_lf_records": 128,
+    "sha256": "886f754c1cf65676c5d35837cc323b9c14f467a5b8e7f0be7db2097328faa362",
+    "strict_preflight": {
+      "accepted_tokens": 1024,
+      "crlf_records": 0,
+      "dropped_tokens": 0,
+      "maximum_record_bytes": 58,
+      "non_ascii_bytes": 0,
+      "overlong_records": 0,
+      "records_with_tokenizer_truncation": 0
+    }
+  },
+  "split": {
+    "algorithm": "sha256-first-64-bits-mod-10000/v1",
+    "contract": "Exact duplicate identities are removed before deterministic split assignment. The builder writes each retained digest to exactly one split.",
+    "train_validation_record_identity_disjoint": true,
+    "validation_basis_points": 1000
+  },
+  "train": {
+    "accepted_tokens": 912,
+    "ledger": "train/ledger.json",
+    "ledger_sha256": "41ccb424d7e63e21bb9a3476cb9cab2c37ef1466d31bb0626d5aa07063f9f277",
+    "record_digest_stream_sha256": "7a6b71d6644f64cd4cf3e24a9a8aa81656a4523ea4d972f5587bdee30d76d415",
+    "records": 114,
+    "shards": 4,
+    "unique_tokens_min_frequency_1": 64
+  },
+  "validation": {
+    "accepted_tokens": 112,
+    "ledger": "validation/ledger.json",
+    "ledger_sha256": "3fa651465f07694f257e37e7edd1ddbc9e4359907db16fbf872797a2aba7fb5d",
+    "record_digest_stream_sha256": "f4ed987dc307d3430bf863b1e56f1800858abceb276aa6dd488d3b11561465ab",
+    "records": 14,
+    "shards": 1
+  },
+  "vegai_ascii_ingest_contract": {
+    "max_line_bytes": 8192,
+    "max_tokens_per_line": 1024,
+    "require_ascii_only": true,
+    "require_lf_only": true,
+    "require_no_dropped_tokens": true,
+    "token_length_bytes": 48
+  }
+}

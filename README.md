@@ -41,6 +41,8 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 > ister; veri yönetişimi, checkpoint ve sınırlar [PRETRAINING.md](docs/PRETRAINING.md)'de, immutable
 > shard'larla crash-safe continual çalışma ise
 > [CONTINUOUS_PRETRAINING.md](docs/CONTINUOUS_PRETRAINING.md)'de açıkça tanımlıdır.
+> Gerçek LMM/LLM ile mevcut HDC production kapsamı arasındaki kaynak-temelli gap
+> analizi [LMM_SCOPE_AND_GAP_ANALYSIS.md](docs/LMM_SCOPE_AND_GAP_ANALYSIS.md)'dedir.
 
 ## Hızlı başlangıç
 
@@ -125,6 +127,18 @@ python3 tools/continuous_shard_manifest.py data/shards/000001.txt data/shards/00
 python3 tools/continuous_pretrain.py --pretrain-bin ./build/vegai_pretrain \
   --manifest data/continual-ledger.json --state-dir state/continual \
   --max-vocab 50000 --min-frequency 1 --context-mode hierarchical --epochs 1
+
+# Production data foundry + record-level held-out leakage gate + auditable run
+python3 tools/production_dataset.py --input governed-corpus.txt \
+  --output-dir production-datasets/release-v1 \
+  --source 'dataset registry/release-v1' --license 'approved-license-id' \
+  --retrieved-at 'registry-event-2026-10-23' \
+  --preprocessing 'versioned governed upstream pipeline' \
+  --validation-basis-points 100
+python3 tools/production_pretrain.py --pretrain-bin ./build/vegai_pretrain \
+  --dataset production-datasets/release-v1/dataset.json \
+  --run-dir production-runs/release-v1-hdc \
+  --max-vocab 20000 --min-frequency 1 --context-mode hierarchical --epochs 1
 ```
 
 GNU CMake hedefi `-std=f2023` bayrağını uygulama, test ve kütüphane hedeflerine
@@ -163,6 +177,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, hierarchical default, deterministic OpenMP / optional OpenVINO immutable-context preparation + source-ordered CPU commit, metrics, checkpoint/resume |
 | Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect`, CPU/OpenVINO context-provider execution switch ve nearest semantic diagnostic |
 | Continual transaction | `tools/continuous_shard_manifest.py`, `tools/continuous_pretrain.py` | immutable SHA-256 ledger, strict ingest gate, candidate generation, atomic state journal |
+| Production data/run control | `tools/production_dataset.py`, `tools/production_pretrain.py` | disk-backed exact record/token dedupe, deterministic held-out split, content-addressed shard package, exact leakage + vocabulary-capacity gate, immutable binary/data/policy provenance, real exactly-once run wrapper |
 | Kaynak preflight | `tools/training_resource_plan.py` | bounded RAM/checkpoint storage estimate, CPU/NUMA/OpenMP recommendation, static accelerator truth contract |
 | OpenVINO context worker | `tools/openvino_context_worker.py` | optional Intel uint32-lane immutable-context bridge; resident per-train service, dynamic-batch compiled-graph cache, execution mask / native-CPU bypass contract |
 | Çalıştırılabilir doğrulama | `app/main.f90` | %25 exact gürültü, analoji, causal chain ve 3-faktör Resonator demo |
@@ -182,7 +197,11 @@ Resonator Network sözleşmesi için [docs/RESONATOR_NETWORK.md](docs/RESONATOR_
 corpus veri hattı, yönetişim ve checkpoint sözleşmesi için
 [docs/PRETRAINING.md](docs/PRETRAINING.md), immutable shard ledger ve
 crash-safe exactly-once continual pretraining için
-[docs/CONTINUOUS_PRETRAINING.md](docs/CONTINUOUS_PRETRAINING.md), fixture üzerinde gerçek yürütme
+[docs/CONTINUOUS_PRETRAINING.md](docs/CONTINUOUS_PRETRAINING.md), production data foundry,
+record-level leakage gate ve immutable run provenance için
+[docs/PRODUCTION_PRETRAINING.md](docs/PRODUCTION_PRETRAINING.md), gerçek LMM/LLM
+hedefine ilişkin kapsam/gap analizi için
+[docs/LMM_SCOPE_AND_GAP_ANALYSIS.md](docs/LMM_SCOPE_AND_GAP_ANALYSIS.md), fixture üzerinde gerçek yürütme
 telemetrisi için [docs/EXAMPLE_PRETRAINING_RUN.md](docs/EXAMPLE_PRETRAINING_RUN.md),
 önce/sonra hız ve controlled semantic-cohesion sonuçları için
 [docs/PRETRAINING_MODE_COMPARISON.md](docs/PRETRAINING_MODE_COMPARISON.md),

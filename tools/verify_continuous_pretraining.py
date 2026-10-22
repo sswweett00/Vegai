@@ -104,7 +104,11 @@ def main() -> int:
                 ]
             )
 
+            manifest_bytes = manifest.read_bytes()
+            manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
             initial = controller_command(binary, manifest, state_dir) + [
+                "--expect-manifest-sha256",
+                manifest_digest,
                 "--max-vocab",
                 "16",
                 "--min-frequency",
@@ -128,6 +132,20 @@ def main() -> int:
                 fail(f"first state does not contain exactly one commit: {state_one}")
             if state_one.get("policy", {}).get("context_mode") != "hierarchical":
                 fail(f"continuous policy did not preserve hierarchical mode: {state_one}")
+
+            # A pinned immutable release rejects even a syntactically valid
+            # whitespace-only manifest replacement before it reads a shard.
+            manifest.write_bytes(manifest_bytes + b" ")
+            pinned_replacement = run(
+                controller_command(binary, manifest, state_dir) + [
+                    "--expect-manifest-sha256", manifest_digest
+                ], expected=1
+            )
+            if "manifest changed or has wrong digest" not in pinned_replacement.stdout:
+                fail(f"pinned manifest replacement was not diagnosed\n{pinned_replacement.stdout}")
+            if state_path.read_bytes() != before_rewrite:
+                fail("pinned manifest replacement modified the durable state")
+            manifest.write_bytes(manifest_bytes)
 
             # A pending shard must remain immutable under the SHA identity in
             # the ledger.  Its mutation is rejected before the real CLI sees it.

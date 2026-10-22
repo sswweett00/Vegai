@@ -126,9 +126,14 @@ python3 tools/continuous_pretrain.py \
 ```
 
 `--max-shards N`, recovery/integration işleri için bir çağrıda en fazla `N`
-pending shard commit eder. Aynı state directory üzerinde tek controller
-çalışabilir. O_EXCL lock kalırsa önce gerçek owner'ı inceleyin; yalnız stale
-olduğu operatörce doğrulandıktan sonra `--recover-lock` kullanın.
+pending shard commit eder. Bir immutable release'i pinlemek için
+`--expect-manifest-sha256 HEX` verilebilir: controller her processing pass'ten
+önce manifest byte digest'ini doğrular; replacement fail-closed olur. Bu option
+append-only `--follow` akışıyla birlikte kullanılmaz, çünkü yeni manifestin
+digest'i tasarım gereği farklı olur. Production dataset wrapper bu pin'i
+otomatik geçirir. Aynı state directory üzerinde tek controller çalışabilir.
+O_EXCL lock kalırsa önce gerçek owner'ı inceleyin; yalnız stale olduğu
+operatörce doğrulandıktan sonra `--recover-lock` kullanın.
 
 ## 5. Durable transaction protokolü
 
@@ -171,6 +176,8 @@ CMake/CTest içindeki `vegai_continuous_pretraining` testi gerçek derlenmiş
 CLI ile iki shard çalıştırır. Test şunları denetler:
 
 - ikinci shard'ın `gamma` vocabulary slotunu eklemesi;
+- `--expect-manifest-sha256` ile whitespace-only immutable manifest replacement'ının
+  shard/CLI çağrısından önce reddi;
 - mutation edilmiş pending shard'ın SHA-256 nedeniyle CLI çağrılmadan reddi;
 - iki shard için `training_oov_tokens = 0` ve accepted-token accounting;
 - completed epoch sayısının iki olması;
@@ -181,6 +188,8 @@ CLI ile iki shard çalıştırır. Test şunları denetler:
   manifest output'unun input shard'ı overwrite etmesine karşı koruma.
 
 Tek başına iki-pass corpus pipeline, telemetri ve checkpoint formatı için
-[PRETRAINING.md](PRETRAINING.md)'ye; gerçek speed/semantic benchmark sınırları
- için [PRETRAINING_MODE_COMPARISON.md](PRETRAINING_MODE_COMPARISON.md)'ye
-bakın.
+[PRETRAINING.md](PRETRAINING.md)'ye; exact record-deduplicated dataset foundry,
+held-out leakage gate, binary/data/policy run provenance ve production wrapper
+için [PRODUCTION_PRETRAINING.md](PRODUCTION_PRETRAINING.md)'ye; gerçek
+speed/semantic benchmark sınırları için
+[PRETRAINING_MODE_COMPARISON.md](PRETRAINING_MODE_COMPARISON.md)'ye bakın.

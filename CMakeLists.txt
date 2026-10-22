@@ -144,6 +144,19 @@ if(VEGAI_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_continuous_pretraining.py
                     --pretrain-bin $<TARGET_FILE:vegai_pretrain>
         )
+        add_test(
+            NAME vegai_production_pretraining
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_production_pretraining.py
+                    --pretrain-bin $<TARGET_FILE:vegai_pretrain>
+        )
+        add_test(
+            NAME vegai_example_production_dataset_preflight
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/production_pretrain.py
+                    --pretrain-bin $<TARGET_FILE:vegai_pretrain>
+                    --dataset ${CMAKE_CURRENT_SOURCE_DIR}/examples/production_dataset/mini_turkish_ascii_hdc/dataset.json
+                    --run-dir ${CMAKE_CURRENT_BINARY_DIR}/example-production-preflight
+                    --max-vocab 128 --preflight-only
+        )
     else()
         message(WARNING "Python3 was not found; Python hardware/corpus integration tests are not registered.")
     endif()

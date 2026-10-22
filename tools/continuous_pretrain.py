@@ -205,8 +205,19 @@ def scan_shard(path: Path) -> tuple[str, int, PreflightStats]:
         raise ContinuousPretrainError(f"cannot read shard {path}: {error}") from error
 
 
-def load_manifest(path: Path) -> list[Shard]:
+def load_manifest(path: Path, expected_sha256: str | None = None) -> list[Shard]:
+    if expected_sha256 is not None:
+        require(is_sha256(expected_sha256), "expected manifest SHA-256 is invalid")
+        require(
+            file_sha256(path) == expected_sha256.lower(),
+            f"continuous manifest changed or has wrong digest: {path}",
+        )
     manifest = load_json(path, "continuous shard manifest")
+    if expected_sha256 is not None:
+        require(
+            file_sha256(path) == expected_sha256.lower(),
+            f"continuous manifest changed while being read: {path}",
+        )
     require(manifest.get("schema") == MANIFEST_SCHEMA, f"unsupported shard manifest schema: {manifest.get('schema')!r}")
     contract = manifest.get("vegai_ascii_ingest_contract")
     require(isinstance(contract, dict), "manifest omitted vegai_ascii_ingest_contract")
@@ -680,8 +691,9 @@ def process_available(
     binary: Path,
     state: dict[str, Any],
     maximum_shards: int | None,
+    expected_manifest_sha256: str | None,
 ) -> tuple[dict[str, Any], int]:
-    shards = load_manifest(manifest_path)
+    shards = load_manifest(manifest_path, expected_manifest_sha256)
     validate_manifest_prefix(state, shards)
     committed = 0
     while state["generation"] < len(shards) and (maximum_shards is None or committed < maximum_shards):
@@ -700,6 +712,10 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--pretrain-bin", required=True, type=Path, help="compiled vegai_pretrain executable")
     parser.add_argument("--manifest", required=True, type=Path, help="immutable ordered shard manifest JSON")
     parser.add_argument("--state-dir", required=True, type=Path, help="controller state and generation directory")
+    parser.add_argument(
+        "--expect-manifest-sha256",
+        help="optional immutable manifest digest; reject replacement before every processing pass",
+    )
     parser.add_argument("--follow", action="store_true", help="poll an atomically updated append-only manifest forever")
     parser.add_argument("--poll-seconds", type=float, default=5.0, help="follow polling interval (default: 5)")
     parser.add_argument("--max-shards", type=int, help="commit at most this many currently pending shards")
@@ -737,7 +753,8 @@ def main() -> int:
             state = load_state(state_directory, arguments)
             while True:
                 state, committed = process_available(
-                    state_directory, manifest_path, binary, state, arguments.max_shards
+                    state_directory, manifest_path, binary, state, arguments.max_shards,
+                    arguments.expect_manifest_sha256,
                 )
                 if not arguments.follow:
                     break

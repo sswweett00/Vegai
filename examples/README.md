@@ -102,6 +102,30 @@ publish kullanır; doğrudan `continue` komutunu durable checkpoint üzerinde
 semantics için
 [`docs/CONTINUOUS_PRETRAINING.md`](../docs/CONTINUOUS_PRETRAINING.md)'ye bakın.
 
+## 3. Production-data foundry fixture'ı
+
+`production_dataset/mini_turkish_ascii_hdc/`, yukarıdaki 128-record sentetik
+fixture'ın source-controlled, immutable production-package örneğidir. Exact
+record dedupe, SHA-256 shard ledger ve deterministic %10 held-out split sonucu
+**114 train record / 912 token / 64 exact unique token / 4 shard** ve
+**14 validation record / 112 token / 1 shard** içerir. Bu bir LLM/LMM dataset'i veya semantic benchmark
+değil; Vegai HDC için data governance/run-control integration fixture'ıdır.
+
+```bash
+# Tam shard/ledger/data manifest doğrulamasından sonra gerçek exactly-once HDC run
+python3 tools/production_pretrain.py \
+  --pretrain-bin ./build/vegai_pretrain \
+  --dataset examples/production_dataset/mini_turkish_ascii_hdc/dataset.json \
+  --run-dir /tmp/vegai-mini-production-run \
+  --max-vocab 128 --min-frequency 1 --window 2 --position-shift 41 \
+  --context-mode hierarchical --epochs 1 --omp-threads 2
+```
+
+Run önce exact train/validation record leakage audit ve resource preflight
+yapar. Package'ı yeniden üretme, immutable SHA sözleşmesi, resume/failure
+semantiği ve gerçek mimari sınırlar için
+[`docs/PRODUCTION_PRETRAINING.md`](../docs/PRODUCTION_PRETRAINING.md)'ye bakın.
+
 ## Veri yönetişimi
 
 `*.vgai` çalışma çıktısıdır; gerçek corpus veya checkpoint'i depoya commit
