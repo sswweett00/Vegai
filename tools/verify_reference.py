@@ -113,6 +113,41 @@ def bundle3(a: tuple[int, ...], b: tuple[int, ...], c: tuple[int, ...]) -> tuple
     )
 
 
+def bundle_bit_parallel(vectors: list[tuple[int, ...]], tie_seed: int) -> tuple[int, ...]:
+    """Independent bit-sliced majority oracle for up to 2,047 unit vectors.
+
+    Each 64-bit word holds 64 independent population counters in binary planes.
+    It mirrors the new Fortran fast context accumulator but is deliberately
+    structured separately from the signed-counter reference bundle above.
+    """
+
+    assert vectors and len(vectors) <= 2_047
+    tie = from_seed(tie_seed)
+    threshold = len(vectors) // 2
+    result: list[int] = []
+    for word in range(WORDS):
+        planes = [0] * 11
+        for vector in vectors:
+            carry = vector[word]
+            for plane in range(11):
+                previous = planes[plane]
+                planes[plane] = previous ^ carry
+                carry = previous & carry
+        equal_mask = MASK64
+        greater_mask = 0
+        for plane in range(10, -1, -1):
+            if (threshold >> plane) & 1:
+                equal_mask &= planes[plane]
+            else:
+                greater_mask |= equal_mask & planes[plane]
+                equal_mask &= (~planes[plane]) & MASK64
+        if len(vectors) % 2 == 0:
+            result.append(greater_mask | (equal_mask & tie[word]))
+        else:
+            result.append(greater_mask)
+    return tuple(result)
+
+
 def noise_exact(vector: tuple[int, ...], flips: int, seed: int) -> tuple[int, ...]:
     assert 0 <= flips <= BITS
     mask = [0] * WORDS
@@ -182,6 +217,13 @@ def run_unit_properties() -> None:
     require(permute(permute(a, 129), -129) == a, "permutation inverse failed")
     require(permute(a, BITS + 19) == permute(a, 19), "permutation wrap failed")
     require(bundle([a, b, c], 777) == bundle3(a, b, c), "majority equivalence failed")
+    bundle_inputs = [from_seed(91_000 + index) for index in range(8)]
+    for cardinality in range(1, len(bundle_inputs) + 1):
+        require(
+            bundle_bit_parallel(bundle_inputs[:cardinality], 991)
+            == bundle(bundle_inputs[:cardinality], 991),
+            f"bit-sliced bundle diverged at cardinality {cardinality}",
+        )
 
     noisy = noise_exact(a, 4_096, 44)
     require(hamming(a, noisy) == 4_096, "exact noise cardinality failed")

@@ -32,14 +32,24 @@ module hdc_pretraining
    integer(int32), parameter, public :: PT_ERR_HYPERVECTOR = -511_int32
    integer(int32), parameter, public :: PT_ERR_RECORD_TOO_LONG = -512_int32
 
+   ! Context encoders share the same deterministic update and checkpoint
+   ! contracts.  LEGACY_POSITIONAL retains the original signed-counter path for
+   ! regression comparison; POSITIONAL is its bit-identical bit-sliced fast
+   ! implementation; HYBRID adds an order-invariant semantic view alongside
+   ! the positional view to strengthen topical retrieval.
+   integer(int32), parameter, public :: PT_CONTEXT_LEGACY_POSITIONAL = 1_int32
+   integer(int32), parameter, public :: PT_CONTEXT_POSITIONAL = 2_int32
+   integer(int32), parameter, public :: PT_CONTEXT_HYBRID = 3_int32
+
    character(len=8), parameter :: CHECKPOINT_MAGIC = 'VGHDC001'
-   integer(int32), parameter :: CHECKPOINT_VERSION = 3_int32
+   integer(int32), parameter :: CHECKPOINT_VERSION = 4_int32
 
    type, public :: hdc_pretrain_config_t
       integer(int32) :: max_vocabulary = 20000_int32
       integer(int64) :: min_frequency = 2_int64
       integer(int32) :: context_window = 4_int32
       integer(int32) :: position_shift_bits = 73_int32
+      integer(int32) :: context_mode = PT_CONTEXT_HYBRID
       integer(int32) :: epochs = 1_int32
       integer(int32) :: initial_plasticity_percent = 25_int32
       integer(int32) :: minimum_plasticity_percent = 1_int32
@@ -65,6 +75,7 @@ module hdc_pretraining
       logical :: ready = .false.
       integer(int32) :: context_window = 0_int32
       integer(int32) :: position_shift_bits = 0_int32
+      integer(int32) :: context_mode = 0_int32
       integer(int32) :: initial_plasticity_percent = 0_int32
       integer(int32) :: minimum_plasticity_percent = 0_int32
       integer(int32) :: plasticity_decay_events = 0_int32
@@ -82,7 +93,7 @@ module hdc_pretraining
    public :: pretrain_metrics_reset, pretrain_model_footprint_bytes
    public :: pretrain_checkpoint_save, pretrain_checkpoint_load
    public :: pretrain_lookup_token, pretrain_get_semantic_hv, pretrain_nearest_semantic
-   public :: pretrain_config_from_model
+   public :: pretrain_config_from_model, pretrain_context_mode_name
 
 contains
 
@@ -94,6 +105,22 @@ contains
               allocated(model%base_bits) .and. allocated(model%semantic_bits) .and. &
               allocated(model%experience_count)
    end function pretrain_model_is_ready
+
+   pure function pretrain_context_mode_name(context_mode) result(name)
+      integer(int32), intent(in) :: context_mode
+      character(len=18) :: name
+
+      select case (context_mode)
+      case (PT_CONTEXT_LEGACY_POSITIONAL)
+         name = 'legacy'
+      case (PT_CONTEXT_POSITIONAL)
+         name = 'positional'
+      case (PT_CONTEXT_HYBRID)
+         name = 'hybrid'
+      case default
+         name = 'invalid'
+      end select
+   end function pretrain_context_mode_name
 
    subroutine pretrain_metrics_reset(metrics)
       type(pretrain_metrics_t), intent(inout) :: metrics
@@ -119,6 +146,7 @@ contains
       model%ready = .false.
       model%context_window = 0_int32
       model%position_shift_bits = 0_int32
+      model%context_mode = 0_int32
       model%initial_plasticity_percent = 0_int32
       model%minimum_plasticity_percent = 0_int32
       model%plasticity_decay_events = 0_int32
@@ -143,6 +171,12 @@ contains
          return
       end if
       if (config%position_shift_bits == 0_int32 .or. config%epochs <= 0_int32) then
+         status = PT_ERR_INVALID_ARGUMENT
+         return
+      end if
+      if (config%context_mode /= PT_CONTEXT_LEGACY_POSITIONAL .and. &
+          config%context_mode /= PT_CONTEXT_POSITIONAL .and. &
+          config%context_mode /= PT_CONTEXT_HYBRID) then
          status = PT_ERR_INVALID_ARGUMENT
          return
       end if
@@ -419,6 +453,7 @@ contains
       call initialize_active_hypervectors(model)
       model%context_window = config%context_window
       model%position_shift_bits = config%position_shift_bits
+      model%context_mode = config%context_mode
       model%initial_plasticity_percent = config%initial_plasticity_percent
       model%minimum_plasticity_percent = config%minimum_plasticity_percent
       model%plasticity_decay_events = config%plasticity_decay_events
@@ -453,7 +488,8 @@ contains
       integer(int32), intent(in) :: n_tokens, center_index
       type(pretrain_metrics_t), intent(inout) :: metrics
       integer(int32), intent(out) :: status
-      type(hv_acc_t) :: accumulator
+      type(hv_acc_t) :: legacy_accumulator
+      type(hv_bitacc_t) :: bit_accumulator
       type(hv_t) :: neighbor, positioned, context, prototype, updated
       integer(int32) :: center_slot, offset, neighbor_index, neighbor_slot
       integer(int32) :: add_status, update_status, shift_bits, neighbors
@@ -464,7 +500,14 @@ contains
       center_slot = token_slots(center_index)
       if (center_slot == 0_int32) return
 
-      call hv_acc_reset(accumulator)
+      ! The legacy path is retained as a regression oracle.  New positional
+      ! and hybrid modes use the bit-sliced accumulator, whose unit-weight
+      ! majority is bit-identical to hv_acc_t without per-dimension branches.
+      if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL) then
+         call hv_acc_reset(legacy_accumulator)
+      else
+         call hv_bitacc_reset(bit_accumulator)
+      end if
       neighbors = 0_int32
       do offset = -config%context_window, config%context_window
          if (offset == 0_int32) cycle
@@ -476,10 +519,26 @@ contains
          neighbor%bits = model%base_bits(:, neighbor_slot)
          shift_bits = int(int(offset, int64) * int(config%position_shift_bits, int64), int32)
          positioned = hv_permute(neighbor, shift_bits)
-         call hv_acc_add(accumulator, positioned, add_status)
+         if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL) then
+            call hv_acc_add(legacy_accumulator, positioned, add_status)
+         else
+            call hv_bitacc_add(bit_accumulator, positioned, add_status)
+         end if
          if (add_status /= HV_OK) then
             status = PT_ERR_HYPERVECTOR
             return
+         end if
+
+         ! Hybrid learning adds a second, unpermuted identity view.  Position
+         ! remains encoded by the first view, while the second causes tokens
+         ! sharing a topical neighbourhood to converge rather than treating
+         ! left/right rotations as unrelated semantic evidence.
+         if (config%context_mode == PT_CONTEXT_HYBRID) then
+            call hv_bitacc_add(bit_accumulator, neighbor, add_status)
+            if (add_status /= HV_OK) then
+               status = PT_ERR_HYPERVECTOR
+               return
+            end if
          end if
          neighbors = neighbors + 1_int32
          call add_nonnegative(metrics%context_pairs, 1_int64, status)
@@ -489,7 +548,11 @@ contains
 
       tie_seed = ieor(vocab_seed_for_slot(model%vocabulary, center_slot), &
                       ishftc(model%experience_count(center_slot), 19))
-      context = hv_acc_finalize(accumulator, ieor(config%tie_seed, tie_seed))
+      if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL) then
+         context = hv_acc_finalize(legacy_accumulator, ieor(config%tie_seed, tie_seed))
+      else
+         context = hv_bitacc_finalize(bit_accumulator, ieor(config%tie_seed, tie_seed))
+      end if
       prototype%bits = model%semantic_bits(:, center_slot)
       plasticity_percent = scheduled_plasticity_percent(model, model%experience_count(center_slot))
       call hv_hebbian_update_percent(prototype, context, plasticity_percent, tie_seed, updated, update_status)
@@ -608,6 +671,7 @@ contains
           config%min_frequency /= model%vocabulary%min_frequency .or. &
           config%context_window /= model%context_window .or. &
           config%position_shift_bits /= model%position_shift_bits .or. &
+          config%context_mode /= model%context_mode .or. &
           config%initial_plasticity_percent /= model%initial_plasticity_percent .or. &
           config%minimum_plasticity_percent /= model%minimum_plasticity_percent .or. &
           config%plasticity_decay_events /= model%plasticity_decay_events .or. &
@@ -742,6 +806,7 @@ contains
       config%min_frequency = model%vocabulary%min_frequency
       config%context_window = model%context_window
       config%position_shift_bits = model%position_shift_bits
+      config%context_mode = model%context_mode
       config%initial_plasticity_percent = model%initial_plasticity_percent
       config%minimum_plasticity_percent = model%minimum_plasticity_percent
       config%plasticity_decay_events = model%plasticity_decay_events
@@ -792,6 +857,7 @@ contains
       checksum = checkpoint_mix(checksum, model%vocabulary%min_frequency)
       checksum = checkpoint_mix(checksum, int(model%context_window, int64))
       checksum = checkpoint_mix(checksum, int(model%position_shift_bits, int64))
+      checksum = checkpoint_mix(checksum, int(model%context_mode, int64))
       checksum = checkpoint_mix(checksum, int(model%initial_plasticity_percent, int64))
       checksum = checkpoint_mix(checksum, int(model%minimum_plasticity_percent, int64))
       checksum = checkpoint_mix(checksum, int(model%plasticity_decay_events, int64))
@@ -853,7 +919,7 @@ contains
       if (io_status == 0) write(unit, iostat=io_status) model%vocabulary%capacity, &
          model%vocabulary%count, model%vocabulary%active_count, model%vocabulary%min_frequency
       if (io_status == 0) write(unit, iostat=io_status) model%context_window, model%position_shift_bits, &
-         model%initial_plasticity_percent, model%minimum_plasticity_percent, &
+         model%context_mode, model%initial_plasticity_percent, model%minimum_plasticity_percent, &
          model%plasticity_decay_events, model%tie_seed
       if (io_status == 0) write(unit, iostat=io_status) model%training_epochs_completed
       if (io_status == 0) write(unit, iostat=io_status) model%totals%corpus_lines, model%totals%raw_tokens, &
@@ -931,7 +997,7 @@ contains
       model%vocabulary%count = count
 
       read(unit, iostat=io_status) model%context_window, model%position_shift_bits, &
-         model%initial_plasticity_percent, model%minimum_plasticity_percent, &
+         model%context_mode, model%initial_plasticity_percent, model%minimum_plasticity_percent, &
          model%plasticity_decay_events, model%tie_seed
       if (io_status == 0) read(unit, iostat=io_status) model%training_epochs_completed
       if (io_status == 0) read(unit, iostat=io_status) model%totals%corpus_lines, model%totals%raw_tokens, &
@@ -953,6 +1019,7 @@ contains
       checkpoint_config%min_frequency = min_frequency
       checkpoint_config%context_window = model%context_window
       checkpoint_config%position_shift_bits = model%position_shift_bits
+      checkpoint_config%context_mode = model%context_mode
       checkpoint_config%initial_plasticity_percent = model%initial_plasticity_percent
       checkpoint_config%minimum_plasticity_percent = model%minimum_plasticity_percent
       checkpoint_config%plasticity_decay_events = model%plasticity_decay_events

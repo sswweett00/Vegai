@@ -30,6 +30,18 @@ module hyper_types
       integer(int64) :: bits(HV_WORDS) = 0_int64
    end type hv_t
 
+   ! The bit-sliced accumulator stores a binary counter for every HDC bit.  A
+   ! 1-bit input vector can therefore be added with word-wise XOR/AND carries
+   ! rather than one branch per hypervector dimension.  Eleven planes represent
+   ! up to 2,047 context components, which exceeds the tokenizer's largest
+   ! possible hybrid context (2 * (1,024 - 1) = 2,046).
+   integer(int32), parameter, public :: HV_BITACC_PLANES = 11_int32
+   integer(int32), parameter, public :: HV_BITACC_MAX_ITEMS = 2047_int32
+   type, public :: hv_bitacc_t
+      integer(int64) :: planes(HV_BITACC_PLANES, HV_WORDS) = 0_int64
+      integer(int32) :: sample_count = 0_int32
+   end type hv_bitacc_t
+
    ! 64 x 256 signed counters = 32 KiB.  This intentionally fits in a typical
    ! L1 data cache, while the checked add routine prevents int16 wraparound.
    type, public :: hv_acc_t
@@ -41,6 +53,7 @@ module hyper_types
    public :: hv_bind, hv_bundle3, hv_permute
    public :: hv_hamming, hv_similarity, hv_hamming_zscore, hv_equal
    public :: hv_acc_reset, hv_acc_add, hv_acc_finalize
+   public :: hv_bitacc_reset, hv_bitacc_add, hv_bitacc_finalize
    public :: hv_hebbian_update, hv_hebbian_update_percent
    public :: hv_inject_noise_exact, hv_inject_noise_percent
 
@@ -358,6 +371,89 @@ contains
          res%bits(word) = out_word
       end do
    end function hv_acc_finalize
+
+   !---------------------------------------------------------------------------
+   ! Bit-sliced majority accumulator
+   !---------------------------------------------------------------------------
+
+   ! A streaming, word-parallel equivalent of an unsigned per-bit population
+   ! counter.  It is intended for bounded context bundling where every input has
+   ! unit weight; weighted Hebbian accumulation continues to use hv_acc_t.
+   pure subroutine hv_bitacc_reset(acc)
+      type(hv_bitacc_t), intent(inout) :: acc
+
+      acc%planes = 0_int64
+      acc%sample_count = 0_int32
+   end subroutine hv_bitacc_reset
+
+   ! Adds a binary hypervector to each independent bit counter.  The carry
+   ! chain is a ripple adder over bit planes, but each plane contains 64 HDC
+   ! dimensions at once.  Preflighting sample_count keeps a rejected overflow
+   ! atomic, just as hv_acc_add does.
+   pure subroutine hv_bitacc_add(acc, vector, status)
+      type(hv_bitacc_t), intent(inout) :: acc
+      type(hv_t), intent(in) :: vector
+      integer(int32), intent(out) :: status
+      integer(int64) :: carry, previous
+      integer(int32) :: word, plane
+
+      status = HV_OK
+      if (acc%sample_count >= HV_BITACC_MAX_ITEMS) then
+         status = HV_ERR_ACCUMULATOR_OVERFLOW
+         return
+      end if
+
+      do word = 1, HV_WORDS
+         carry = vector%bits(word)
+         do plane = 1, HV_BITACC_PLANES
+            previous = acc%planes(plane, word)
+            acc%planes(plane, word) = ieor(previous, carry)
+            carry = iand(previous, carry)
+         end do
+      end do
+      acc%sample_count = acc%sample_count + 1_int32
+   end subroutine hv_bitacc_add
+
+   ! Thresholds bit-sliced binary population counters without unpacking any of
+   ! the 16,384 dimensions.  For even cardinalities equality with N/2 gets the
+   ! same seeded tie breaker as hv_acc_finalize; for odd cardinalities strictly
+   ! greater than floor(N/2) is the ordinary majority.  Thus unit-weight output
+   ! is bit-identical to the reference signed accumulator.
+   pure function hv_bitacc_finalize(acc, tie_seed) result(res)
+      type(hv_bitacc_t), intent(in) :: acc
+      integer(int64), intent(in), optional :: tie_seed
+      type(hv_t) :: res, tie_breaker
+      integer(int64) :: seed, equal_mask, greater_mask
+      integer(int32) :: word, plane, threshold
+
+      if (acc%sample_count == 0_int32) then
+         res = hv_zero()
+         return
+      end if
+
+      seed = int(z'000000000466F45D', int64)
+      if (present(tie_seed)) seed = tie_seed
+      tie_breaker = hv_from_seed(seed)
+      threshold = acc%sample_count / 2_int32
+
+      do word = 1, HV_WORDS
+         equal_mask = not(0_int64)
+         greater_mask = 0_int64
+         do plane = HV_BITACC_PLANES, 1, -1
+            if (btest(threshold, plane - 1_int32)) then
+               equal_mask = iand(equal_mask, acc%planes(plane, word))
+            else
+               greater_mask = ior(greater_mask, iand(equal_mask, acc%planes(plane, word)))
+               equal_mask = iand(equal_mask, not(acc%planes(plane, word)))
+            end if
+         end do
+         if (modulo(acc%sample_count, 2_int32) == 0_int32) then
+            res%bits(word) = ior(greater_mask, iand(equal_mask, tie_breaker%bits(word)))
+         else
+            res%bits(word) = greater_mask
+         end if
+      end do
+   end function hv_bitacc_finalize
 
    ! Plastic bit replacement.  The AND of two independent SplitMix masks
    ! selects approximately 25 percent of dimensions without floating point.

@@ -76,8 +76,8 @@ sıfır vektörü değildir. Bu ayrım özellikle açıklama ve dokümantasyonda
 (a AND b) OR (b AND c) OR (a AND c)
 ```
 
-Genel bundling `hv_acc_t` kullanır. `counts(bit, word)` o boyuttaki bipolar
-oy toplamıdır. `hv_acc_add` iki fazlıdır:
+Genel veya weighted bundling `hv_acc_t` kullanır. `counts(bit, word)` o
+boyuttaki bipolar oy toplamıdır. `hv_acc_add` iki fazlıdır:
 
 1. bütün 16.384 counter için güncellemenin `int16` sınırına sığıp sığmadığını
    kontrol eder;
@@ -88,6 +88,13 @@ Dolayısıyla taşma başarısızlığı **atomiktir**. `hv_acc_finalize`, pozit
 sayacı bit-1, negatif sayacı bit-0 yapar; sıfırda deterministik `tie_seed`
 hiper-vektörünün aynı bitini kullanır. Boş accumulator bilerek all-zero
 döndürür; rastgele bir “boş bundle” üretmez.
+
+Unit-weight corpus context'leri için `hv_bitacc_t`, her 64-bit word içindeki
+64 ayrı population counter'ı 11 binary carry plane'de tutar. Böylece 16.384
+ayrı bit branch'i yerine word-level XOR/AND ripple carry uygulanır. Eşit
+kardinalitede aynı seeded tie policy kullanıldığından `positional` pretraining
+mode'u `hv_acc_t` legacy yoluyla bit-tam eşdeğerdir; native ve bağımsız Python
+reference testleri bu eşdeğerliği sınar.
 
 ### 2.3 Permütasyon
 
@@ -287,8 +294,12 @@ eşitliği ile doğrulanır. Frequency eşiği active mask'i belirler. Capacity
 taşması, approximate eviction yerine deterministik hata üretir.
 
 İkinci pass'te token identity hiper-vektörleri relative-position permutation
-ile bundle edilir ve center token semantic prototype'ına exact-cardinality
-plasticity mask'i uygulanır. `base_bits(HV_WORDS, capacity)` ve
+ile bundle edilir. Varsayılan `hybrid` context encoder buna ek olarak her
+komşunun unpermuted identity görünümünü de aynı deterministic majority bundle'a
+katar; positional role sinyali korunurken topical co-occurrence semantic
+prototype'ları daha güçlü yakınlaştırır. `positional` encoder aynı positional
+semantiği word-parallel bit-sliced binary counter ile yürütür ve eski `legacy`
+signed-counter yolu ile bit-tam eşdeğerdir. `base_bits(HV_WORDS, capacity)` ve
 `semantic_bits(HV_WORDS, capacity)` ayrı tutulur: identity değişmez, semantic
 iz online güncellenir. Aynı corpus, config ve source commit için işlem sırası
 bit-tam sonuç üretmelidir.
@@ -297,7 +308,8 @@ Ingest boundary'si de mimari sözleşmesidir: tokenizer ASCII-byte semantiklidir
 long token truncate edilmez, >8.192-byte fiziksel record prefix olarak
 öğrenilmez ve tamamen düşürülür. Drop'lar metrik olur; strict modda hata olur.
 Checkpoint'te vocabulary hash table saklanmaz, tokenlardan rebuild edilir;
-semantic config, planes, counters ve accidental-corruption checksum saklanır.
+context encoder dahil semantic config, planes, counters ve accidental-corruption
+checksum saklanır.
 Ayrıntılı contract ve data governance için [PRETRAINING.md](PRETRAINING.md)'ye
 bakın.
 

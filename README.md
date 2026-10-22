@@ -31,8 +31,8 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 > sözlük büyüklüğü ve sorgu gürültüsüne bağlı istatistiksel bir konudur.
 >
 > **Corpus pretraining notu:** `vegai_pretrain`, Transformer/LLM eğitimi değil;
-> deterministik, stream edilen positional context'lerden HDC semantic prototype
-> öğrenimidir. Unicode corpus'lar ön-tokenization ister; veri yönetişimi,
+> deterministik positional + order-invariant hybrid context'lerden HDC semantic
+> prototype öğrenimidir. Unicode corpus'lar ön-tokenization ister; veri yönetişimi,
 > checkpoint ve sınırlar [PRETRAINING.md](docs/PRETRAINING.md)'de açıkça
 > tanımlıdır.
 
@@ -76,8 +76,11 @@ OMP_NUM_THREADS=2 ./build/hds_engine
 
 # Dengeli, Türkçe-ASCII sentetik fixture ile checkpoint/resume örneği
 ./build/vegai_pretrain train examples/corpus/mini_turkish_ascii_pretrain.txt mini.vgai \
-  --max-vocab 128 --min-frequency 8 --window 2 --epochs 2 --strict --query okul
+  --max-vocab 128 --min-frequency 8 --window 2 --context-mode hybrid \
+  --epochs 2 --strict --query okul
 python3 tools/verify_example_corpus.py --pretrain-bin ./build/vegai_pretrain
+python3 tools/compare_pretraining_modes.py --pretrain-bin ./build/vegai_pretrain \
+  --repetitions 3 --omp-threads 1
 
 # Gerçek corpus'u eğitmeden önce local digest + ingest preflight
 python3 tools/corpus_manifest.py CORPUS.txt --output corpus-manifest.json \
@@ -153,9 +156,10 @@ restored = hv_bind(role, pair)     ! filler ile bit-bit aynıdır
 ```
 
 - **Binding:** `A ⊗ B = A XOR B`; `A ⊗ (A ⊗ B) = B`.
-- **Bundling:** `hv_bundle3` üçlü bitwise majority yapar. Daha genel bundle
-  için `hv_acc_t` + `hv_acc_add` + `hv_acc_finalize` kullanılır. Çift
-  kardinalitede tie-breaker seed'i zorunlu olarak deterministiktir.
+- **Bundling:** `hv_bundle3` üçlü bitwise majority yapar. Genel weighted
+  bundle için `hv_acc_t` + `hv_acc_add` + `hv_acc_finalize`; unit-weight,
+  yüksek-throughput context bundle için bit-sliced `hv_bitacc_t` kullanılır.
+  Çift kardinalitede tie-breaker seed'i zorunlu olarak deterministiktir.
 - **Permutation:** pozitif kaydırma global bit konumu `p`'yi
   `p + k (mod D)` konumuna taşır. `Π⁻ᵏ(Πᵏ(A)) = A` native test ile sınanır.
 - **Similarity:** `1 - 2·Hamming(A,B)/16384` aralığı `[-1,+1]` içindedir.

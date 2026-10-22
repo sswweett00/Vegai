@@ -25,7 +25,9 @@ contains
       type(hv_t) :: a, b, c, d, zero, noisy, noisy_again, bundled, expected
       type(hv_t) :: ones, before, updated_a, updated_b, splitmix_zero
       type(hv_acc_t) :: accumulator, accumulator_before
-      integer(int32) :: status, distance
+      type(hv_bitacc_t) :: bit_accumulator
+      type(hv_t) :: bundle_inputs(8)
+      integer(int32) :: status, distance, i
       real :: similarity
 
       splitmix_zero = hv_from_seed(0_int64)
@@ -64,6 +66,23 @@ contains
       bundled = hv_acc_finalize(accumulator, 77_int64)
       expected = hv_bundle3(a, b, c)
       call assert_hv_equal(bundled, expected, 'three-way accumulator equals majority bundle')
+
+      ! The high-throughput bit-sliced bundle must remain bit-identical to the
+      ! checked signed accumulator for both odd majorities and even seeded ties.
+      do i = 1, size(bundle_inputs)
+         bundle_inputs(i) = hv_from_seed(int(1000 + i, int64))
+      end do
+      call hv_acc_reset(accumulator)
+      call hv_bitacc_reset(bit_accumulator)
+      do i = 1, size(bundle_inputs)
+         call hv_acc_add(accumulator, bundle_inputs(i), status)
+         call assert_i32_equal(status, HV_OK, 'reference accumulator accepts unit bundle input')
+         call hv_bitacc_add(bit_accumulator, bundle_inputs(i), status)
+         call assert_i32_equal(status, HV_OK, 'bit-sliced accumulator accepts unit bundle input')
+         call assert_hv_equal(hv_bitacc_finalize(bit_accumulator, 991_int64), &
+                              hv_acc_finalize(accumulator, 991_int64), &
+                              'bit-sliced bundle matches signed accumulator at every cardinality')
+      end do
 
       ones%bits = not(0_int64)
       call hv_acc_reset(accumulator)
@@ -371,8 +390,8 @@ contains
    subroutine test_hdc_pretraining()
       character(len=*), parameter :: CORPUS_PATH = 'vegai_pretraining_test_corpus.txt'
       character(len=*), parameter :: CHECKPOINT_PATH = 'vegai_pretraining_test_checkpoint.vgai'
-      type(hdc_pretrain_model_t) :: model_a, model_b, restored
-      type(hdc_pretrain_config_t) :: config, resumed_config, strict_config
+      type(hdc_pretrain_model_t) :: model_a, model_b, restored, legacy_model, positional_model
+      type(hdc_pretrain_config_t) :: config, resumed_config, strict_config, legacy_config, positional_config
       type(pretrain_metrics_t) :: vocabulary_metrics, train_metrics
       type(hv_t) :: semantic_hv
       character(len=TOKEN_LEN) :: nearest_token
@@ -402,6 +421,10 @@ contains
       config%initial_plasticity_percent = 25_int32
       config%minimum_plasticity_percent = 1_int32
       config%plasticity_decay_events = 4_int32
+      call assert_i32_equal(config%context_mode, PT_CONTEXT_HYBRID, &
+                            'hybrid context encoder is the quality-oriented default')
+      call assert_true(trim(pretrain_context_mode_name(config%context_mode)) == 'hybrid', &
+                       'context encoder exposes a stable human-readable name')
 
       call pretrain_build_vocabulary(model_a, CORPUS_PATH, config, vocabulary_metrics, status)
       call assert_i32_equal(status, PT_OK, 'pretraining vocabulary pass succeeds')
@@ -445,12 +468,37 @@ contains
       call assert_true(all(model_a%experience_count == model_b%experience_count), &
                        'experience counters are reproducible')
 
+      ! The fast positional encoder is an implementation-only optimization: it
+      ! must preserve the legacy semantic plane exactly.  Hybrid adds a second,
+      ! order-invariant context view, so it should intentionally differ while
+      ! retaining all stream counters and deterministic replay guarantees.
+      legacy_config = config
+      legacy_config%context_mode = PT_CONTEXT_LEGACY_POSITIONAL
+      positional_config = config
+      positional_config%context_mode = PT_CONTEXT_POSITIONAL
+      call pretrain_build_vocabulary(legacy_model, CORPUS_PATH, legacy_config, vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'legacy comparison vocabulary pass succeeds')
+      call pretrain_train_file(legacy_model, CORPUS_PATH, legacy_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'legacy comparison training pass succeeds')
+      call pretrain_build_vocabulary(positional_model, CORPUS_PATH, positional_config, vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'fast positional vocabulary pass succeeds')
+      call pretrain_train_file(positional_model, CORPUS_PATH, positional_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'fast positional training pass succeeds')
+      call assert_true(all(legacy_model%semantic_bits == positional_model%semantic_bits), &
+                       'bit-sliced positional encoder is bit-identical to legacy learning')
+      call assert_true(all(legacy_model%experience_count == positional_model%experience_count), &
+                       'fast positional encoder preserves learning schedule counters')
+      call assert_true(any(model_a%semantic_bits /= positional_model%semantic_bits), &
+                       'hybrid encoder contributes distinct order-invariant semantic evidence')
+
       call pretrain_checkpoint_save(model_a, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'pretraining checkpoint save succeeds')
       call pretrain_checkpoint_load(CHECKPOINT_PATH, restored, status)
       call assert_i32_equal(status, PT_OK, 'pretraining checkpoint load succeeds')
       call assert_i32_equal(restored%vocabulary%active_count, model_a%vocabulary%active_count, &
                             'checkpoint rebuild restores active vocabulary count')
+      call assert_i32_equal(restored%context_mode, PT_CONTEXT_HYBRID, &
+                            'checkpoint preserves hybrid encoder semantics')
       call assert_true(all(restored%base_bits == model_a%base_bits), 'checkpoint restores base hypervectors')
       call assert_true(all(restored%semantic_bits == model_a%semantic_bits), &
                        'checkpoint restores semantic hypervectors')
@@ -472,7 +520,12 @@ contains
       resumed_config%context_window = resumed_config%context_window + 1_int32
       call pretrain_train_file(restored, CORPUS_PATH, resumed_config, train_metrics, status)
       call assert_i32_equal(status, PT_ERR_INCOMPATIBLE_CONFIG, &
-                            'semantic configuration mismatch is rejected on resume')
+                            'context-window mismatch is rejected on resume')
+      resumed_config%context_window = model_a%context_window
+      resumed_config%context_mode = PT_CONTEXT_POSITIONAL
+      call pretrain_train_file(restored, CORPUS_PATH, resumed_config, train_metrics, status)
+      call assert_i32_equal(status, PT_ERR_INCOMPATIBLE_CONFIG, &
+                            'context encoder mismatch is rejected on resume')
 
       open(newunit=unit, file=CORPUS_PATH, status='replace', action='write', &
            form='formatted', iostat=io_status)
@@ -509,6 +562,8 @@ contains
       call pretrain_model_destroy(model_a)
       call pretrain_model_destroy(model_b)
       call pretrain_model_destroy(restored)
+      call pretrain_model_destroy(legacy_model)
+      call pretrain_model_destroy(positional_model)
       open(newunit=unit, file=CORPUS_PATH, status='old', iostat=io_status)
       if (io_status == 0) close(unit, status='delete')
       open(newunit=unit, file=CHECKPOINT_PATH, status='old', access='stream', form='unformatted', &

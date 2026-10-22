@@ -25,6 +25,7 @@ max_vocabulary              = 128
 min_frequency               = 8
 context_window              = 2
 position_shift_bits         = 41
+context_mode                = hybrid
 epochs                      = 2
 initial_plasticity_percent  = 25
 minimum_plasticity_percent  = 1
@@ -45,11 +46,13 @@ ise `train` subcommand'inin zorunlu parçaları olduğu için dahildir.
 python3 tools/measure_example_pretraining.py \
   --pretrain-bin ./build/vegai_pretrain \
   --checkpoint /tmp/mini-turkish-timed.vgai \
-  --epochs 2 --omp-threads 1
+  --context-mode hybrid --epochs 2 --omp-threads 1
 ```
 
-CI bu ölçümü derlemeden sonra ayrı bir adımda çalıştırır ve elapsed süre ile
-training-token/saniye değerini workflow summary ve check-run notice olarak
+CI derlemeden sonra bu timing kapsamını `tools/compare_pretraining_modes.py`
+içinde `legacy`, bit-tam hızlı `positional` ve varsayılan `hybrid` için üçer
+tekrar ile çalıştırır; medyan elapsed süre, training-token/saniye ve controlled
+semantic-cohesion karşılaştırmasını workflow summary/check-run notice olarak
 yayımlar. Süreler runner, derleyici bayrakları ve CPU'ya bağlıdır; fixture kısa
 olduğu için yalnız reproducible smoke timing olarak yorumlanmalıdır.
 

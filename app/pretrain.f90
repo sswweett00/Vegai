@@ -103,7 +103,7 @@ contains
          case ('--strict')
             parsed_config%strict_tokenization = .true.
             index = index + 1
-         case ('--max-vocab', '--min-frequency', '--window', '--position-shift', '--epochs', &
+         case ('--max-vocab', '--min-frequency', '--window', '--position-shift', '--context-mode', '--epochs', &
                '--initial-plasticity', '--minimum-plasticity', '--decay-events', '--query')
             if (index == last_argument) then
                parse_status = PT_ERR_INVALID_ARGUMENT
@@ -119,6 +119,20 @@ contains
                read(value, *, iostat=io_status) parsed_config%context_window
             case ('--position-shift')
                read(value, *, iostat=io_status) parsed_config%position_shift_bits
+            case ('--context-mode')
+               select case (trim(value))
+               case ('legacy')
+                  parsed_config%context_mode = PT_CONTEXT_LEGACY_POSITIONAL
+                  io_status = 0
+               case ('positional')
+                  parsed_config%context_mode = PT_CONTEXT_POSITIONAL
+                  io_status = 0
+               case ('hybrid')
+                  parsed_config%context_mode = PT_CONTEXT_HYBRID
+                  io_status = 0
+               case default
+                  io_status = 1
+               end select
             case ('--epochs')
                read(value, *, iostat=io_status) parsed_config%epochs
             case ('--initial-plasticity')
@@ -246,6 +260,7 @@ contains
       write(output_unit, '(A,I0)') '  min frequency: ', trained_model%vocabulary%min_frequency
       write(output_unit, '(A,I0)') '  context window: ', trained_model%context_window
       write(output_unit, '(A,I0)') '  positional shift: ', trained_model%position_shift_bits
+      write(output_unit, '(A,A)') '  context mode: ', trim(pretrain_context_mode_name(trained_model%context_mode))
       write(output_unit, '(A,I0)') '  completed epochs: ', trained_model%training_epochs_completed
       write(output_unit, '(A,I0)') '  total prototype updates: ', trained_model%totals%center_updates
       write(output_unit, '(A,I0)') '  estimated resident bytes: ', pretrain_model_footprint_bytes(trained_model)
@@ -298,7 +313,8 @@ contains
       write(output_unit, '(A)') '  vegai_pretrain resume CORPUS CHECKPOINT [--epochs N] [--strict] [--query TOKEN]'
       write(output_unit, '(A)') '  vegai_pretrain inspect CHECKPOINT [--query TOKEN]'
       write(output_unit, '(A)') 'Train options:'
-      write(output_unit, '(A)') '  --max-vocab N --min-frequency N --window N --position-shift N --epochs N'
+      write(output_unit, '(A)') '  --max-vocab N --min-frequency N --window N --position-shift N --context-mode MODE --epochs N'
+      write(output_unit, '(A)') '  MODE is legacy, positional, or hybrid (default hybrid)'
       write(output_unit, '(A)') '  --initial-plasticity N --minimum-plasticity N --decay-events N --strict --query TOKEN'
       write(output_unit, '(A)') 'This is streaming distributional HDC learning, not Transformer/LLM pretraining.'
    end subroutine print_usage

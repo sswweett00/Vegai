@@ -74,36 +74,49 @@ jobs:
           ./build-ci/vegai_pretrain resume examples/corpus/toy_hdc_corpus.txt "$checkpoint" \
             --epochs 1 --query queen
 
-      - name: Measure isolated full fixture pretraining command
+      - name: Run independent Python reference verification
+        run: python3 tools/verify_reference.py
+
+      - name: Compile optimized GNU Make binaries
+        run: make clean && make all
+
+      - name: Compare optimized pretraining speed and semantic cohesion
         run: |
           set -euo pipefail
-          report="${RUNNER_TEMP}/isolated-pretraining-timing.json"
-          python3 tools/measure_example_pretraining.py \
-            --pretrain-bin ./build-ci/vegai_pretrain \
-            --checkpoint "${RUNNER_TEMP}/timed-mini-turkish.vgai" \
-            --epochs 2 --omp-threads 1 > "$report"
-          cat "$report"
+          report="${RUNNER_TEMP}/pretraining-mode-comparison.json"
+          python3 tools/compare_pretraining_modes.py \
+            --pretrain-bin ./build/vegai_pretrain \
+            --repetitions 3 --omp-threads 1 --output "$report" > /dev/null
           python3 - "$report" "$GITHUB_STEP_SUMMARY" <<'PY'
           import json
           import sys
 
           with open(sys.argv[1], encoding="utf-8") as source:
               report = json.load(source)
+          speed = report["speed"]
+          quality = report["quality"]
+          comparison = report["comparison"]
           message = (
-              f"elapsed_seconds={report['elapsed_seconds']:.9f}; "
-              f"training_tokens={report['training_tokens']}; "
-              f"training_tokens_per_second={report['training_tokens_per_second']:.3f}; "
-              f"epochs={report['epochs']}; omp_threads={report['omp_threads']}"
+              f"legacy_tps={speed['legacy']['training_tokens_per_second']:.3f}; "
+              f"positional_tps={speed['positional']['training_tokens_per_second']:.3f}; "
+              f"hybrid_tps={speed['hybrid']['training_tokens_per_second']:.3f}; "
+              f"positional_speedup={comparison['positional_speedup_vs_legacy']:.4f}x; "
+              f"hybrid_speedup={comparison['hybrid_speedup_vs_legacy']:.4f}x; "
+              f"hybrid_top1={quality['hybrid']['same_cluster_top1_percent']:.3f}%; "
+              f"semantic_similarity_gain={comparison['hybrid_mean_top1_similarity_gain_vs_positional']:.6f}"
           )
           with open(sys.argv[2], "a", encoding="utf-8") as summary:
-              summary.write("## Isolated fixture pretraining timing\n\n")
-              summary.write("`vegai_pretrain train` wall-clock only; compiler and prior CI work excluded.\n\n")
-              summary.write(f"```text\n{message}\n```\n")
-          print(f"::notice title=Isolated pretraining command timing::{message}")
+              summary.write("## Optimized pretraining comparison\n\n")
+              summary.write("Optimized Make binary; each timing sample covers one `vegai_pretrain train` process only.\n\n")
+              summary.write("| Mode | Median seconds | Training token/s | Controlled Top-1 cluster | Mean Top-1 similarity |\n")
+              summary.write("|---|---:|---:|---:|---:|\n")
+              for mode in ("legacy", "positional", "hybrid"):
+                  summary.write(
+                      f"| {mode} | {speed[mode]['median_seconds']:.6f} | "
+                      f"{speed[mode]['training_tokens_per_second']:.3f} | "
+                      f"{quality[mode]['same_cluster_top1_percent']:.3f}% | "
+                      f"{quality[mode]['mean_top1_similarity']:.6f} |\n"
+                  )
+              summary.write(f"\n```text\n{message}\n```\n")
+          print(f"::notice title=Optimized pretraining comparison::{message}")
           PY
-
-      - name: Run independent Python reference verification
-        run: python3 tools/verify_reference.py
-
-      - name: Compile optimized GNU Make target
-        run: make clean && make engine

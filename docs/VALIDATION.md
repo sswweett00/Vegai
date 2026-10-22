@@ -81,8 +81,10 @@ saturate ederek ambiguity'yi doğrular.
 
 - fixed fixture corpus üzerinde exact unique/active vocabulary, raw/active/OOV
   token sayaçları ve ordered-window context pair sayısı;
-- aynı input/config ile iki bağımsız run'ın base plane, semantic plane ve
-  experience counter bakımından bit-tam eşitliği;
+- aynı input/config ile iki bağımsız `hybrid` run'ın base plane, semantic plane
+  ve experience counter bakımından bit-tam eşitliği;
+- `legacy` signed-counter ve hızlı `positional` bit-sliced encoder'ın
+  bit-tam semantic-plane eşitliği;
 - semantic prototype lookup ve self-excluded nearest-neighbour diagnostic;
 - binary checkpoint save/load, rebuilt hash index ve payload plane round-trip;
 - kesintisiz ikinci epoch ile checkpoint'ten resume edilen ikinci epoch'un
@@ -95,8 +97,12 @@ saturate ederek ambiguity'yi doğrular.
 CI, küçük `toy_hdc_corpus.txt` ile `train → inspect → resume` smoke zincirini
 ve `mini_turkish_ascii_pretrain.txt` ile manifest, dengeli-token cardinality,
 bit-tam çift checkpoint ve `train → inspect → resume` integration zincirini
-çalıştırır. Bu fixture'lar yalnız pipeline doğrulamasıdır; semantic kalite veya
-dil yeteneği benchmarkı değildir.
+çalıştırır. CI ayrıca optimized Make binary ile aynı corpus/config üzerinde
+`tools/compare_pretraining_modes.py` çalıştırır; `legacy → positional → hybrid`
+modlarının isolate edilmiş `train` wall-clock medyanını, token/saniyesini ve
+checkpoint üzerinden controlled Top-1 topical-cohesion ölçümünü workflow
+summary'ye yazar. Bu fixture'lar yalnız pipeline doğrulaması ve kontrollü
+retrieval diagnostic'idir; semantic kalite veya dil yeteneği benchmarkı değildir.
 
 ## Olasılık modeli ve sayısal marjlar
 

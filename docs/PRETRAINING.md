@@ -22,16 +22,29 @@ Her aktif sözlük token'ı `w` için iki adet 16.384-bit hiper-vektör vardır:
   prototype**.
 
 Bir satırdaki aktif center token `wᵢ` için, `r ∈ [-W, W] \ {0}` konumlarındaki
-aktif komşular alınır. Konum bilgisi bir dairesel permütasyonla kodlanır:
+aktif komşular alınır. Konum bilgisi bir dairesel permütasyonla kodlanır.
+Varsayılan **hybrid** encoder, positional syntax sinyalini ve order-invariant
+topical co-occurrence sinyalini aynı deterministic bundle içinde birleştirir:
 
 ```text
-Cᵢ = majority_tie_seeded( Π^(r × P)(B(wᵢ₊ᵣ)) ; her geçerli r için )
+Vpos = { Π^(r × P)(B(wᵢ₊ᵣ)) ; her geçerli r için }
+Vtopic = { B(wᵢ₊ᵣ) ; her geçerli r için }
+Cᵢ = majority_tie_seeded(Vpos ∪ Vtopic)
 S(wᵢ) ← replace_exact_fraction(S(wᵢ), Cᵢ, learning_rate(experience(wᵢ)))
 ```
 
 - `W`, context window; `P`, `position_shift_bits` değeridir.
-- `majority_tie_seeded`, `hv_acc_t` ile signed-counter biriktirme ve
-  deterministic tie breaker kullanır.
+- `hybrid` varsayılandır: left/right role bilgisini `Vpos` içinde korurken,
+  aynı topical neighbourhood'u paylaşan token'ların `Vtopic` sayesinde daha
+  güçlü semantic cohesion üretmesini hedefler.
+- `positional`, yalnız `Vpos` kullanır. Bu modun bit-sliced implementation'ı,
+  eski `legacy` signed-counter implementation'ı ile unit-weight context için
+  bit-tam eşdeğerdir.
+- `legacy`, önceki positional signed-counter yolu için regression/benchmark
+  referansıdır; yeni eğitimler için önerilmez.
+- `majority_tie_seeded`, yeni modlarda word-parallel `hv_bitacc_t` binary
+  population counter ve deterministic tie breaker kullanır. Bu, 16.384 bit
+  üzerinde tek tek branch yerine packed XOR/AND carry ile çalışır.
 - Güncelleme gradient değildir. `hv_hebbian_update_percent`, seçilecek
   **boyutların** cardinality'sini tam olarak belirler; eski prototype bitleri
   seçilmeyen boyutlarda korunur. Context ve eski bit aynıysa nihai Hamming
@@ -129,7 +142,7 @@ cmake --build build --parallel
 # Yeni iki-pass model
 ./build/vegai_pretrain train CORPUS.txt model.vgai \
   --max-vocab 50000 --min-frequency 3 --window 4 --position-shift 73 \
-  --epochs 3 --initial-plasticity 25 --minimum-plasticity 1 \
+  --context-mode hybrid --epochs 3 --initial-plasticity 25 --minimum-plasticity 1 \
   --decay-events 32 --query token
 
 # Checkpoint semantic configuration ile uyumlu ek epoch
@@ -147,6 +160,7 @@ cmake --build build --parallel
 | `--min-frequency N` | 2 | active vocabulary threshold |
 | `--window N` | 4 | her yönde context yarıçapı |
 | `--position-shift N` | 73 | relative position başına bit shift |
+| `--context-mode MODE` | `hybrid` | `legacy`, bit-tam hızlı `positional` veya positional+topical `hybrid` encoder |
 | `--epochs N` | 1 | ikinci corpus geçişi sayısı |
 | `--initial-plasticity N` | 25 | başlangıç selected-dimension yüzdesi |
 | `--minimum-plasticity N` | 1 | schedule alt sınırı |
@@ -155,8 +169,8 @@ cmake --build build --parallel
 | `--query TOKEN` | yok | eğitimden sonra bir semantic neighbour göster |
 
 `resume`, checkpoint'ten vocabulary threshold/capacity, `window`, shift,
-plasticity ve tie seed'ini geri alır; yalnız `--epochs`, `--strict`, `--query`
-kabul eder. Öğrenme semantiğini
+context encoder, plasticity ve tie seed'ini geri alır; yalnız `--epochs`,
+`--strict`, `--query` kabul eder. Öğrenme semantiğini
 checkpoint'ten farklı bir config ile sürdürme `PT_ERR_INCOMPATIBLE_CONFIG` ile
 reddedilir. CLI query'si tokenizer üzerinden canonicalize edilir ve yalnız bir
 token kabul eder.
@@ -195,13 +209,16 @@ telemetridir.
 `pretrain_checkpoint_save` stream-unformatted bir `.vgai` dosyası yazar;
 `pretrain_checkpoint_load` magic/version, shape, counter sign, vocabulary
 frequency/active invariantları, rebuilt hash index ve payload checksum kontrolü
-yapar. Versiyon şu an **3**tür. Checksum yalnız accidental corruption tespiti
-içindir; kriptografik bütünlük/imza değildir.
+yapar. Versiyon şu an **4**tür; v4, context encoder semantiğini payload ve
+checksum'a dahil eder. Önceki v3 checkpoint'ler v4 executable ile resume
+edilmez; corpus manifesti ve source commit ile yeniden train edilmelidir.
+Checksum yalnız accidental corruption tespiti içindir; kriptografik
+bütünlük/imza değildir.
 
 Checkpoint aşağıdakileri taşır:
 
 - capacity, token strings, frequencies, active mask ve min frequency;
-- context/position/plasticity/tie-seed semantiği;
+- context mode/position/plasticity/tie-seed semantiği;
 - completed epoch sayısı ve aggregate eğitim metrikleri;
 - base/semantic hypervector planes ve token experience sayaçları.
 
@@ -274,14 +291,28 @@ Native testler şunları kontrol eder:
 
 - exact-rate plasticity cardinality'si (complement input altında %25 = 4.096
   Hamming değişimi);
-- iki aynı corpus run'ının base/prototype/experience bit eşitliği;
+- bit-sliced `positional` bundle'ın legacy signed-counter bundle ile her
+  cardinality'de bit eşitliği ve aynı corpus run'ında semantic plane eşitliği;
+- iki aynı `hybrid` corpus run'ının base/prototype/experience bit eşitliği;
 - windowed context count ve active/OOV telemetry;
 - checkpoint round-trip ve uninterrupted run ile checkpoint-resume run'ın
   bit-tam eşitliği;
 - incompatible resume config, strict long token ve strict overlong record hata
   yolları.
 
-CI ayrıca küçük corpus ile `train → inspect → resume` CLI smoke testini çalıştırır.
+CI ayrıca küçük corpus ile `train → inspect → resume` CLI smoke testini ve
+optimized Make binary üzerinde `tools/compare_pretraining_modes.py` ile
+`legacy → positional → hybrid` karşılaştırmasını çalıştırır. Karşılaştırma,
+aynı 64-token sentetik fixture üzerinde doğrudan `vegai_pretrain train`
+wall-clock medyanını ve gerçek checkpoint/CLI ile controlled Top-1 semantic
+cohesion sinyalini raporlar. Bu kontrollü tanı, doğal dil yeteneği veya
+production throughput garantisi değildir.
+
+```bash
+python3 tools/compare_pretraining_modes.py \
+  --pretrain-bin ./build/vegai_pretrain --repetitions 3 --omp-threads 1
+```
+
 Bu kontroller semantic usefulness, bias, güvenlik, gerçek dünya language quality
 veya herhangi bir throughput iddiası değildir. Üretim kullanımı için kendi
 lisanslı corpus'unuzda held-out retrieval, task accuracy, robustness, latency,

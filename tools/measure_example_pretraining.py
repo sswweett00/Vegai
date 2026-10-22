@@ -38,6 +38,12 @@ def main() -> int:
     parser.add_argument("--pretrain-bin", required=True, type=Path, help="compiled vegai_pretrain executable")
     parser.add_argument("--checkpoint", required=True, type=Path, help="temporary checkpoint output path")
     parser.add_argument("--epochs", type=int, default=2, help="complete fixture epochs to train (default: 2)")
+    parser.add_argument(
+        "--context-mode",
+        choices=("legacy", "positional", "hybrid"),
+        default="hybrid",
+        help="context encoder used by the timed train command (default: hybrid)",
+    )
     parser.add_argument("--omp-threads", type=int, default=1, help="OMP_NUM_THREADS for the child command")
     arguments = parser.parse_args()
 
@@ -67,6 +73,8 @@ def main() -> int:
         "2",
         "--position-shift",
         "41",
+        "--context-mode",
+        arguments.context_mode,
         "--epochs",
         str(arguments.epochs),
         "--initial-plasticity",
@@ -122,6 +130,7 @@ def main() -> int:
         "measurement": "single vegai_pretrain train process wall clock",
         "compile_or_test_time_included": False,
         "epochs": completed_epochs,
+        "context_mode": arguments.context_mode,
         "training_tokens": raw_tokens,
         "active_training_tokens": active_tokens,
         "context_pairs": context_pairs,

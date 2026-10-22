@@ -39,7 +39,7 @@ pretraining ve context-window telemetrisi için tasarlanmıştır.
 ./build/vegai_pretrain train examples/corpus/mini_turkish_ascii_pretrain.txt \
   mini-turkish.vgai \
   --max-vocab 128 --min-frequency 8 --window 2 --position-shift 41 \
-  --epochs 2 --initial-plasticity 25 --minimum-plasticity 1 \
+  --context-mode hybrid --epochs 2 --initial-plasticity 25 --minimum-plasticity 1 \
   --decay-events 8 --strict --query okul
 
 ./build/vegai_pretrain inspect mini-turkish.vgai --query teknoloji
@@ -76,7 +76,16 @@ neighbour etiketi özellikle assert edilmez: HDC context prototype'ı için bu
 fixture ancak diagnostic sinyal üretir, anlam doğruluğu sertifikası değildir.
 Gerçek executable run'ın counter/schedule/checkpoint ayrıntıları
 [`docs/EXAMPLE_PRETRAINING_RUN.md`](../docs/EXAMPLE_PRETRAINING_RUN.md)
-belgesindedir.
+belgesindedir. `legacy`, bit-tam hızlı `positional` ve varsayılan `hybrid`
+encoder'ın eğitim hızı ile controlled topical-cohesion karşılaştırması için:
+
+```bash
+python3 tools/compare_pretraining_modes.py \
+  --pretrain-bin ./build/vegai_pretrain --repetitions 3 --omp-threads 1
+```
+
+Bu yalnız sentetik in-corpus diagnostic'tir; doğal Türkçe anlama benchmarkı
+veya production throughput iddiası değildir.
 
 ## Veri yönetişimi
 
