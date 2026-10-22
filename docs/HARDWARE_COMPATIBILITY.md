@@ -81,8 +81,11 @@ child-process sürelerini ölçün.
 
 ## 3. Entegre grafik, discrete GPU ve NPU
 
-Vegai şu an GPU compute backend'i içermez. CUDA, OpenCL, SYCL/oneAPI, Metal,
-Vulkan compute veya vendor NPU runtime'ı yüklenmez. Sonuç olarak:
+Portable varsayılan Vegai binary'si zorunlu bir GPU/NPU compute backend'i
+veya vendor runtime yüklemez: CUDA, OpenCL, SYCL/oneAPI, Metal ve Vulkan
+compute bağımlılığı yoktur. Intel OpenVINO kurulursa yalnız immutable HDC
+context stage'i için opt-in bir worker vardır; source-ordered training commit
+CPU'da kalır. Sonuç olarak:
 
 - Intel Arc/iGPU, AMD Radeon iGPU, Apple integrated GPU veya discrete GPU'nun
   varlığı CPU execution için önkoşul değildir;
@@ -93,7 +96,8 @@ Vulkan compute veya vendor NPU runtime'ı yüklenmez. Sonuç olarak:
 - Intel Core Ultra için opt-in OpenVINO context provider immutable packed-HDC
   bundle/finalize aşamasını CPU/GPU/NPU policy'sine dispatch edebilir; runtime
   summary gerçek execution mask'ini raporlar ve `--openvino-require-accelerator`
-  CPU fallback'i reddeder;
+  CPU fallback'i reddeder. Explicit fallback `--openvino-device CPU` ise CPU
+  plugin'i başlatmak yerine native fused/OpenMP kernel'ini kullanır;
 - provider için lane ABI, driver, transfer, fallback ve CPU-reference
   checkpoint-byte-equality sözleşmesi ayrı doğrulanır; adapter varlığı bu
   sözleşmenin yerine geçmez.

@@ -287,20 +287,23 @@ Düzeltme üç parçalıdır:
    eder. Strict `--openvino-required` ise hâlâ graph bridge'i çalıştırır; bu
    doğruluk testi ile production CPU policy birbirine karıştırılmaz.
 
-[CI run 39851363774](https://github.com/sswweett00/Vegai/actions/runs/39851363774)
-AMD EPYC 7763/Linux hostunda same two-record / 30-context strict CPU-plugin
-fixture'ı byte-tam checkpoint equality ile tekrar çalıştırdı:
+[CI run 39851742002](https://github.com/sswweett00/Vegai/actions/runs/39851742002)
+AMD EPYC 7763/Linux hostunda same two-record / 30-context fixture'ı byte-tam
+checkpoint equality ile tekrar çalıştırdı:
 
-| Strict OpenVINO CPU bridge sürümü | Gerçek train süresi | CPU reference'a oran | Sonuç |
+| Arm | Gerçek train süresi | CPU reference'a oran | Sonuç |
 |---|---:|---:|---|
-| process-per-line / per-shape compile (önceki) | `1.438524 s` | `67.9080×` | correctness only |
-| resident worker + dynamic cache + two neutral shapes | `0.400872 s` | `18.3878×` | **3.59× daha düşük bridge süresi**, byte-tam eşit |
+| doğrudan native CPU reference | `0.021218 s` | `1.0000×` | regression arm |
+| normal explicit CPU fallback → native fused/OpenMP bypass | `0.020939 s` | `0.9869×` | **0 worker session/request, 0 OpenVINO dispatch, byte-tam eşit** |
+| resident/cached strict OpenVINO CPU plugin bridge | `0.427948 s` | `20.1696×` | 1 session / 2 request / 30 context, byte-tam eşit |
+| eski process-per-line / per-shape strict bridge | `1.438524 s` | `67.9080×` | historical correctness-only baseline |
 
-Bu cold strict bridge hâlâ küçük fixture'da doğrudan CPU'dan yavaştır; bu
-beklenen ve açıkça raporlanan sonuçtur. Yeni normal CPU-fallback armı native
-CPU'da kalır ve CPU plugin dispatch/sessions/requests değerlerini sıfır olarak
-raporlar; CI buna checkpoint equality ve bounded timing regression guard uygular.
-Dolayısıyla "OpenVINO CPU hızlandırdı" iddiası yapılmaz. Sonuç Intel iGPU/NPU
-benchmarkı değildir; Core Ultra GPU/NPU speedup/energy iddiası için
-`--openvino-require-accelerator` ile hedef makinede strict equality + timing
-ölçümü gerekir.
+Strict resident bridge'in absolute süresi historical per-line tasarıma göre
+yaklaşık **3.36×** düştü; farklı run'lardaki küçük wall-clock farkları normaldir.
+Ancak cold strict bridge hâlâ küçük fixture'da doğrudan CPU'dan yavaştır; bu
+beklenen ve açıkça raporlanan sonuçtur. Production CPU policy ise CI'da
+reference'dan **0.9869×** oranla geçti ve CPU plugin dispatch/sessions/requests
+sayıları sıfır kaldı. Dolayısıyla "OpenVINO CPU hızlandırdı" iddiası yapılmaz.
+Sonuç Intel iGPU/NPU benchmarkı değildir; Core Ultra GPU/NPU speedup/energy
+iddiası için `--openvino-require-accelerator` ile hedef makinede strict equality
++ timing ölçümü gerekir.

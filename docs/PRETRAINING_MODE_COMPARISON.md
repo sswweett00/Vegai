@@ -126,8 +126,8 @@ Bu yine sentetik/in-corpus diagnostic'tir, held-out doğal dil başarısı deği
 
 ## V5: OpenVINO immutable-context bridge — resident worker / CPU policy sonucu
 
-[GitHub Actions run 39851363774](https://github.com/sswweett00/Vegai/actions/runs/39851363774)
-(commit `750af27`) optional OpenVINO runtime'ı ile gerçek Fortran↔Python
+[GitHub Actions run 39851742002](https://github.com/sswweett00/Vegai/actions/runs/39851742002)
+(commit `f5fc4ab`) optional OpenVINO runtime'ı ile gerçek Fortran↔Python
 lane-worker bridge'ini tekrar çalıştırdı. Worker artık bir train süresince
 resident, `Core`/dynamic-batch compiled graph cache'i request'ler arasında
 paylaşılıyor. Actual edge cardinality'leri seeded neutral `(tie, NOT tie)`
@@ -137,21 +137,22 @@ provider checkpoint byte'ları tam eşitti.
 
 | Arm | Gerçek `vegai_pretrain train` süresi | Dispatched context | Checkpoint |
 |---|---:|---:|---|
-| portable CPU reference | `0.021801 s` | 0 | regression arm |
+| portable CPU reference | `0.021218 s` | 0 | regression arm |
+| normal explicit CPU fallback → native fused/OpenMP bypass | `0.020939 s` | 0 | **byte-tam eşit**, 0 worker session/request |
 | önceki process-per-line strict CPU bridge | `1.438524 s` | 30 | byte-tam eşit |
-| resident/cached strict OpenVINO **CPU plugin** bridge | `0.400872 s` | 30 | **byte-tam eşit** |
+| resident/cached strict OpenVINO **CPU plugin** bridge | `0.427948 s` | 30 | **byte-tam eşit**, 1 session / 2 request |
 
-Strict bridge ratio `67.9080×`den **`18.3878×`**e indi; same small fixture'da
-bridge süresi yaklaşık **3.59×** azaldı. Bu, cold Python/OpenVINO startup
-maliyetinin tamamını değil per-line startup ve repeated-shape compile maliyetini
-ortadan kaldırır. Dolayısıyla strict CPU plugin armı hâlâ CPU hızlandırması
-iddiası değildir.
+Strict bridge ratio `67.9080×` historical baseline'dan **`20.1696×`**e indi;
+absolute bridge süresi yaklaşık **3.36×** azaldı. Bu, cold Python/OpenVINO
+startup maliyetinin tamamını değil per-line startup ve repeated-shape compile
+maliyetini ortadan kaldırır. Dolayısıyla strict CPU plugin armı hâlâ CPU
+hızlandırması iddiası değildir.
 
 Production CPU policy ayrıdır: fallback açıkken explicit `--openvino-device
 CPU`, worker açmak yerine native fused/OpenMP context construction'a gider;
 runtime output `native-CPU bypass` sayacını yükseltir, OpenVINO device execution
-mask'i ve worker session/request sayaçları sıfır kalır. CI bu arm için de
-checkpoint equality ve bounded child-process timing guard uygular. Ölçü yalnız
+mask'i ve worker session/request sayaçları sıfır kalır. CI bu armda CPU reference
+ile `0.9869×` timing ratio ve byte-eşit checkpoint doğruladı. Ölçü yalnız
 `vegai_pretrain train` child process'ini kapsar; fixture üretimi, byte compare
 ve Python harness hariçtir.
 
