@@ -453,7 +453,7 @@ contains
       type(hdc_pretrain_model_t) :: context_serial_model, context_parallel_model
       type(hdc_pretrain_config_t) :: config, resumed_config, strict_config, legacy_config, positional_config, continuation_config
       type(hdc_pretrain_config_t) :: reference_config, hierarchical_config, local_only_config, coherent_config
-      type(hdc_pretrain_config_t) :: context_serial_config, context_parallel_config
+      type(hdc_pretrain_config_t) :: openvino_rejected_config, context_serial_config, context_parallel_config
       type(pretrain_metrics_t) :: vocabulary_metrics, train_metrics, extension_metrics
       type(pretrain_execution_report_t) :: default_execution, serial_execution, parallel_execution
       type(hv_t) :: semantic_hv, semantic_before_extension, semantic_after_extension
@@ -613,6 +613,20 @@ contains
       call assert_i32_equal(status, PT_OK, 'short-record coherent training succeeds')
       call assert_true(all(short_coherent_model%semantic_bits == model_a%semantic_bits), &
                        'coherent threshold leaves short-record hybrid semantics unchanged')
+
+      ! Coherent cross-fold inputs have no representation in the immutable
+      ! OpenVINO lane ABI. Reject the configuration before any worker/process
+      ! can be started rather than silently changing encoder semantics.
+      openvino_rejected_config = coherent_config
+      openvino_rejected_config%context_provider = PT_CONTEXT_PROVIDER_OPENVINO
+      openvino_rejected_config%openvino_worker = 'tools/openvino_context_worker.py'
+      openvino_rejected_config%openvino_python = 'python3'
+      openvino_rejected_config%openvino_work_dir = '.'
+      openvino_rejected_config%openvino_device = 'GPU'
+      openvino_rejected_config%openvino_min_contexts = 1_int32
+      call pretrain_build_vocabulary(model_b, CORPUS_PATH, openvino_rejected_config, vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_ERR_INVALID_ARGUMENT, &
+                            'coherent mode rejects the unsupported OpenVINO worker ABI')
 
       ! The fast positional encoder is an implementation-only optimization: it
       ! must preserve the legacy semantic plane exactly.  Hybrid adds a second,

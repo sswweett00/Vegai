@@ -106,6 +106,20 @@ cohesion testidir; held-out task başarısı veya doğal-dil anlama kanıtı de�
 `coherent` CPU/OpenMP-only'dir; mevcut OpenVINO immutable-item ABI'si
 center-dependent cross-fold context'i taşımaz.
 
+### Coherent ilk doğrulanmış controlled sonuç
+
+[GitHub Actions run 39980147491](https://github.com/sswweett00/Vegai/actions/runs/39980147491)
+(AMD EPYC 7763 / Linux, `OMP_NUM_THREADS=1`) bu üç-arm diagnostic'i, native
+Fortran testleri ve historical baseline byte-equality kontrolüyle birlikte geçti.
+Aynı 16-token fixture'da mean Top-1 similarity `hybrid` için `0.168998`,
+`hierarchical` için `0.826843`, `coherent` için `0.647824` oldu. Böylece
+coherent'in hybrid'e karşı farkı **`+0.478826`** idi ve same-cluster Top-1
+non-regression guard'ı geçti. Bu sonuç coherent'in bu kontrollü fixture'da
+hierarchical'i geçtiği iddiası değildir; tasarımın amacı fixed global bütçede
+self-echo'yu azaltmak ve measurable non-regression sağlamaktır. Süre, yalnız
+`train` child-process'i için workflow summary'de raporlanır; herhangi bir
+CPU/OS'a veya doğal corpus'a genellenmez.
+
 ## Aynı-run baseline → hot-path mimarisi karşılaştırması
 
 `tools/compare_pretraining_revisions.py`, sabit pre-optimization commit
