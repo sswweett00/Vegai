@@ -48,8 +48,13 @@ jobs:
         if: failure()
         run: |
           set -euo pipefail
-          detail=$(find build-ci -name LastTest.log -type f -exec tail -n 80 {} + | tr '\n' ' ' | cut -c1-1900)
-          if [ -z "$detail" ]; then
+          log_file=$(find build-ci -name LastTest.log -type f -print -quit)
+          if [ -n "$log_file" ]; then
+            detail=$(grep -Ein 'fail|error|assert|checks:' "$log_file" | tail -n 40 | tr '\n' ' ' | cut -c1-1900 || true)
+            if [ -z "$detail" ]; then
+              detail=$(tail -n 140 "$log_file" | tr '\n' ' ' | cut -c1-1900)
+            fi
+          else
             detail="CTest failed without a LastTest.log diagnostic"
           fi
           echo "::error title=Fortran property test diagnostic::$detail"
