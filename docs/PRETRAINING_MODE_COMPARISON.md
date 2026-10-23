@@ -95,6 +95,51 @@ signal: same-cluster Top-1 gerilemez ve mean Top-1 similarity gain `> 0.002`
 olur. Bu bilerek tasarlanmış in-corpus cohesion testidir; held-out task
 başarısı değildir.
 
+## Aynı-run baseline → hot-path mimarisi karşılaştırması
+
+`tools/compare_pretraining_revisions.py`, sabit pre-optimization commit
+`e34fd22` ile aday binary'yi **aynı runner** üzerinde portable `make pretrain`
+profiliyle build eder. Her iki binary için önce ölçüm-dışı warm-up yapılır,
+sonra sıra her repetition'da ters çevrilir. Böylece cache/termal durumun yalnız
+sonra çalışan binary'ye avantaj vermesi azaltılır. Her timed sample tam bir
+`vegai_pretrain train` child process'idir; compilation, fixture üretimi,
+checkpoint compare, JSON ve harness süresi hariçtir. Her workload için
+baseline/optimized checkpoint byte dizisinin ve her binary'nin kendi tekrar
+çalışmalarının tam eşit olması zorunludur.
+
+CI'nın kullandığı iki bilinçli bottleneck fixture şunlardır:
+
+| Fixture | Record | Epoch | Training token/run | Amaç |
+|---|---:|---:|---:|---|
+| `short_records` | 256 × 8 active token | 2 | 4.096 | bounded bitacc reset, staging wipe removal, kısa-record hierarchy skip ve adaptive serial scheduler |
+| `repeated_centers` | 8 × 1.024 active token | 2 | 16.384 | repeated-center source-order planner'ın eski backward quadratic scan'ini kaldırma |
+
+[GitHub Actions run 39974078629](https://github.com/sswweett00/Vegai/actions/runs/39974078629)
+(commit `5848420`, AMD EPYC 9V45 96-Core / Linux `7.0.0-1017-azure`,
+`OMP_NUM_THREADS=2`, üç timed repetition) aşağıdaki **aynı-run** sonucu verdi:
+
+| Fixture | e34fd22 median train s | Optimize median train s | Önce token/s | Sonra token/s | Sonra/önce | Checkpoint |
+|---|---:|---:|---:|---:|---:|---|
+| `short_records` | 0.061195 | 0.058502 | ≈66,933.573 | ≈70,014.700 | **1.0460×** | **byte-tam eşit** |
+| `repeated_centers` | 0.129973 | 0.095075 | ≈126,056.950 | ≈172,327.110 | **1.3670×** | **byte-tam eşit** |
+
+Bu, compiler/CI setup değil yalnız `train` process wall-clock ölçümüdür ve
+checkpoint equality ile semantic preservation doğrulanmıştır. Fakat fixture'lar
+özellikle mimari darboğazları görünür kılmak için sentetiktir; doğal corpus,
+I/O, vocabulary cardinality, OpenMP runtime, SSD/cache ve termal koşullarda
+aynı oran vaat edilmez. Kendi iki compiled binary'nizi aynı koşulda ölçmek için:
+
+```bash
+# Baseline source ve portable binary (repo root dışındaki geçici worktree önerilir)
+git fetch origin e34fd22e485807108dd85957d869a2d880325dca
+git worktree add --detach /tmp/vegai-e34 e34fd22e485807108dd85957d869a2d880325dca
+make -C /tmp/vegai-e34 pretrain BUILD_DIR=/tmp/vegai-e34-build
+make pretrain
+python3 tools/compare_pretraining_revisions.py \
+  --before-pretrain-bin /tmp/vegai-e34-build/vegai_pretrain \
+  --after-pretrain-bin ./build/vegai_pretrain --repetitions 3
+```
+
 ## V4: deterministic single-core / multi-core context construction
 
 [GitHub Actions run 39839135866](https://github.com/sswweett00/Vegai/actions/runs/39839135866)

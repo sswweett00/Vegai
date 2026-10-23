@@ -113,7 +113,10 @@ python3 tools/compare_pretraining_threads.py \
 
 Timing yalnız `vegai_pretrain train` child process'ini kapsar; compile, fixture
 üretimi, checkpoint compare ve harness dışarıdadır. Hız oranı host/workload'a
-özgüdür; core sayısıyla lineer ölçeklenme vaadi değildir.
+özgüdür; core sayısıyla lineer ölçeklenme vaadi değildir. Sabit source baseline
+ile hot-path önce/sonra ölçümü gerektiğinde
+`tools/compare_pretraining_revisions.py` iki compiled binary'yi warm-up ve
+alternating order ile çalıştırır; byte-identical checkpoint koşulu zorunludur.
 
 İlk doğrulanmış gerçek CI ölçümünde ([run 39839135866](https://github.com/sswweett00/Vegai/actions/runs/39839135866),
 AMD EPYC 7763 / Linux) long-record fixture için 1 thread `0.538901 s`, 2 thread

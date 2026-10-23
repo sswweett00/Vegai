@@ -289,8 +289,13 @@ python3 tools/compare_pretraining_threads.py --pretrain-bin ./build/vegai_pretra
 ```
 
 Bu benchmark'ta compile/fixture/harness süresi hariçtir ve hız oranı yalnız
-ölçülen host/workload için geçerlidir. GPU/NPU adapter inventory'si tek başına
-compute kullanımı değildir. Intel Core Ultra için opt-in OpenVINO context
+ölçülen host/workload için geçerlidir. Sabit `e34fd22` baseline ile aynı-run
+mimari önce/sonra ölçümü için `tools/compare_pretraining_revisions.py` kullanın;
+araç real `train` process'lerini timing eder, warm-up/order alternation uygular
+ve checkpoint byte equality zorunlu kılar. Controlled sonuçlar ve fixture
+sınırları [PRETRAINING_MODE_COMPARISON.md](PRETRAINING_MODE_COMPARISON.md)'de
+aynı-run baseline bölümünde belgelenir. GPU/NPU adapter inventory'si tek başına compute kullanımı
+değildir. Intel Core Ultra için opt-in OpenVINO context
 provider, immutable packed-HDC bundle/finalize aşamasını dispatch ederken
 source-order update'i CPU'da tutar; worker bir train çağrısı boyunca resident
 kalır ve item-cardinality graph'larını dynamic batch ile cache'ler. Explicit

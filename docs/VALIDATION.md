@@ -46,6 +46,8 @@ CI bunların checked CMake/OpenMP varyantını ve ayrıca optimize Make hedefini
 - XOR identity ve self-inverse unbinding;
 - forward/inverse permutation ve dimension wrap;
 - three-way accumulator sonucu = boolean majority-3;
+- bounded bit-sliced reset sonrası lazy carry-plane initialization'ın signed
+  accumulator ile her cardinality'de bit-tam eşitliği;
 - `int16` counter overflow'unda status ve **atomic state preservation**;
 - tam 4096 bit noise, determinism ve invalid argument davranışı;
 - Hebbian mask determinism ve değişen bit sayısının alt sınırı.
@@ -92,7 +94,9 @@ saturate ederek ambiguity'yi doğrular.
   semantic plane ve experience counter bakımından bit-tam eşitliği;
 - repeated center token içeren record üzerinde serial ve OpenMP context-build
   run'larının base plane, semantic plane ve experience counter bakımından
-  bit-tam eşitliği;
+  bit-tam eşitliği; adaptive default'un kısa record'larda serial path'i,
+  `--parallel-min-contexts=1` override'ının parallel scheduler telemetry'sini
+  seçmesi;
 - `legacy` signed-counter ve hızlı `positional` bit-sliced encoder'ın
   bit-tam semantic-plane eşitliği;
 - semantic prototype lookup ve self-excluded nearest-neighbour diagnostic;
@@ -155,6 +159,14 @@ girmez. Workflow summary; portable/native profil oranını,
 `legacy → positional → fused hybrid` temel karşılaştırmasını, fused/reference
 hybrid checkpoint byte eşitliği + hız oranını ve ayrı 16-token-record controlled
 `hybrid → hierarchical` topical-cohesion diagnostic'ini yazar.
+
+`tools/compare_pretraining_revisions.py`, CI'da sabit `e34fd22` baseline
+binary'sini aynı portable Make profile ile build eder ve short-record ile
+dense repeated-center fixture'larında aday binary'yle gerçek `train` child
+process timing'i yapar. Warm-up/alternating order uygulanır; her binary'nin
+self-determinism'i ve baseline/candidate checkpoint byte equality zorunludur.
+Bu, hot-path mimari değişikliğinin ölçümüdür; genel corpus throughput vaadi
+değildir.
 
 `tools/compare_pretraining_threads.py`, ayrıca uzun-record fixture'da
 `OMP_NUM_THREADS=1` ile 2 arasında gerçek train timing'i ölçer ve checkpoint
