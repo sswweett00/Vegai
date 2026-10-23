@@ -90,6 +90,26 @@ veya production throughput iddiası değildir. Kaydedilmiş CI önce/sonra değe
 [`docs/PRETRAINING_MODE_COMPARISON.md`](../docs/PRETRAINING_MODE_COMPARISON.md)
 belgesindedir.
 
+## 3. Veri odakli grounded diyalog fixture'i
+
+`dialogue/mini_turkish_hdc_dialogue.tsv`, yukaridaki mini corpus'un active
+ASCII token'lariyla yazilmis sentetik `prompt<TAB>response` bilgi bankasidir.
+`vegai_chat` cevap metnini source code'dan üretmez; bu TSV'den aynen alir ya da
+grounding esigi gecmezse abstain eder. Once mini checkpoint'i egittikten sonra:
+
+```bash
+./build/vegai_chat ask mini.vgai examples/dialogue/mini_turkish_hdc_dialogue.tsv \
+  --prompt "okul ders" --max-entries 64 --history-turns 0
+
+./build/vegai_chat repl mini.vgai examples/dialogue/mini_turkish_hdc_dialogue.tsv \
+  --max-entries 64 --history-turns 3
+```
+
+Bu sekiz response gercek bilgi, dogal Turkce kalite veya LLM cevabi degildir;
+data contract ve grounded retrieval integration fixture'idir. TSV strict
+ASCII/LF, tek TAB ve active-checkpoint-prompt sozlesmesine uymalidir. Ayrintilar
+icin [DIALOGUE_RETRIEVAL.md](../docs/DIALOGUE_RETRIEVAL.md)'ye bakın.
+
 ## Kesintisiz shard örneği
 
 Bu fixture tek dosyalı deterministic smoke/benchmark içindir. Production benzeri
@@ -102,7 +122,7 @@ publish kullanır; doğrudan `continue` komutunu durable checkpoint üzerinde
 semantics için
 [`docs/CONTINUOUS_PRETRAINING.md`](../docs/CONTINUOUS_PRETRAINING.md)'ye bakın.
 
-## 3. Production-data foundry fixture'ı
+## 4. Production-data foundry fixture'ı
 
 `production_dataset/mini_turkish_ascii_hdc/`, yukarıdaki 128-record sentetik
 fixture'ın source-controlled, immutable production-package örneğidir. Exact

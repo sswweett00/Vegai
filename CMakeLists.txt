@@ -27,6 +27,7 @@ add_library(vegai_hds STATIC
     src/resonator_network.f90
     src/reasoning_core.f90
     src/hdc_pretraining.f90
+    src/dialogue_retrieval.f90
 )
 
 set_target_properties(vegai_hds PROPERTIES
@@ -95,6 +96,12 @@ target_link_libraries(hds_engine PRIVATE vegai_hds)
 add_executable(vegai_pretrain app/pretrain.f90)
 target_link_libraries(vegai_pretrain PRIVATE vegai_hds)
 
+# A separate executable keeps grounded dialogue retrieval modular: model
+# training/checkpoint semantics remain in vegai_pretrain, while this surface
+# only retrieves operator-supplied knowledge-base responses.
+add_executable(vegai_chat app/chat.f90)
+target_link_libraries(vegai_chat PRIVATE vegai_hds)
+
 if(VEGAI_BUILD_TESTS)
     include(CTest)
     enable_testing()
@@ -138,6 +145,12 @@ if(VEGAI_BUILD_TESTS)
             NAME vegai_example_pretraining
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_example_corpus.py
                     --pretrain-bin $<TARGET_FILE:vegai_pretrain>
+        )
+        add_test(
+            NAME vegai_dialogue_retrieval
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_dialogue_retrieval.py
+                    --pretrain-bin $<TARGET_FILE:vegai_pretrain>
+                    --chat-bin $<TARGET_FILE:vegai_chat>
         )
         add_test(
             NAME vegai_continuous_pretraining

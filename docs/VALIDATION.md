@@ -23,13 +23,14 @@ yerine geçmez.
 | `make debug` | bounds/runtime/FPE denetimli native test | başarısızlık yok |
 | `make run` | 512+ sembollü demo | frame, analogy, 4 causal adım ve 3-factor Resonator PASS |
 | `make pretrain` | HDC corpus CLI derlemesi | portable `build/vegai_pretrain` oluşur |
+| `make chat` | TSV-grounded retrieval CLI derlemesi | portable `build/vegai_chat` oluşur; cevap generator değildir |
 | `make native` | yalnız build-host CPU'suna tuned ikili | `build-native/vegai_pretrain` oluşur |
 | `python3 tools/verify_hardware_compatibility.py` | CPU/OS/RAM/GPU/NPU inventory ve CPU-backend truth contract | `hardware compatibility verification: PASS` |
 | `python3 tools/verify_training_resource_plan.py` | bounded RAM/checkpoint storage/OpenMP placement planı ve accelerator fail-closed contract | `training resource plan verification: PASS` |
 | `python3 tools/verify_openvino_provider.py` | optional Intel OpenVINO provider preflight/truth contract | `OpenVINO provider verification: PASS` |
 | `python3 tools/verify_openvino_context_worker.py` | uint32-lane worker protocol, neutral tie/complement padding, resident graph-cache reuse; runtime yoksa fail-closed | `OpenVINO context worker verification: PASS` |
 | `python3 tools/verify_openvino_context_provider.py --pretrain-bin build/vegai_pretrain` | native-CPU bypass timing/equality guard + strict resident OpenVINO graph checkpoint equality (runtime yoksa SKIP) | `OpenVINO context provider verification: PASS` |
-| `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties`, donanım/OpenVINO contract testleri, `vegai_example_pretraining`, `vegai_continuous_pretraining`, `vegai_production_pretraining`, `vegai_example_production_dataset_preflight` PASS |
+| `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties`, donanım/OpenVINO contract testleri, `vegai_example_pretraining`, `vegai_dialogue_retrieval`, `vegai_continuous_pretraining`, `vegai_production_pretraining`, `vegai_example_production_dataset_preflight` PASS |
 
 CI bunların checked CMake/OpenMP varyantını ve ayrıca optimize Make hedefini
 çalıştırır.
@@ -119,6 +120,15 @@ train/validation leakage rejection, exactly-once generation, completed
 state/payload health audit'i ve idempotent production resume'ı sınar. `vegai_example_production_dataset_preflight`,
 source-controlled sentetik package'ın ledger/content-address/leakage contract'ını
 ayrıca doğrular.
+
+`vegai_dialogue_retrieval`, gerçek derlenmis `vegai_pretrain` ve `vegai_chat`
+ikilileriyle runtime TSV response degisikliginin user-visible response'u da
+degistirdigini, grounded olmayan query'nin abstain ettigini, strict unknown
+prompt/malformed TSV failure'ini ve bounded REPL yolunu kontrol eder. Native
+Fortran property testi ayni katmanda exact retrieval tie/margin, duplicate
+embedding, fixed capacity, strict ASCII ingest ve session ring reset
+invariantlarini kapsar. Bu, LLM kalite degerlendirmesi degil, veri-kaynakli
+retrieval contract'idir.
 
 CI önce `tools/hardware_compatibility.py` ile CPU/OS/mimari/RAM/GPU/NPU
 inventory metadata'sını, sonra `tools/training_resource_plan.py` ile bounded

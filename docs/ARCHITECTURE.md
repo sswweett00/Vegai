@@ -324,7 +324,31 @@ audit ile resource plan yapar ve var olan
 plane'ini değiştirmez; Transformer/LMM runtime değildir. Tam operation/failure
 contract için [PRODUCTION_PRETRAINING.md](PRODUCTION_PRETRAINING.md)'ye bakın.
 
-## 7. Paralellik ve performans sınırları
+## 7. Grounded diyalog retrieval katmanı
+
+`dialogue_retrieval`, checkpoint semantic prototype'larini operator-supplied
+`prompt<TAB>response` bilgi bankasi ile birlestiren ayri bir katmandir. Index
+prompt'lari active semantic hypervector'lerin deterministic weighted majority
+bundle'i olarak saklanir; response metni embedding, tokenizer input'u veya
+executable instruction olmaz. `vegai_chat`, yalnizca secilen TSV response'u
+aynen yayinlar.
+
+Canli prompt bilinmeyen filler token'lar icerebilir; bunlar sayilir ve policy
+izin verirse atlanir. Buna karsin publish edilen knowledge-base prompt'unun tum
+token'lari checkpoint vocabulary'sinde active olmak zorundadir. Exact Hamming
+tarama en iyi ve runner-up sonucu hesaplar; similarity veya margin esigi
+gecilmezse result `found=.false.` kalir. Bu abstention mekanizmasi, zayif
+semantic eslesmeyi dogal gorunen hardcoded/generative cevapla gizlemez.
+
+Session yalniz son `max_history_turns` user-prompt HV'sini fixed-capacity ring
+dizisinde tutar. Mevcut prompt ile bounded history tekrar bundle edilir; index,
+checkpoint ve training state mutasyona ugramaz. Exact scan `O(N)` oldugu icin
+module tek-host, bounded knowledge base contract'idir; buyuk-scale ANN/remote
+search bir adapter olarak ayri tasarlanmalidir. Ayrintili veri, confidence ve
+operasyon contract'i için [DIALOGUE_RETRIEVAL.md](DIALOGUE_RETRIEVAL.md)'ye
+bakın.
+
+## 8. Paralellik ve performans sınırları
 
 `hv_bind`, `hv_bundle3`, `hv_hamming` ve mask işlemlerinde `!$omp simd`
 ipucu bulunur. `mem_cleanup` global taraması `!$omp parallel do reduction(min:...)`

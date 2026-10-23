@@ -24,6 +24,8 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
   shard pretraining içeren HDC/VSA corpus pipeline;
 - immutable context construction + source-ordered commit ile checkpoint-bit-tam
   deterministic OpenMP multi-core training; RAM/SSD/NUMA resource preflight;
+- hardcoded cevap üretmeyen, operator TSV bilgi bankasindan grounded HDC
+  retrieval yapan bounded chat/REPL yuzeyi ve abstention kapisi;
 - yerel Fortran özellik/entegrasyon testleri, bağımsız Python referans modeli
   ve GitHub Actions ile denetimli derleme.
 
@@ -37,7 +39,9 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 > deterministik positional + order-invariant hybrid context'lerden HDC semantic
 > prototype öğrenimidir. Varsayılan `hierarchical`, uzun kayıtlarda bounded
 > whole-record topical evidence ekler ve kısa kayıtlarda `hybrid` ile bit-tam
-> aynıdır. Unicode corpus'lar ön-tokenization
+> aynıdır. `vegai_chat` da free-form cevap üreten bir LLM değildir; yalnız
+> versioned TSV bilgi bankasindan grounded response retrieval yapar veya
+> abstain eder. Unicode corpus'lar ön-tokenization
 > ister; veri yönetişimi, checkpoint ve sınırlar [PRETRAINING.md](docs/PRETRAINING.md)'de, immutable
 > shard'larla crash-safe continual çalışma ise
 > [CONTINUOUS_PRETRAINING.md](docs/CONTINUOUS_PRETRAINING.md)'de açıkça tanımlıdır.
@@ -53,6 +57,7 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 make test
 make run
 make pretrain
+make chat
 
 # Sınır denetimli hata ayıklama derlemesi
 make debug
@@ -113,6 +118,11 @@ export OMP_NUM_THREADS=2 OMP_PROC_BIND=close OMP_PLACES=cores
 ./build/vegai_pretrain train examples/corpus/mini_turkish_ascii_pretrain.txt mini.vgai \
   --max-vocab 128 --min-frequency 8 --window 2 --context-mode hierarchical \
   --epochs 2 --strict --query okul
+
+# Operator-supplied TSV'den grounded retrieval; cevap source code'dan degil
+# knowledge base'den gelir, esik gecmezse answer uydurulmaz.
+./build/vegai_chat ask mini.vgai examples/dialogue/mini_turkish_hdc_dialogue.tsv \
+  --prompt "okul ders" --max-entries 64 --history-turns 0
 python3 tools/verify_example_corpus.py --pretrain-bin ./build/vegai_pretrain
 python3 tools/compare_pretraining_modes.py --pretrain-bin ./build/vegai_pretrain \
   --repetitions 3 --omp-threads 1
@@ -181,6 +191,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Corpus ingest | `src/text_tokenizer.f90`, `src/vocabulary.f90` | bounded ASCII canonicalization, collision-safe frequency vocabulary |
 | HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, hierarchical default, deterministic OpenMP / optional OpenVINO immutable-context preparation + source-ordered CPU commit, metrics, checkpoint/resume |
 | Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect`, CPU/OpenVINO context-provider execution switch ve nearest semantic diagnostic |
+| Grounded dialogue retrieval | `src/dialogue_retrieval.f90`, `app/chat.f90` | operator TSV response index'i, strict ASCII/OOV gate, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; free-form LLM generation degil |
 | Continual transaction + health audit | `tools/continuous_shard_manifest.py`, `tools/continuous_pretrain.py`, `tools/continuous_pretrain_status.py` | immutable SHA-256 ledger, strict ingest gate, candidate generation, atomic state journal, read-only checkpoint/prefix/payload audit |
 | Production data/run control | `tools/production_dataset.py`, `tools/production_pretrain.py` | disk-backed exact record/token dedupe, deterministic held-out split, content-addressed shard package, exact leakage + vocabulary-capacity gate, immutable binary/data/policy provenance, real exactly-once run wrapper |
 | Kaynak preflight | `tools/training_resource_plan.py` | bounded RAM/checkpoint storage estimate, CPU/NUMA/OpenMP recommendation, static accelerator truth contract |
@@ -202,7 +213,8 @@ Resonator Network sözleşmesi için [docs/RESONATOR_NETWORK.md](docs/RESONATOR_
 corpus veri hattı, yönetişim ve checkpoint sözleşmesi için
 [docs/PRETRAINING.md](docs/PRETRAINING.md), immutable shard ledger ve
 crash-safe exactly-once continual pretraining için
-[docs/CONTINUOUS_PRETRAINING.md](docs/CONTINUOUS_PRETRAINING.md), production data foundry,
+[docs/CONTINUOUS_PRETRAINING.md](docs/CONTINUOUS_PRETRAINING.md), data-driven grounded
+chat/retrieval sözleşmesi için [docs/DIALOGUE_RETRIEVAL.md](docs/DIALOGUE_RETRIEVAL.md), production data foundry,
 record-level leakage gate ve immutable run provenance için
 [docs/PRODUCTION_PRETRAINING.md](docs/PRODUCTION_PRETRAINING.md), gerçek LMM/LLM
 hedefine ilişkin kapsam/gap analizi için

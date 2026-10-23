@@ -18,11 +18,18 @@ multimodal neural runtime yapmaz.
 | CPU operation | portable/native Fortran build, OpenMP immutable-context preparation, conservative RAM/checkpoint preflight |
 | Optional Intel boundary | OpenVINO yalnız immutable packed-HDC context preparation için; explicit CPU policy native fused kernel'dir; GPU/NPU execution ayrıca doğrulanmalıdır |
 | Yeni production control plane | disk-backed exact raw-record dedupe, content-addressed shards, deterministic held-out split, exact leakage gate, max-vocabulary capacity preflight, binary/data/policy provenance |
+| Grounded diyalog retrieval | checkpoint semantic HV + operator TSV prompt/response index, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; cevap TSV'den gelir |
 
 Bu sistem, bounded semantic prototype/retrieval ve symbolic factor reasoning için
 üretim kalitesinde operation sözleşmeleri taşıyabilir. Model kapasitesi ve
 öğrenme semantiği HDC slot/vocabulary/context yapısına bağlıdır; neural parameter
 sayısı, next-token likelihood veya generative model kapasitesi değildir.
+
+`vegai_chat` bu sınırı degistirmez: user-visible metin, operatorun versioned TSV
+bilgi bankasindan retrieval ile gelir; model yeni paragraf/token sample etmez.
+Similarity/margin gate'i gecilmezse abstain eder. Bu, hardcoded reply yerine
+data-driven grounded UX icin yararlidir; LLM sohbet zekasi, factual guarantee
+veya safety policy yerine gecmez.
 
 ## Gerçek LMM/LLM için eksik zorunlu katmanlar
 

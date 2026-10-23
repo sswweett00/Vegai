@@ -6,6 +6,7 @@ program test_all
    use reasoning_core
    use resonator_network
    use hdc_pretraining
+   use dialogue_retrieval
    use text_tokenizer, only: TOKEN_LEN, MAX_LINE_CHARS, MAX_TOKENS_PER_LINE, tokenize_ascii_line
    use vocabulary
    use test_support
@@ -17,6 +18,7 @@ program test_all
    call test_resonator_network()
    call test_text_ingest()
    call test_hdc_pretraining()
+   call test_dialogue_retrieval()
    call finish_tests()
 
 contains
@@ -801,5 +803,136 @@ contains
            iostat=io_status)
       if (io_status == 0) close(unit, status='delete')
    end subroutine test_hdc_pretraining
+
+   subroutine test_dialogue_retrieval()
+      character(len=*), parameter :: CORPUS_PATH = 'vegai_dialogue_test_corpus.txt'
+      character(len=*), parameter :: KNOWLEDGE_PATH = 'vegai_dialogue_test_knowledge.tsv'
+      character(len=*), parameter :: REJECTED_KNOWLEDGE_PATH = 'vegai_dialogue_rejected_knowledge.tsv'
+      type(hdc_pretrain_model_t) :: model
+      type(hdc_pretrain_config_t) :: training_config
+      type(pretrain_metrics_t) :: vocabulary_metrics, training_metrics
+      type(dialogue_config_t) :: dialogue_config
+      type(dialogue_index_t) :: index, loaded_index, rejected_index
+      type(dialogue_session_t) :: session, loaded_session
+      type(dialogue_answer_t) :: answer
+      integer :: unit, io_status
+      integer(int32) :: status, entries_loaded
+
+      open(newunit=unit, file=CORPUS_PATH, status='replace', action='write', &
+           form='formatted', iostat=io_status)
+      call assert_true(io_status == 0, 'dialogue retrieval corpus fixture opens')
+      if (io_status /= 0) return
+      write(unit, '(A)') 'alpha beta gamma'
+      write(unit, '(A)') 'alpha beta delta'
+      write(unit, '(A)') 'omega psi phi'
+      write(unit, '(A)') 'omega psi tau'
+      write(unit, '(A)') 'gamma delta theta'
+      close(unit)
+
+      training_config = hdc_pretrain_config_t()
+      training_config%max_vocabulary = 16_int32
+      training_config%min_frequency = 1_int64
+      training_config%context_window = 2_int32
+      training_config%position_shift_bits = 41_int32
+      training_config%epochs = 1_int32
+      training_config%initial_plasticity_percent = 25_int32
+      training_config%minimum_plasticity_percent = 1_int32
+      training_config%plasticity_decay_events = 8_int32
+      training_config%strict_tokenization = .true.
+      call pretrain_build_vocabulary(model, CORPUS_PATH, training_config, vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'dialogue fixture vocabulary builds')
+      call pretrain_train_file(model, CORPUS_PATH, training_config, training_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'dialogue fixture HDC training succeeds')
+
+      dialogue_config = dialogue_config_t()
+      dialogue_config%max_entries = 3_int32
+      dialogue_config%max_history_turns = 2_int32
+      dialogue_config%minimum_similarity = -1.0
+      dialogue_config%minimum_margin = 0.0
+      call dialogue_index_init(index, dialogue_config, status)
+      call assert_i32_equal(status, DIALOGUE_OK, 'bounded dialogue index initializes')
+      call assert_true(dialogue_index_is_initialized(index), 'dialogue index reports initialized')
+      call assert_true(dialogue_index_footprint_bytes(index) > 0_int64, 'dialogue index reports bounded footprint')
+      call dialogue_index_add(index, model, 'alpha beta', 'first response comes from data', status)
+      call assert_i32_equal(status, DIALOGUE_OK, 'first data-driven dialogue row registers')
+      call dialogue_index_add(index, model, 'omega psi', 'second response comes from data', status)
+      call assert_i32_equal(status, DIALOGUE_OK, 'second data-driven dialogue row registers')
+      call dialogue_index_add(index, model, 'alpha beta', 'ambiguous duplicate response', status)
+      call assert_i32_equal(status, DIALOGUE_ERR_DUPLICATE_PROMPT, 'duplicate prompt embedding is rejected')
+      call dialogue_index_add(index, model, 'gamma delta', 'third response comes from data', status)
+      call assert_i32_equal(status, DIALOGUE_OK, 'third data-driven dialogue row registers')
+      call dialogue_index_add(index, model, 'alpha gamma', 'over-capacity response', status)
+      call assert_i32_equal(status, DIALOGUE_ERR_CAPACITY, 'bounded dialogue index rejects excess rows')
+
+      call dialogue_session_init(session, dialogue_config%max_history_turns, status)
+      call assert_i32_equal(status, DIALOGUE_OK, 'bounded dialogue session initializes')
+      call dialogue_ask(index, model, session, 'alpha beta', answer, status)
+      call assert_i32_equal(status, DIALOGUE_OK, 'exact dialogue prompt retrieves')
+      call assert_true(answer%found .and. trim(answer%response) == 'first response comes from data', &
+                       'dialogue answer is the registered data payload rather than code text')
+      call assert_true(answer%query_known_tokens == 2_int32 .and. answer%query_ignored_tokens == 0_int32, &
+                       'dialogue prompt reports active and ignored token accounting')
+      call assert_true(session%count == 1_int32, 'first dialogue prompt enters bounded session memory')
+      call dialogue_ask(index, model, session, 'omega psi', answer, status)
+      call assert_i32_equal(status, DIALOGUE_OK, 'second dialogue prompt accepts bounded history')
+      call dialogue_ask(index, model, session, 'gamma delta', answer, status)
+      call assert_i32_equal(status, DIALOGUE_OK, 'third dialogue prompt wraps bounded history')
+      call assert_true(session%count == 2_int32, 'dialogue history remains bounded at configured turn count')
+      call dialogue_session_reset(session, status)
+      call assert_i32_equal(status, DIALOGUE_OK, 'dialogue session reset succeeds')
+      call dialogue_ask(index, model, session, 'alpha beta', answer, status)
+      call assert_true(answer%found .and. trim(answer%response) == 'first response comes from data', &
+                       'session reset restores stateless exact retrieval')
+      call dialogue_ask(index, model, session, 'unseen', answer, status)
+      call assert_i32_equal(status, DIALOGUE_ERR_NO_KNOWN_TOKENS, 'prompt with no active checkpoint token is rejected')
+
+      open(newunit=unit, file=KNOWLEDGE_PATH, status='replace', action='write', access='stream', &
+           form='unformatted', iostat=io_status)
+      call assert_true(io_status == 0, 'dialogue TSV fixture opens')
+      if (io_status == 0) then
+         write(unit) 'alpha beta' // achar(9) // 'loaded response from TSV' // achar(10)
+         write(unit) 'omega psi' // achar(9) // 'second loaded response from TSV' // achar(10)
+         close(unit)
+      end if
+      dialogue_config%max_entries = 3_int32
+      dialogue_config%max_history_turns = 0_int32
+      call dialogue_index_init(loaded_index, dialogue_config, status)
+      call assert_i32_equal(status, DIALOGUE_OK, 'TSV dialogue index initializes')
+      call dialogue_index_load_tsv(loaded_index, model, KNOWLEDGE_PATH, entries_loaded, status)
+      call assert_i32_equal(status, DIALOGUE_OK, 'strict TSV knowledge base loads')
+      call assert_i32_equal(entries_loaded, 2_int32, 'TSV loader publishes each data row')
+      call dialogue_session_init(loaded_session, 0_int32, status)
+      call dialogue_ask(loaded_index, model, loaded_session, 'alpha beta', answer, status)
+      call assert_true(answer%found .and. trim(answer%response) == 'loaded response from TSV', &
+                       'TSV content controls the user-visible dialogue answer')
+
+      open(newunit=unit, file=REJECTED_KNOWLEDGE_PATH, status='replace', action='write', access='stream', &
+           form='unformatted', iostat=io_status)
+      call assert_true(io_status == 0, 'rejected dialogue TSV fixture opens')
+      if (io_status == 0) then
+         write(unit) 'alpha unseen' // achar(9) // 'this row must not be partially indexed' // achar(10)
+         close(unit)
+      end if
+      call dialogue_index_init(rejected_index, dialogue_config, status)
+      call assert_i32_equal(status, DIALOGUE_OK, 'rejected TSV index initializes')
+      call dialogue_index_load_tsv(rejected_index, model, REJECTED_KNOWLEDGE_PATH, entries_loaded, status)
+      call assert_i32_equal(status, DIALOGUE_ERR_UNKNOWN_TOKEN, 'TSV prompt with checkpoint OOV token is rejected')
+      call assert_i32_equal(entries_loaded, 0_int32, 'failed strict TSV load publishes no partial entry count')
+      call assert_true(.not. dialogue_index_is_initialized(rejected_index), &
+                       'failed strict TSV load destroys partial knowledge index')
+
+      call dialogue_session_destroy(session)
+      call dialogue_session_destroy(loaded_session)
+      call dialogue_index_destroy(index)
+      call dialogue_index_destroy(loaded_index)
+      call dialogue_index_destroy(rejected_index)
+      call pretrain_model_destroy(model)
+      open(newunit=unit, file=CORPUS_PATH, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+      open(newunit=unit, file=KNOWLEDGE_PATH, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+      open(newunit=unit, file=REJECTED_KNOWLEDGE_PATH, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+   end subroutine test_dialogue_retrieval
 
 end program test_all

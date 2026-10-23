@@ -21,18 +21,20 @@ NATIVE_OPT_FLAGS ?= -O3 -march=native -mtune=native -funroll-loops
 
 SOURCES := src/hyper_types.f90 src/text_tokenizer.f90 src/vocabulary.f90 \
            src/symbolic_memory.f90 src/resonator_network.f90 src/reasoning_core.f90 \
-           src/hdc_pretraining.f90
+           src/hdc_pretraining.f90 src/dialogue_retrieval.f90
 APP := app/main.f90
 PRETRAIN_APP := app/pretrain.f90
+CHAT_APP := app/chat.f90
 TEST_SOURCES := test/test_support.f90 test/test_all.f90
 ENGINE := $(BUILD_DIR)/hds_engine
 PRETRAIN := $(BUILD_DIR)/vegai_pretrain
+CHAT := $(BUILD_DIR)/vegai_chat
 TEST_BINARY := $(BUILD_DIR)/vegai_tests
 
-.PHONY: all engine pretrain test run run-pretrain check clean clean-all debug portable native portable-test native-test
+.PHONY: all engine pretrain chat test run run-pretrain run-chat check clean clean-all debug portable native portable-test native-test
 
-# Default target: portable optimized GNU binary without host-only ISA flags.
-all: engine pretrain
+# Default target: portable optimized GNU binaries without host-only ISA flags.
+all: engine pretrain chat
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)/mod
@@ -47,6 +49,11 @@ pretrain: $(PRETRAIN)
 $(PRETRAIN): $(SOURCES) $(PRETRAIN_APP) | $(BUILD_DIR)
 	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(SOURCES) $(PRETRAIN_APP) -o $@ $(LDFLAGS)
 
+chat: $(CHAT)
+
+$(CHAT): $(SOURCES) $(CHAT_APP) | $(BUILD_DIR)
+	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(SOURCES) $(CHAT_APP) -o $@ $(LDFLAGS)
+
 $(TEST_BINARY): $(SOURCES) $(TEST_SOURCES) | $(BUILD_DIR)
 	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(SOURCES) $(TEST_SOURCES) -o $@ $(LDFLAGS)
 
@@ -58,6 +65,9 @@ run: $(ENGINE)
 
 run-pretrain: $(PRETRAIN)
 	$(PRETRAIN) help
+
+run-chat: $(CHAT)
+	$(CHAT) help
 
 # Explicit profiles keep portable and host-tuned binaries in distinct folders,
 # avoiding accidental reuse of incompatible module/object files.
