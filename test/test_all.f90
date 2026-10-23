@@ -1,12 +1,13 @@
 ! SPDX-License-Identifier: MIT
 program test_all
-   use, intrinsic :: iso_fortran_env, only: int16, int32, int64
+   use, intrinsic :: iso_fortran_env, only: int8, int16, int32, int64
    use hyper_types
    use symbolic_memory
    use reasoning_core
    use resonator_network
    use hdc_pretraining
    use dialogue_retrieval
+   use tokenless_field
    use text_tokenizer, only: TOKEN_LEN, MAX_LINE_CHARS, MAX_TOKENS_PER_LINE, tokenize_ascii_line
    use vocabulary
    use test_support
@@ -16,6 +17,7 @@ program test_all
    call test_symbolic_memory()
    call test_reasoning_pipeline()
    call test_resonator_network()
+   call test_tokenless_signal_field()
    call test_text_ingest()
    call test_hdc_pretraining()
    call test_dialogue_retrieval()
@@ -400,6 +402,96 @@ contains
          call mem_destroy(ambiguous_books(i))
       end do
    end subroutine test_resonator_network
+
+   subroutine test_tokenless_signal_field()
+      integer(int8), parameter :: RAW_BYTES(8) = [ &
+         0_int8, -1_int8, 1_int8, int(z'80', int8), 64_int8, -64_int8, 10_int8, 0_int8 ]
+      integer(int8), parameter :: REORDERED_BYTES(8) = [ &
+         0_int8, 10_int8, -64_int8, 64_int8, int(z'80', int8), 1_int8, -1_int8, 0_int8 ]
+      integer(int8) :: empty_bytes(0)
+      integer(int8), allocatable :: too_large_bytes(:)
+      integer(int64) :: spectrum(HV_BITS), invalid_spectrum(HV_BITS)
+      integer(int64) :: spectral_energy, residual
+      integer(int32) :: status
+      type(field_encoding_t) :: encoding, same_encoding, reordered_encoding
+      type(hv_t) :: reconstructed, negative_field, positive_field
+
+      ! This path handles raw octets directly.  Values below cover signed
+      ! Fortran int8 representations of 0, 255, 128, and other byte values;
+      ! it is intentionally independent of the ASCII text tokenizer.
+      call field_encode_bytes(RAW_BYTES, encoding, status)
+      call assert_i32_equal(status, FIELD_OK, 'raw byte-event field accepts arbitrary octets')
+      call assert_i32_equal(encoding%byte_count, 8_int32, 'byte-event field reports exact bounded input size')
+      call field_encode_bytes(RAW_BYTES, same_encoding, status)
+      call assert_i32_equal(status, FIELD_OK, 'same raw byte stream re-encodes')
+      call assert_hv_equal(encoding%order_field, same_encoding%order_field, &
+                           'byte-event order field is deterministic')
+      call assert_hv_equal(encoding%distribution_field, same_encoding%distribution_field, &
+                           'byte-event distribution field is deterministic')
+
+      call field_encode_bytes(REORDERED_BYTES, reordered_encoding, status)
+      call assert_i32_equal(status, FIELD_OK, 'reordered raw byte stream encodes')
+      call assert_hv_equal(encoding%distribution_field, reordered_encoding%distribution_field, &
+                           'distribution field is explicitly order-insensitive')
+      call assert_true(.not. hv_equal(encoding%order_field, reordered_encoding%order_field), &
+                       'position-sensitive raw-byte field changes for reordered events')
+      call assert_true(field_fingerprint(encoding%order_field) /= field_fingerprint(reordered_encoding%order_field), &
+                       'rolling diagnostic fingerprint distinguishes the tested ordering')
+
+      call field_walsh_forward(encoding%order_field, spectrum, status)
+      call assert_i32_equal(status, FIELD_OK, 'Walsh forward transform accepts packed bipolar field')
+      call field_spectral_energy(spectrum, spectral_energy, status)
+      call assert_i32_equal(status, FIELD_OK, 'bounded Walsh spectrum has safe exact energy')
+      call assert_true(spectral_energy == FIELD_WALSH_EXPECTED_ENERGY, &
+                       'Walsh Parseval energy is exactly dimension squared')
+      call field_parseval_residual(spectrum, residual, status)
+      call assert_i32_equal(status, FIELD_OK, 'Parseval residual evaluates valid spectrum')
+      call assert_true(residual == 0_int64, 'Walsh Parseval residual is exactly zero')
+      call assert_true(field_bipolar_energy(encoding%order_field) == int(HV_BITS, int64), &
+                       'packed field has exact bipolar energy equal to dimension')
+      call field_walsh_inverse(spectrum, reconstructed, status)
+      call assert_i32_equal(status, FIELD_OK, 'valid bounded Walsh spectrum has exact inverse')
+      call assert_hv_equal(reconstructed, encoding%order_field, 'Walsh inverse reconstructs every field bit')
+
+      ! The two constant bipolar fields exercise the exact DC Walsh column:
+      ! H times +1 is [D, 0, ...], and H times -1 is [-D, 0, ...].
+      positive_field%bits = not(0_int64)
+      call field_walsh_forward(positive_field, spectrum, status)
+      call assert_i32_equal(status, FIELD_OK, 'positive constant field transforms')
+      call assert_true(spectrum(1) == int(HV_BITS, int64) .and. all(spectrum(2:) == 0_int64), &
+                       'positive constant field has exact Walsh DC spectrum')
+      call field_walsh_inverse(spectrum, reconstructed, status)
+      call assert_i32_equal(status, FIELD_OK, 'positive constant spectrum inverts')
+      call assert_hv_equal(reconstructed, positive_field, 'positive constant Walsh inverse is exact')
+      negative_field = hv_zero()
+      call field_walsh_forward(negative_field, spectrum, status)
+      call assert_i32_equal(status, FIELD_OK, 'negative constant field transforms')
+      call assert_true(spectrum(1) == -int(HV_BITS, int64) .and. all(spectrum(2:) == 0_int64), &
+                       'negative constant field has exact Walsh DC spectrum')
+      call field_walsh_inverse(spectrum, reconstructed, status)
+      call assert_i32_equal(status, FIELD_OK, 'negative constant spectrum inverts')
+      call assert_hv_equal(reconstructed, negative_field, 'negative constant Walsh inverse is exact')
+
+      invalid_spectrum = spectrum
+      invalid_spectrum(1) = int(HV_BITS, int64) + 1_int64
+      call field_spectral_energy(invalid_spectrum, spectral_energy, status)
+      call assert_i32_equal(status, FIELD_ERR_INVALID_SPECTRUM, 'out-of-range spectrum is fail-closed')
+      call field_walsh_inverse(invalid_spectrum, reconstructed, status)
+      call assert_i32_equal(status, FIELD_ERR_INVALID_SPECTRUM, 'inverse rejects out-of-range spectrum')
+      call assert_hv_equal(reconstructed, hv_zero(), 'rejected spectrum publishes no partial field')
+      invalid_spectrum = 0_int64
+      call field_walsh_inverse(invalid_spectrum, reconstructed, status)
+      call assert_i32_equal(status, FIELD_ERR_INVALID_SPECTRUM, &
+                            'inverse rejects bounded coefficients without bipolar reconstruction')
+
+      call field_encode_bytes(empty_bytes, encoding, status)
+      call assert_i32_equal(status, FIELD_ERR_EMPTY_INPUT, 'empty byte stream is rejected explicitly')
+      allocate(too_large_bytes(FIELD_MAX_BYTES + 1_int32))
+      too_large_bytes = 0_int8
+      call field_encode_bytes(too_large_bytes, encoding, status)
+      call assert_i32_equal(status, FIELD_ERR_CAPACITY, 'oversized byte stream is rejected before accumulation')
+      deallocate(too_large_bytes)
+   end subroutine test_tokenless_signal_field
 
    subroutine test_text_ingest()
       type(vocabulary_t) :: vocab

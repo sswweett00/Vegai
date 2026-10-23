@@ -21,6 +21,7 @@ set(CMAKE_Fortran_EXTENSIONS OFF)
 
 add_library(vegai_hds STATIC
     src/hyper_types.f90
+    src/tokenless_field.f90
     src/text_tokenizer.f90
     src/vocabulary.f90
     src/symbolic_memory.f90
@@ -96,6 +97,11 @@ target_link_libraries(hds_engine PRIVATE vegai_hds)
 add_executable(vegai_pretrain app/pretrain.f90)
 target_link_libraries(vegai_pretrain PRIVATE vegai_hds)
 
+# Raw-byte field inspection remains separate from text-token pretraining.  It
+# exposes finite representation checks only and has no generative surface.
+add_executable(vegai_field app/field.f90)
+target_link_libraries(vegai_field PRIVATE vegai_hds)
+
 # A separate executable keeps grounded dialogue retrieval modular: model
 # training/checkpoint semantics remain in vegai_pretrain, while this surface
 # only retrieves operator-supplied knowledge-base responses.
@@ -120,6 +126,11 @@ if(VEGAI_BUILD_TESTS)
 
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
+        add_test(
+            NAME vegai_tokenless_signal_field
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_tokenless_field.py
+                    --field-bin $<TARGET_FILE:vegai_field>
+        )
         add_test(
             NAME vegai_hardware_compatibility
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_hardware_compatibility.py

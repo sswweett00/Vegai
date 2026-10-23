@@ -13,6 +13,8 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 
 - taşma-semantikleri tanımlı deterministik SplitMix64 tabanlı vektör üretimi;
 - 2 KiB paketli hiper-vektör cebiri ve geri çevrilebilir bağlama;
+- BPE/subword vocabulary kullanmadan raw octet event'lerini bounded HDC field'e
+  alan, exact Walsh/inverse/Parseval doğrulamalı ayrı Tokenless Signal Field;
 - taşma denetimli, atomik başarısız olan 32 KiB Hebbian bundling biriktiricisi;
 - sabit kapasiteli, heap-parçalanmasız, gerçek paketli SoA çağrışımsal bellek;
 - açıkça **exact** ve **yaklaşık LSH** cleanup API'lerinin ayrılması;
@@ -45,6 +47,14 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 > Bit-seviyesi işlemler, özellikle sabit sembol sözlükleri ve bileşimsel
 > anahtarlar için çok ucuzdur; doğruluk/kapasite, bundle kardinalitesi,
 > sözlük büyüklüğü ve sorgu gürültüsüne bağlı istatistiksel bir konudur.
+>
+> **Tokenless Signal Field notu:** `vegai_field`, raw byte'ları BPE/subword
+> vocabulary olmadan işler; bu yalnız deterministic bounded representation
+> yoludur. Sabit 16.384-bit field arbitrary input için lossless değildir.
+> Walsh/Parseval doğrulaması sonlu integer aritmetiğini kanıtlar; dil anlamı,
+> dış dünya factuality'si veya fiziksel ölçüm doğruluğu kanıtlamaz. Raw source
+> digest/provenance dışarıda saklanmalıdır. Tam contract:
+> [TOKENLESS_SIGNAL_FIELD.md](docs/TOKENLESS_SIGNAL_FIELD.md).
 >
 > **Corpus pretraining notu:** `vegai_pretrain`, Transformer/LLM eğitimi değil;
 > deterministik positional + order-invariant hybrid context'lerden HDC semantic
@@ -83,7 +93,13 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 make test
 make run
 make pretrain
+make field
 make chat
+
+# Raw byte-event field: independent Python oracle + compiled CLI contract
+make field-check
+printf 'raw bytes, not tokens\n' > /tmp/vegai-raw.bin
+./build/vegai_field inspect /tmp/vegai-raw.bin
 
 # Sınır denetimli hata ayıklama derlemesi
 make debug
@@ -252,6 +268,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Katman | Dosya | Sorumluluk |
 |---|---|---|
 | Bit cebiri | `src/hyper_types.f90` | üretim, XOR binding, majority-3, permütasyon, Hamming, exact noise, Hebbian sayaç |
+| Tokenless Signal Field | `src/tokenless_field.f90`, `app/field.f90` | raw octet event encoding, bounded order/distribution field, exact integer Walsh/inverse/Parseval inspection; semantic/lossless/physical-world claim'i değil |
 | Çağrışımsal bellek | `src/symbolic_memory.f90` | sabit kapasiteli SoA store, ID hash, LSH, exact/approximate cleanup |
 | Akıl yürütme | `src/reasoning_core.f90` | role–filler frame, n-gram, kural bankası, analogik transfer |
 | Resonator Network | `src/resonator_network.f90` | slot-spesifik codebook'larla çoklu-faktör çözümleme ve exact certification |
@@ -270,7 +287,8 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Çalıştırılabilir doğrulama | `app/main.f90` | %25 exact gürültü, analoji, causal chain ve 3-faktör Resonator demo |
 | Native testler | `test/test_all.f90` | cebirsel invariantlar, hata yolları, serial/OpenMP pretraining eşitliği ve uçtan uca test |
 | Donanım/OS profili | `tools/hardware_compatibility.py` | privacy-conscious CPU/RAM/GPU/NPU inventory, portable CPU backend sözleşmesi |
-| Bağımsız oracle | `tools/verify_reference.py` | standart SplitMix64 ve demo sözleşmelerinin Python modeli |
+| Bağımsız HDC oracle | `tools/verify_reference.py` | standart SplitMix64 ve demo sözleşmelerinin Python modeli |
+| Bağımsız tokenless-field oracle | `tools/verify_tokenless_field.py` | raw byte-event construction, Walsh/inverse/Parseval ve compiled CLI fail-closed contract'inin Python modeli |
 
 Bir hiper-vektörün payload'u tam olarak `256 × 8 = 2048` bayttır. Bu, 64-byte
 cache-line varsayımında **32 cache-line payload birimine** eşittir. Fortran'ın
@@ -280,6 +298,8 @@ iddia etmiyoruz. Sıfır-kayıplı 64-byte hizalama gerekiyorsa derleyici/ABI'ye
 özel hizalı allocator uygulanmalıdır.
 
 Ayrıntılı tasarım ve invariantlar için [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
+raw-byte tokenless representation, exact Walsh contract ve semantic/physical
+sınırlar için [docs/TOKENLESS_SIGNAL_FIELD.md](docs/TOKENLESS_SIGNAL_FIELD.md),
 Resonator Network sözleşmesi için [docs/RESONATOR_NETWORK.md](docs/RESONATOR_NETWORK.md),
 corpus veri hattı, yönetişim ve checkpoint sözleşmesi için
 [docs/PRETRAINING.md](docs/PRETRAINING.md), JSONL/JSON/TXT/Parquet/Arrow training-data

@@ -28,22 +28,24 @@ DATAIO_PYTHON ?= $(DATAIO_VENV)/bin/python
 LMM_VENV ?= .venv-lmm
 LMM_PYTHON ?= $(LMM_VENV)/bin/python
 
-SOURCES := src/hyper_types.f90 src/text_tokenizer.f90 src/vocabulary.f90 \
+SOURCES := src/hyper_types.f90 src/tokenless_field.f90 src/text_tokenizer.f90 src/vocabulary.f90 \
            src/symbolic_memory.f90 src/resonator_network.f90 src/reasoning_core.f90 \
            src/hdc_pretraining.f90 src/dialogue_retrieval.f90
 APP := app/main.f90
 PRETRAIN_APP := app/pretrain.f90
+FIELD_APP := app/field.f90
 CHAT_APP := app/chat.f90
 TEST_SOURCES := test/test_support.f90 test/test_all.f90
 ENGINE := $(BUILD_DIR)/hds_engine
 PRETRAIN := $(BUILD_DIR)/vegai_pretrain
+FIELD := $(BUILD_DIR)/vegai_field
 CHAT := $(BUILD_DIR)/vegai_chat
 TEST_BINARY := $(BUILD_DIR)/vegai_tests
 
-.PHONY: all engine pretrain chat test run run-pretrain run-chat check data-check capability-check lmm-check dialogue-check clean clean-all debug portable native portable-test native-test
+.PHONY: all engine pretrain field chat test run run-pretrain run-field run-chat check field-check data-check capability-check lmm-check dialogue-check clean clean-all debug portable native portable-test native-test
 
 # Default target: portable optimized GNU binaries without host-only ISA flags.
-all: engine pretrain chat
+all: engine pretrain field chat
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)/mod
@@ -57,6 +59,11 @@ pretrain: $(PRETRAIN)
 
 $(PRETRAIN): $(SOURCES) $(PRETRAIN_APP) | $(BUILD_DIR)
 	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(SOURCES) $(PRETRAIN_APP) -o $@ $(LDFLAGS)
+
+field: $(FIELD)
+
+$(FIELD): $(SOURCES) $(FIELD_APP) | $(BUILD_DIR)
+	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(SOURCES) $(FIELD_APP) -o $@ $(LDFLAGS)
 
 chat: $(CHAT)
 
@@ -74,6 +81,9 @@ run: $(ENGINE)
 
 run-pretrain: $(PRETRAIN)
 	$(PRETRAIN) help
+
+run-field: $(FIELD)
+	$(FIELD) help
 
 run-chat: $(CHAT)
 	$(CHAT) help
@@ -99,12 +109,18 @@ debug:
 
 check:
 	python3 tools/verify_reference.py
+	python3 tools/verify_tokenless_field.py
 	python3 tools/verify_example_corpus.py
 	python3 tools/verify_hardware_compatibility.py
 	python3 tools/verify_training_resource_plan.py
 	python3 tools/verify_openvino_provider.py
 	python3 tools/verify_openvino_context_worker.py
 	python3 tools/verify_capability_curriculum.py
+
+# Independent Python oracle plus compiled CLI integration for the finite
+# byte-event field.  This verifies representation identities, not semantics.
+field-check: $(FIELD)
+	python3 tools/verify_tokenless_field.py --field-bin $(FIELD)
 
 # Strict stdlib-only verification of policy-driven reasoning/problem-solving/
 # coding (or operator-defined) curriculum packaging.  It uses only temporary

@@ -47,6 +47,27 @@ kontrol eder.
 `hv_seed_from_id` bir `int32` ID'yi `int64` seed'e injective olarak taşır.
 Bellek hash tablosu da negatif ID'leri geçerli kabul eder.
 
+### 1.3 Tokenless raw-byte Signal Field
+
+`tokenless_field` normal `text_tokenizer` ve external LMM tokenizer plane'inden
+ayrı bir raw-octet (`int8`) giriş yoludur. BPE/subword vocabulary, merge,
+normalization veya learned lookup çalıştırmaz. Bir byte stream'in her event'i
+sabit domain-separated atomla temsil edilir; `order_field` pozisyonu XOR
+kompozisyonuna dahil eder, `distribution_field` ise deterministic majority ile
+sıra-duyarsız dağılım özetidir. Bu iki field de sabit `D=16384` bitlik sketch'tir;
+arbitrary uzun stream için injective/lossless değildir. Raw source digest ve
+provenance field dışında tutulmalıdır.
+
+Modül yalnız `1…32767` raw byte kabul eder. Limit, `int16` bundling counter'ın
+wraparound'sız `±32767` unit vote sınırından türetilir; empty veya oversized
+input fail-closed hata döndürür. `D=2^14` sayesinde unnormalised
+Walsh-Hadamard dönüşümü tam `int64` sınırlarıyla kontrol edilir:
+`HᵀH = D I`, valid bipolar field için `||Hx||² = D²` ve inverse
+`H(Hx)/D = x` bit-tam sınanır. Bu, semantic veya fiziksel dünya doğruluğu
+iddiası değil, sonlu representation aritmetiği invariantıdır. Tam contract,
+integer bounds, independent oracle ve deployment sınırları için
+[TOKENLESS_SIGNAL_FIELD.md](TOKENLESS_SIGNAL_FIELD.md)'ye bakın.
+
 ## 2. Cebirsel operator invariantları
 
 ### 2.1 Binding / unbinding

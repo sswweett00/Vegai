@@ -11,6 +11,7 @@ multimodal neural runtime yapmaz.
 | Alan | Vegai'de doğrulanmış mevcut durum |
 |---|---|
 | Core representation | Fortran 2023 packed 16.384-bit hypervector/VSA (`hyper_types`, `symbolic_memory`) |
+| Tokenless byte-event field | Raw octet'i BPE/subword vocabulary olmadan bounded order/distribution HDC field'e indirger; exact Walsh/inverse/Parseval integer contract'i vardır, semantic/lossless/physical-world claim'i yoktur (`tokenless_field`) |
 | Learning | iki-pass ASCII corpus, frequency vocabulary, deterministic HDC context bundle ve source-ordered Hebbian prototype update (`hdc_pretraining`) |
 | Factor reasoning | bounded exact certificate ile Resonator Network multi-factor factorization |
 | Determinism | fixed seeds, bounded allocation/error contracts, serial/OpenMP checkpoint byte equality, checkpoint/resume |
@@ -26,6 +27,15 @@ Bu sistem, bounded semantic prototype/retrieval ve symbolic factor reasoning iç
 üretim kalitesinde operation sözleşmeleri taşıyabilir. Model kapasitesi ve
 öğrenme semantiği HDC slot/vocabulary/context yapısına bağlıdır; neural parameter
 sayısı, next-token likelihood veya generative model kapasitesi değildir.
+
+`tokenless_field` bu sınırı değiştirmez. Learned BPE/subword tokenizer'a
+alternatif olarak ham octet event'lerini doğrudan işleyebilir ve finite
+Walsh-Hadamard identity'lerini exact olarak kanıtlayabilir. Ancak sabit 16.384
+bitlik bir field arbitrary byte stream için lossless değildir; byte-level
+aritmetik, doğal dil veya multimodal semantic understanding, gerçek dünya
+factuality ya da fiziksel ölçüm doğruluğu değildir. Bunun için source identity,
+calibration/uncertainty ve target-domain evaluation ayrı gerekir. Ayrıntılı
+sınır [TOKENLESS_SIGNAL_FIELD.md](TOKENLESS_SIGNAL_FIELD.md)'dedir.
 
 `vegai_chat` bu sınırı degistirmez: user-visible metin, operatorun versioned TSV
 bilgi bankasindan retrieval ile gelir; model yeni paragraf/token sample etmez.
