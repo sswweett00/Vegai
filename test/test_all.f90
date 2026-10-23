@@ -1,6 +1,6 @@
 ! SPDX-License-Identifier: MIT
 program test_all
-   use, intrinsic :: iso_fortran_env, only: int16, int32, int64
+   use, intrinsic :: iso_fortran_env, only: error_unit, int16, int32, int64
    use hyper_types
    use symbolic_memory
    use reasoning_core
@@ -707,6 +707,7 @@ contains
       call pretrain_checkpoint_save(coherent_model, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'coherent checkpoint save succeeds')
       call pretrain_checkpoint_load(CHECKPOINT_PATH, restored, status)
+      if (status /= PT_OK) write(error_unit, '(A,I0)') 'ERROR: coherent checkpoint load status=', status
       call assert_i32_equal(status, PT_OK, 'coherent checkpoint load succeeds')
       call assert_i32_equal(restored%context_mode, PT_CONTEXT_COHERENT, &
                             'checkpoint preserves coherent encoder semantics')
