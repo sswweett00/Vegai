@@ -30,6 +30,7 @@ import tempfile
 import time
 from typing import Any, Iterator, Mapping, Sequence
 
+from lmm_gateway_template import EVIDENCE_PLACEHOLDER, REQUEST_PLACEHOLDER, load_gateway_command_template
 from lmm_contract import (
     GENERATION_REPORT_SCHEMA,
     MAX_EVIDENCE_ITEMS,
@@ -60,8 +61,6 @@ MAX_CASES = 10_000
 MAX_HMAC_KEY_BYTES = 4 * 1024
 MAX_GATEWAY_STDOUT_BYTES = 8 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 180.0
-REQUEST_PLACEHOLDER = "{request}"
-EVIDENCE_PLACEHOLDER = "{evidence}"
 
 
 class LMMQualityEvaluationError(LMMContractError):
@@ -230,43 +229,10 @@ def iter_cases(path: Path, maximum_cases: int) -> Iterator[QualityCase]:
     require_unchanged(source, identity, "quality case set")
 
 
-def require_option_placeholder_binding(command: Sequence[str], option: str, placeholder: str) -> None:
-    """Require a literal placeholder to be the sole value of one gateway option."""
-    positions = [index for index, item in enumerate(command) if item == placeholder]
-    require(len(positions) == 1, f"quality gateway command must contain exactly one literal {placeholder!r}")
-    position = positions[0]
-    require(position > 0 and command[position - 1] == option,
-            f"quality gateway {placeholder!r} must be the direct value of {option}")
-    require(not any(item.startswith(f"{option}=") for item in command),
-            f"quality gateway command must not use an additional {option}=... option")
-    require(command.count(option) == 1, f"quality gateway command must contain exactly one {option}")
-
-
 def load_command(path: Path) -> tuple[list[str], FileIdentity]:
-    identity = file_identity(path, "quality gateway command", maximum_bytes=MAX_JSON_BYTES)
-    try:
-        value = json.loads(path.resolve().read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise LMMQualityEvaluationError(f"cannot parse quality gateway command {path}: {error}") from error
-    require(isinstance(value, list) and value and all(isinstance(item, str) and item for item in value),
-            "quality gateway command must be a nonempty JSON string array")
-    command = list(value)
-    for item in command:
-        require(
-            (REQUEST_PLACEHOLDER not in item or item == REQUEST_PLACEHOLDER)
-            and (EVIDENCE_PLACEHOLDER not in item or item == EVIDENCE_PLACEHOLDER),
-            "quality gateway placeholders must occupy complete command arguments",
-        )
-    require_option_placeholder_binding(command, "--request", REQUEST_PLACEHOLDER)
-    require_option_placeholder_binding(command, "--evidence", EVIDENCE_PLACEHOLDER)
-    require(command.count("--print-json") == 1,
-            "quality gateway command must include exactly one --print-json so output provenance is machine-readable")
-    require(not any(item == "--output" or item.startswith("--output=") for item in command),
-            "quality gateway command must not include --output; evaluator owns its private temporary case files")
-    require(not any(item == "--include-response-in-report" or item.startswith("--include-response-in-report=") for item in command),
-            "quality gateway command must not include --include-response-in-report; evaluator avoids persisting held-out output")
-    require_unchanged(path, identity, "quality gateway command")
-    return command, identity
+    """Compatibility wrapper around the shared no-shell gateway template parser."""
+    template = load_gateway_command_template(path, label="quality gateway command")
+    return list(template.command), template.identity
 
 
 def load_hmac_key(path: Path | None) -> tuple[bytes | None, FileIdentity | None]:

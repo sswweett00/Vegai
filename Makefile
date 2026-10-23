@@ -119,12 +119,14 @@ data-check:
 	$(DATAIO_PYTHON) tools/verify_training_data_io.py
 
 # Optional real Unicode/BPE tokenizer path plus stdlib-only worker/context,
-# evidence, session, multimodal assets and held-out citation/abstention release
-# contracts. No model weights are pulled.
+# evidence, session, multimodal assets, held-out citation/abstention release,
+# and measured domain-expert portfolio-routing contracts. No model weights are
+# pulled.
 lmm-check:
 	@test -x "$(LMM_PYTHON)" || python3 -m venv "$(LMM_VENV)"
 	$(LMM_PYTHON) -m pip install --disable-pip-version-check -r requirements-lmm.txt
 	$(LMM_PYTHON) tools/verify_lmm_runtime.py
+	$(LMM_PYTHON) tools/verify_lmm_portfolio.py
 
 clean:
 	rm -rf $(BUILD_DIR)

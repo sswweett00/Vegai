@@ -20,8 +20,9 @@ yerine geçmez.
 |---|---|---|
 | `make check` | bağımsız reference property + demo | `Python reference verification: PASS` |
 | `make data-check` | optional PyArrow kurulumu; streaming JSONL/JSON/TXT/Parquet/Arrow round-trip, corruption ve production adapter | `training data I/O verification: PASS` |
-| `make lmm-check` | optional Rust Unicode/BPE tokenizer; long context, session ledger, knowledge evidence, image/audio/video asset registry, real worker protocol, held-out citation/abstention quality release gate ve capability gate | `lmm runtime verification: PASS` |
+| `make lmm-check` | optional Rust Unicode/BPE tokenizer; long context, session ledger, knowledge evidence, image/audio/video asset registry, real worker protocol, held-out citation/abstention quality release gate, measured domain-expert routing/panel ve capability gate | `lmm runtime verification: PASS` + `lmm portfolio verification: PASS` |
 | `python3 tools/lmm_quality_evaluation.py --cases ... --gateway-command-json ... --report ... --fail-on-gate` | gerçek configured model gateway ile held-out citation/abstention provenance ve release threshold | report yayınlanır; başarısız quality gate exit `3` |
+| `python3 tools/lmm_portfolio.py route --portfolio ... --task ... --request ... --evidence ... --output ...` | immutable model/gateway/quality/evaluation-card binding ile target-domain candidate seçimi veya panel planı | eligible candidate yoksa exit `2`; raw request/response rapora girmez |
 | `make dialogue-check` | real compiled chat ile held-out grounded/abstention metrikleri, report privacy/provenance, strict schema ve negative release gate | `dialogue evaluation verification: PASS` |
 | `make test` | native cebir, error path, memory, reasoning | `Checks: ..., failures: 0` |
 | `make debug` | bounds/runtime/FPE denetimli native test | başarısızlık yok |
@@ -34,7 +35,7 @@ yerine geçmez.
 | `python3 tools/verify_openvino_provider.py` | optional Intel OpenVINO provider preflight/truth contract | `OpenVINO provider verification: PASS` |
 | `python3 tools/verify_openvino_context_worker.py` | uint32-lane worker protocol, neutral tie/complement padding, resident graph-cache reuse; runtime yoksa fail-closed | `OpenVINO context worker verification: PASS` |
 | `python3 tools/verify_openvino_context_provider.py --pretrain-bin build/vegai_pretrain` | native-CPU bypass timing/equality guard + strict resident OpenVINO graph checkpoint equality (runtime yoksa SKIP) | `OpenVINO context provider verification: PASS` |
-| `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties`, donanım/OpenVINO contract testleri, `vegai_example_pretraining`, `vegai_dialogue_retrieval`, `vegai_dialogue_evaluation`, `vegai_lmm_runtime`, `vegai_continuous_pretraining`, `vegai_production_pretraining`, `vegai_example_production_dataset_preflight` PASS |
+| `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties`, donanım/OpenVINO contract testleri, `vegai_example_pretraining`, `vegai_dialogue_retrieval`, `vegai_dialogue_evaluation`, `vegai_lmm_runtime`, `vegai_lmm_portfolio`, `vegai_continuous_pretraining`, `vegai_production_pretraining`, `vegai_example_production_dataset_preflight` PASS |
 
 CI bunların checked CMake/OpenMP varyantını ve ayrıca optimize Make hedefini
 çalıştırır. Rich-format CI adımı `requirements-dataio.txt` ile optional PyArrow
@@ -159,9 +160,13 @@ CJK FTS evidence retrieval, hash-chain session, deterministic token-budget long
 context, content-addressed image/audio/video asset, backend-owned worker output,
 provenance report, model-emitted citation/abstention gate, privacy-conscious
 held-out quality release gate, capability yoksa fail-closed rejection ve actual
-gateway child-process benchmark sınırı. Bu test bir modelin factuality, fluency
-veya multimodal reasoning benchmark'ı değildir; [LMM_RUNTIME.md](LMM_RUNTIME.md)
-contract'inin integration testidir.
+gateway child-process benchmark sınırı. `vegai_lmm_portfolio`, ayrıca en yüksek
+measured target-domain candidate seçimini, independent-group panelini, raw-text
+privacy'yi, quality threshold fail-closed davranışını, wrong-model veya
+unmeasured gateway command ve runtime-drift rejection'ını test eder. Bu testler factuality, fluency veya multimodal
+reasoning benchmark'ı değildir; [LMM_RUNTIME.md](LMM_RUNTIME.md) ve
+[LMM_PORTFOLIO_ROUTING.md](LMM_PORTFOLIO_ROUTING.md) contract'lerinin integration
+testleridir.
 
 CI önce `tools/hardware_compatibility.py` ile CPU/OS/mimari/RAM/GPU/NPU
 inventory metadata'sını, sonra `tools/training_resource_plan.py` ile bounded

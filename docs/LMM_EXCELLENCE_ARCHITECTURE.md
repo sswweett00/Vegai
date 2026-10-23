@@ -45,7 +45,7 @@ licensed data / feedback / benchmarks
 | Real generation gateway | **Uygulandı**; OpenVINO GenAI text, HTTPS OpenAI-compatible, trusted worker | Gerçek seçilmiş modelin task-quality benchmark'ı |
 | Long dialogue/evidence/media | **Uygulandı**; hash-chain ledger, token budget, FTS evidence, image/audio/video asset contract | Semantic memory, embedding/reranker ve gerçek encoder quality evaluation |
 | Citation/abstention quality gate | **Uygulandı**; held-out real gateway runner ve release threshold | Factual entailment, human preference, safety/red-team ve calibration benchmark'ları |
-| Model portfolio/router | **Arayüz hazır**; gateway manifest/engine boundary birden çok backend bağlayabilir | Router policy, counterfactual evaluation, fallback/SLO validation |
+| Model portfolio/router | **Kısmi uygulandı**; provenance-bound target-domain expert routing, measured threshold ve independent-panel planı | Persistent policy service, shadow/counterfactual evaluation, canary/rollback ve live queue/SLO validation |
 | Neural pretraining/alignment | **Harici gerçek model gerekir** | Tensor runtime, distributed optimizer, data mixture, loss/eval curves |
 | Multimodal reasoning | **Arayüz hazır**; assets + worker protocol | Licensed paired data, VLM/ASR/video encoder, modality task scores |
 | Accelerator scheduler | **Arayüz hazır**; requested device/provenance, resident service benchmark methodology | Gerçek CPU/iGPU/GPU/NPU placement, throughput/energy evidence |
@@ -79,6 +79,16 @@ Tek model her domain için optimal değildir. Production router aşağıdaki imm
 model manifest alanlarını kullanmalıdır: context window, modal capability,
 tokenizer, artifact revision, license ve gerçek eval kartı.
 
+`tools/lmm_portfolio.py`, bunun repository içindeki fail-closed control-plane
+uygulamasıdır. Candidate'i yalnız model manifest SHA'sına bağlı, geçmişte başarılı
+citation/abstention quality report'u ve target-domain evaluation card'ı varsa
+seçer. Domain/residency/safety/modality/context/latency/cost threshold'ları
+geçmeyen candidate için “daha zayıf modelle devam et” cevabı üretmez. `single-best`
+gerçek seçilmiş gateway'i çağırabilir; `independent-panel` farklı provider/family
+group'ları için provenance-bound plan üretir, fakat semantik adjudication veya
+çoğunluk oylamasını kalite kanıtı diye uydurmaz. Ayrıntılı sözleşme:
+[LMM_PORTFOLIO_ROUTING.md](LMM_PORTFOLIO_ROUTING.md).
+
 ### 3.1 Router kararı
 
 Her request için policy, ölçülmüş değerlerle şu sırayı izlemelidir:
@@ -107,7 +117,7 @@ harici servislerdir:
 - persistent model servers (OpenVINO/vLLM/benzeri) ve queue-aware scheduler;
 - per-model tokenizer/chat-template conformance testleri;
 - model/reranker/embedding version registry;
-- router policy store, shadow evaluator, canary/rollback controller;
+- persistent router policy service, shadow/counterfactual evaluator, canary/rollback controller;
 - tenant isolation, rate limit, quota ve audit log retention policy.
 
 ## 4. Eğitim ve data factory mimarisi
@@ -221,17 +231,21 @@ kalan riskleri yayınlamalıdır.
 
 1. Her target domain için frozen held-out citation/abstention suite'i oluşturup
    `lmm_quality_evaluation.py --fail-on-gate` ile CI/release'e bağlayın.
-2. Gerçek lisanslı model package'i `lmm_model_manifest.py create/verify` ile
+2. Her gerçek model için immutable target-domain evaluation card üretin ve
+   `lmm_portfolio.py route` ile domain/residency/safety/SLO eşiklerini geçen
+   expert'i veya bağımsız paneli seçin.
+3. Gerçek lisanslı model package'i `lmm_model_manifest.py create/verify` ile
    bağlayın; tokenizer/chat-template conformance testini ekleyin.
-3. Retrieval relevance + factual-entailment benchmark'ı, calibration ve human
+4. Retrieval relevance + factual-entailment benchmark'ı, calibration ve human
    preference eval'i ekleyin.
-4. Persistent server/router/accelerator telemetry'yi shadow traffic ile ölçün.
-5. Training/data factory ve safety/red-team katmanlarını gerçek verilerle
+5. Persistent server/router/accelerator telemetry'yi shadow traffic ile ölçün.
+6. Training/data factory ve safety/red-team katmanlarını gerçek verilerle
    devreye alın; her phase'de old benchmark non-regression gate uygulayın.
-6. Ancak bu raporlar target domain'de gerekli Pareto üstünlüğünü gösterirse
+7. Ancak bu raporlar target domain'de gerekli Pareto üstünlüğünü gösterirse
    deployment claim'i yapın; diğer alanlarda kapsamı açıkça sınırlayın.
 
-İlgili operasyon contract'i için [LMM_RUNTIME.md](LMM_RUNTIME.md), mevcut
-HDC/LMM ayrımı için [LMM_SCOPE_AND_GAP_ANALYSIS.md](LMM_SCOPE_AND_GAP_ANALYSIS.md)
+İlgili operasyon contract'i için [LMM_RUNTIME.md](LMM_RUNTIME.md), measured
+expert routing/panel sözleşmesi için [LMM_PORTFOLIO_ROUTING.md](LMM_PORTFOLIO_ROUTING.md),
+mevcut HDC/LMM ayrımı için [LMM_SCOPE_AND_GAP_ANALYSIS.md](LMM_SCOPE_AND_GAP_ANALYSIS.md)
 ve genel release güvence tablosu için [QUALITY_ASSURANCE.md](QUALITY_ASSURANCE.md)
 bakın.

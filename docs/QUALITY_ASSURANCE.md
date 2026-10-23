@@ -36,7 +36,7 @@ anlamına gelmez.
 | Data quality | JSONL/JSON/TXT/Parquet/Arrow schema boundary, exact dedupe, split audit | Exact dedupe semantic duplicate, PII/license veya contamination çözmez | `training_dataset.py`, provenance ve upstream governed pipeline |
 | Production transaction | Immutable shard, SHA-256 ledger, exact leakage audit, exactly-once state | Source/domain quality kendi başına garanti edilmez | `production_dataset.py`, `production_pretrain.py`, health audit |
 | Grounded chat | Her response operator TSV'den gelir; exact Hamming scan, margin/similarity abstention | Held-out task accuracy ve threshold calibration yoksa güvenilirlik bilinmez | **Yeni:** versioned held-out evaluator + release gates |
-| Optional LMM integration | Gerçek external model backend'i için Unicode/subword manifest, long-context packer, knowledge evidence, multimodal asset boundary ve held-out citation/abstention release gate | Model weights/quality/provider güvenliği Vegai tarafından sağlanmaz; multimodal capability model-specific'tir | **Yeni:** `lmm_gateway.py`, `lmm_quality_evaluation.py`, session/knowledge/assets contracts, artifact hash ve fail-closed capability/quality gate |
+| Optional LMM integration | Gerçek external model backend'i için Unicode/subword manifest, long-context packer, knowledge evidence, multimodal asset boundary, held-out citation/abstention release gate ve measured domain-expert routing/panel | Model weights/quality/provider güvenliği Vegai tarafından sağlanmaz; scorecard broad quality kanıtı değildir, multimodal capability model-specific'tir | **Yeni:** `lmm_gateway.py`, `lmm_quality_evaluation.py`, `lmm_portfolio.py`, session/knowledge/assets contracts, artifact hash ve fail-closed capability/quality/routing gate |
 | Hardware / performance | Portable/native CPU profiles, OpenMP byte equality, resource plan, optional OpenVINO truth contract | GPU/NPU inventory compute kanıtı değildir; universal throughput yok | Host-specific benchmark ve provider execution evidence |
 | Security / governance | Fail-closed ASCII contracts, hashes, atomic publication | Prompt/response factuality, PII, licensing, adversarial corpus ve human review dışarıdadır | Versioned source registry, review, retention, red-team policy |
 
@@ -208,9 +208,9 @@ Bu ayrım, "test çalıştı fakat kalite yetersiz" ile "test güvenilir şekild
 ## 6. LMM integration sınırı ve hâlâ kanıtlanmayan alanlar
 
 Yeni optional LMM plane; Unicode/subword tokenizer JSON'u, gerçek model backend
-çağrısı, hash-chained long-context, source evidence, multimodal asset referansı
-ve held-out citation/abstention release gate'i sağlar. Ancak bunlar aşağıdakileri
-**otomatik** eklemez:
+çağrısı, hash-chained long-context, source evidence, multimodal asset referansı,
+held-out citation/abstention release gate'i ve measured domain-expert routing
+sağlar. Ancak bunlar aşağıdakileri **otomatik** eklemez:
 
 - Vegai içinde Transformer attention, autodiff, optimizer veya gradient training;
 - model weight'leri, model family kalitesi veya neural token likelihood kanıtı;
@@ -218,10 +218,13 @@ ve held-out citation/abstention release gate'i sağlar. Ancak bunlar aşağıdak
   VLM backend'inin görevidir;
 - distributed model/data/pipeline parallelism;
 - factual truth oracle, safety alignment veya red-team otomasyonu;
-- LMM benchmark/perplexity/human preference karşılaştırması.
+- LMM benchmark/perplexity/human preference karşılaştırması;
+- evaluation card sayılarının geçerli target-domain üstünlük veya panel
+  adjudication kanıtı olduğu iddiası.
 
-Bu yetenekler için [LMM_SCOPE_AND_GAP_ANALYSIS.md](LMM_SCOPE_AND_GAP_ANALYSIS.md)
-ve [LMM_RUNTIME.md](LMM_RUNTIME.md) belgelerindeki model/data/evaluation
+Bu yetenekler için [LMM_SCOPE_AND_GAP_ANALYSIS.md](LMM_SCOPE_AND_GAP_ANALYSIS.md),
+[LMM_RUNTIME.md](LMM_RUNTIME.md) ve [LMM_PORTFOLIO_ROUTING.md](LMM_PORTFOLIO_ROUTING.md)
+belgelerindeki model/data/evaluation
 mimarisi gerekir. HDC retrieval kalite gate'i yalnız açıkça tanımlanmış operator
 knowledge-base domain'inde ölçülebilir güvenilirlik sağlar; LMM backend report'u
 ise yalnız gerçek backend çağrısı/provenance kanıtıdır.
@@ -238,8 +241,9 @@ ise yalnız gerçek backend çağrısı/provenance kanıtıdır.
 | `docs/VALIDATION.md` | CI doğrulama matrisi ve test kapsamı güncellenir |
 | `tools/lmm_contract.py`, `tools/lmm_model_manifest.py`, `tools/lmm_gateway.py` | Gerçek model backend'i için Unicode/subword, immutable artifact package, context, response provenance ve fail-closed gateway |
 | `tools/lmm_session.py`, `tools/lmm_knowledge.py`, `tools/lmm_assets.py` | Hash-chain dialogue, source-grounded world-knowledge evidence ve image/audio/video input plane |
-| `tools/lmm_quality_evaluation.py` | Gerçek gateway command'i üzerinde privacy-conscious held-out citation/abstention evaluation ve explicit release thresholds |
-| `tools/verify_lmm_runtime.py` | Model-weightsiz LMM integration + quality-gate contract testi |
+| `tools/lmm_quality_evaluation.py`, `tools/lmm_gateway_template.py` | Gerçek gateway command'i üzerinde privacy-conscious held-out citation/abstention evaluation, explicit release thresholds ve shared no-shell template validation |
+| `tools/lmm_portfolio.py` | Immutable model/gateway/quality-card binding, measured target-domain expert selection, independent panel planı ve generate-time provenance recheck |
+| `tools/verify_lmm_runtime.py`, `tools/verify_lmm_portfolio.py` | Model-weightsiz LMM runtime/quality/routing contract testleri |
 
 Bu layer, core HDC checkpoint formatını, deterministic training semantics'ini
 veya response üretim modelini değiştirmez. Böylece kalite işlemi model

@@ -60,9 +60,12 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 > Operatorün gerçek modelini bağlayan Unicode/subword, long-context, source
 > evidence ve multimodal asset contract'i ise
 > [LMM_RUNTIME.md](docs/LMM_RUNTIME.md)'dedir; bu boundary model weights'i,
-> evrensel LMM kalitesi veya neural training stack'i içermez. LMM'lerle her
-> görevde doğrulanabilir biçimde rekabet hedefi için gereken tüm ayrı katmanların
-> uygulama/kanıt roadmap'i [LMM_EXCELLENCE_ARCHITECTURE.md](docs/LMM_EXCELLENCE_ARCHITECTURE.md)'dedir.
+> evrensel LMM kalitesi veya neural training stack'i içermez. Ölçülmüş
+> target-domain model expert seçimi ve bağımsız panel planı için
+> [LMM_PORTFOLIO_ROUTING.md](docs/LMM_PORTFOLIO_ROUTING.md), LMM'lerle her görevde
+> doğrulanabilir biçimde rekabet hedefi için gereken tüm ayrı katmanların
+> uygulama/kanıt roadmap'i ise
+> [LMM_EXCELLENCE_ARCHITECTURE.md](docs/LMM_EXCELLENCE_ARCHITECTURE.md)'dedir.
 
 ## Hızlı başlangıç
 
@@ -162,8 +165,9 @@ python3 tools/compare_pretraining_modes.py --pretrain-bin ./build/vegai_pretrain
   --repetitions 3 --omp-threads 1
 
 # Optional LMM integration boundary: Rust Unicode/BPE tokenizer, long-context,
-# knowledge evidence, media asset provenance and a real-model worker protocol.
-# Bu komut model weight indirmez veya yapay cevap üretmez.
+# knowledge evidence, media asset provenance, real-model worker protocol and
+# measured domain-expert portfolio routing. Bu komut model weight indirmez veya
+# yapay cevap üretmez.
 make lmm-check
 
 # Gerçek corpus'u eğitmeden önce local digest + ingest preflight
@@ -240,7 +244,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect`, CPU/OpenVINO context-provider execution switch ve nearest semantic diagnostic |
 | Grounded dialogue retrieval | `src/dialogue_retrieval.f90`, `app/chat.f90` | operator TSV response index'i, strict ASCII/OOV gate, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; free-form LLM generation degil |
 | Dialogue quality release gate | `tools/dialogue_evaluation.py` | versioned held-out JSONL ile stateless exact prompt grounding/abstention olcumu, immutable input digest binding, privacy-conscious report ve threshold gate |
-| Optional LMM integration | `tools/lmm_contract.py`, `tools/lmm_model_manifest.py`, `tools/lmm_gateway.py`, `tools/lmm_quality_evaluation.py`, `tools/lmm_session.py`, `tools/lmm_knowledge.py`, `tools/lmm_assets.py` | gerçek external model backend'i için Unicode/subword tokenizer binding, model-artifact hash, long-context packer, source evidence, content-addressed media, model-emitted citation/abstention held-out release gate ve fail-closed provenance; model weights/native neural training degil |
+| Optional LMM integration | `tools/lmm_contract.py`, `tools/lmm_model_manifest.py`, `tools/lmm_gateway.py`, `tools/lmm_quality_evaluation.py`, `tools/lmm_portfolio.py`, `tools/lmm_session.py`, `tools/lmm_knowledge.py`, `tools/lmm_assets.py` | gerçek external model backend'i için Unicode/subword tokenizer binding, model-artifact hash, long-context packer, source evidence, content-addressed media, held-out citation/abstention release gate, measured domain-expert routing/independent-panel planı ve fail-closed provenance; model weights/native neural training degil |
 | Continual transaction + health audit | `tools/continuous_shard_manifest.py`, `tools/continuous_pretrain.py`, `tools/continuous_pretrain_status.py` | immutable SHA-256 ledger, strict ingest gate, candidate generation, atomic state journal, read-only checkpoint/prefix/payload audit |
 | Production data/run control | `tools/production_dataset.py`, `tools/production_pretrain.py` | disk-backed exact record/token dedupe, deterministic held-out split, content-addressed shard package, exact leakage + vocabulary-capacity gate, immutable binary/data/policy provenance, real exactly-once run wrapper |
 | Kaynak preflight | `tools/training_resource_plan.py` | bounded RAM/checkpoint storage estimate, CPU/NUMA/OpenMP recommendation, static accelerator truth contract |
@@ -273,8 +277,10 @@ record-level leakage gate ve immutable run provenance için
 hedefine ilişkin kapsam/gap analizi için
 [docs/LMM_SCOPE_AND_GAP_ANALYSIS.md](docs/LMM_SCOPE_AND_GAP_ANALYSIS.md), gerçek
 model gateway/Unicode/long-context/multimodal integration contract'i için
-[docs/LMM_RUNTIME.md](docs/LMM_RUNTIME.md), target-domain LMM excellence/evidence
-roadmap'i için [docs/LMM_EXCELLENCE_ARCHITECTURE.md](docs/LMM_EXCELLENCE_ARCHITECTURE.md),
+[docs/LMM_RUNTIME.md](docs/LMM_RUNTIME.md), target-domain measured expert routing
+sözleşmesi için [docs/LMM_PORTFOLIO_ROUTING.md](docs/LMM_PORTFOLIO_ROUTING.md),
+LMM excellence/evidence roadmap'i için
+[docs/LMM_EXCELLENCE_ARCHITECTURE.md](docs/LMM_EXCELLENCE_ARCHITECTURE.md),
 fixture üzerinde gerçek yürütme telemetrisi için [docs/EXAMPLE_PRETRAINING_RUN.md](docs/EXAMPLE_PRETRAINING_RUN.md),
 önce/sonra hız ve controlled semantic-cohesion sonuçları için
 [docs/PRETRAINING_MODE_COMPARISON.md](docs/PRETRAINING_MODE_COMPARISON.md),

@@ -387,11 +387,16 @@ ayri seçeneklerdir. Missing backend/model/capability fail-closed olur.
 aynı gerçek gateway command'i üzerinden çalıştırır; modelin kendi ürettiği
 citation/abstention marker'larını ölçer ve release threshold'unu fail-closed
 uygular. Report ham prompt/response taşımadan provenance hash'lerini korur.
+`lmm_portfolio.py`, bu quality report'u model manifest ve target-domain
+measurement card ile bağlayarak domain/residency/safety/modality/SLO koşullarını
+geçen en iyi expert'i seçer veya farklı provider/family için bağımsız panel planı
+üretir. Uygun candidate yoksa cevap template'i üretmek yerine fail-closed olur.
 
 Bu plane serbest generation'i gerçek modelin output'u olarak mümkün kilar;
 factuality, safety, neural training, model quality veya GPU/NPU speed iddiasini
-tek basina kanitlamaz. Tam package/worker, privacy, long-context, held-out gate
-ve benchmark contract'i için [LMM_RUNTIME.md](LMM_RUNTIME.md)'ye bakın.
+tek basina kanitlamaz. Tam package/worker, privacy, long-context, held-out gate,
+measured expert routing ve benchmark contract'i için [LMM_RUNTIME.md](LMM_RUNTIME.md)
+ile [LMM_PORTFOLIO_ROUTING.md](LMM_PORTFOLIO_ROUTING.md)'ye bakın.
 
 ## 9. Paralellik ve performans sınırları
 

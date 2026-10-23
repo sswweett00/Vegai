@@ -42,8 +42,10 @@ LMM düzlemi şu bileşenlerden oluşur:
 | `tools/lmm_assets.py` | Görüntü/ses/video dosyalarını content-addressed store'a alır; MIME magic, source/license ve immutable hash kaydeder |
 | `tools/lmm_gateway.py` | Context + evidence + verified asset'leri gerçek backend'e yollar; model/request/evidence/assets provenance report üretir |
 | `tools/benchmark_lmm_gateway.py` | Sadece gerçek gateway child-process sürelerini ve backend token sayısını ölçer |
+| `tools/lmm_gateway_template.py` | Shell kullanmayan shared `{request}`/`{evidence}` gateway argv template doğrulaması; redirect/duplicate placeholder ve response-retention'i reddeder |
 | `tools/lmm_quality_evaluation.py` | Held-out gerçek gateway çağrılarında model-emitted citation/abstention contract'i, privacy-conscious report ve fail-closed release threshold'ları |
-| `tools/verify_lmm_runtime.py` | Unicode, BPE-ready tokenizer, model-manifest rehash, CJK/Arabic lexical retrieval, long context, üç medya tipi snapshot, local endpoint, quality-gate provenance ve capability-gate entegrasyon testi |
+| `tools/lmm_portfolio.py` | Immutable manifest + passed quality report + target-domain evaluation card ile deterministic expert model routing veya bağımsız panel planı; `single-best` gerçek dispatch'i |
+| `tools/verify_lmm_runtime.py`, `tools/verify_lmm_portfolio.py` | Runtime boundary ile domain-routing/privacy/provenance/fail-closed dispatch entegrasyon testleri |
 
 ## 2. Gerçek serbest doğal dil üretimi
 
@@ -351,13 +353,31 @@ icin exit `3` verir. Bu metrikler operatorün kaliteli source/case tasarımıyla
 anlamlıdır; prose factuality, safety, preference, semantic reasoning veya
 LLM'lerden üstünlük yerine geçmez.
 
-## 10. Doğrulama
+## 10. Ölçülmüş domain expert routing ve bağımsız panel
+
+`tools/lmm_portfolio.py`, tek bir modelin her task'ta en iyi olduğu varsayımını
+kabul etmez. Operatorün `vegai-lmm-portfolio/v1` dosyasında model manifest,
+gateway command, passed `vegai-lmm-quality-report/v1` ve target-domain
+evaluation card bağlanır. Routing task; domain, residency, safety, modality,
+context, latency, cost ve measured lower-bound threshold'larını tanımlar.
+Uygun candidate yoksa fallback cevap yazmak yerine fail-closed durur.
+
+`single-best`, en yüksek deterministic measured ranking ile seçilen gerçek
+backend'i private input snapshot üzerinden çağırabilir. `independent-panel`,
+farklı `independence_group` değerine sahip birden çok eligible candidate planı
+üretir fakat cevapları otomatik birleştirmez veya çoğunluk oylamasını factuality
+kanıtı diye göstermez. Bu yaklaşım, operator-owned human/adjudicator/tool
+workflow'unda bağımsız critique için güvenli başlangıçtır. Tam şema, örnek ve
+sınırlar için [LMM_PORTFOLIO_ROUTING.md](LMM_PORTFOLIO_ROUTING.md)'ye bakın.
+
+## 11. Doğrulama
 
 ```bash
 python3 tools/verify_lmm_runtime.py
+python3 tools/verify_lmm_portfolio.py
 ```
 
-Test şunları denetler:
+Bu iki test birlikte şunları denetler:
 
 - Türkçe, Arapça ve Japonca Unicode retrieval;
 - `tokenizers` kuruluysa gerçek `tokenizer.json` BPE yolu;
@@ -370,6 +390,8 @@ Test şunları denetler:
 - local OpenAI-compatible endpoint'e gerçek text/image request payload'u;
 - model-emitted citation/abstention marker gateway gate'i ve privacy-conscious
   held-out quality/release evaluator (başarılı ve bilinçli başarısız gate);
+- measured domain-expert portfolio ranking, bağımsız panel, selected gateway
+  dispatch, raw-text privacy ve başka manifest'e bağlı command fail-closed rejection;
 - modality capability yoksa fail-closed rejection;
 - gerçek gateway child process benchmark sınırı.
 
@@ -377,7 +399,7 @@ Test şunları denetler:
 model ağırlığı içermez; yalnız operatorün kendi OpenVINO model package'ini
 çalıştırması için optional provider bağımlılığıdır.
 
-## 11. Hâlâ yapılmamış ve iddia edilmeyenler
+## 12. Hâlâ yapılmamış ve iddia edilmeyenler
 
 Bu entegrasyon aşağıdakileri otomatik olarak sağlamaz:
 

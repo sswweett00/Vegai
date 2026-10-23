@@ -199,6 +199,14 @@ evidence içerir, report ham prompt/response tutmaz. Ayrıntılı güvenlik,
 performance, model package ve quality-gate sözleşmesi
 [LMM_RUNTIME.md](../docs/LMM_RUNTIME.md)'dedir.
 
+Target-domain expert seçiminde kullanılacak operator JSON şablonları
+[`lmm/portfolio/`](lmm/portfolio/) altında bulunur. Bu şablonlardaki zero SHA
+placeholder'ları gerçek artifact değildir; tamamlanmış model/evaluation
+provenance'ı olmadan route etmeye çalışmak fail-closed olur. Çalışan sentetik
+protocol fixture'ı `tools/verify_lmm_portfolio.py` temporary workspace'te
+oluşturur. Ayrıntılı schema ve sınırlar için
+[LMM_PORTFOLIO_ROUTING.md](../docs/LMM_PORTFOLIO_ROUTING.md)'ye bakın.
+
 ## Kesintisiz shard örneği
 
 Bu fixture tek dosyalı deterministic smoke/benchmark içindir. Production benzeri

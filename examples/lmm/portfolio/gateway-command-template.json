@@ -1,0 +1,15 @@
+[
+  "python3",
+  "tools/lmm_gateway.py",
+  "--model",
+  "/secure/models/domain-expert/manifest.json",
+  "--request",
+  "{request}",
+  "--evidence",
+  "{evidence}",
+  "--worker-command-json",
+  "/secure/workers/domain-expert.json",
+  "--grounding-mode",
+  "evidence-or-abstain",
+  "--print-json"
+]

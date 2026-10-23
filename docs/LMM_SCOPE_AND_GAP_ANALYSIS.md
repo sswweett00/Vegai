@@ -20,7 +20,7 @@ multimodal neural runtime yapmaz.
 | Yeni production control plane | disk-backed exact raw-record dedupe, content-addressed shards, deterministic held-out split, exact leakage gate, max-vocabulary capacity preflight, binary/data/policy provenance |
 | Grounded diyalog retrieval | checkpoint semantic HV + operator TSV prompt/response index, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; cevap TSV'den gelir |
 | Grounded retrieval quality gate | versioned held-out JSONL, stateless real-binary exact prompt/abstention metrikleri, immutable input digest binding, privacy-conscious report ve explicit release threshold'lari |
-| Optional LMM integration plane | Unicode/subword model-tokenizer manifest, hash-chained long dialogue, provenance-bound FTS evidence, content-addressed image/audio/video asset registry, model-emitted citation/abstention release gate ve gerçek OpenVINO/API/worker backend gateway'i; model ağırlığı depoda değildir |
+| Optional LMM integration plane | Unicode/subword model-tokenizer manifest, hash-chained long dialogue, provenance-bound FTS evidence, content-addressed image/audio/video asset registry, model-emitted citation/abstention release gate, measured domain-expert router/independent-panel planı ve gerçek OpenVINO/API/worker backend gateway'i; model ağırlığı depoda değildir |
 
 Bu sistem, bounded semantic prototype/retrieval ve symbolic factor reasoning için
 üretim kalitesinde operation sözleşmeleri taşıyabilir. Model kapasitesi ve
@@ -47,9 +47,12 @@ ve immutable model artifact manifest'iyle context pack eder. Image/audio/video
 ancak gerçek backend capability'si ilan edildiğinde worker'a geçer.
 `lmm_quality_evaluation.py`, gerçek configured gateway üzerinde held-out
 citation/abstention contract'ini release threshold ile ölçer; response'u
-hardcode etmez veya factuality iddia etmez. Bu bir LMM runtime'ın tümünü Fortran
-HDC çekirdeğine dönüştürmez ve ağırlık/model kalitesi iddiası taşımaz. Ayrıntılı
-contract için [LMM_RUNTIME.md](LMM_RUNTIME.md)'ye bakın.
+hardcode etmez veya factuality iddia etmez. `lmm_portfolio.py`, yalnız aynı
+model manifest'e bağlı passed quality report ve target-domain measurement card
+ile expert route/panel seçimi yapar; scorecard'ın broad quality iddiasını kendi
+başına kanıtlamaz. Bu bir LMM runtime'ın tümünü Fortran HDC çekirdeğine
+dönüştürmez ve ağırlık/model kalitesi iddiası taşımaz. Ayrıntılı contract için
+[LMM_RUNTIME.md](LMM_RUNTIME.md) ve [LMM_PORTFOLIO_ROUTING.md](LMM_PORTFOLIO_ROUTING.md)'ye bakın.
 
 ## Gerçek LMM/LLM için eksik zorunlu katmanlar
 
@@ -97,7 +100,10 @@ edilebilir işlemsel eksikleri kapatır:
 12. model-emitted evidence citation/explicit abstention marker doğrulaması ve
     gerçek gateway child process'leri üzerinde privacy-conscious held-out LMM
     quality/release gate;
-13. actual gateway child-process latency ve backend-reported token ölçümü.
+13. model manifest + quality report + target-domain evaluation card bağlayan,
+    residency/safety/modality/SLO threshold'lu deterministic expert routing ve
+    bağımsız panel planı;
+14. actual gateway child-process latency ve backend-reported token ölçümü.
 
 Bunlar veri kaybı, silent duplicate, held-out contamination, capacity overflow,
 restart operasyon riski, dar grounded-retrieval kalitesinin ölçülmeden publish
@@ -134,6 +140,7 @@ HDC data/checkpoint sözleşmesi için [PRETRAINING.md](PRETRAINING.md), continu
 transaction için [CONTINUOUS_PRETRAINING.md](CONTINUOUS_PRETRAINING.md),
 held-out retrieval gate/audit için [QUALITY_ASSURANCE.md](QUALITY_ASSURANCE.md),
 gerçek model gateway/Unicode/multimodal boundary için [LMM_RUNTIME.md](LMM_RUNTIME.md),
+measured domain expert routing için [LMM_PORTFOLIO_ROUTING.md](LMM_PORTFOLIO_ROUTING.md),
 target-domain'de ölçülebilir LMM üstünlüğü roadmap'i için
 [LMM_EXCELLENCE_ARCHITECTURE.md](LMM_EXCELLENCE_ARCHITECTURE.md) ve Fortran core
 invariantları için [ARCHITECTURE.md](ARCHITECTURE.md) referanstır.
