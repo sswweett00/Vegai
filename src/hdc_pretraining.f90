@@ -71,8 +71,11 @@ module hdc_pretraining
 
    character(len=8), parameter :: CHECKPOINT_MAGIC = 'VGHDC001'
    ! Version 6 introduces the persisted COHERENT context-mode enum.  The wire
-   ! layout is otherwise stable; v4/v5 checkpoints remain readable.
+   ! layout is otherwise stable; v4/v5 checkpoints remain readable.  Existing
+   ! encoder modes continue to write v5 so execution-only refactors retain
+   ! byte-equality with their pre-COHERENT checkpoints.
    integer(int32), parameter :: CHECKPOINT_VERSION = 6_int32
+   integer(int32), parameter :: CHECKPOINT_PRE_COHERENT_VERSION = 5_int32
    integer(int32), parameter :: CHECKPOINT_MIN_VERSION = 4_int32
 
    type, public :: hdc_pretrain_config_t
@@ -2384,11 +2387,20 @@ contains
       end do
    end function model_checkpoint_checksum
 
+   pure function pretrain_checkpoint_write_version(model) result(checkpoint_version)
+      type(hdc_pretrain_model_t), intent(in) :: model
+      integer(int32) :: checkpoint_version
+
+      checkpoint_version = CHECKPOINT_PRE_COHERENT_VERSION
+      if (model%context_mode == PT_CONTEXT_COHERENT) checkpoint_version = CHECKPOINT_VERSION
+   end function pretrain_checkpoint_write_version
+
    subroutine pretrain_checkpoint_save(model, checkpoint_path, status)
       type(hdc_pretrain_model_t), intent(in) :: model
       character(len=*), intent(in) :: checkpoint_path
       integer(int32), intent(out) :: status
       integer :: unit, io_status
+      integer(int32) :: checkpoint_version
       integer(int64) :: checksum
 
       status = PT_OK
@@ -2401,6 +2413,7 @@ contains
          return
       end if
 
+      checkpoint_version = pretrain_checkpoint_write_version(model)
       open(newunit=unit, file=trim(checkpoint_path), status='replace', action='write', &
            access='stream', form='unformatted', iostat=io_status)
       if (io_status /= 0) then
@@ -2408,7 +2421,7 @@ contains
          return
       end if
 
-      write(unit, iostat=io_status) CHECKPOINT_MAGIC, CHECKPOINT_VERSION
+      write(unit, iostat=io_status) CHECKPOINT_MAGIC, checkpoint_version
       if (io_status == 0) write(unit, iostat=io_status) model%vocabulary%capacity, &
          model%vocabulary%count, model%vocabulary%active_count, model%vocabulary%min_frequency
       if (io_status == 0) write(unit, iostat=io_status) model%context_window, model%position_shift_bits, &
@@ -2426,7 +2439,7 @@ contains
       if (io_status == 0) write(unit, iostat=io_status) model%semantic_bits
       if (io_status == 0) write(unit, iostat=io_status) model%experience_count
       if (io_status == 0) then
-         checksum = model_checkpoint_checksum(model, CHECKPOINT_VERSION)
+         checksum = model_checkpoint_checksum(model, checkpoint_version)
          write(unit, iostat=io_status) checksum
       end if
       close(unit)
@@ -2518,6 +2531,12 @@ contains
       checkpoint_config%minimum_plasticity_percent = model%minimum_plasticity_percent
       checkpoint_config%plasticity_decay_events = model%plasticity_decay_events
       checkpoint_config%tie_seed = model%tie_seed
+      if (model%context_mode == PT_CONTEXT_COHERENT .and. version < CHECKPOINT_VERSION) then
+         close(unit)
+         status = PT_ERR_CHECKPOINT
+         call pretrain_model_destroy(model)
+         return
+      end if
       call validate_pretrain_config(checkpoint_config, status)
       if (status /= PT_OK .or. model%training_epochs_completed < 0_int64 .or. &
           model%totals%corpus_lines < 0_int64 .or. model%totals%raw_tokens < 0_int64 .or. &
