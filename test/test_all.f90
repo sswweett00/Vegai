@@ -1,6 +1,6 @@
 ! SPDX-License-Identifier: MIT
 program test_all
-   use, intrinsic :: iso_fortran_env, only: error_unit, int16, int32, int64
+   use, intrinsic :: iso_fortran_env, only: int16, int32, int64
    use hyper_types
    use symbolic_memory
    use reasoning_core
@@ -458,9 +458,8 @@ contains
       type(pretrain_execution_report_t) :: default_execution, serial_execution, parallel_execution
       type(hv_t) :: semantic_hv, semantic_before_extension, semantic_after_extension
       character(len=TOKEN_LEN) :: nearest_token
-      character(len=8) :: checkpoint_magic
       integer :: unit, io_status
-      integer(int32) :: status, slot, nearest_slot, checkpoint_version
+      integer(int32) :: status, slot, nearest_slot
       logical :: found
       real :: similarity
 
@@ -697,8 +696,22 @@ contains
       call assert_i32_equal(status, PT_OK, 'coherent reference training succeeds')
       call assert_true(all(coherent_model%semantic_bits == coherent_replay%semantic_bits), &
                        'coherent fused local context remains bit-identical to reference learning')
+      ! The v5 byte contract applies to every pre-COHERENT semantic encoder,
+      ! not just the historical default.  Reading the raw header prevents a
+      ! future broad writer-version bump from defeating the fixed-baseline
+      ! checkpoint-byte regression harness.
+      call pretrain_checkpoint_save(legacy_model, CHECKPOINT_PATH, status)
+      call assert_i32_equal(status, PT_OK, 'legacy checkpoint save succeeds')
+      call assert_checkpoint_header_version(CHECKPOINT_PATH, 5_int32, 'legacy')
+      call pretrain_checkpoint_save(positional_model, CHECKPOINT_PATH, status)
+      call assert_i32_equal(status, PT_OK, 'positional checkpoint save succeeds')
+      call assert_checkpoint_header_version(CHECKPOINT_PATH, 5_int32, 'positional')
+      call pretrain_checkpoint_save(local_only_model, CHECKPOINT_PATH, status)
+      call assert_i32_equal(status, PT_OK, 'hybrid checkpoint save succeeds')
+      call assert_checkpoint_header_version(CHECKPOINT_PATH, 5_int32, 'hybrid')
       call pretrain_checkpoint_save(hierarchical_model, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'hierarchical checkpoint save succeeds')
+      call assert_checkpoint_header_version(CHECKPOINT_PATH, 5_int32, 'hierarchical')
       call pretrain_checkpoint_load(CHECKPOINT_PATH, restored, status)
       call assert_i32_equal(status, PT_OK, 'hierarchical checkpoint load succeeds')
       call assert_i32_equal(restored%context_mode, PT_CONTEXT_HIERARCHICAL, &
@@ -709,21 +722,8 @@ contains
                             'coherent model retains its context-mode identity before checkpointing')
       call pretrain_checkpoint_save(coherent_model, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'coherent checkpoint save succeeds')
-      open(newunit=unit, file=CHECKPOINT_PATH, status='old', access='stream', form='unformatted', &
-           action='read', iostat=io_status)
-      call assert_true(io_status == 0, 'coherent checkpoint header opens')
-      if (io_status == 0) then
-         read(unit, iostat=io_status) checkpoint_magic, checkpoint_version
-         close(unit)
-         call assert_true(io_status == 0 .and. checkpoint_magic == 'VGHDC001', &
-                          'coherent checkpoint header is readable')
-         if (checkpoint_version /= 6_int32) then
-            write(error_unit, '(A,I0)') 'ERROR: coherent checkpoint header version=', checkpoint_version
-         end if
-         call assert_i32_equal(checkpoint_version, 6_int32, 'coherent checkpoint uses format version six')
-      end if
+      call assert_checkpoint_header_version(CHECKPOINT_PATH, 6_int32, 'coherent')
       call pretrain_checkpoint_load(CHECKPOINT_PATH, restored, status)
-      if (status /= PT_OK) write(error_unit, '(A,I0)') 'ERROR: coherent checkpoint load status=', status
       call assert_i32_equal(status, PT_OK, 'coherent checkpoint load succeeds')
       call assert_i32_equal(restored%context_mode, PT_CONTEXT_COHERENT, &
                             'checkpoint preserves coherent encoder semantics')
@@ -892,6 +892,29 @@ contains
            iostat=io_status)
       if (io_status == 0) close(unit, status='delete')
    end subroutine test_hdc_pretraining
+
+   subroutine assert_checkpoint_header_version(checkpoint_path, expected_version, encoder_name)
+      character(len=*), intent(in) :: checkpoint_path, encoder_name
+      integer(int32), intent(in) :: expected_version
+      character(len=8) :: magic
+      integer :: checkpoint_unit, checkpoint_io_status
+      integer(int32) :: checkpoint_version
+
+      magic = ''
+      checkpoint_version = 0_int32
+      open(newunit=checkpoint_unit, file=checkpoint_path, status='old', access='stream', &
+           form='unformatted', action='read', iostat=checkpoint_io_status)
+      call assert_true(checkpoint_io_status == 0, trim(encoder_name) // ' checkpoint header opens')
+      if (checkpoint_io_status /= 0) return
+      read(checkpoint_unit, iostat=checkpoint_io_status) magic, checkpoint_version
+      close(checkpoint_unit)
+      call assert_true(checkpoint_io_status == 0 .and. magic == 'VGHDC001', &
+                       trim(encoder_name) // ' checkpoint header is readable')
+      if (checkpoint_io_status == 0 .and. magic == 'VGHDC001') then
+         call assert_i32_equal(checkpoint_version, expected_version, &
+                               trim(encoder_name) // ' checkpoint has the expected format version')
+      end if
+   end subroutine assert_checkpoint_header_version
 
    subroutine test_dialogue_retrieval()
       character(len=*), parameter :: CORPUS_PATH = 'vegai_dialogue_test_corpus.txt'

@@ -10,7 +10,9 @@ ile ARM64 gibi başka mimarilerde aynı kaynak kodunun derlenebilmesini hedefler
 > aynı SIMD genişliği veya aynı checkpoint dosya ABI'si vaat edilmez. Benchmark
 > sonucu ancak ölçüldüğü host için geçerlidir. Mevcut default training mode,
 > uzun records için quality-oriented `hierarchical`tir; kısa records için local
-> `hybrid` semantiğini korur.
+> `hybrid` semantiğini korur. Opt-in `coherent` aynı long-record bütçesinde
+> cross-fold global evidence kullanır; current OpenVINO worker ABI'si bunu
+> taşımadığından CPU/OpenMP-only'dir.
 
 ## 1. CPU profilleri
 
@@ -98,6 +100,9 @@ CPU'da kalır. Sonuç olarak:
   summary gerçek execution mask'ini raporlar ve `--openvino-require-accelerator`
   CPU fallback'i reddeder. Explicit fallback `--openvino-device CPU` ise CPU
   plugin'i başlatmak yerine native fused/OpenMP kernel'ini kullanır;
+- `coherent`in center-dependent cross-fold item dizisi lane ABI'de yoktur;
+  `--context-provider openvino --context-mode coherent` validation aşamasında
+  fail-closed reddedilir, başka bir mode'a sessizce yönlendirilmez;
 - provider için lane ABI, driver, transfer, fallback ve CPU-reference
   checkpoint-byte-equality sözleşmesi ayrı doğrulanır; adapter varlığı bu
   sözleşmenin yerine geçmez.

@@ -220,7 +220,10 @@ jobs:
               f"long_hybrid_similarity={long_quality['hybrid']['mean_top1_similarity']:.6f}; "
               f"long_hierarchical_similarity={long_quality['hierarchical']['mean_top1_similarity']:.6f}; "
               f"hierarchical_similarity_gain="
-              f"{comparison['hierarchical_long_record_mean_top1_similarity_gain_vs_hybrid']:.6f}"
+              f"{comparison['hierarchical_long_record_mean_top1_similarity_gain_vs_hybrid']:.6f}; "
+              f"long_coherent_similarity={long_quality['coherent']['mean_top1_similarity']:.6f}; "
+              f"coherent_similarity_gain="
+              f"{comparison['coherent_long_record_mean_top1_similarity_gain_vs_hybrid']:.6f}"
           )
           with open(sys.argv[3], "a", encoding="utf-8") as summary:
               print("## Optimized pretraining comparison", file=summary)
@@ -296,7 +299,7 @@ jobs:
                   file=summary,
               )
               print(file=summary)
-              print("### Long-record controlled hierarchy diagnostic", file=summary)
+              print("### Long-record controlled hierarchy / coherent diagnostic", file=summary)
               print(file=summary)
               print(
                   "This generated fixture has disjoint topical clusters and 16 active tokens per record; it is not a "
@@ -314,6 +317,15 @@ jobs:
                       f"{long_quality[mode]['mean_top1_similarity']:.6f} |",
                       file=summary,
                   )
+              print(file=summary)
+              print(
+                  f"Hierarchical mean-similarity delta vs hybrid: "
+                  f"**{long_context['hierarchical_mean_top1_similarity_gain_vs_hybrid']:+.6f}**; "
+                  f"coherent delta vs hybrid: "
+                  f"**{long_context['coherent_mean_top1_similarity_gain_vs_hybrid']:+.6f}**. "
+                  "Coherent acceptance is non-regression of same-cluster Top-1, not a required positive gain.",
+                  file=summary,
+              )
               print(file=summary)
               print("```text", file=summary)
               print(message, file=summary)

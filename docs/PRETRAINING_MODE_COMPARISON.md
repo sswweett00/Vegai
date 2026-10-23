@@ -73,27 +73,38 @@ Aynı base corpus/config ile iki `hybrid` varyant çalışır:
 
 İki checkpoint'in tüm byte dizisi ve SHA-256'sı **eşit** olmak zorundadır. Bu
 kural Top-1 diagnostic eşitliğinden daha güçlüdür: vocabulary, base plane,
-semantic plane, experience sayaçları, totals ve v5 checksum'ın tamamının aynı
-olduğunu doğrular. Hız oranı `reference_median / fused_median` olarak verilir.
+semantic plane, experience sayaçları, totals ve mode'un seçtiği checkpoint
+version checksum'ının tamamının aynı olduğunu doğrular. Bu `hybrid` armı v5
+writer kullanır. Hız oranı `reference_median / fused_median` olarak verilir.
 
-### D. Long-record hierarchical controlled diagnostic
+### D. Long-record hierarchical / coherent controlled diagnostic
 
-Normal fixture kasıtlı olarak sekiz-token satırlıdır ve `hierarchical` eşiği
-olan 12 active token'ın altında kalır. Araç geçici, ASCII-only bir fixture üretir:
-her biri aynı disjoint topical kümenin sekiz token'ını iki kez içeren **16-token**
-kayıtlar; küme başına 16 kayıt, toplam 128 kayıt. İki epoch için:
+Normal fixture kasıtlı olarak sekiz-token satırlıdır ve `hierarchical` ile
+`coherent` eşiği olan 12 active token'ın altında kalır. Araç geçici, ASCII-only
+bir fixture üretir: her biri aynı disjoint topical kümenin sekiz token'ını iki
+kez içeren **16-token** kayıtlar; küme başına 16 kayıt, toplam 128 kayıt. İki
+epoch için:
 
 ```text
 Training token/run        4,096
 Ordered context pair/run  14,848
 ```
 
-`hierarchical`, local `hybrid` representation'ı korur ve yalnız bu uzun
+Araç `hybrid`, `hierarchical` ve `coherent` modlarını ayrı checkpoint'lerle
+çalıştırır. `hierarchical`, local `hybrid` representation'ını korur ve uzun
 kayıtlarda satır-base-vector majority özetini üç bounded katkı olarak ekler.
-Bu nedenle comparison `hybrid` ile `hierarchical` arasında yapılır. Acceptance
-signal: same-cluster Top-1 gerilemez ve mean Top-1 similarity gain `> 0.002`
-olur. Bu bilerek tasarlanmış in-corpus cohesion testidir; held-out task
-başarısı değildir.
+`coherent` aynı üç-item global bütçeyi `full-record × 1 + center'ın opposite-
+parity fold'u × 2` olarak dağıtır; böylece focal occurrence iki fold katkısından
+çıkar, ama full-record anchor'da bir kez kalır. Fold'lar record başına immutable
+base vectors üzerinden hazırlanır.
+
+`hierarchical` için acceptance signal: same-cluster Top-1 gerilemez ve mean
+Top-1 similarity gain `> 0.002` olur. `coherent` için daha muhafazakâr guard:
+same-cluster Top-1, `hybrid`e göre gerilememelidir; ölçülen similarity farkı
+raporlanır fakat pozitif gain zorunlu değildir. Bu bilerek tasarlanmış in-corpus
+cohesion testidir; held-out task başarısı veya doğal-dil anlama kanıtı değildir.
+`coherent` CPU/OpenMP-only'dir; mevcut OpenVINO immutable-item ABI'si
+center-dependent cross-fold context'i taşımaz.
 
 ## Aynı-run baseline → hot-path mimarisi karşılaştırması
 
@@ -323,11 +334,15 @@ throughput iddiası olarak karşılaştırılmamalıdır.
 - `--reference-context-kernel` checkpoint formatına yazılmaz; yalnız benchmark
   ve regression oracle'dır. Aynı semantic config ile fused/reference checkpoint
   byte eşitliği bu nedenle zorunludur.
-- Checkpoint writer v5'tir; reader v4/v5 kabul eder ve checksum'ı dosyanın
-  kendi version değeriyle doğrular.
+- Checkpoint writer mode-seçimlidir: `legacy`/`positional`/`hybrid`/
+  `hierarchical` v5 header+checksum yazar; `coherent` v6 yazar. Reader v4/v5/v6
+  kabul eder ve checksum'ı dosyanın kendi version değeriyle doğrular; coherent
+  semantic mode taşıyan v4/v5 payload fail-closed reddedilir.
 - Hierarchical global signal satırda bir kez üretilir, yalnız ≥12 active token
   için etkinleşir ve local context accumulator kapasitesiyle bounded kalır;
-  eşik altındaki record için topic accumulator kurulmaz.
+  eşik altındaki record için topic accumulator kurulmaz. Coherent aynı eşikte
+  bir full-record ve iki parity fold özetini record başına bir kez üretir;
+  center bundle'ı full özeti bir, opposite-parity fold özetini iki kez ekler.
 - Bounded bit accumulator reset'i yalnız bilinen cardinality'nin erişebileceği
   carry plane'lerini yazar; daha yüksek plane'e geçiş lazy-clear ile güvenlidir.
   Odd majority finalization tie vector üretmez. Bu execution detayı

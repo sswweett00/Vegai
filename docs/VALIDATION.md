@@ -100,7 +100,12 @@ saturate ederek ambiguity'yi doğrular.
 - `legacy` signed-counter ve hızlı `positional` bit-sliced encoder'ın
   bit-tam semantic-plane eşitliği;
 - semantic prototype lookup ve self-excluded nearest-neighbour diagnostic;
+- `hierarchical` ve `coherent` long-record encoder'larının ayrı semantic
+  plane üretmesi; coherent fused/reference local-kernel eşitliği ve short-record
+  `hybrid` eşitliği;
 - binary checkpoint save/load, rebuilt hash index ve payload plane round-trip;
+  raw header regression'ı ile legacy/hierarchical writer'ın v5, coherent
+  writer'ın v6 yazdığının doğrulanması;
 - kesintisiz ikinci epoch ile checkpoint'ten resume edilen ikinci epoch'un
   bit-tam eşitliği;
 - resume semantic config mismatch, strict long-token, strict non-ASCII byte ve
@@ -142,23 +147,28 @@ olmaksızın accelerator talebini fail-closed reddeder. Ayrı OpenVINO bridge
 adımı optional runtime'ı kurar; önce explicit CPU fallback'ın native fused
 kernel'e worker başlatmadan bypass ettiğini, ardından strict resident CPU
 OpenVINO context graph ile Fortran CPU reference checkpoint byte equality'yi
-test eder. Worker verifier ayrıca dynamic-batch compiled-model cache ve
-neutral tie/complement padding exactness'ini denetler. Ardından portable
+test eder. `coherent` cross-fold encoder bu ABI tarafından desteklenmez ve
+OpenVINO provider seçildiğinde validation aşamasında fail-closed reddedilir;
+worker'a sessiz bir farklı context semantics gönderilmez. Worker verifier ayrıca
+dynamic-batch compiled-model cache ve neutral tie/complement padding exactness'ini
+denetler. Ardından portable
 varsayılan Make binary ile aynı host için opt-in `native` binary'yi
 `tools/compare_pretraining_build_profiles.py` üzerinden
 ölçer. İki profile'ın checkpoint byte eşitliği zorunludur; süre oranı yalnız o
 host için anlamlıdır.
 
 Native testler fused raw-word/permuted/pair accumulator plane bit-eşitliğini,
-fused/reference hybrid ile hierarchical replay eşitliğini, repeated-center
-serial/OpenMP context-build eşitliğini ve hierarchical checkpoint round-trip'ini
-denetler. `tools/compare_pretraining_modes.py` portable binary üzerinde yalnız
-her bir gerçek `vegai_pretrain train` child-process wall-clock'ını raporlar:
-compiler, CI setup, fixture construction, inspect ve harness süresi ölçüye
-girmez. Workflow summary; portable/native profil oranını,
-`legacy → positional → fused hybrid` temel karşılaştırmasını, fused/reference
-hybrid checkpoint byte eşitliği + hız oranını ve ayrı 16-token-record controlled
-`hybrid → hierarchical` topical-cohesion diagnostic'ini yazar.
+fused/reference hybrid, hierarchical ve coherent replay eşitliğini,
+repeated-center serial/OpenMP context-build eşitliğini; hierarchical v5 ve
+coherent v6 checkpoint round-trip'ini denetler. `tools/compare_pretraining_modes.py`
+portable binary üzerinde yalnız her bir gerçek `vegai_pretrain train`
+child-process wall-clock'ını raporlar: compiler, CI setup, fixture construction,
+inspect ve harness süresi ölçüye girmez. Workflow summary; portable/native
+profil oranını, `legacy → positional → fused hybrid` temel karşılaştırmasını,
+fused/reference hybrid checkpoint byte eşitliği + hız oranını ve ayrı
+16-token-record controlled `hybrid → hierarchical → coherent` topical-cohesion
+diagnostic'ini yazar. Coherent guard yalnız hybrid same-cluster Top-1 sonucunun
+gerilememesidir; bu HDC diagnostic'i doğal-dil kalite iddiası değildir.
 
 `tools/compare_pretraining_revisions.py`, CI'da sabit `e34fd22` baseline
 binary'sini aynı portable Make profile ile build eder ve short-record ile

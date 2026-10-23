@@ -104,9 +104,12 @@ python3 tools/continuous_pretrain.py \
 
 State var olduktan sonra policy option'ları verilirse mevcut immutable değerle
 aynı olmak zorundadır; aksi halde çağrı başarısız olur. `context_mode` policy
-allowlist'i `legacy`, `positional`, `hybrid` ve `hierarchical` değerlerini
-kabul eder; hierarchical mode yalnız ≥12 active-token içeren shard kayıtlarında
-bounded whole-record signal ekler. Sıradan restart için aynı üç temel argüman
+allowlist'i `legacy`, `positional`, `hybrid`, `hierarchical` ve `coherent`
+değerlerini kabul eder; hierarchical mode yalnız ≥12 active-token içeren shard
+kayıtlarında bounded whole-record signal ekler. CPU-only `coherent`, aynı
+uzun-record eşiğinde full-record anchor ile opposite-parity fold evidence'i
+kullanır; checkpointleri v6 olduğundan policy/mode sonradan değiştirilemez.
+Sıradan restart için aynı üç temel argüman
 yeterlidir:
 
 ```bash

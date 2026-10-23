@@ -40,6 +40,17 @@ S(wᵢ) ← replace_exact_fraction(S(wᵢ), Cᵢ, learning_rate(experience(wᵢ)
 `L, L, L` eklenir. Bu üç katkı sabittir; context satır sınırını geçmez ve
 bit-sliced accumulator kapasitesi tarafından üstten sınırlandırılır.
 
+`coherent` aynı uzun-record eşiği ve aynı üç global-item bütçesini kullanır,
+fakat uzun satır için bir tam-record özeti `L` ile birlikte kaynak pozisyonunun
+iki parity fold özetini bir kez üretir. 1-tabanlı kaynak pozisyonu `i` olan bir
+center için `Cᵢ`ye `L` bir kez, **karşı parity** fold özeti iki kez eklenir.
+Dolayısıyla center'ın o occurrence'ı iki cross-fold katkıda yer almaz; yalnız
+tam-record anchor içinde bir kez görünür. Karşı fold boşsa güvenli fallback
+`L, L, L`dir. Local positional+topic evidence aynen `hybrid`tir. Bu, bir
+record'u insan gibi anlamak veya aynı token'ın bütün tekrarlarını dışlamak değil,
+long-record self-identity echo'yu bounded ve deterministik biçimde azaltma
+amaçlı yapısal bir HDC encoder seçeneğidir.
+
 - `W`, context window; `P`, `position_shift_bits` değeridir.
 - `hierarchical` varsayılandır: `hybrid`in left/right role bilgisini `Vpos`
   içinde ve topical neighbourhood sinyalini `Vtopic` içinde korur; yalnız ≥12
@@ -56,6 +67,13 @@ bit-sliced accumulator kapasitesi tarafından üstten sınırlandırılır.
   bounded katkı olarak her eligible center'a ekler. Bu uzun-kayıt topical
   cohesion için kontrollü bir seçenektir; document understanding iddiası
   değildir. Sekiz-token örnek fixture bu eşiğin altında kalır ve etkilenmez.
+- `coherent`, `hierarchical` ile aynı local evidence, ≥12-token eşiği ve üç
+  global item sınırına sahiptir; global ağırlığı `full-record × 1 + opposite-
+  parity fold × 2` olarak dağıtır. Fold'lar record başına bir kez immutable
+  base vectors üzerinden hazırlanır; center başına quadratic scan veya mutable
+  semantic-prototype okuması yoktur. Kısa record'larda bit-tam `hybrid` ile
+  aynıdır. Mevcut OpenVINO worker ABI'si cross-fold items taşımadığından bu mod
+  bilinçli olarak CPU/OpenMP ile sınırlıdır.
 - `legacy`, önceki positional signed-counter yolu için regression/benchmark
   referansıdır; yeni eğitimler için önerilmez.
 - `majority_tie_seeded`, yeni modlarda word-parallel `hv_bitacc_t` binary
@@ -140,9 +158,11 @@ ile azaltılır. Bunların hiçbiri checkpoint payload'una girmez veya source-or
   Yalnız `update_required` kolonları yazılır ve daha sonra yalnız onlar okunur;
   böylece kısa record'larda gereksiz yaklaşık 2 MiB memory-bandwidth write
   kaldırılır.
-- Hierarchical whole-record accumulator yalnız ≥12 active token olduğunda
-  kurulur. Kısa record'lar zaten bit-tam local `hybrid` semantiğine sahip olduğu
-  için burada allocator/reset/bundle işi yapılmaz.
+- `hierarchical` whole-record accumulator yalnız ≥12 active token olduğunda
+  kurulur. `coherent` aynı eşikte bir full-record ve en çok iki parity-fold
+  accumulator'ını record başına bir kez kurar; center başına yeniden tarama
+  yapmaz. Kısa record'lar zaten bit-tam local `hybrid` semantiğine sahip olduğu
+  için bu modlarda allocator/reset/bundle işi yapılmaz.
 - Adaptive scheduler, varsayılan olarak bir record'da en az 32 eligible center
   varsa OpenMP worksharing seçer; daha küçük record'lar serial immutable path'e
   gider. CLI çıktıdaki `CPU serial/parallel context batches` ve `...contexts`
@@ -201,6 +221,12 @@ cmake --build build --parallel
   --context-mode hierarchical --epochs 3 --initial-plasticity 25 --minimum-plasticity 1 \
   --decay-events 32 --query token
 
+# Long-record global self-echo'yu cross-fold olarak azaltan CPU-only encoder.
+# Kısa record'larda hybrid ile bit-tam aynıdır.
+./build/vegai_pretrain train LONG_RECORDS.txt coherent.vgai \
+  --max-vocab 50000 --min-frequency 3 --window 4 --position-shift 73 \
+  --context-mode coherent --epochs 3 --strict
+
 # Checkpoint semantic configuration ile uyumlu ek epoch (vocabulary değiştirmez)
 ./build/vegai_pretrain resume CORPUS.txt model.vgai --epochs 1 --query token
 
@@ -222,7 +248,7 @@ cmake --build build --parallel
 | `--min-frequency N` | 2 | active vocabulary threshold |
 | `--window N` | 4 | her yönde context yarıçapı |
 | `--position-shift N` | 73 | relative position başına bit shift |
-| `--context-mode MODE` | `hierarchical` | `legacy`, bit-tam hızlı `positional`, local positional+topical `hybrid` veya `hybrid`e yalnız ≥12 active-token kayıtta bounded whole-record topical evidence ekleyen kalite-odaklı `hierarchical` |
+| `--context-mode MODE` | `hierarchical` | `legacy`, bit-tam hızlı `positional`, local positional+topical `hybrid`, ≥12 active-token kayıtta `full-record × 3` global evidence ekleyen `hierarchical`, ya da aynı bütçeyi `full-record × 1 + opposite-parity fold × 2` olarak kullanan CPU-only `coherent` |
 | `--parallel-context-build` | açık | immutable per-record context construction için OpenMP; yalnız record update sayısı eşikteyse team açılır, source-ordered prototype commit sayesinde thread count checkpoint semantiğini değiştirmez |
 | `--parallel-min-contexts N` | 32 | execution-only adaptive scheduler eşiği; N'den az eligible center içeren kısa record'lar team-launch/staging maliyetinden kaçınmak için serial hazırlanır |
 | `--serial-context-build` | kapalı | yalnız debug/regression için parallel context hazırlığını kapatır; checkpoint state değildir |
@@ -298,9 +324,11 @@ aynı-run baseline bölümünde belgelenir. GPU/NPU adapter inventory'si tek ba�
 değildir. Intel Core Ultra için opt-in OpenVINO context
 provider, immutable packed-HDC bundle/finalize aşamasını dispatch ederken
 source-order update'i CPU'da tutar; worker bir train çağrısı boyunca resident
-kalır ve item-cardinality graph'larını dynamic batch ile cache'ler. Explicit
-CPU fallback, CPU plugin'i hızlandırma diye sunmak yerine native fused/OpenMP
-kernel'ine bypass eder. Device mask'i runtime output'ta doğrulanır ve strict
+kalır ve item-cardinality graph'larını dynamic batch ile cache'ler. `coherent`
+mode'un center-dependent cross-fold item dizisi bu worker ABI'sinde yoktur:
+`--context-provider openvino --context-mode coherent` validation aşamasında
+reddedilir; sessiz CPU/OpenVINO route değişimi yapılmaz. Explicit CPU fallback,
+CPU plugin'i hızlandırma diye sunmak yerine native fused/OpenMP kernel'ine bypass eder. Device mask'i runtime output'ta doğrulanır ve strict
 CPU-reference checkpoint byte equality zorunludur. Ayrıntılı kaynak ve
 accelerator sınırları için [RESOURCE_AWARE_TRAINING.md](RESOURCE_AWARE_TRAINING.md)'ye
 bakın.
@@ -332,15 +360,25 @@ telemetridir.
 `pretrain_checkpoint_save` stream-unformatted bir `.vgai` dosyası yazar;
 `pretrain_checkpoint_load` magic/version, shape, counter sign, vocabulary
 frequency/active invariantları, rebuilt hash index ve payload checksum kontrolü
-yapar. Writer sürümü şu an **5**tir. v5, `hierarchical` context-mode enum'unu
-kabul eder ve v5 header değeriyle checksum üretir; reader hem v4 hem v5
-checkpoint'i, checkpoint'in kendi version değeriyle checksum hesaplayarak
-okur. Böylece mevcut v4 payload layout'u okunabilir kalır; v3 ve daha eski
-checkpoint'ler reddedilir ve corpus manifesti + source commit ile yeniden train
-edilmelidir. `--reference-context-kernel` bilerek checkpoint state
-olmadığından fused/reference run'ları aynı semantic model için byte-tam aynı
-checkpoint üretmelidir. Checksum yalnız accidental corruption tespiti içindir;
-kriptografik bütünlük/imza değildir.
+yapar. Writer **mode-seçimli** sürüm kullanır:
+
+- `legacy`, `positional`, `hybrid` ve `hierarchical` checkpoint'leri **v5**
+  header/checksum'ı ile yazmaya devam eder. Bu, mevcut historical checkpoint
+  byte-equality regression ve `e34fd22` baseline karşılaştırmasını korur.
+- `coherent` checkpoint'leri **v6** header/checksum'ı ile yazılır. v6, yeni
+  center-dependent cross-fold semantic contract'ini v5 writer stream'inden
+  ayırır.
+
+Reader v4, v5 ve v6'yı dosyanın kendi version değeriyle checksum hesaplayarak
+okur; ancak coherent context-mode taşıyan bir v5/v4 payload fail-closed
+reddedilir. Böylece eski mode'ların historical byte dizisi korunurken coherent
+resume için açık bir format sınırı vardır. v3 ve daha eski checkpoint'ler
+reddedilir ve corpus manifesti + source commit ile yeniden train edilmelidir.
+`--reference-context-kernel` bilerek checkpoint state olmadığından
+fused/reference run'ları aynı semantic model için byte-tam aynı checkpoint
+üretmelidir. Farklı encoder mode'larının checkpoint byte'larının eşit olması
+beklenmez. Checksum yalnız accidental corruption tespiti içindir; kriptografik
+bütünlük/imza değildir.
 
 Checkpoint aşağıdakileri taşır:
 
@@ -437,6 +475,9 @@ Native testler şunları kontrol eder:
   run'larının base/semantic plane ve experience counter bakımından bit-tam eşitliği;
 - ≥12 active-token controlled record üzerinde `hierarchical` replay
   determinismi, local-only hybrid'den ayrışması ve checkpoint round-trip'i;
+- aynı long-record fixture üzerinde `coherent`in hierarchy'den ayrışması,
+  fused/reference local-kernel eşitliği, kısa-record `hybrid` eşitliği ve v6
+  checkpoint round-trip'i; eski encoder'ların raw v5 header yazmayı sürdürmesi;
 - windowed context count ve active/OOV telemetry;
 - checkpoint round-trip ve uninterrupted run ile checkpoint-resume run'ın
   bit-tam eşitliği;
@@ -450,8 +491,10 @@ compiler/CI setup, fixture construction, inspect ve Python harness süreleri
 hariçtir. Base 64-token fixture üzerinde `legacy → positional → fused hybrid`
 oranlarını; aynı hybrid config için reference rotate-then-add ile fused kernel
 checkpoint byte eşitliği + süre oranını; ayrıca 16-token-record kontrollü
-fixture üzerinde `hybrid → hierarchical` Top-1 cohesion diagnostic'ini
-raporlar. Bunlar kontrollü tanılardır; doğal dil yeteneği veya production
+fixture üzerinde `hybrid → hierarchical → coherent` Top-1 cohesion
+diagnostic'ini raporlar. Coherent arm için kabul koşulu hybrid same-cluster
+Top-1 sonucunu geriletmemektir; pozitif similarity gain zorunlu bir doğal-dil
+iddiası değildir. Bunlar kontrollü tanılardır; doğal dil yeteneği veya production
 throughput garantisi değildir.
 
 ```bash

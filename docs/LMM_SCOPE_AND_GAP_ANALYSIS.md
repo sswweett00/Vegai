@@ -16,7 +16,7 @@ multimodal neural runtime yapmaz.
 | Determinism | fixed seeds, bounded allocation/error contracts, serial/OpenMP checkpoint byte equality, checkpoint/resume |
 | Continual data | strict ASCII/LF SHA-256 immutable shards, private snapshot/candidate generation/atomic state journal ile exactly-once commit |
 | CPU operation | portable/native Fortran build, OpenMP immutable-context preparation, conservative RAM/checkpoint preflight |
-| Optional Intel boundary | OpenVINO yalnız immutable packed-HDC context preparation için; explicit CPU policy native fused kernel'dir; GPU/NPU execution ayrıca doğrulanmalıdır |
+| Optional Intel boundary | OpenVINO yalnız supported positional/hybrid/hierarchical immutable packed-HDC context preparation için; explicit CPU policy native fused kernel'dir. Center-dependent coherent cross-fold mode CPU/OpenMP-only'dir; GPU/NPU execution ayrıca doğrulanmalıdır |
 | Yeni production control plane | disk-backed exact raw-record dedupe, content-addressed shards, deterministic held-out split, exact leakage gate, max-vocabulary capacity preflight, binary/data/policy provenance |
 | Grounded diyalog retrieval | checkpoint semantic HV + operator TSV prompt/response index, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; cevap TSV'den gelir |
 

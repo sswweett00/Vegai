@@ -139,6 +139,16 @@ accuracy veya gerçek corpus kalite garantisi değildir. Eski experiment'i veya
 kısa-record baseline'ı yeniden üretmek için açıkça `--context-mode hybrid`
 verin.
 
+`--context-mode coherent` ayrı bir opt-in long-record encoder'dır. Aynı ≥12
+active-token eşiği ve üç global-item kapasitesinde, full-record summary'yi bir
+kez; center'ın opposite-parity fold summary'sini iki kez bundle'a ekler. Böylece
+focal occurrence cross-fold items içinde değildir, fakat full-record anchor'da
+bir kez kalır. Summaries record başına immutable base vectors ile hazırlanır;
+per-center quadratic work veya mutable semantic read yoktur. Bu structural HDC
+seçeneği doğal dil anlama/logic doğruluğu vaat etmez. Repository diagnostic'i
+coherent için yalnız hybrid same-cluster Top-1 gerilememesini zorunlu tutar;
+positive similarity farkı raporlanır ama garanti edilmez.
+
 Kaliteyi artırmanın en güvenli yolları şunlardır:
 
 1. lisanslı corpus'u normalize edin, deduplicate edin ve tokenizer contract'ına
@@ -189,6 +199,11 @@ bit-sliced bundle/finalize işlemi) OpenVINO worker'a batch olarak gönderilir;
 source-order prototype/Hebbian commit, experience schedule ve checkpoint yazımı
 Fortran CPU tarafında kalır. Böylece GPU/NPU yalnız uygun immutable context
 işinde kullanılır; semantiği sıralı olan update aşaması zorla offload edilmez.
+`coherent` mode'un center-dependent `full + opposite-parity fold` item dizisi
+bu immutable lane ABI'de temsil edilmez. Bu nedenle
+`--context-provider openvino --context-mode coherent` configuration validation
+ile fail-closed reddedilir; GPU/NPU selection CPU fallback'e veya başka bir
+encoder'a sessizce dönüştürülmez.
 
 Worker yalnız adapter listesi değildir; selected device üzerinde gerçek HDC
 shape'larını çalıştırır. Bir `vegai_pretrain train` çağrısında Python process,

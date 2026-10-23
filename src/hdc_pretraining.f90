@@ -70,10 +70,11 @@ module hdc_pretraining
    integer(int32), parameter :: OPENVINO_POLL_MILLISECONDS = 1_int32
 
    character(len=8), parameter :: CHECKPOINT_MAGIC = 'VGHDC001'
-   ! Version 6 introduces the persisted COHERENT context-mode enum.  The wire
-   ! layout is otherwise stable; v4/v5 checkpoints remain readable.  Existing
-   ! encoder modes continue to write v5 so execution-only refactors retain
-   ! byte-equality with their pre-COHERENT checkpoints.
+   ! Version 6 reserves an explicit checkpoint contract for the COHERENT
+   ! context-mode semantics. The wire layout is otherwise stable; v4/v5
+   ! checkpoints remain readable. Existing encoder modes continue to write v5
+   ! so execution-only refactors retain byte-equality with their pre-COHERENT
+   ! checkpoints.
    integer(int32), parameter :: CHECKPOINT_VERSION = 6_int32
    integer(int32), parameter :: CHECKPOINT_PRE_COHERENT_VERSION = 5_int32
    integer(int32), parameter :: CHECKPOINT_MIN_VERSION = 4_int32
@@ -2387,12 +2388,15 @@ contains
       end do
    end function model_checkpoint_checksum
 
-   pure function pretrain_checkpoint_write_version(model) result(checkpoint_version)
+   pure function pretrain_checkpoint_write_version(model) result(format_version)
       type(hdc_pretrain_model_t), intent(in) :: model
-      integer(int32) :: checkpoint_version
+      integer(int32) :: format_version
 
-      checkpoint_version = CHECKPOINT_PRE_COHERENT_VERSION
-      if (model%context_mode == PT_CONTEXT_COHERENT) checkpoint_version = CHECKPOINT_VERSION
+      ! Keep the result name distinct from CHECKPOINT_VERSION: Fortran names
+      ! are case-insensitive, so a same-spelling result would shadow the module
+      ! constant and silently retain the legacy value.
+      format_version = CHECKPOINT_PRE_COHERENT_VERSION
+      if (model%context_mode == PT_CONTEXT_COHERENT) format_version = CHECKPOINT_VERSION
    end function pretrain_checkpoint_write_version
 
    subroutine pretrain_checkpoint_save(model, checkpoint_path, status)

@@ -39,7 +39,10 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 > deterministik positional + order-invariant hybrid context'lerden HDC semantic
 > prototype öğrenimidir. Varsayılan `hierarchical`, uzun kayıtlarda bounded
 > whole-record topical evidence ekler ve kısa kayıtlarda `hybrid` ile bit-tam
-> aynıdır. `vegai_chat` da free-form cevap üreten bir LLM değildir; yalnız
+> aynıdır. Opt-in `coherent`, aynı bounded global bütçeyi full-record anchor ve
+> opposite-parity cross-fold evidence arasında dağıtarak long-record occurrence
+> self-echo'yu azaltır; mevcut worker ABI'si bunu taşımadığından CPU/OpenMP-only
+> seçenektir. `vegai_chat` da free-form cevap üreten bir LLM değildir; yalnız
 > versioned TSV bilgi bankasindan grounded response retrieval yapar veya
 > abstain eder. Unicode corpus'lar ön-tokenization
 > ister; veri yönetişimi, checkpoint ve sınırlar [PRETRAINING.md](docs/PRETRAINING.md)'de, immutable
@@ -88,8 +91,11 @@ adapter inventory'si tek başına compute iddiası değildir. Intel Core Ultra i
 opt-in OpenVINO/oneAPI context provider vardır: immutable packed-HDC context
 bundle işlemini gerçek worker device'ına dispatch eder, source-ordered
 prototype commit'i CPU'da tutar ve checkpoint byte equality ile doğrulanır.
-Bir `train` çağrısında worker resident kalır ve dynamic-batch graph cache'i
-tekrar kullanılır. Açık CPU fallback policy'si ise OpenVINO CPU graph'ını
+`coherent`in center-dependent cross-fold context'i mevcut OpenVINO ABI'sinde
+bulunmaz; `--context-provider openvino --context-mode coherent` fail-closed
+reddedilir, başka bir mode'a sessizce yönlendirilmez. Bir `train` çağrısında
+worker resident kalır ve dynamic-batch graph cache'i tekrar kullanılır. Açık
+CPU fallback policy'si ise OpenVINO CPU graph'ını
 başlatmak yerine native fused/OpenMP context kernel'ine gider; bu, dürüstçe
 CPU execution olarak raporlanır. `--openvino-require-accelerator` gerçek
 GPU/NPU execution yoksa fail closed döner. RAM,
@@ -189,7 +195,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Akıl yürütme | `src/reasoning_core.f90` | role–filler frame, n-gram, kural bankası, analogik transfer |
 | Resonator Network | `src/resonator_network.f90` | slot-spesifik codebook'larla çoklu-faktör çözümleme ve exact certification |
 | Corpus ingest | `src/text_tokenizer.f90`, `src/vocabulary.f90` | bounded ASCII canonicalization, collision-safe frequency vocabulary |
-| HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, hierarchical default, deterministic OpenMP / optional OpenVINO immutable-context preparation + source-ordered CPU commit, metrics, checkpoint/resume |
+| HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, hierarchical default + CPU-only coherent cross-fold option, deterministic OpenMP / optional OpenVINO immutable-context preparation + source-ordered CPU commit, mode-selective v5/v6 checkpoint/resume |
 | Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect`, CPU/OpenVINO context-provider execution switch ve nearest semantic diagnostic |
 | Grounded dialogue retrieval | `src/dialogue_retrieval.f90`, `app/chat.f90` | operator TSV response index'i, strict ASCII/OOV gate, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; free-form LLM generation degil |
 | Continual transaction + health audit | `tools/continuous_shard_manifest.py`, `tools/continuous_pretrain.py`, `tools/continuous_pretrain_status.py` | immutable SHA-256 ledger, strict ingest gate, candidate generation, atomic state journal, read-only checkpoint/prefix/payload audit |

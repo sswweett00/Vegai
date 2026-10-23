@@ -60,9 +60,10 @@ kullanır. Aynı config/corpus ile `--reference-context-kernel`
 rotate-then-add yolu da ayrıca ölçülür ve fused checkpoint ile **byte-tam eşit**
 olması zorunludur. Araç ayrıca normal sekiz-token fixture'ın eşiğinin altında
 kaldığını açıkça koruyarak, ayrı üretilmiş 16-token-record controlled fixture
-üzerinde `hybrid` ile `hierarchical` topical-cohesion diagnostic'ini raporlar.
-Medyan elapsed süre, training-token/saniye ve dar semantic diagnostic workflow
-summary/check-run notice'a yazılır. Süreler runner, derleyici bayrakları ve
+üzerinde `hybrid`, `hierarchical` ve CPU-only `coherent` topical-cohesion
+diagnostic'ini raporlar. Coherent için koşul same-cluster Top-1 non-regression'dır;
+positive similarity gain vaat edilmez. Medyan elapsed süre, training-token/saniye
+ve dar semantic diagnostic workflow summary/check-run notice'a yazılır. Süreler runner, derleyici bayrakları ve
 CPU'ya bağlıdır; bunlar doğal dil kalitesi veya production throughput iddiası
 olmayan reproducible smoke/controlled timing'lerdir.
 
