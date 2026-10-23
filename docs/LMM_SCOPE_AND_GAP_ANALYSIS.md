@@ -22,6 +22,7 @@ multimodal neural runtime yapmaz.
 | Grounded diyalog retrieval | checkpoint semantic HV + operator TSV prompt/response index, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; cevap TSV'den gelir |
 | Grounded retrieval quality gate | versioned held-out JSONL, stateless real-binary exact prompt/abstention metrikleri, immutable input digest binding, privacy-conscious report ve explicit release threshold'lari |
 | Optional LMM integration plane | Unicode/subword model-tokenizer manifest, hash-chained long dialogue, provenance-bound FTS evidence, content-addressed image/audio/video asset registry, model-emitted citation/abstention release gate, measured domain-expert router/independent-panel planı ve gerçek OpenVINO/API/worker backend gateway'i; model ağırlığı depoda değildir |
+| Algorithm/optimizer evidence governor | Immutable algorithm/optimizer/training/artifact identity'lerini repeated held-out bounded observation ile Bonferroni-Hoeffding/Pareto gate'ten geçirir; actual optimizer veya neural training runtime değildir (`evidential_optimizer.py`) |
 
 Bu sistem, bounded semantic prototype/retrieval ve symbolic factor reasoning için
 üretim kalitesinde operation sözleşmeleri taşıyabilir. Model kapasitesi ve
@@ -36,6 +37,15 @@ aritmetik, doğal dil veya multimodal semantic understanding, gerçek dünya
 factuality ya da fiziksel ölçüm doğruluğu değildir. Bunun için source identity,
 calibration/uncertainty ve target-domain evaluation ayrı gerekir. Ayrıntılı
 sınır [TOKENLESS_SIGNAL_FIELD.md](TOKENLESS_SIGNAL_FIELD.md)'dedir.
+
+`evidential_optimizer.py` de native AdamW/Lion/Transformer optimizer eklemez.
+Gerçek external algorithm/optimizer candidate'larının config/artifact identity'si
+ve aynı held-out benchmark üzerindeki repeated bounded ölçümleri için güçlü bir
+selection gate sağlar. Bu gate geçilirse yalnız declared domain/metric altında
+baseline improvement evidence'i vardır; optimizer'ın evrensel en gelişmiş
+olduğu, bağımsızlık varsayımının gerçek olduğu veya gerçek dünya kalite
+üstünlüğü kanıtlanmış olmaz. Ayrıntı:
+[EVIDENTIAL_OPTIMIZER.md](EVIDENTIAL_OPTIMIZER.md).
 
 `vegai_chat` bu sınırı degistirmez: user-visible metin, operatorun versioned TSV
 bilgi bankasindan retrieval ile gelir; model yeni paragraf/token sample etmez.
@@ -73,7 +83,7 @@ yeni data plane, model runtime ve test yüzeyi gerektirir.
 |---|---|---|
 | Unicode/subword tokenizer | Optional `tokenizers-json` model package ile var; HDC `text_tokenizer` hâlâ ASCII-byte'dır | BPE/Unigram tokenizer gerçek model package'ine aittir; geniş tokenizer quality/normalization test suite'i model owner tarafından sağlanmalıdır |
 | Tensor/matrix runtime | Native Vegai'de yok; harici actual backend bağlanabilir | Transformer linear layers, embeddings, attention ve activations packed-HV XOR/majority işlemleri değildir |
-| Autodiff + optimizer | Native Vegai'de yok | Backpropagation, gradient accumulation, AdamW/Lion, clipping, loss scaling ve optimizer state gerekir |
+| Autodiff + optimizer | Native Vegai'de yok; EPO yalnız external candidate evidence selection yapar | Backpropagation, gradient accumulation, AdamW/Lion, clipping, loss scaling ve optimizer state gerekir |
 | Transformer/sequence objective | Harici model backend'de olabilir; repo model weight/architecture sağlamaz | Causal/encoder-decoder attention, positional encoding, logits, cross entropy ve sampling/generation gerçek model package'inde kanıtlanmalıdır |
 | Multimodal encoders/fusion | Asset registry + worker protocol var; native encoder/fusion yok | image/audio/video decoding, vision/audio encoder, alignment/fusion, modality batching ve safety policy gerçek VLM/AV worker tarafından sağlanmalıdır |
 | Distributed training | Yok | data/model/pipeline parallelism, collectives, gradient synchronization, elastic fault recovery ve sharded optimizer/checkpoint gerekir |
@@ -113,7 +123,10 @@ edilebilir işlemsel eksikleri kapatır:
 13. model manifest + quality report + target-domain evaluation card bağlayan,
     residency/safety/modality/SLO threshold'lu deterministic expert routing ve
     bağımsız panel planı;
-14. actual gateway child-process latency ve backend-reported token ölçümü.
+14. actual gateway child-process latency ve backend-reported token ölçümü;
+15. external algorithm/optimizer config, training contract ve artifact identity
+    için repeated held-out bounded observation, conservative all-objective
+    baseline comparison, robust Pareto ve no-replace decision gate'i.
 
 Bunlar veri kaybı, silent duplicate, held-out contamination, capacity overflow,
 restart operasyon riski, dar grounded-retrieval kalitesinin ölçülmeden publish

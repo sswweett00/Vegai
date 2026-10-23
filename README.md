@@ -31,6 +31,9 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
   ile staged reasoning/problem-solving/coding veya başka hedef-domain curriculum
   seçimi, held-out coverage gate'i, exact split isolation, immutable shard ledger
   ve source+policy replay doğrulaması;
+- gerçek algorithm/optimizer candidate'larını immutable config/artifact hash'i,
+  repeated held-out evidence, conservative Hoeffding confidence bound ve robust
+  Pareto gate ile seçen fail-closed Evidential Pareto Optimizer control plane'i;
 - immutable context construction + source-ordered commit ile checkpoint-bit-tam
   deterministic OpenMP multi-core training; RAM/SSD/NUMA resource preflight;
 - hardcoded cevap üretmeyen, operator TSV bilgi bankasindan grounded HDC
@@ -55,6 +58,13 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 > dış dünya factuality'si veya fiziksel ölçüm doğruluğu kanıtlamaz. Raw source
 > digest/provenance dışarıda saklanmalıdır. Tam contract:
 > [TOKENLESS_SIGNAL_FIELD.md](docs/TOKENLESS_SIGNAL_FIELD.md).
+>
+> **Algorithm/optimizer notu:** EPO (`evidential_optimizer.py`) bir neural
+> optimizer veya evrensel en iyi AI iddiası değildir. Operatorün gerçek
+> algorithm/optimizer config'lerini yalnız aynı held-out suite üzerinde,
+> repeated bounded ölçümlerle all-objective confidence-bound baseline
+> improvement kanıtlanırsa seçer; kanıt yoksa fail-closed olur. Sözleşme:
+> [EVIDENTIAL_OPTIMIZER.md](docs/EVIDENTIAL_OPTIMIZER.md).
 >
 > **Corpus pretraining notu:** `vegai_pretrain`, Transformer/LLM eğitimi değil;
 > deterministik positional + order-invariant hybrid context'lerden HDC semantic
@@ -100,6 +110,9 @@ make chat
 make field-check
 printf 'raw bytes, not tokens\n' > /tmp/vegai-raw.bin
 ./build/vegai_field inspect /tmp/vegai-raw.bin
+
+# Algorithm/optimizer evidence gate (model weights veya sentetik cevap üretmez)
+make optimizer-check
 
 # Sınır denetimli hata ayıklama derlemesi
 make debug
@@ -275,6 +288,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Corpus ingest | `src/text_tokenizer.f90`, `src/vocabulary.f90` | bounded ASCII canonicalization, collision-safe frequency vocabulary |
 | Rich training data I/O | `tools/training_data_io.py`, `tools/training_dataset.py` | JSONL/JSON/TXT/Parquet/Arrow schema boundary, streaming/batching, exact text dedupe, split/imbalance audit ve explicit strict-HDC projection |
 | Capability curriculum | `tools/capability_curriculum.py` | operator-defined metadata paths/tag/difficulty stage policy'si, SQLite exact-dedupe + split/annotation conflict gate'i, held-out/source coverage, strict text-only projection, immutable continuous ledger ve source+policy replay verification; hardcoded task data veya capability claim'i degil |
+| Evidential Pareto Optimizer | `tools/evidential_optimizer.py` | gerçek algorithm/optimizer config ve artifact hash'lerini repeated held-out bounded metric'lerle Bonferroni-Hoeffding confidence + robust Pareto gate üzerinden seçer; neural optimizer/runtime veya universal-best claim'i değil |
 | HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, hierarchical default + CPU-only coherent cross-fold option, deterministic OpenMP / optional OpenVINO immutable-context preparation + source-ordered CPU commit, mode-selective v5/v6 checkpoint/resume |
 | Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect`, CPU/OpenVINO context-provider execution switch ve nearest semantic diagnostic |
 | Grounded dialogue retrieval | `src/dialogue_retrieval.f90`, `app/chat.f90` | operator TSV response index'i, strict ASCII/OOV gate, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; free-form LLM generation degil |
@@ -306,7 +320,9 @@ corpus veri hattı, yönetişim ve checkpoint sözleşmesi için
 şeması ve streaming dönüşüm sözleşmesi için
 [docs/TRAINING_DATA_FORMAT.md](docs/TRAINING_DATA_FORMAT.md), operator policy'si ile
 hardcoded veri eklemeden staged target-domain curriculum packaging/replay için
-[docs/CAPABILITY_CURRICULUM.md](docs/CAPABILITY_CURRICULUM.md), immutable shard ledger ve
+[docs/CAPABILITY_CURRICULUM.md](docs/CAPABILITY_CURRICULUM.md), gerçek algorithm/optimizer
+adaylarını held-out confidence/Pareto evidence ile seçen fail-closed control plane için
+[docs/EVIDENTIAL_OPTIMIZER.md](docs/EVIDENTIAL_OPTIMIZER.md), immutable shard ledger ve
 crash-safe exactly-once continual pretraining için
 [docs/CONTINUOUS_PRETRAINING.md](docs/CONTINUOUS_PRETRAINING.md), data-driven grounded
 chat/retrieval sözleşmesi için [docs/DIALOGUE_RETRIEVAL.md](docs/DIALOGUE_RETRIEVAL.md),

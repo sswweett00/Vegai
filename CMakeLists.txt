@@ -132,6 +132,10 @@ if(VEGAI_BUILD_TESTS)
                     --field-bin $<TARGET_FILE:vegai_field>
         )
         add_test(
+            NAME vegai_evidential_optimizer
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_evidential_optimizer.py
+        )
+        add_test(
             NAME vegai_hardware_compatibility
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_hardware_compatibility.py
         )

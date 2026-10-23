@@ -42,7 +42,7 @@ FIELD := $(BUILD_DIR)/vegai_field
 CHAT := $(BUILD_DIR)/vegai_chat
 TEST_BINARY := $(BUILD_DIR)/vegai_tests
 
-.PHONY: all engine pretrain field chat test run run-pretrain run-field run-chat check field-check data-check capability-check lmm-check dialogue-check clean clean-all debug portable native portable-test native-test
+.PHONY: all engine pretrain field chat test run run-pretrain run-field run-chat check field-check optimizer-check data-check capability-check lmm-check dialogue-check clean clean-all debug portable native portable-test native-test
 
 # Default target: portable optimized GNU binaries without host-only ISA flags.
 all: engine pretrain field chat
@@ -110,6 +110,7 @@ debug:
 check:
 	python3 tools/verify_reference.py
 	python3 tools/verify_tokenless_field.py
+	python3 tools/verify_evidential_optimizer.py
 	python3 tools/verify_example_corpus.py
 	python3 tools/verify_hardware_compatibility.py
 	python3 tools/verify_training_resource_plan.py
@@ -121,6 +122,11 @@ check:
 # byte-event field.  This verifies representation identities, not semantics.
 field-check: $(FIELD)
 	python3 tools/verify_tokenless_field.py --field-bin $(FIELD)
+
+# Algorithm/optimizer candidate selection is evidence-bound rather than a
+# claim that any one optimizer is universally best.  It needs no model weights.
+optimizer-check:
+	python3 tools/verify_evidential_optimizer.py
 
 # Strict stdlib-only verification of policy-driven reasoning/problem-solving/
 # coding (or operator-defined) curriculum packaging.  It uses only temporary

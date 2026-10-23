@@ -46,7 +46,8 @@ licensed data / feedback / benchmarks
 | Long dialogue/evidence/media | **Uygulandı**; hash-chain ledger, token budget, FTS evidence, image/audio/video asset contract | Semantic memory, embedding/reranker ve gerçek encoder quality evaluation |
 | Citation/abstention quality gate | **Uygulandı**; held-out real gateway runner ve release threshold | Factual entailment, human preference, safety/red-team ve calibration benchmark'ları |
 | Model portfolio/router | **Kısmi uygulandı**; provenance-bound target-domain expert routing, measured threshold ve independent-panel planı | Persistent policy service, shadow/counterfactual evaluation, canary/rollback ve live queue/SLO validation |
-| Neural pretraining/alignment | **Harici gerçek model gerekir** | Tensor runtime, distributed optimizer, data mixture, loss/eval curves |
+| Algorithm/optimizer evidence governor | **Uygulandı**; immutable algorithm/optimizer/training/artifact identities, repeated held-out bounded metrics, Bonferroni-Hoeffding confidence ve robust Pareto fail-closed selection | Gerçek bağımsız replication, benchmark contamination audit, energy/throughput measurement ve selected optimizer'ın gerçek training run kanıtı |
+| Neural pretraining/alignment | **Harici gerçek model gerekir**; EPO yalnız hangi kanıtlanmış external config'in seçilebileceğini govern eder | Tensor runtime, distributed optimizer, data mixture, loss/eval curves |
 | Multimodal reasoning | **Arayüz hazır**; assets + worker protocol | Licensed paired data, VLM/ASR/video encoder, modality task scores |
 | Accelerator scheduler | **Arayüz hazır**; requested device/provenance, resident service benchmark methodology | Gerçek CPU/iGPU/GPU/NPU placement, throughput/energy evidence |
 | Safety/governance | **Kısmi**; immutable inputs, source/license fields, privacy-conscious reports | PII/rights pipeline, policy classifier, red-team, incident response |
@@ -119,6 +120,19 @@ harici servislerdir:
 - model/reranker/embedding version registry;
 - persistent router policy service, shadow/counterfactual evaluator, canary/rollback controller;
 - tenant isolation, rate limit, quota ve audit log retention policy.
+
+### 3.3 Algorithm/optimizer evidence governor
+
+`tools/evidential_optimizer.py`, model router'ın yerine geçmeyen fakat onun
+altındaki algorithm/optimizer training candidate'larını yöneten ayrı bir
+control plane'dir. Candidate manifest gerçek architecture/optimizer config,
+training contract ve artifact SHA-256 identity'lerini bağlar. Aynı immutable
+held-out suite/protocol altında repeated bounded measurement yoksa ya da
+conservative all-objective baseline improvement sertifikalanmazsa karar
+yayınlamaz. Bu, “dünyanın en iyi optimizer'ı” marketing iddiası değil,
+operator-declared target domain için falsifiable selection gate'tir. Matematik,
+provenance, no-replace publication ve bağımsız verifier:
+[EVIDENTIAL_OPTIMIZER.md](EVIDENTIAL_OPTIMIZER.md).
 
 ## 4. Eğitim ve data factory mimarisi
 
