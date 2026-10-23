@@ -46,8 +46,9 @@ LMM düzlemi şu bileşenlerden oluşur:
 | `tools/lmm_gateway_template.py` | Shell kullanmayan shared `{request}`/`{evidence}` gateway argv template doğrulaması; redirect/duplicate placeholder ve response-retention'i reddeder |
 | `tools/lmm_quality_evaluation.py` | Held-out gerçek gateway çağrılarında model-emitted citation/abstention contract'i, privacy-conscious report ve fail-closed release threshold'ları |
 | `tools/lmm_portfolio.py` | Immutable manifest + passed quality report + target-domain evaluation card ile deterministic expert model routing veya bağımsız panel planı; `single-best` gerçek dispatch'i |
+| `tools/lmm_release_governor.py` | Frozen portfolio/task baseline-candidate identity'leri üzerinde aggregate-only shadow → bounded canary → promote/rollback karar/state chain'i ve external traffic directive |
 | `tools/lmm_tool_orchestrator.py` | Request+registry-bound typed read-only tool planı, prior-result reference, no-shell private execution, distinct verifier ve gateway-ready evidence publication |
-| `tools/verify_lmm_runtime.py`, `tools/verify_lmm_portfolio.py`, `tools/verify_lmm_tool_orchestrator.py` | Runtime boundary ile domain-routing/privacy/provenance/fail-closed dispatch ve tool-plan entegrasyon testleri |
+| `tools/verify_lmm_runtime.py`, `tools/verify_lmm_portfolio.py`, `tools/verify_lmm_tool_orchestrator.py`, `tools/verify_lmm_release_governor.py` | Runtime boundary ile domain-routing/privacy/provenance/fail-closed dispatch, verified tool plan ve release-governance entegrasyon testleri |
 
 ## 2. Gerçek serbest doğal dil üretimi
 
@@ -372,6 +373,26 @@ kanıtı diye göstermez. Bu yaklaşım, operator-owned human/adjudicator/tool
 workflow'unda bağımsız critique için güvenli başlangıçtır. Tam şema, örnek ve
 sınırlar için [LMM_PORTFOLIO_ROUTING.md](LMM_PORTFOLIO_ROUTING.md)'ye bakın.
 
+### 10.1 Offline route sonrası shadow/canary release governor
+
+`lmm_portfolio.py`nin selected candidate'i, gerçek user traffic'e otomatik
+promote edilmez. `tools/lmm_release_governor.py`, aynı immutable task ve
+portfolio üzerinden baseline/candidate'i yeniden yükler; model manifest,
+gateway command, evaluation card ve passed held-out quality report identity'ni
+state'e bağlar. Policy quality, reliability, safety, cost ve latency için ayrı
+bounded live metric ister. Consentli shadow evidence pass etmeden bounded
+canary directive'i; conservative all-metric non-regression kanıtı olmadan da
+full promotion directive'i vermez.
+
+Governor input'u raw session/request/evidence/response değildir: strict LF
+aggregate telemetry ve opaque replay IDs'dir. Decision raw ID/path içermez;
+external controller için `shadow-mirror-only`, `bounded-canary`,
+`candidate-promoted` veya `baseline-only-rollback` directive'i üretir. Traffic
+enforcement, telemetry integrity, signed release head/CAS, provider revision
+attestation, privacy/tenant isolation ve emergency kill switch bu Python
+control plane'in dışında kalır. Tam contract:
+[LMM_RELEASE_GOVERNANCE.md](LMM_RELEASE_GOVERNANCE.md).
+
 ## 11. Typed, verified tool-use plane
 
 `tools/lmm_tool_orchestrator.py`, LMM'in veya operatörün output olarak verdiği
@@ -398,9 +419,10 @@ katmanında zorunludur. Tam contract:
 python3 tools/verify_lmm_runtime.py
 python3 tools/verify_lmm_portfolio.py
 python3 tools/verify_lmm_tool_orchestrator.py
+python3 tools/verify_lmm_release_governor.py
 ```
 
-Bu üç test birlikte şunları denetler:
+Bu dört test birlikte şunları denetler:
 
 - Türkçe, Arapça ve Japonca Unicode retrieval;
 - `tokenizers` kuruluysa gerçek `tokenizer.json` BPE yolu;
@@ -417,6 +439,10 @@ Bu üç test birlikte şunları denetler:
   dispatch, raw-text privacy ve başka manifest'e bağlı command fail-closed rejection;
 - request/registry-bound typed tool plan, predecessor reference, separate verifier,
   no-replace evidence/report, raw argument/result privacy ve negative tool gates;
+- immutable portfolio identity, shadow pass → bounded canary transition,
+  conservative promotion/rollback, aggregate-only privacy, replay/forged
+  telemetry/state semantic/tamper ve required quality/reliability/safety/cost/
+  latency policy gates;
 - modality capability yoksa fail-closed rejection;
 - gerçek gateway child process benchmark sınırı.
 
@@ -436,7 +462,10 @@ Bu entegrasyon aşağıdakileri otomatik olarak sağlamaz:
   worker/model gerektirir;
 - LMM benchmark, human preference, red-team veya multimodal task score'u;
 - kernel/container sandbox, network egress policy, real verifier independence,
-  mutating-tool authorization/idempotency veya tool-use benchmark'ı.
+  mutating-tool authorization/idempotency veya tool-use benchmark'ı;
+- signed deployment registry/CAS, live traffic enforcement, trustworthy online
+  telemetry, provider weight attestation, tenant isolation veya automatic
+  production safety approval.
 
 Bu yüzden bu katman “LMM eklendi” demek için yeterli bir operational boundary
 sağlar; “Vegai artık evrensel LMM'den daha iyi” sonucu çıkarmaz. Gerçek kalite

@@ -119,8 +119,14 @@ harici servislerdir:
 - persistent model servers (OpenVINO/vLLM/benzeri) ve queue-aware scheduler;
 - per-model tokenizer/chat-template conformance testleri;
 - model/reranker/embedding version registry;
-- persistent router policy service, shadow/counterfactual evaluator, canary/rollback controller;
+- signed/persistent router policy service, shadow/counterfactual telemetry collector ve traffic-enforcing deployment controller;
 - tenant isolation, rate limit, quota ve audit log retention policy.
+
+Bu repo artık `lmm_release_governor.py` ile frozen portfolio/task/model/gateway/
+held-out identity'lerini aggregate-only shadow/canary kararına bağlayan bir
+control-plane contract'i sağlar; ancak persistent signer/registry, live traffic
+enforcement, telemetry integrity ve distributed single-writer transaction yine
+external production servisidir.
 
 ### 3.3 Algorithm/optimizer evidence governor
 
@@ -134,6 +140,28 @@ yayınlamaz. Bu, “dünyanın en iyi optimizer'ı” marketing iddiası değil,
 operator-declared target domain için falsifiable selection gate'tir. Matematik,
 provenance, no-replace publication ve bağımsız verifier:
 [EVIDENTIAL_OPTIMIZER.md](EVIDENTIAL_OPTIMIZER.md).
+
+### 3.4 Shadow/canary release governor
+
+`tools/lmm_release_governor.py`, router'ın offline eligible candidate kararını
+user-visible deployment'a otomatik sıçrama yaptırmadan önce denetler. Immutable
+policy baseline/candidate portfolio'larını, selected routing task'ı, model
+manifest'i, gateway command'i, evaluation card'ı ve passed held-out quality
+report'unu bağlar. Policy quality, reliability, safety, cost ve latency için
+ayrı bounded live metric zorunluluğu getirir. Consentli shadow aggregate'leri
+pass etmeden canary başlatmaz; canary'de time-uniform conservative confidence
+bound ile ancak tüm metric'ler non-regression/promotion şartını sağlarsa
+`promote`, herhangi bir confident failure varsa `rollback`, diğer durumda
+fail-closed `pending` üretir. Raw prompt/response veya telemetry identifier
+state/decision artifact'ine yazılmaz.
+
+Decision yalnız `shadow-mirror-only`, `bounded-canary`, `candidate-promoted` ya
+da `baseline-only-rollback` external traffic directive'idir. Model server'a
+route yapmaz, provider weights'i attest etmez, telemetry'nin dürüstlüğünü veya
+quality/safety label'larını doğrulamaz. Signed append-only registry, atomic
+controller CAS, tenant/network isolation, alerting ve emergency kill switch
+production owner tarafından uygulanmalıdır. Tam schema, istatistik, privacy ve
+non-claim sınırları: [LMM_RELEASE_GOVERNANCE.md](LMM_RELEASE_GOVERNANCE.md).
 
 ## 4. Eğitim ve data factory mimarisi
 
@@ -255,14 +283,21 @@ kalan riskleri yayınlamalıdır.
 2. Her gerçek model için immutable target-domain evaluation card üretin ve
    `lmm_portfolio.py route` ile domain/residency/safety/SLO eşiklerini geçen
    expert'i veya bağımsız paneli seçin.
-3. Gerçek lisanslı model package'i `lmm_model_manifest.py create/verify` ile
+3. Frozen baseline/candidate route kararını `lmm_release_governor.py` policy'sine
+   bağlayın; consented shadow → bounded canary → promote/rollback state chain'ini
+   signed controller CAS'i ile yürütün. Her policy quality/reliability/safety/
+   cost/latency live metrics'ini ve aggregate privacy protocol'ünü preregister
+   etmelidir.
+4. Gerçek lisanslı model package'i `lmm_model_manifest.py create/verify` ile
    bağlayın; tokenizer/chat-template conformance testini ekleyin.
-4. Retrieval relevance + factual-entailment benchmark'ı, calibration ve human
+5. Retrieval relevance + factual-entailment benchmark'ı, calibration ve human
    preference eval'i ekleyin.
-5. Persistent server/router/accelerator telemetry'yi shadow traffic ile ölçün.
-6. Training/data factory ve safety/red-team katmanlarını gerçek verilerle
+6. Persistent server/router/accelerator telemetry'yi shadow ve canary traffic ile
+   ölçün; telemetry integrity, provider/weight attestation ve emergency rollback
+   ayrıca test edilmelidir.
+7. Training/data factory ve safety/red-team katmanlarını gerçek verilerle
    devreye alın; her phase'de old benchmark non-regression gate uygulayın.
-7. Ancak bu raporlar target domain'de gerekli Pareto üstünlüğünü gösterirse
+8. Ancak bu raporlar target domain'de gerekli Pareto üstünlüğünü gösterirse
    deployment claim'i yapın; diğer alanlarda kapsamı açıkça sınırlayın.
 
 İlgili operasyon contract'i için [LMM_RUNTIME.md](LMM_RUNTIME.md), measured

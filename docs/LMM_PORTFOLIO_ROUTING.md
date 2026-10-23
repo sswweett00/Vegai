@@ -36,6 +36,7 @@ evidence marker contract'ini ölçer; factual entailment yerine geçmez.
 | `tools/lmm_portfolio.py route` | Ölçülmüş domain expert veya bağımsız panel seçimi; raw request taşımayan `vegai-lmm-route-decision/v1` raporu |
 | `tools/lmm_portfolio.py generate` | `single-best` kararıyla private request/evidence snapshot'ı üzerinden gerçek gateway çağrısı; model ve input provenance'ını yeniden doğrular |
 | `tools/lmm_quality_evaluation.py` | Candidate'in citation/abstention held-out release report'unu üretir; portföy seçimi bu report'un manifest SHA'sını doğrular |
+| `tools/lmm_release_governor.py` | Router'ın offline eligible baseline/candidate seçimini immutable shadow → bounded canary → promote/rollback release state'ine bağlar; raw prompt/response saklamaz ve external traffic directive üretir |
 | `tools/verify_lmm_portfolio.py` | Synthetic worker ile domain selection, gerçek dispatch, panel bağımsızlığı, raw-text privacy ve fail-closed negative cases |
 
 Tüm gerçek modeller, gateway command'leri, evaluation suite'leri ve scorecard
@@ -232,7 +233,29 @@ ancak açık `--include-response-in-report` ile eklenir. `--print-json`, respons
 operatorün stdout consumer'ına iletir; held-out evaluation için bu metni kalıcı
 loglara yazmamak operatorün sorumluluğundadır.
 
-## 6. Fail-closed ve provenance davranışı
+## 6. Router kararından live release'e geçiş
+
+`route` veya `generate` raporu, target-domain candidate'in frozen offline
+threshold'ları geçtiğini gösterir; tek başına user traffic'i %100 candidate'e
+verme yetkisi değildir. `single-best` routing task ve aynı immutable portfolio
+candidate'leri `tools/lmm_release_governor.py` policy'sine baseline/candidate
+olarak bağlanmalıdır.
+
+Governor, model manifest/gateway command/evaluation card/held-out quality
+report identity'lerini tekrar doğrular; quality, reliability, safety, cost ve
+latency için ayrı bounded live policies ister. Consentli shadow aggregate'i
+geçmeden bounded canary directive vermez; canary'de conservative time-uniform
+confidence evidence yoksa canary'yi korur veya rollback yapar. Raw
+request/response router/gateway tarafında kalır; governor'a yalnız opaque ID'li
+aggregate observation girer.
+
+Bu, router'ın deployment controller'a dönüştüğü anlamına gelmez. Signed release
+registry, provider weight/runtime attestation, telemetry trust, tenant
+isolation, traffic splitting, atomic expected-head/CAS, alerting ve emergency
+kill switch external platform sorumluluğundadır. Tam policy/state/decision
+schema'sı: [LMM_RELEASE_GOVERNANCE.md](LMM_RELEASE_GOVERNANCE.md).
+
+## 7. Fail-closed ve provenance davranışı
 
 Router report yayınlamaz ve exit `2` ile durur, eğer:
 
@@ -254,10 +277,11 @@ counterfactual/shadow routing karşılaştırması için denetlenebilir input zi
 oluşur. Ancak real provider'ın endpoint arkasındaki weight revision'ını manifest
 dışında değiştirmediği ayrıca provider attestation ile kanıtlanmalıdır.
 
-## 7. Doğrulama
+## 8. Doğrulama
 
 ```bash
 python3 tools/verify_lmm_portfolio.py
+python3 tools/verify_lmm_release_governor.py
 make lmm-check
 ```
 
@@ -266,5 +290,8 @@ gateway dispatch'ini, raw prompt/response privacy default'unu, iki farklı
 independence group ile paneli, threshold altında güvenli reddi, başka model
 yoluna bağlı veya held-out report'ta ölçülmemiş command rejection'ını,
 immutable worker-config output collision'ını ve held-out runtime'dan sapmış
-worker config rejection'ını test eder. Synthetic worker yalnız protocol
-fixture'idir; gerçek domain score veya LMM üstünlüğü sonucu değildir.
+worker config rejection'ını test eder. `verify_lmm_release_governor.py` ise
+ayrı synthetic fixture ile immutable portfolio binding, shadow→canary geçişi,
+promotion/rollback, aggregate privacy, replay/forged identity/tamper ve required
+live-metric gates'ini test eder. Synthetic worker/metric gerçek domain score
+veya LMM üstünlüğü sonucu değildir.

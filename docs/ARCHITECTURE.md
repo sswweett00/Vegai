@@ -412,12 +412,19 @@ uygular. Report ham prompt/response taşımadan provenance hash'lerini korur.
 measurement card ile bağlayarak domain/residency/safety/modality/SLO koşullarını
 geçen en iyi expert'i seçer veya farklı provider/family için bağımsız panel planı
 üretir. Uygun candidate yoksa cevap template'i üretmek yerine fail-closed olur.
+`lmm_release_governor.py`, offline router sonucunu doğrudan production
+promotion saymaz: frozen baseline/candidate identity'lerini required
+quality/reliability/safety/cost/latency live policy'sine bağlar, raw text
+saklamayan aggregate shadow → bounded canary → promote/rollback state/decision
+artifacts üretir. Traffic split, signed state registry, provider runtime
+attestation ve telemetry trust external deployment controller sorumluluğundadır.
 
 Bu plane serbest generation'i gerçek modelin output'u olarak mümkün kilar;
 factuality, safety, neural training, model quality veya GPU/NPU speed iddiasini
 tek basina kanitlamaz. Tam package/worker, privacy, long-context, held-out gate,
 measured expert routing ve benchmark contract'i için [LMM_RUNTIME.md](LMM_RUNTIME.md)
-ile [LMM_PORTFOLIO_ROUTING.md](LMM_PORTFOLIO_ROUTING.md)'ye bakın.
+ile [LMM_PORTFOLIO_ROUTING.md](LMM_PORTFOLIO_ROUTING.md)'ye; immutable
+shadow/canary/rollback contract'i için [LMM_RELEASE_GOVERNANCE.md](LMM_RELEASE_GOVERNANCE.md)'ye bakın.
 
 ## 9. Paralellik ve performans sınırları
 

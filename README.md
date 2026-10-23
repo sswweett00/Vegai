@@ -45,6 +45,9 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 - LMM/operator planlarını request+registry hash'ine bağlayan, typed çok-adımlı
   tool dataflow, shell'siz execution, distinct verifier ve provenance-bound
   evidence publication sağlayan read-only Verified Tool Orchestration plane'i;
+- frozen portfolio/model/gateway/held-out identity'lerine bağlı, raw
+  prompt/response saklamayan aggregate telemetry ile shadow → bounded canary →
+  promote/rollback kararını veren immutable LMM Release Governor control plane'i;
 - yerel Fortran özellik/entegrasyon testleri, bağımsız Python referans modeli
   ve GitHub Actions ile denetimli derleme.
 
@@ -76,6 +79,15 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 > reasoning/factuality'sini kanıtlamaz ve OS sandbox yerine geçmez. Sözleşme:
 > [VERIFIED_TOOL_ORCHESTRATION.md](docs/VERIFIED_TOOL_ORCHESTRATION.md).
 >
+> **Release governor notu:** `lmm_release_governor.py`, yalnız frozen
+> portfolio/task/model/gateway/evaluation/held-out-quality artifact'lerine
+> bağlı bir shadow → canary → promote/rollback karar düzlemi sağlar. Her policy
+> quality, reliability, safety, cost ve latency metric'ini zorunlu kılar;
+> time-uniform conservative bound ve aggregate-only telemetry kullanır. Model
+> eğitmez, canlı trafiği route/enforce etmez, raw prompt/response saklamaz,
+> provider weight attestation veya genel üstünlük kanıtı değildir. Sözleşme:
+> [LMM_RELEASE_GOVERNANCE.md](docs/LMM_RELEASE_GOVERNANCE.md).
+>
 > **Corpus pretraining notu:** `vegai_pretrain`, Transformer/LLM eğitimi değil;
 > deterministik positional + order-invariant hybrid context'lerden HDC semantic
 > prototype öğrenimidir. Varsayılan `hierarchical`, uzun kayıtlarda bounded
@@ -99,7 +111,9 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 > [LMM_RUNTIME.md](docs/LMM_RUNTIME.md)'dedir; bu boundary model weights'i,
 > evrensel LMM kalitesi veya neural training stack'i içermez. Ölçülmüş
 > target-domain model expert seçimi ve bağımsız panel planı için
-> [LMM_PORTFOLIO_ROUTING.md](docs/LMM_PORTFOLIO_ROUTING.md), LMM'lerle her görevde
+> [LMM_PORTFOLIO_ROUTING.md](docs/LMM_PORTFOLIO_ROUTING.md), onun production
+> shadow/canary/rollback uygulama contract'i için
+> [LMM_RELEASE_GOVERNANCE.md](docs/LMM_RELEASE_GOVERNANCE.md), LMM'lerle her görevde
 > doğrulanabilir biçimde rekabet hedefi için gereken tüm ayrı katmanların
 > uygulama/kanıt roadmap'i ise
 > [LMM_EXCELLENCE_ARCHITECTURE.md](docs/LMM_EXCELLENCE_ARCHITECTURE.md)'dedir.
@@ -126,6 +140,9 @@ make optimizer-check
 
 # Verified read-only LMM tool plan/control-plane contract
 make tool-check
+
+# Immutable shadow/canary LMM release, rollback and privacy contract
+make release-check
 
 # Sınır denetimli hata ayıklama derlemesi
 make debug
@@ -308,6 +325,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Dialogue quality release gate | `tools/dialogue_evaluation.py` | versioned held-out JSONL ile stateless exact prompt grounding/abstention olcumu, immutable input digest binding, privacy-conscious report ve threshold gate |
 | Optional LMM integration | `tools/lmm_contract.py`, `tools/lmm_model_manifest.py`, `tools/lmm_gateway.py`, `tools/lmm_quality_evaluation.py`, `tools/lmm_portfolio.py`, `tools/lmm_session.py`, `tools/lmm_knowledge.py`, `tools/lmm_assets.py` | gerçek external model backend'i için Unicode/subword tokenizer binding, model-artifact hash, long-context packer, source evidence, content-addressed media, held-out citation/abstention release gate, measured domain-expert routing/independent-panel planı ve fail-closed provenance; model weights/native neural training degil |
 | Verified tool orchestration | `tools/lmm_tool_orchestrator.py` | model/operator action planını exact request+registry binding, typed multi-step output reference, no-shell private worker execution, separate verifier digest ve gateway-ready evidence ile yürütür; final answer, OS sandbox veya universal reasoning claim'i değil |
+| LMM release governance | `tools/lmm_release_governor.py` | frozen portfolio/task/model/gateway/evaluation/held-out-quality provenance'ı, zorunlu quality/reliability/safety/cost/latency policy'si, aggregate-only shadow → bounded canary → promote/rollback state chain'i ve external traffic directive üretir; live routing, telemetry trust veya model superiority claim'i değil |
 | Continual transaction + health audit | `tools/continuous_shard_manifest.py`, `tools/continuous_pretrain.py`, `tools/continuous_pretrain_status.py` | immutable SHA-256 ledger, strict ingest gate, candidate generation, atomic state journal, read-only checkpoint/prefix/payload audit |
 | Production data/run control | `tools/production_dataset.py`, `tools/production_pretrain.py` | disk-backed exact record/token dedupe, deterministic held-out split, content-addressed shard package, exact leakage + vocabulary-capacity gate, immutable binary/data/policy provenance, real exactly-once run wrapper |
 | Kaynak preflight | `tools/training_resource_plan.py` | bounded RAM/checkpoint storage estimate, CPU/NUMA/OpenMP recommendation, static accelerator truth contract |

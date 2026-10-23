@@ -169,6 +169,7 @@ transaction için [CONTINUOUS_PRETRAINING.md](CONTINUOUS_PRETRAINING.md),
 held-out retrieval gate/audit için [QUALITY_ASSURANCE.md](QUALITY_ASSURANCE.md),
 gerçek model gateway/Unicode/multimodal boundary için [LMM_RUNTIME.md](LMM_RUNTIME.md),
 measured domain expert routing için [LMM_PORTFOLIO_ROUTING.md](LMM_PORTFOLIO_ROUTING.md),
-target-domain'de ölçülebilir LMM üstünlüğü roadmap'i için
+immutable shadow/canary/rollback release handoff için
+[LMM_RELEASE_GOVERNANCE.md](LMM_RELEASE_GOVERNANCE.md), target-domain'de ölçülebilir LMM üstünlüğü roadmap'i için
 [LMM_EXCELLENCE_ARCHITECTURE.md](LMM_EXCELLENCE_ARCHITECTURE.md) ve Fortran core
 invariantları için [ARCHITECTURE.md](ARCHITECTURE.md) referanstır.
