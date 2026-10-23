@@ -449,9 +449,10 @@ contains
       character(len=*), parameter :: PARALLEL_CONTEXT_PATH = 'vegai_parallel_context.txt'
       type(hdc_pretrain_model_t) :: model_a, model_b, restored, legacy_model, positional_model, continuation_model
       type(hdc_pretrain_model_t) :: hierarchical_model, local_only_model, hierarchical_replay, short_hierarchical_model
+      type(hdc_pretrain_model_t) :: coherent_model, coherent_replay, short_coherent_model
       type(hdc_pretrain_model_t) :: context_serial_model, context_parallel_model
       type(hdc_pretrain_config_t) :: config, resumed_config, strict_config, legacy_config, positional_config, continuation_config
-      type(hdc_pretrain_config_t) :: reference_config, hierarchical_config, local_only_config
+      type(hdc_pretrain_config_t) :: reference_config, hierarchical_config, local_only_config, coherent_config
       type(hdc_pretrain_config_t) :: context_serial_config, context_parallel_config
       type(pretrain_metrics_t) :: vocabulary_metrics, train_metrics, extension_metrics
       type(pretrain_execution_report_t) :: default_execution, serial_execution, parallel_execution
@@ -601,6 +602,17 @@ contains
       call assert_i32_equal(status, PT_OK, 'short-record hierarchical training succeeds')
       call assert_true(all(short_hierarchical_model%semantic_bits == model_a%semantic_bits), &
                        'hierarchical threshold leaves short-record hybrid semantics unchanged')
+      coherent_config = hierarchical_config
+      coherent_config%context_mode = PT_CONTEXT_COHERENT
+      call assert_true(trim(pretrain_context_mode_name(coherent_config%context_mode)) == 'coherent', &
+                       'coherent context encoder exposes a stable human-readable name')
+      call pretrain_build_vocabulary(short_coherent_model, CORPUS_PATH, coherent_config, &
+                                     vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'short-record coherent vocabulary succeeds')
+      call pretrain_train_file(short_coherent_model, CORPUS_PATH, coherent_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'short-record coherent training succeeds')
+      call assert_true(all(short_coherent_model%semantic_bits == model_a%semantic_bits), &
+                       'coherent threshold leaves short-record hybrid semantics unchanged')
 
       ! The fast positional encoder is an implementation-only optimization: it
       ! must preserve the legacy semantic plane exactly.  Hybrid adds a second,
@@ -657,6 +669,15 @@ contains
       call assert_i32_equal(status, PT_OK, 'local-only comparison training succeeds')
       call assert_true(any(hierarchical_model%semantic_bits /= local_only_model%semantic_bits), &
                        'hierarchical long-record summary changes learned semantic prototypes')
+      coherent_config = hierarchical_config
+      coherent_config%context_mode = PT_CONTEXT_COHERENT
+      call pretrain_build_vocabulary(coherent_model, HIERARCHICAL_PATH, coherent_config, &
+                                     vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'coherent vocabulary pass succeeds')
+      call pretrain_train_file(coherent_model, HIERARCHICAL_PATH, coherent_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'coherent long-record training succeeds')
+      call assert_true(any(coherent_model%semantic_bits /= hierarchical_model%semantic_bits), &
+                       'coherent cross-fold topical view differs from self-inclusive hierarchy')
       reference_config = hierarchical_config
       reference_config%reference_context_kernel = .true.
       call pretrain_build_vocabulary(hierarchical_replay, HIERARCHICAL_PATH, reference_config, &
@@ -666,6 +687,15 @@ contains
       call assert_i32_equal(status, PT_OK, 'hierarchical reference training succeeds')
       call assert_true(all(hierarchical_model%semantic_bits == hierarchical_replay%semantic_bits), &
                        'hierarchical fused local context remains bit-identical to reference learning')
+      reference_config = coherent_config
+      reference_config%reference_context_kernel = .true.
+      call pretrain_build_vocabulary(coherent_replay, HIERARCHICAL_PATH, reference_config, &
+                                     vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'coherent reference vocabulary pass succeeds')
+      call pretrain_train_file(coherent_replay, HIERARCHICAL_PATH, reference_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'coherent reference training succeeds')
+      call assert_true(all(coherent_model%semantic_bits == coherent_replay%semantic_bits), &
+                       'coherent fused local context remains bit-identical to reference learning')
       call pretrain_checkpoint_save(hierarchical_model, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'hierarchical checkpoint save succeeds')
       call pretrain_checkpoint_load(CHECKPOINT_PATH, restored, status)
@@ -674,6 +704,14 @@ contains
                             'checkpoint preserves hierarchical encoder semantics')
       call assert_true(all(restored%semantic_bits == hierarchical_model%semantic_bits), &
                        'hierarchical checkpoint restores semantic prototypes')
+      call pretrain_checkpoint_save(coherent_model, CHECKPOINT_PATH, status)
+      call assert_i32_equal(status, PT_OK, 'coherent checkpoint save succeeds')
+      call pretrain_checkpoint_load(CHECKPOINT_PATH, restored, status)
+      call assert_i32_equal(status, PT_OK, 'coherent checkpoint load succeeds')
+      call assert_i32_equal(restored%context_mode, PT_CONTEXT_COHERENT, &
+                            'checkpoint preserves coherent encoder semantics')
+      call assert_true(all(restored%semantic_bits == coherent_model%semantic_bits), &
+                       'coherent checkpoint restores semantic prototypes')
 
       call pretrain_checkpoint_save(model_a, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'pretraining checkpoint save succeeds')

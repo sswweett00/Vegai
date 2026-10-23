@@ -47,6 +47,11 @@ module hdc_pretraining
    ! HIERARCHICAL retains hybrid's local positional/topic evidence and adds a
    ! bounded whole-record topical summary for records with many active tokens.
    integer(int32), parameter, public :: PT_CONTEXT_HIERARCHICAL = 4_int32
+   ! COHERENT keeps the same bounded item budget as HIERARCHICAL but uses a
+   ! cross-fold record view for most global evidence.  The focal token appears
+   ! only once in the full-record contribution rather than in every global
+   ! contribution, reducing self-identity echo without mutable model reads.
+   integer(int32), parameter, public :: PT_CONTEXT_COHERENT = 5_int32
 
    ! Execution-only context providers.  CPU is the portable authoritative
    ! backend.  OPENVINO can offload only immutable, pre-positioned context
@@ -65,7 +70,9 @@ module hdc_pretraining
    integer(int32), parameter :: OPENVINO_POLL_MILLISECONDS = 1_int32
 
    character(len=8), parameter :: CHECKPOINT_MAGIC = 'VGHDC001'
-   integer(int32), parameter :: CHECKPOINT_VERSION = 5_int32
+   ! Version 6 introduces the persisted COHERENT context-mode enum.  The wire
+   ! layout is otherwise stable; v4/v5 checkpoints remain readable.
+   integer(int32), parameter :: CHECKPOINT_VERSION = 6_int32
    integer(int32), parameter :: CHECKPOINT_MIN_VERSION = 4_int32
 
    type, public :: hdc_pretrain_config_t
@@ -222,6 +229,8 @@ contains
          name = 'hybrid'
       case (PT_CONTEXT_HIERARCHICAL)
          name = 'hierarchical'
+      case (PT_CONTEXT_COHERENT)
+         name = 'coherent'
       case default
          name = 'invalid'
       end select
@@ -320,7 +329,8 @@ contains
       if (config%context_mode /= PT_CONTEXT_LEGACY_POSITIONAL .and. &
           config%context_mode /= PT_CONTEXT_POSITIONAL .and. &
           config%context_mode /= PT_CONTEXT_HYBRID .and. &
-          config%context_mode /= PT_CONTEXT_HIERARCHICAL) then
+          config%context_mode /= PT_CONTEXT_HIERARCHICAL .and. &
+          config%context_mode /= PT_CONTEXT_COHERENT) then
          status = PT_ERR_INVALID_ARGUMENT
          return
       end if
@@ -330,7 +340,11 @@ contains
          return
       end if
       if (config%context_provider == PT_CONTEXT_PROVIDER_OPENVINO) then
+         ! The lane worker has an exact ABI for positional/hybrid/hierarchical
+         ! immutable items.  COHERENT's center-dependent cross-fold item view
+         ! remains CPU-only until a separately verified worker ABI exists.
          if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL .or. &
+             config%context_mode == PT_CONTEXT_COHERENT .or. &
              len_trim(config%openvino_worker) == 0 .or. len_trim(config%openvino_python) == 0 .or. &
              len_trim(config%openvino_work_dir) == 0 .or. len_trim(config%openvino_device) == 0 .or. &
              config%openvino_min_contexts <= 0_int32 .or. config%openvino_timeout_milliseconds <= 0_int32 .or. &
@@ -829,6 +843,76 @@ contains
       line_context = hv_bitacc_finalize(line_accumulator, model%tie_seed)
    end subroutine pretrain_build_line_topic_context
 
+   ! COHERENT uses three immutable record summaries while preserving the
+   ! HIERARCHICAL channel's fixed three-item context budget:
+   !   1 x full-record topic + 2 x opposite parity-fold topic.
+   ! The parity-fold topic cannot contain the focal token occurrence, so it
+   ! contributes cross-position record evidence without repeatedly echoing the center's
+   ! own base identity.  A repeated token at another source position remains a
+   ! valid contextual occurrence.  This is a deterministic structural context
+   ! view, not a learned attention mechanism or an unbounded document memory.
+   subroutine pretrain_build_coherent_line_topic_contexts(model, token_slots, n_tokens, active_count, &
+                                                          line_context, fold_contexts, fold_active_counts, status)
+      type(hdc_pretrain_model_t), intent(in) :: model
+      integer(int32), intent(in) :: token_slots(:)
+      integer(int32), intent(in) :: n_tokens, active_count
+      type(hv_t), intent(out) :: line_context, fold_contexts(2)
+      integer(int32), intent(out) :: fold_active_counts(2)
+      integer(int32), intent(out) :: status
+      type(hv_bitacc_t) :: line_accumulator, fold_accumulators(2)
+      integer(int32) :: token_index, slot, fold_index, add_status, observed_active_count
+
+      line_context = hv_zero()
+      fold_contexts(1) = hv_zero()
+      fold_contexts(2) = hv_zero()
+      fold_active_counts = 0_int32
+      status = PT_OK
+      if (active_count < HIERARCHICAL_MIN_ACTIVE_TOKENS) return
+      if (active_count > n_tokens .or. n_tokens > size(token_slots, kind=int32)) then
+         status = PT_ERR_INVALID_ARGUMENT
+         return
+      end if
+
+      do token_index = 1, n_tokens
+         if (token_slots(token_index) == 0_int32) cycle
+         fold_index = modulo(token_index - 1_int32, 2_int32) + 1_int32
+         fold_active_counts(fold_index) = fold_active_counts(fold_index) + 1_int32
+      end do
+      observed_active_count = fold_active_counts(1) + fold_active_counts(2)
+      if (observed_active_count /= active_count) then
+         status = PT_ERR_INVALID_ARGUMENT
+         return
+      end if
+
+      call hv_bitacc_reset(line_accumulator, active_count)
+      do fold_index = 1, 2
+         if (fold_active_counts(fold_index) > 0_int32) then
+            call hv_bitacc_reset(fold_accumulators(fold_index), fold_active_counts(fold_index))
+         end if
+      end do
+      do token_index = 1, n_tokens
+         slot = token_slots(token_index)
+         if (slot == 0_int32) cycle
+         call hv_bitacc_add_words(line_accumulator, model%base_bits(:, slot), add_status)
+         if (add_status /= HV_OK) then
+            status = PT_ERR_HYPERVECTOR
+            return
+         end if
+         fold_index = modulo(token_index - 1_int32, 2_int32) + 1_int32
+         call hv_bitacc_add_words(fold_accumulators(fold_index), model%base_bits(:, slot), add_status)
+         if (add_status /= HV_OK) then
+            status = PT_ERR_HYPERVECTOR
+            return
+         end if
+      end do
+      line_context = hv_bitacc_finalize(line_accumulator, model%tie_seed)
+      do fold_index = 1, 2
+         if (fold_active_counts(fold_index) > 0_int32) then
+            fold_contexts(fold_index) = hv_bitacc_finalize(fold_accumulators(fold_index), model%tie_seed)
+         end if
+      end do
+   end subroutine pretrain_build_coherent_line_topic_contexts
+
    ! Determine which centers will update and the exact experience counter that
    ! each update must observe.  Context vectors depend only on immutable base
    ! identities plus this counter-derived tie seed; prototype mutation happens
@@ -929,14 +1013,15 @@ contains
    ! state and is therefore OpenMP-safe.  Its output is committed separately in
    ! source order by pretrain_apply_center_update.
    subroutine pretrain_construct_center_context(model, config, token_slots, n_tokens, center_index, &
-                                                expected_neighbor_count, line_topic_context, line_active_tokens, &
-                                                experience_before, context_bits, status)
+                                                expected_neighbor_count, line_topic_context, line_topic_fold_contexts, &
+                                                line_active_tokens, line_topic_fold_active_counts, experience_before, &
+                                                context_bits, status)
       type(hdc_pretrain_model_t), intent(in) :: model
       type(hdc_pretrain_config_t), intent(in) :: config
       integer(int32), intent(in) :: token_slots(:)
       integer(int32), intent(in) :: n_tokens, center_index, expected_neighbor_count
-      type(hv_t), intent(in) :: line_topic_context
-      integer(int32), intent(in) :: line_active_tokens
+      type(hv_t), intent(in) :: line_topic_context, line_topic_fold_contexts(2)
+      integer(int32), intent(in) :: line_active_tokens, line_topic_fold_active_counts(2)
       integer(int64), intent(in) :: experience_before
       integer(int64), intent(out) :: context_bits(HV_WORDS)
       integer(int32), intent(out) :: status
@@ -945,8 +1030,9 @@ contains
       type(hv_t) :: neighbor, positioned, context
       integer(int32) :: center_slot, offset, neighbor_index, neighbor_slot
       integer(int32) :: add_status, shift_bits, neighbors, global_items, global_index, maximum_items
+      integer(int32) :: center_fold, opposite_fold
       integer(int64) :: tie_seed
-      logical :: reference_kernel, topic_mode
+      logical :: reference_kernel, topic_mode, use_global_topic, use_coherent_cross_topic
 
       status = PT_OK
       context_bits = 0_int64
@@ -964,14 +1050,33 @@ contains
       ! vocabulary's word-major SoA column.
       reference_kernel = config%reference_context_kernel
       topic_mode = config%context_mode == PT_CONTEXT_HYBRID .or. &
-                   config%context_mode == PT_CONTEXT_HIERARCHICAL
+                   config%context_mode == PT_CONTEXT_HIERARCHICAL .or. &
+                   config%context_mode == PT_CONTEXT_COHERENT
+      use_global_topic = .false.
+      use_coherent_cross_topic = .false.
+      center_fold = modulo(center_index - 1_int32, 2_int32) + 1_int32
+      opposite_fold = 3_int32 - center_fold
+      select case (config%context_mode)
+      case (PT_CONTEXT_HIERARCHICAL)
+         use_global_topic = line_active_tokens >= HIERARCHICAL_MIN_ACTIVE_TOKENS
+      case (PT_CONTEXT_COHERENT)
+         if (line_active_tokens >= HIERARCHICAL_MIN_ACTIVE_TOKENS) then
+            if (line_topic_fold_active_counts(1) < 0_int32 .or. &
+                line_topic_fold_active_counts(2) < 0_int32 .or. &
+                line_topic_fold_active_counts(1) + line_topic_fold_active_counts(2) /= line_active_tokens) then
+               status = PT_ERR_INVALID_ARGUMENT
+               return
+            end if
+            use_global_topic = .true.
+            use_coherent_cross_topic = line_topic_fold_active_counts(opposite_fold) > 0_int32
+         end if
+      end select
       if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL) then
          call hv_acc_reset(legacy_accumulator)
       else
          maximum_items = expected_neighbor_count
          if (topic_mode) maximum_items = 2_int32 * maximum_items
-         if (config%context_mode == PT_CONTEXT_HIERARCHICAL .and. &
-             line_active_tokens >= HIERARCHICAL_MIN_ACTIVE_TOKENS) then
+         if (use_global_topic) then
             maximum_items = maximum_items + min(HIERARCHICAL_GLOBAL_CONTEXT_WEIGHT, &
                                                 HV_BITACC_MAX_ITEMS - maximum_items)
          end if
@@ -1017,8 +1122,8 @@ contains
                return
             end if
          else
-            ! HYBRID and HIERARCHICAL share the exact local positional+topic
-            ! representation.  The pair kernel is algebraically identical to
+            ! HYBRID, HIERARCHICAL, and COHERENT share the exact local
+            ! positional+topic representation.  The pair kernel is algebraically identical to
             ! two adds but eliminates both a 2 KiB rotate temporary and a
             ! second carry pass.
             call hv_bitacc_add_permuted_pair_words(bit_accumulator, model%base_bits(:, neighbor_slot), &
@@ -1035,17 +1140,36 @@ contains
          return
       end if
 
-      if (config%context_mode == PT_CONTEXT_HIERARCHICAL .and. &
-          line_active_tokens >= HIERARCHICAL_MIN_ACTIVE_TOKENS) then
+      if (use_global_topic) then
          global_items = min(HIERARCHICAL_GLOBAL_CONTEXT_WEIGHT, &
                             HV_BITACC_MAX_ITEMS - bit_accumulator%sample_count)
-         do global_index = 1, global_items
-            call hv_bitacc_add(bit_accumulator, line_topic_context, add_status)
-            if (add_status /= HV_OK) then
-               status = PT_ERR_HYPERVECTOR
-               return
+         if (config%context_mode == PT_CONTEXT_COHERENT .and. use_coherent_cross_topic) then
+            ! Keep one all-record anchor for coverage, then favor the opposite
+            ! parity fold for the remaining global weight.  The latter excludes
+            ! this token occurrence and therefore reduces self-echo.
+            if (global_items > 0_int32) then
+               call hv_bitacc_add(bit_accumulator, line_topic_context, add_status)
+               if (add_status /= HV_OK) then
+                  status = PT_ERR_HYPERVECTOR
+                  return
+               end if
             end if
-         end do
+            do global_index = 2, global_items
+               call hv_bitacc_add(bit_accumulator, line_topic_fold_contexts(opposite_fold), add_status)
+               if (add_status /= HV_OK) then
+                  status = PT_ERR_HYPERVECTOR
+                  return
+               end if
+            end do
+         else
+            do global_index = 1, global_items
+               call hv_bitacc_add(bit_accumulator, line_topic_context, add_status)
+               if (add_status /= HV_OK) then
+                  status = PT_ERR_HYPERVECTOR
+                  return
+               end if
+            end do
+         end if
       end if
 
       tie_seed = ieor(vocab_seed_for_slot(model%vocabulary, center_slot), ishftc(experience_before, 19))
@@ -1147,7 +1271,8 @@ contains
          status = PT_ERR_INVALID_ARGUMENT
          return
       end if
-      if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL .or. token_slots(center_index) == 0_int32) then
+      if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL .or. &
+          config%context_mode == PT_CONTEXT_COHERENT .or. token_slots(center_index) == 0_int32) then
          status = PT_ERR_CONTEXT_PROVIDER
          return
       end if
@@ -1529,7 +1654,8 @@ contains
       center_actual_item_counts = 0_int32
       center_groups = 0_int32
       if (config%context_provider /= PT_CONTEXT_PROVIDER_OPENVINO) return
-      if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL) then
+      if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL .or. &
+          config%context_mode == PT_CONTEXT_COHERENT) then
          status = PT_ERR_CONTEXT_PROVIDER
          return
       end if
@@ -1799,9 +1925,9 @@ contains
       integer(int64) :: non_ascii_count
       integer(int64), allocatable :: prepared_context_bits(:, :), experiences_before(:)
       integer(int32), allocatable :: neighbor_counts(:), prepared_status(:), line_update_counts(:)
-      integer(int32) :: touched_slots(MAX_TOKENS_PER_LINE)
+      integer(int32) :: touched_slots(MAX_TOKENS_PER_LINE), line_topic_fold_active_counts(2)
       logical, allocatable :: update_required(:)
-      type(hv_t) :: line_topic_context
+      type(hv_t) :: line_topic_context, line_topic_fold_contexts(2)
       logical :: eof, found, overlong, truncated, provider_used, construct_in_parallel
 
       status = PT_OK
@@ -1877,10 +2003,19 @@ contains
          if (status /= PT_OK) exit
 
          line_topic_context = hv_zero()
+         line_topic_fold_contexts(1) = hv_zero()
+         line_topic_fold_contexts(2) = hv_zero()
+         line_topic_fold_active_counts = 0_int32
          if (config%context_mode == PT_CONTEXT_HIERARCHICAL .and. &
              line_active_tokens >= HIERARCHICAL_MIN_ACTIVE_TOKENS) then
             call pretrain_build_line_topic_context(model, token_slots, n_tokens, line_active_tokens, &
                                                    line_topic_context, status)
+            if (status /= PT_OK) exit
+         else if (config%context_mode == PT_CONTEXT_COHERENT .and. &
+                  line_active_tokens >= HIERARCHICAL_MIN_ACTIVE_TOKENS) then
+            call pretrain_build_coherent_line_topic_contexts(model, token_slots, n_tokens, line_active_tokens, &
+                                                             line_topic_context, line_topic_fold_contexts, &
+                                                             line_topic_fold_active_counts, status)
             if (status /= PT_OK) exit
          end if
 
@@ -1933,7 +2068,8 @@ contains
                   if (.not. update_required(token_index)) cycle
                   call pretrain_construct_center_context(model, config, token_slots, n_tokens, token_index, &
                                                          neighbor_counts(token_index), line_topic_context, &
-                                                         line_active_tokens, experiences_before(token_index), &
+                                                         line_topic_fold_contexts, line_active_tokens, &
+                                                         line_topic_fold_active_counts, experiences_before(token_index), &
                                                          prepared_context_bits(:, token_index), &
                                                          prepared_status(token_index))
                end do
@@ -1943,7 +2079,8 @@ contains
                   if (.not. update_required(token_index)) cycle
                   call pretrain_construct_center_context(model, config, token_slots, n_tokens, token_index, &
                                                          neighbor_counts(token_index), line_topic_context, &
-                                                         line_active_tokens, experiences_before(token_index), &
+                                                         line_topic_fold_contexts, line_active_tokens, &
+                                                         line_topic_fold_active_counts, experiences_before(token_index), &
                                                          prepared_context_bits(:, token_index), &
                                                          prepared_status(token_index))
                end do

@@ -291,7 +291,7 @@ jobs:
               print(file=summary)
               print("| Mode | Median seconds | Training token/s | Controlled Top-1 cluster | Mean Top-1 similarity |", file=summary)
               print("|---|---:|---:|---:|---:|", file=summary)
-              for mode in ("hybrid", "hierarchical"):
+              for mode in ("hybrid", "hierarchical", "coherent"):
                   print(
                       f"| {mode} | {long_speed[mode]['median_seconds']:.6f} | "
                       f"{long_speed[mode]['training_tokens_per_second']:.3f} | "

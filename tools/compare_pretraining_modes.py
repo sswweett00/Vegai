@@ -38,7 +38,7 @@ BASE_EPOCHS = 2
 BASE_TRAINING_TOKENS = 2_048
 BASE_CONTEXT_PAIRS = 6_656
 BASE_MODES = ("legacy", "positional", "hybrid")
-LONG_CONTEXT_MODES = ("hybrid", "hierarchical")
+LONG_CONTEXT_MODES = ("hybrid", "hierarchical", "coherent")
 LONG_RECORDS_PER_CLUSTER = 16
 LONG_EPOCHS = 2
 
@@ -388,9 +388,18 @@ def main() -> int:
                 "hierarchical long-record cohesion gain was unexpectedly small: "
                 f"{hierarchical_similarity_gain:.6f}",
             )
+            coherent_similarity_gain = (
+                long_quality["coherent"]["mean_top1_similarity"]
+                - long_quality["hybrid"]["mean_top1_similarity"]
+            )
+            require(
+                long_quality["coherent"]["same_cluster_top1_hits"]
+                >= long_quality["hybrid"]["same_cluster_top1_hits"],
+                "coherent cross-fold mode regressed controlled long-record top-1 cohesion",
+            )
 
             report: dict[str, Any] = {
-                "schema": "vegai-pretraining-mode-comparison/v3",
+                "schema": "vegai-pretraining-mode-comparison/v4",
                 "hardware": collect_hardware_profile(),
                 "timing_scope": (
                     "one vegai_pretrain train process per sample; compilation, CI setup, fixture construction, "
@@ -428,9 +437,17 @@ def main() -> int:
                     "hierarchical_mean_top1_similarity_gain_vs_hybrid": round(
                         hierarchical_similarity_gain, 6
                     ),
+                    "coherent_mean_top1_similarity_gain_vs_hybrid": round(
+                        coherent_similarity_gain, 6
+                    ),
                     "hierarchical_speedup_vs_hybrid": round(
                         long_speed["hybrid"]["median_seconds"]
                         / long_speed["hierarchical"]["median_seconds"],
+                        4,
+                    ),
+                    "coherent_speedup_vs_hybrid": round(
+                        long_speed["hybrid"]["median_seconds"]
+                        / long_speed["coherent"]["median_seconds"],
                         4,
                     ),
                 },
@@ -452,6 +469,9 @@ def main() -> int:
                     ),
                     "hierarchical_long_record_mean_top1_similarity_gain_vs_hybrid": round(
                         hierarchical_similarity_gain, 6
+                    ),
+                    "coherent_long_record_mean_top1_similarity_gain_vs_hybrid": round(
+                        coherent_similarity_gain, 6
                     ),
                 },
             }

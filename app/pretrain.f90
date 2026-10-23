@@ -189,6 +189,9 @@ contains
                case ('hierarchical')
                   parsed_config%context_mode = PT_CONTEXT_HIERARCHICAL
                   io_status = 0
+               case ('coherent')
+                  parsed_config%context_mode = PT_CONTEXT_COHERENT
+                  io_status = 0
                case default
                   io_status = 1
                end select
@@ -536,8 +539,9 @@ contains
       write(output_unit, '(A)') '  vegai_pretrain inspect CHECKPOINT [--query TOKEN | --query-file PATH]'
       write(output_unit, '(A)') 'Train options:'
       write(output_unit, '(A)') '  --max-vocab N --min-frequency N --window N --position-shift N --context-mode MODE --epochs N'
-      write(output_unit, '(A)') '  MODE is legacy, positional, hybrid, or hierarchical (default hierarchical)'
+      write(output_unit, '(A)') '  MODE is legacy, positional, hybrid, hierarchical, or coherent (default hierarchical)'
       write(output_unit, '(A)') '  hierarchical adds bounded whole-record topical evidence for long records'
+      write(output_unit, '(A)') '  coherent is CPU-only: cross-fold topical context reduces global self-identity echo'
       write(output_unit, '(A)') '  continue first extends vocabulary from one immutable shard, then trains it'
       write(output_unit, '(A)') '  --initial-plasticity N --minimum-plasticity N --decay-events N --strict --query TOKEN'
       write(output_unit, '(A)') '  --parallel-context-build (default) builds immutable per-record contexts with OpenMP when worthwhile'

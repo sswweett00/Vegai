@@ -54,7 +54,7 @@ LOCK_FILENAME = ".continuous-pretrain.lock"
 # app/pretrain.f90 receives corpus/checkpoint arguments in character(len=512).
 MAX_PRETRAIN_CLI_PATH_BYTES = 512
 HEX64 = set("0123456789abcdef")
-MODES = {"legacy", "positional", "hybrid", "hierarchical"}
+MODES = {"legacy", "positional", "hybrid", "hierarchical", "coherent"}
 
 
 class ContinuousPretrainError(RuntimeError):
@@ -344,7 +344,7 @@ def validate_policy(policy: dict[str, Any]) -> None:
     require(policy["min_frequency"] == 1, "lossless continuous mode requires min_frequency=1")
     require(policy["context_window"] > 0, "context_window must be positive")
     require(policy["position_shift_bits"] != 0, "position_shift_bits must be nonzero")
-    require(policy["context_mode"] in MODES, "context_mode must be legacy, positional, hybrid, or hierarchical")
+    require(policy["context_mode"] in MODES, "context_mode must be legacy, positional, hybrid, hierarchical, or coherent")
     require(policy["epochs_per_shard"] > 0, "epochs_per_shard must be positive")
     require(0 < policy["minimum_plasticity_percent"] <= policy["initial_plasticity_percent"] <= 100,
             "plasticity percentages are invalid")
