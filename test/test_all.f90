@@ -705,6 +705,8 @@ contains
                             'checkpoint preserves hierarchical encoder semantics')
       call assert_true(all(restored%semantic_bits == hierarchical_model%semantic_bits), &
                        'hierarchical checkpoint restores semantic prototypes')
+      call assert_i32_equal(coherent_model%context_mode, PT_CONTEXT_COHERENT, &
+                            'coherent model retains its context-mode identity before checkpointing')
       call pretrain_checkpoint_save(coherent_model, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'coherent checkpoint save succeeds')
       open(newunit=unit, file=CHECKPOINT_PATH, status='old', access='stream', form='unformatted', &
