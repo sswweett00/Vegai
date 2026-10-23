@@ -42,7 +42,7 @@ FIELD := $(BUILD_DIR)/vegai_field
 CHAT := $(BUILD_DIR)/vegai_chat
 TEST_BINARY := $(BUILD_DIR)/vegai_tests
 
-.PHONY: all engine pretrain field chat test run run-pretrain run-field run-chat check field-check optimizer-check data-check capability-check lmm-check dialogue-check clean clean-all debug portable native portable-test native-test
+.PHONY: all engine pretrain field chat test run run-pretrain run-field run-chat check field-check optimizer-check tool-check data-check capability-check lmm-check dialogue-check clean clean-all debug portable native portable-test native-test
 
 # Default target: portable optimized GNU binaries without host-only ISA flags.
 all: engine pretrain field chat
@@ -111,6 +111,7 @@ check:
 	python3 tools/verify_reference.py
 	python3 tools/verify_tokenless_field.py
 	python3 tools/verify_evidential_optimizer.py
+	python3 tools/verify_lmm_tool_orchestrator.py
 	python3 tools/verify_example_corpus.py
 	python3 tools/verify_hardware_compatibility.py
 	python3 tools/verify_training_resource_plan.py
@@ -127,6 +128,11 @@ field-check: $(FIELD)
 # claim that any one optimizer is universally best.  It needs no model weights.
 optimizer-check:
 	python3 tools/verify_evidential_optimizer.py
+
+# Typed, no-shell, independently checked read-only tool execution for actual
+# LMM/operator plans. This verifies the control plane, not a model's reasoning.
+tool-check:
+	python3 tools/verify_lmm_tool_orchestrator.py
 
 # Strict stdlib-only verification of policy-driven reasoning/problem-solving/
 # coding (or operator-defined) curriculum packaging.  It uses only temporary
@@ -151,13 +157,14 @@ data-check:
 
 # Optional real Unicode/BPE tokenizer path plus stdlib-only worker/context,
 # evidence, session, multimodal assets, held-out citation/abstention release,
-# and measured domain-expert portfolio-routing contracts. No model weights are
-# pulled.
+# measured domain-expert portfolio-routing and verified read-only tool-plan
+# contracts. No model weights are pulled.
 lmm-check:
 	@test -x "$(LMM_PYTHON)" || python3 -m venv "$(LMM_VENV)"
 	$(LMM_PYTHON) -m pip install --disable-pip-version-check -r requirements-lmm.txt
 	$(LMM_PYTHON) tools/verify_lmm_runtime.py
 	$(LMM_PYTHON) tools/verify_lmm_portfolio.py
+	$(LMM_PYTHON) tools/verify_lmm_tool_orchestrator.py
 
 clean:
 	rm -rf $(BUILD_DIR)

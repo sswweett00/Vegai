@@ -46,6 +46,7 @@ licensed data / feedback / benchmarks
 | Long dialogue/evidence/media | **Uygulandı**; hash-chain ledger, token budget, FTS evidence, image/audio/video asset contract | Semantic memory, embedding/reranker ve gerçek encoder quality evaluation |
 | Citation/abstention quality gate | **Uygulandı**; held-out real gateway runner ve release threshold | Factual entailment, human preference, safety/red-team ve calibration benchmark'ları |
 | Model portfolio/router | **Kısmi uygulandı**; provenance-bound target-domain expert routing, measured threshold ve independent-panel planı | Persistent policy service, shadow/counterfactual evaluation, canary/rollback ve live queue/SLO validation |
+| Verified tool-use/reasoning boundary | **Kısmi uygulandı**; request+registry-bound typed plan, sequential tool-result dataflow, no-shell executor, distinct verifier ve evidence artifact | Real OS sandbox/network policy, side effects+human confirmation, verifier independence audit, benchmarked planning/tool-use quality ve semantic adjudication |
 | Algorithm/optimizer evidence governor | **Uygulandı**; immutable algorithm/optimizer/training/artifact identities, repeated held-out bounded metrics, Bonferroni-Hoeffding confidence ve robust Pareto fail-closed selection | Gerçek bağımsız replication, benchmark contamination audit, energy/throughput measurement ve selected optimizer'ın gerçek training run kanıtı |
 | Neural pretraining/alignment | **Harici gerçek model gerekir**; EPO yalnız hangi kanıtlanmış external config'in seçilebileceğini govern eder | Tensor runtime, distributed optimizer, data mixture, loss/eval curves |
 | Multimodal reasoning | **Arayüz hazır**; assets + worker protocol | Licensed paired data, VLM/ASR/video encoder, modality task scores |
@@ -168,13 +169,19 @@ yerine geçmez.
 3. **Memory:** hash-chained raw dialogue, user-consented durable facts, scoped
    summaries, memory expiry ve deletion audit. Model summary'si source history
    yerine geçmemelidir.
-4. **Tools:** typed schemas, least privilege, idempotency key, sandbox,
-   timeout/retry, side-effect confirmation ve tool-result provenance.
-5. **Reasoning:** plan/execute/verify ayrımı, calculator/search/code tools için
-   independent verifier, confidence calibration ve unsupported-claim abstention.
+4. **Tools:** `lmm_tool_orchestrator.py` typed schema, request/registry
+   binding, idempotency key, no-shell timeout, result provenance ve declared
+   distinct verifier ile **read-only** tool plane sağlar. OS sandbox, network
+   egress policy, retry semantics, mutating side-effect confirmation ve human
+   authorization ayrıca gerekir.
+5. **Reasoning:** Plan/execute/verify ayrımı ve previous-result dataflow
+   uygulandı; calculator/search/code tool'unun gerçek semantic verifier'ı,
+   confidence calibration, plan quality ve unsupported-claim abstention
+   evaluation'ı ayrı target-domain benchmark gerektirir.
 
 Her tool/retrieval bağlantısı için attack simulation, stale-data testleri ve
-source-to-answer trace gerekir.
+source-to-answer trace gerekir. Contract ve negative-gate test kapsamı:
+[VERIFIED_TOOL_ORCHESTRATION.md](VERIFIED_TOOL_ORCHESTRATION.md).
 
 ## 6. Multimodal plane
 

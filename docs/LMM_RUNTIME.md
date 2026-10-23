@@ -20,6 +20,7 @@ strict session JSONL ─────┐
                            ├── lmm_session.py ── vegai-lmm-request/v1
 Unicode documents JSONL ──┼── lmm_knowledge.py ─ vegai-lmm-evidence/v1
 image/audio/video bytes ──┼── lmm_assets.py ──── asset registry
+model/operator tool plan ─┼── lmm_tool_orchestrator.py ─ verified tool evidence
                            │
 model manifest + tokenizer ┴── lmm_gateway.py
                                   │
@@ -45,7 +46,8 @@ LMM düzlemi şu bileşenlerden oluşur:
 | `tools/lmm_gateway_template.py` | Shell kullanmayan shared `{request}`/`{evidence}` gateway argv template doğrulaması; redirect/duplicate placeholder ve response-retention'i reddeder |
 | `tools/lmm_quality_evaluation.py` | Held-out gerçek gateway çağrılarında model-emitted citation/abstention contract'i, privacy-conscious report ve fail-closed release threshold'ları |
 | `tools/lmm_portfolio.py` | Immutable manifest + passed quality report + target-domain evaluation card ile deterministic expert model routing veya bağımsız panel planı; `single-best` gerçek dispatch'i |
-| `tools/verify_lmm_runtime.py`, `tools/verify_lmm_portfolio.py` | Runtime boundary ile domain-routing/privacy/provenance/fail-closed dispatch entegrasyon testleri |
+| `tools/lmm_tool_orchestrator.py` | Request+registry-bound typed read-only tool planı, prior-result reference, no-shell private execution, distinct verifier ve gateway-ready evidence publication |
+| `tools/verify_lmm_runtime.py`, `tools/verify_lmm_portfolio.py`, `tools/verify_lmm_tool_orchestrator.py` | Runtime boundary ile domain-routing/privacy/provenance/fail-closed dispatch ve tool-plan entegrasyon testleri |
 
 ## 2. Gerçek serbest doğal dil üretimi
 
@@ -370,14 +372,35 @@ kanıtı diye göstermez. Bu yaklaşım, operator-owned human/adjudicator/tool
 workflow'unda bağımsız critique için güvenli başlangıçtır. Tam şema, örnek ve
 sınırlar için [LMM_PORTFOLIO_ROUTING.md](LMM_PORTFOLIO_ROUTING.md)'ye bakın.
 
-## 11. Doğrulama
+## 11. Typed, verified tool-use plane
+
+`tools/lmm_tool_orchestrator.py`, LMM'in veya operatörün output olarak verdiği
+observable action planını actual answer'dan ayrı işler. Plan exact canonical
+request digest'i ve registry file SHA-256'sına bağlıdır. Her read-only tool;
+hash-pinned input/output schema, executor implementation, no-shell argv ve
+ayrı implementation hash'i taşıyan verifier ile declared olur. Prior pass eden
+result'tan RFC 6901 JSON Pointer ile sonraki typed invocation input'una dataflow
+verilebilir; forward/cyclic reference kabul edilmez.
+
+Başarılı result, raw plan/request/result taşımayan execution report ve normal
+`vegai-lmm-evidence/v1` artifact'ı üretir. Evidence, lmm gateway'e verilebilir;
+model response'u yine backend'in kendi output'udur ve citation marker'ını model
+üretir. Orchestrator final prose, hidden chain-of-thought veya tool sonucu
+uydurmaz. Salt-okunur sınır, timeout ve credential-minimized environment vardır;
+ancak container/OS sandbox, network policy, side-effect confirmation, real
+verifier independence ve held-out tool-use evaluation operator/deployment
+katmanında zorunludur. Tam contract:
+[VERIFIED_TOOL_ORCHESTRATION.md](VERIFIED_TOOL_ORCHESTRATION.md).
+
+## 12. Doğrulama
 
 ```bash
 python3 tools/verify_lmm_runtime.py
 python3 tools/verify_lmm_portfolio.py
+python3 tools/verify_lmm_tool_orchestrator.py
 ```
 
-Bu iki test birlikte şunları denetler:
+Bu üç test birlikte şunları denetler:
 
 - Türkçe, Arapça ve Japonca Unicode retrieval;
 - `tokenizers` kuruluysa gerçek `tokenizer.json` BPE yolu;
@@ -392,6 +415,8 @@ Bu iki test birlikte şunları denetler:
   held-out quality/release evaluator (başarılı ve bilinçli başarısız gate);
 - measured domain-expert portfolio ranking, bağımsız panel, selected gateway
   dispatch, raw-text privacy ve başka manifest'e bağlı command fail-closed rejection;
+- request/registry-bound typed tool plan, predecessor reference, separate verifier,
+  no-replace evidence/report, raw argument/result privacy ve negative tool gates;
 - modality capability yoksa fail-closed rejection;
 - gerçek gateway child process benchmark sınırı.
 
@@ -399,7 +424,7 @@ Bu iki test birlikte şunları denetler:
 model ağırlığı içermez; yalnız operatorün kendi OpenVINO model package'ini
 çalıştırması için optional provider bağımlılığıdır.
 
-## 12. Hâlâ yapılmamış ve iddia edilmeyenler
+## 13. Hâlâ yapılmamış ve iddia edilmeyenler
 
 Bu entegrasyon aşağıdakileri otomatik olarak sağlamaz:
 
@@ -409,7 +434,9 @@ Bu entegrasyon aşağıdakileri otomatik olarak sağlamaz:
 - universal factual doğruluk, güvenlik alignment veya copyright/PII temizliği;
 - audio/video semantics veya visual reasoning; bunlar gerçek declared VLM/AV
   worker/model gerektirir;
-- LMM benchmark, human preference, red-team veya multimodal task score'u.
+- LMM benchmark, human preference, red-team veya multimodal task score'u;
+- kernel/container sandbox, network egress policy, real verifier independence,
+  mutating-tool authorization/idempotency veya tool-use benchmark'ı.
 
 Bu yüzden bu katman “LMM eklendi” demek için yeterli bir operational boundary
 sağlar; “Vegai artık evrensel LMM'den daha iyi” sonucu çıkarmaz. Gerçek kalite

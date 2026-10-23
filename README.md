@@ -42,6 +42,9 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 - gerçek operator-supplied LMM backend'i için ayrı Unicode/subword, long-context,
   source-grounded knowledge, image/audio/video asset ve OpenVINO/API/worker
   integration plane'i; model weights'i depoda yoktur;
+- LMM/operator planlarını request+registry hash'ine bağlayan, typed çok-adımlı
+  tool dataflow, shell'siz execution, distinct verifier ve provenance-bound
+  evidence publication sağlayan read-only Verified Tool Orchestration plane'i;
 - yerel Fortran özellik/entegrasyon testleri, bağımsız Python referans modeli
   ve GitHub Actions ile denetimli derleme.
 
@@ -65,6 +68,13 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 > repeated bounded ölçümlerle all-objective confidence-bound baseline
 > improvement kanıtlanırsa seçer; kanıt yoksa fail-closed olur. Sözleşme:
 > [EVIDENTIAL_OPTIMIZER.md](docs/EVIDENTIAL_OPTIMIZER.md).
+>
+> **Verified tool notu:** `lmm_tool_orchestrator.py`, gerçek LMM/operatör
+> planındaki declared salt-okunur araçları typed input/output, shell'siz private
+> invocation ve farklı implementation hash'li verifier ile yürütür; pass eden
+> sonuçları gateway evidence'ine dönüştürür. Final answer üretmez, modelin
+> reasoning/factuality'sini kanıtlamaz ve OS sandbox yerine geçmez. Sözleşme:
+> [VERIFIED_TOOL_ORCHESTRATION.md](docs/VERIFIED_TOOL_ORCHESTRATION.md).
 >
 > **Corpus pretraining notu:** `vegai_pretrain`, Transformer/LLM eğitimi değil;
 > deterministik positional + order-invariant hybrid context'lerden HDC semantic
@@ -113,6 +123,9 @@ printf 'raw bytes, not tokens\n' > /tmp/vegai-raw.bin
 
 # Algorithm/optimizer evidence gate (model weights veya sentetik cevap üretmez)
 make optimizer-check
+
+# Verified read-only LMM tool plan/control-plane contract
+make tool-check
 
 # Sınır denetimli hata ayıklama derlemesi
 make debug
@@ -294,6 +307,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Grounded dialogue retrieval | `src/dialogue_retrieval.f90`, `app/chat.f90` | operator TSV response index'i, strict ASCII/OOV gate, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; free-form LLM generation degil |
 | Dialogue quality release gate | `tools/dialogue_evaluation.py` | versioned held-out JSONL ile stateless exact prompt grounding/abstention olcumu, immutable input digest binding, privacy-conscious report ve threshold gate |
 | Optional LMM integration | `tools/lmm_contract.py`, `tools/lmm_model_manifest.py`, `tools/lmm_gateway.py`, `tools/lmm_quality_evaluation.py`, `tools/lmm_portfolio.py`, `tools/lmm_session.py`, `tools/lmm_knowledge.py`, `tools/lmm_assets.py` | gerçek external model backend'i için Unicode/subword tokenizer binding, model-artifact hash, long-context packer, source evidence, content-addressed media, held-out citation/abstention release gate, measured domain-expert routing/independent-panel planı ve fail-closed provenance; model weights/native neural training degil |
+| Verified tool orchestration | `tools/lmm_tool_orchestrator.py` | model/operator action planını exact request+registry binding, typed multi-step output reference, no-shell private worker execution, separate verifier digest ve gateway-ready evidence ile yürütür; final answer, OS sandbox veya universal reasoning claim'i değil |
 | Continual transaction + health audit | `tools/continuous_shard_manifest.py`, `tools/continuous_pretrain.py`, `tools/continuous_pretrain_status.py` | immutable SHA-256 ledger, strict ingest gate, candidate generation, atomic state journal, read-only checkpoint/prefix/payload audit |
 | Production data/run control | `tools/production_dataset.py`, `tools/production_pretrain.py` | disk-backed exact record/token dedupe, deterministic held-out split, content-addressed shard package, exact leakage + vocabulary-capacity gate, immutable binary/data/policy provenance, real exactly-once run wrapper |
 | Kaynak preflight | `tools/training_resource_plan.py` | bounded RAM/checkpoint storage estimate, CPU/NUMA/OpenMP recommendation, static accelerator truth contract |
@@ -333,7 +347,9 @@ record-level leakage gate ve immutable run provenance için
 hedefine ilişkin kapsam/gap analizi için
 [docs/LMM_SCOPE_AND_GAP_ANALYSIS.md](docs/LMM_SCOPE_AND_GAP_ANALYSIS.md), gerçek
 model gateway/Unicode/long-context/multimodal integration contract'i için
-[docs/LMM_RUNTIME.md](docs/LMM_RUNTIME.md), target-domain measured expert routing
+[docs/LMM_RUNTIME.md](docs/LMM_RUNTIME.md), real LMM/operator tool planını typed,
+independently verified evidence'e dönüştüren plane için
+[docs/VERIFIED_TOOL_ORCHESTRATION.md](docs/VERIFIED_TOOL_ORCHESTRATION.md), target-domain measured expert routing
 sözleşmesi için [docs/LMM_PORTFOLIO_ROUTING.md](docs/LMM_PORTFOLIO_ROUTING.md),
 LMM excellence/evidence roadmap'i için
 [docs/LMM_EXCELLENCE_ARCHITECTURE.md](docs/LMM_EXCELLENCE_ARCHITECTURE.md),

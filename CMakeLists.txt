@@ -180,6 +180,11 @@ if(VEGAI_BUILD_TESTS)
         )
         set_tests_properties(vegai_lmm_runtime PROPERTIES TIMEOUT 180)
         add_test(
+            NAME vegai_lmm_tool_orchestrator
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_lmm_tool_orchestrator.py
+        )
+        set_tests_properties(vegai_lmm_tool_orchestrator PROPERTIES TIMEOUT 180)
+        add_test(
             NAME vegai_lmm_portfolio
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_lmm_portfolio.py
         )
