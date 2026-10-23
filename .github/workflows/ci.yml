@@ -44,6 +44,16 @@ jobs:
       - name: Run native Fortran property and integration tests
         run: ctest --test-dir build-ci --output-on-failure
 
+      - name: Surface native test diagnostics on failure
+        if: failure()
+        run: |
+          set -euo pipefail
+          detail=$(find build-ci -name LastTest.log -type f -exec tail -n 80 {} + | tr '\n' ' ' | cut -c1-1900)
+          if [ -z "$detail" ]; then
+            detail="CTest failed without a LastTest.log diagnostic"
+          fi
+          echo "::error title=Fortran property test diagnostic::$detail"
+
       - name: Run executable end-to-end verification
         run: |
           set +e
