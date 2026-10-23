@@ -368,6 +368,14 @@ jobs:
                   "throughput claim. Byte equality is an exact semantic-regression condition.",
                   file=summary,
               )
+          message = "; ".join(
+              f"{workload['name']}: before={workload['before']['median_seconds']:.6f}s; "
+              f"after={workload['after']['median_seconds']:.6f}s; "
+              f"speedup={workload['after_speedup_vs_before']:.4f}x; "
+              f"checkpoint_bytes_identical={workload['checkpoint_byte_identical']}"
+              for workload in report["workloads"]
+          )
+          print(f"::notice title=Same-run pretraining architecture comparison::{message}")
           PY
 
       - name: Compare deterministic single and multicore context construction
