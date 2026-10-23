@@ -30,6 +30,9 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 - hardcoded cevap üretmeyen, operator TSV bilgi bankasindan grounded HDC
   retrieval yapan bounded chat/REPL yuzeyi, abstention kapisi ve held-out
   grounding/abstention release-quality evaluator'ü;
+- gerçek operator-supplied LMM backend'i için ayrı Unicode/subword, long-context,
+  source-grounded knowledge, image/audio/video asset ve OpenVINO/API/worker
+  integration plane'i; model weights'i depoda yoktur;
 - yerel Fortran özellik/entegrasyon testleri, bağımsız Python referans modeli
   ve GitHub Actions ile denetimli derleme.
 
@@ -54,6 +57,10 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 > [CONTINUOUS_PRETRAINING.md](docs/CONTINUOUS_PRETRAINING.md)'de açıkça tanımlıdır.
 > Gerçek LMM/LLM ile mevcut HDC production kapsamı arasındaki kaynak-temelli gap
 > analizi [LMM_SCOPE_AND_GAP_ANALYSIS.md](docs/LMM_SCOPE_AND_GAP_ANALYSIS.md)'dedir.
+> Operatorün gerçek modelini bağlayan Unicode/subword, long-context, source
+> evidence ve multimodal asset contract'i ise
+> [LMM_RUNTIME.md](docs/LMM_RUNTIME.md)'dedir; bu boundary model weights'i,
+> evrensel LMM kalitesi veya neural training stack'i içermez.
 
 ## Hızlı başlangıç
 
@@ -152,6 +159,11 @@ python3 tools/verify_example_corpus.py --pretrain-bin ./build/vegai_pretrain
 python3 tools/compare_pretraining_modes.py --pretrain-bin ./build/vegai_pretrain \
   --repetitions 3 --omp-threads 1
 
+# Optional LMM integration boundary: Rust Unicode/BPE tokenizer, long-context,
+# knowledge evidence, media asset provenance and a real-model worker protocol.
+# Bu komut model weight indirmez veya yapay cevap üretmez.
+make lmm-check
+
 # Gerçek corpus'u eğitmeden önce local digest + ingest preflight
 python3 tools/corpus_manifest.py CORPUS.txt --output corpus-manifest.json \
   --source 'dataset URI/version' --license 'license ID' --strict-contract
@@ -226,6 +238,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect`, CPU/OpenVINO context-provider execution switch ve nearest semantic diagnostic |
 | Grounded dialogue retrieval | `src/dialogue_retrieval.f90`, `app/chat.f90` | operator TSV response index'i, strict ASCII/OOV gate, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; free-form LLM generation degil |
 | Dialogue quality release gate | `tools/dialogue_evaluation.py` | versioned held-out JSONL ile stateless exact prompt grounding/abstention olcumu, immutable input digest binding, privacy-conscious report ve threshold gate |
+| Optional LMM integration | `tools/lmm_contract.py`, `tools/lmm_model_manifest.py`, `tools/lmm_gateway.py`, `tools/lmm_session.py`, `tools/lmm_knowledge.py`, `tools/lmm_assets.py` | gerçek external model backend'i için Unicode/subword tokenizer binding, model-artifact hash, long-context packer, source evidence, content-addressed media ve fail-closed provenance; model weights/native neural training degil |
 | Continual transaction + health audit | `tools/continuous_shard_manifest.py`, `tools/continuous_pretrain.py`, `tools/continuous_pretrain_status.py` | immutable SHA-256 ledger, strict ingest gate, candidate generation, atomic state journal, read-only checkpoint/prefix/payload audit |
 | Production data/run control | `tools/production_dataset.py`, `tools/production_pretrain.py` | disk-backed exact record/token dedupe, deterministic held-out split, content-addressed shard package, exact leakage + vocabulary-capacity gate, immutable binary/data/policy provenance, real exactly-once run wrapper |
 | Kaynak preflight | `tools/training_resource_plan.py` | bounded RAM/checkpoint storage estimate, CPU/NUMA/OpenMP recommendation, static accelerator truth contract |
@@ -256,7 +269,9 @@ tüm system quality audit'i ve held-out release gate için
 record-level leakage gate ve immutable run provenance için
 [docs/PRODUCTION_PRETRAINING.md](docs/PRODUCTION_PRETRAINING.md), gerçek LMM/LLM
 hedefine ilişkin kapsam/gap analizi için
-[docs/LMM_SCOPE_AND_GAP_ANALYSIS.md](docs/LMM_SCOPE_AND_GAP_ANALYSIS.md), fixture üzerinde gerçek yürütme
+[docs/LMM_SCOPE_AND_GAP_ANALYSIS.md](docs/LMM_SCOPE_AND_GAP_ANALYSIS.md), gerçek
+model gateway/Unicode/long-context/multimodal integration contract'i için
+[docs/LMM_RUNTIME.md](docs/LMM_RUNTIME.md), fixture üzerinde gerçek yürütme
 telemetrisi için [docs/EXAMPLE_PRETRAINING_RUN.md](docs/EXAMPLE_PRETRAINING_RUN.md),
 önce/sonra hız ve controlled semantic-cohesion sonuçları için
 [docs/PRETRAINING_MODE_COMPARISON.md](docs/PRETRAINING_MODE_COMPARISON.md),

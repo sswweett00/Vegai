@@ -20,6 +20,7 @@ yerine geçmez.
 |---|---|---|
 | `make check` | bağımsız reference property + demo | `Python reference verification: PASS` |
 | `make data-check` | optional PyArrow kurulumu; streaming JSONL/JSON/TXT/Parquet/Arrow round-trip, corruption ve production adapter | `training data I/O verification: PASS` |
+| `make lmm-check` | optional Rust Unicode/BPE tokenizer; long context, session ledger, knowledge evidence, image/audio/video asset registry, real worker protocol ve capability gate | `lmm runtime verification: PASS` |
 | `make dialogue-check` | real compiled chat ile held-out grounded/abstention metrikleri, report privacy/provenance, strict schema ve negative release gate | `dialogue evaluation verification: PASS` |
 | `make test` | native cebir, error path, memory, reasoning | `Checks: ..., failures: 0` |
 | `make debug` | bounds/runtime/FPE denetimli native test | başarısızlık yok |
@@ -32,16 +33,17 @@ yerine geçmez.
 | `python3 tools/verify_openvino_provider.py` | optional Intel OpenVINO provider preflight/truth contract | `OpenVINO provider verification: PASS` |
 | `python3 tools/verify_openvino_context_worker.py` | uint32-lane worker protocol, neutral tie/complement padding, resident graph-cache reuse; runtime yoksa fail-closed | `OpenVINO context worker verification: PASS` |
 | `python3 tools/verify_openvino_context_provider.py --pretrain-bin build/vegai_pretrain` | native-CPU bypass timing/equality guard + strict resident OpenVINO graph checkpoint equality (runtime yoksa SKIP) | `OpenVINO context provider verification: PASS` |
-| `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties`, donanım/OpenVINO contract testleri, `vegai_example_pretraining`, `vegai_dialogue_retrieval`, `vegai_dialogue_evaluation`, `vegai_continuous_pretraining`, `vegai_production_pretraining`, `vegai_example_production_dataset_preflight` PASS |
+| `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties`, donanım/OpenVINO contract testleri, `vegai_example_pretraining`, `vegai_dialogue_retrieval`, `vegai_dialogue_evaluation`, `vegai_lmm_runtime`, `vegai_continuous_pretraining`, `vegai_production_pretraining`, `vegai_example_production_dataset_preflight` PASS |
 
 CI bunların checked CMake/OpenMP varyantını ve ayrıca optimize Make hedefini
-çalıştırır. Rich-format CI adımı önce `requirements-dataio.txt` ile optional
-PyArrow'ı kurar, ardından `tools/verify_training_data_io.py` ile JSONL/JSON/TXT,
-Parquet zstd/snappy ve Arrow zstd round-trip; schema/missing-field/corrupt input
-rejection; bounded physical-line/JSON parsing; SQLite exact dedupe/label conflict;
-parallel file stream; strict HDC projection ve structured-source production
-foundry adaptasyonunu çalıştırır. Bu doğrulama format-I/O contract'ıdır; Fortran
-HDC semantic/throughput benchmarkı değildir.
+çalıştırır. Rich-format CI adımı `requirements-dataio.txt` ile optional PyArrow
+ve `requirements-lmm.txt` ile Rust `tokenizers` kurar; ardından
+`tools/verify_training_data_io.py` ile JSONL/JSON/TXT, Parquet zstd/snappy ve
+Arrow zstd round-trip; schema/missing-field/corrupt input rejection; bounded
+physical-line/JSON parsing; SQLite exact dedupe/label conflict; parallel file
+stream; strict HDC projection ve structured-source production foundry
+adaptasyonunu çalıştırır. Bu doğrulama format-I/O contract'ıdır; Fortran HDC
+semantic/throughput benchmarkı değildir.
 
 ## Native test kapsamı
 
@@ -149,6 +151,15 @@ bilinçli failed release gate exit policy'sini test eder. Native Fortran propert
 testi ayni katmanda exact retrieval tie/margin, duplicate embedding, fixed
 capacity, strict ASCII ingest ve session ring reset invariantlarini kapsar. Bu,
 LLM kalite degerlendirmesi degil, veri-kaynakli retrieval contract'idir.
+
+`vegai_lmm_runtime`, gerçek model ağırlığı üretmeden/indirmeden LMM integration
+boundary'sini denetler: Unicode ve optional Rust BPE tokenizer, Turkish/Arabic/
+CJK FTS evidence retrieval, hash-chain session, deterministic token-budget long
+context, content-addressed image/audio/video asset, backend-owned worker output,
+provenance report, capability yoksa fail-closed rejection ve actual gateway
+child-process benchmark sınırı. Bu test bir modelin factuality, fluency veya
+multimodal reasoning benchmark'ı değildir; [LMM_RUNTIME.md](LMM_RUNTIME.md)
+contract'inin integration testidir.
 
 CI önce `tools/hardware_compatibility.py` ile CPU/OS/mimari/RAM/GPU/NPU
 inventory metadata'sını, sonra `tools/training_resource_plan.py` ile bounded

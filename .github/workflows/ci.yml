@@ -20,8 +20,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes gfortran cmake ninja-build
 
-      - name: Install training-data format dependency
-        run: python3 -m pip install --disable-pip-version-check -r requirements-dataio.txt
+      - name: Install training-data and Unicode-subword dependencies
+        run: python3 -m pip install --disable-pip-version-check -r requirements-dataio.txt -r requirements-lmm.txt
 
       - name: Configure checked OpenMP build
         run: |

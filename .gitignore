@@ -27,6 +27,7 @@ __pycache__/
 *.py[cod]
 .venv/
 /.venv-dataio/
+/.venv-lmm/
 
 # Runtime artifacts and locally governed corpora/checkpoints
 *.out
@@ -36,3 +37,8 @@ __pycache__/
 /checkpoints/
 /production-datasets/
 /production-runs/
+/lmm-models/
+/lmm-assets/
+/lmm-knowledge/
+/lmm-sessions/
+/lmm-runs/

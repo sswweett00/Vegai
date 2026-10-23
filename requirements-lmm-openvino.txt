@@ -1,0 +1,4 @@
+# Optional local Intel OpenVINO GenAI text-generation backend.
+# Install only on hosts that own a compatible, licensed OpenVINO-exported model package.
+-r requirements-openvino.txt
+openvino-genai>=2025.0,<2027.0

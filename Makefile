@@ -23,6 +23,10 @@ NATIVE_OPT_FLAGS ?= -O3 -march=native -mtune=native -funroll-loops
 # managed environment if desired.
 DATAIO_VENV ?= .venv-dataio
 DATAIO_PYTHON ?= $(DATAIO_VENV)/bin/python
+# Optional Rust Unicode/subword tokenizer integration stays outside the default
+# HDC toolchain, just like optional Arrow support.
+LMM_VENV ?= .venv-lmm
+LMM_PYTHON ?= $(LMM_VENV)/bin/python
 
 SOURCES := src/hyper_types.f90 src/text_tokenizer.f90 src/vocabulary.f90 \
            src/symbolic_memory.f90 src/resonator_network.f90 src/reasoning_core.f90 \
@@ -36,7 +40,7 @@ PRETRAIN := $(BUILD_DIR)/vegai_pretrain
 CHAT := $(BUILD_DIR)/vegai_chat
 TEST_BINARY := $(BUILD_DIR)/vegai_tests
 
-.PHONY: all engine pretrain chat test run run-pretrain run-chat check data-check dialogue-check clean clean-all debug portable native portable-test native-test
+.PHONY: all engine pretrain chat test run run-pretrain run-chat check data-check lmm-check dialogue-check clean clean-all debug portable native portable-test native-test
 
 # Default target: portable optimized GNU binaries without host-only ISA flags.
 all: engine pretrain chat
@@ -113,6 +117,13 @@ data-check:
 	@test -x "$(DATAIO_PYTHON)" || python3 -m venv "$(DATAIO_VENV)"
 	$(DATAIO_PYTHON) -m pip install --disable-pip-version-check -r requirements-dataio.txt
 	$(DATAIO_PYTHON) tools/verify_training_data_io.py
+
+# Optional real Unicode/BPE tokenizer path plus stdlib-only worker/context,
+# evidence, session and multimodal asset contracts. No model weights are pulled.
+lmm-check:
+	@test -x "$(LMM_PYTHON)" || python3 -m venv "$(LMM_VENV)"
+	$(LMM_PYTHON) -m pip install --disable-pip-version-check -r requirements-lmm.txt
+	$(LMM_PYTHON) tools/verify_lmm_runtime.py
 
 clean:
 	rm -rf $(BUILD_DIR)

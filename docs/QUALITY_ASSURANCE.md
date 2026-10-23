@@ -36,6 +36,7 @@ anlamına gelmez.
 | Data quality | JSONL/JSON/TXT/Parquet/Arrow schema boundary, exact dedupe, split audit | Exact dedupe semantic duplicate, PII/license veya contamination çözmez | `training_dataset.py`, provenance ve upstream governed pipeline |
 | Production transaction | Immutable shard, SHA-256 ledger, exact leakage audit, exactly-once state | Source/domain quality kendi başına garanti edilmez | `production_dataset.py`, `production_pretrain.py`, health audit |
 | Grounded chat | Her response operator TSV'den gelir; exact Hamming scan, margin/similarity abstention | Held-out task accuracy ve threshold calibration yoksa güvenilirlik bilinmez | **Yeni:** versioned held-out evaluator + release gates |
+| Optional LMM integration | Gerçek external model backend'i için Unicode/subword manifest, long-context packer, knowledge evidence ve multimodal asset boundary | Model weights/quality/provider güvenliği Vegai tarafından sağlanmaz; multimodal capability model-specific'tir | **Yeni:** `lmm_gateway.py`, session/knowledge/assets contracts, artifact hash ve fail-closed capability gate |
 | Hardware / performance | Portable/native CPU profiles, OpenMP byte equality, resource plan, optional OpenVINO truth contract | GPU/NPU inventory compute kanıtı değildir; universal throughput yok | Host-specific benchmark ve provider execution evidence |
 | Security / governance | Fail-closed ASCII contracts, hashes, atomic publication | Prompt/response factuality, PII, licensing, adversarial corpus ve human review dışarıdadır | Versioned source registry, review, retention, red-team policy |
 
@@ -204,21 +205,25 @@ Bu ayrım, "test çalıştı fakat kalite yetersiz" ile "test güvenilir şekild
    izlenir. Yeni data eski held-out testte sızıntı üretmeyecek şekilde versioned
    edilir.
 
-## 6. LMM ile karşılaştırılabilir olmayan alanlar
+## 6. LMM integration sınırı ve hâlâ kanıtlanmayan alanlar
 
-Bu kalite katmanı aşağıdakileri eklemez:
+Yeni optional LMM plane; Unicode/subword tokenizer JSON'u, gerçek model backend
+çağrısı, hash-chained long-context, source evidence ve multimodal asset referansı
+sağlar. Ancak bunlar aşağıdakileri **otomatik** eklemez:
 
-- Unicode/subword tokenizer veya neural token likelihood;
-- Transformer attention, autodiff, optimizer veya gradient training;
-- image/audio/video encoder ve multimodal fusion;
+- Vegai içinde Transformer attention, autodiff, optimizer veya gradient training;
+- model weight'leri, model family kalitesi veya neural token likelihood kanıtı;
+- image/audio/video encoder ve multimodal fusion; bunlar declared gerçek worker/
+  VLM backend'inin görevidir;
 - distributed model/data/pipeline parallelism;
 - factual truth oracle, safety alignment veya red-team otomasyonu;
 - LMM benchmark/perplexity/human preference karşılaştırması.
 
 Bu yetenekler için [LMM_SCOPE_AND_GAP_ANALYSIS.md](LMM_SCOPE_AND_GAP_ANALYSIS.md)
-belgesindeki ayrı runtime/data/evaluation mimarisi gerekir. HDC retrieval
-kalite gate'i yalnız açıkça tanımlanmış operator knowledge-base domain'inde
-ölçülebilir güvenilirlik sağlar.
+ve [LMM_RUNTIME.md](LMM_RUNTIME.md) belgelerindeki model/data/evaluation
+mimarisi gerekir. HDC retrieval kalite gate'i yalnız açıkça tanımlanmış operator
+knowledge-base domain'inde ölçülebilir güvenilirlik sağlar; LMM backend report'u
+ise yalnız gerçek backend çağrısı/provenance kanıtıdır.
 
 ## 7. Kod entegrasyon haritası
 
@@ -230,6 +235,9 @@ kalite gate'i yalnız açıkça tanımlanmış operator knowledge-base domain'in
 | `CMakeLists.txt` | `vegai_dialogue_evaluation` CTest kaydı |
 | `docs/DIALOGUE_RETRIEVAL.md` | Retrieval kullanımına held-out calibration/release gate eklenir |
 | `docs/VALIDATION.md` | CI doğrulama matrisi ve test kapsamı güncellenir |
+| `tools/lmm_contract.py`, `tools/lmm_model_manifest.py`, `tools/lmm_gateway.py` | Gerçek model backend'i için Unicode/subword, immutable artifact package, context, response provenance ve fail-closed gateway |
+| `tools/lmm_session.py`, `tools/lmm_knowledge.py`, `tools/lmm_assets.py` | Hash-chain dialogue, source-grounded world-knowledge evidence ve image/audio/video input plane |
+| `tools/verify_lmm_runtime.py` | Model-weightsiz LMM integration contract testi |
 
 Bu layer, core HDC checkpoint formatını, deterministic training semantics'ini
 veya response üretim modelini değiştirmez. Böylece kalite işlemi model

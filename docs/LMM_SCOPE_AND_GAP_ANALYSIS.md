@@ -20,6 +20,7 @@ multimodal neural runtime yapmaz.
 | Yeni production control plane | disk-backed exact raw-record dedupe, content-addressed shards, deterministic held-out split, exact leakage gate, max-vocabulary capacity preflight, binary/data/policy provenance |
 | Grounded diyalog retrieval | checkpoint semantic HV + operator TSV prompt/response index, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; cevap TSV'den gelir |
 | Grounded retrieval quality gate | versioned held-out JSONL, stateless real-binary exact prompt/abstention metrikleri, immutable input digest binding, privacy-conscious report ve explicit release threshold'lari |
+| Optional LMM integration plane | Unicode/subword model-tokenizer manifest, hash-chained long dialogue, provenance-bound FTS evidence, content-addressed image/audio/video asset registry ve gerçek OpenVINO/API/worker backend gateway'i; model ağırlığı depoda değildir |
 
 Bu sistem, bounded semantic prototype/retrieval ve symbolic factor reasoning için
 üretim kalitesinde operation sözleşmeleri taşıyabilir. Model kapasitesi ve
@@ -38,6 +39,15 @@ chat binary'si ile olcer ve release threshold'unu fail-closed uygular. Ancak
 LMM evaluation gate satirindaki eksigi kapatmaz; perplexity, multimodal task,
 contamination, factuality veya safety/red-team evaluation yapmaz.
 
+`tools/lmm_gateway.py` ile ayrı bir LMM integration plane eklendi. Bu plane,
+gerçek bir operator-supplied OpenVINO GenAI modelini, HTTPS OpenAI-compatible
+endpoint'i veya local multimodal worker'ı bağlayabilir; Unicode/subword tokenizer
+ve immutable model artifact manifest'iyle context pack eder. Image/audio/video
+ancak gerçek backend capability'si ilan edildiğinde worker'a geçer. Bu bir LMM
+runtime'ın tümünü Fortran HDC çekirdeğine dönüştürmez ve ağırlık/model kalitesi
+iddiası taşımaz. Ayrıntılı contract için [LMM_RUNTIME.md](LMM_RUNTIME.md)'ye
+bakın.
+
 ## Gerçek LMM/LLM için eksik zorunlu katmanlar
 
 Aşağıdakiler "flag" veya wrapper ile eklenebilecek küçük eksikler değildir;
@@ -45,16 +55,16 @@ yeni data plane, model runtime ve test yüzeyi gerektirir.
 
 | Zorunlu LMM katmanı | Vegai'deki durum | Neden mevcut HDC katmanıyla ikame edilemez |
 |---|---|---|
-| Unicode/subword tokenizer | Yok; `text_tokenizer` ASCII-byte, 48-byte token, 1.024 token/record sözleşmesidir | BPE/Unigram vocabulary training, normalization ve offset/sequence semantics gerekir |
-| Tensor/matrix runtime | Yok | Transformer linear layers, embeddings, attention ve activations packed-HV XOR/majority işlemleri değildir |
-| Autodiff + optimizer | Yok | Backpropagation, gradient accumulation, AdamW/Lion, clipping, loss scaling ve optimizer state gerekir |
-| Transformer/sequence objective | Yok | Causal/encoder-decoder attention, positional encoding, logits, cross entropy ve sampling/generation gerekir |
-| Multimodal encoders/fusion | Yok | image/audio/video decoding, vision/audio encoder, alignment/fusion, modality batching ve safety policy gerekir |
+| Unicode/subword tokenizer | Optional `tokenizers-json` model package ile var; HDC `text_tokenizer` hâlâ ASCII-byte'dır | BPE/Unigram tokenizer gerçek model package'ine aittir; geniş tokenizer quality/normalization test suite'i model owner tarafından sağlanmalıdır |
+| Tensor/matrix runtime | Native Vegai'de yok; harici actual backend bağlanabilir | Transformer linear layers, embeddings, attention ve activations packed-HV XOR/majority işlemleri değildir |
+| Autodiff + optimizer | Native Vegai'de yok | Backpropagation, gradient accumulation, AdamW/Lion, clipping, loss scaling ve optimizer state gerekir |
+| Transformer/sequence objective | Harici model backend'de olabilir; repo model weight/architecture sağlamaz | Causal/encoder-decoder attention, positional encoding, logits, cross entropy ve sampling/generation gerçek model package'inde kanıtlanmalıdır |
+| Multimodal encoders/fusion | Asset registry + worker protocol var; native encoder/fusion yok | image/audio/video decoding, vision/audio encoder, alignment/fusion, modality batching ve safety policy gerçek VLM/AV worker tarafından sağlanmalıdır |
 | Distributed training | Yok | data/model/pipeline parallelism, collectives, gradient synchronization, elastic fault recovery ve sharded optimizer/checkpoint gerekir |
-| Neural mixed precision | Yok | BF16/FP16/FP8 numerical policy, master weights, loss scaling ve hardware kernels gerekir |
-| LMM evaluation gate | Yok | held-out perplexity/task suites, contamination policy, modality quality, safety/red-team ve calibration gerekir |
-| GPU/NPU neural training backend | Yok | adapter inventory/OpenVINO context dispatch, neural training kernel veya CPU+GPU+NPU joint compute kanıtı değildir |
-| Dataset governance at LMM scale | Kısmi | exact duplicate/leakage gate vardır; semantic near-duplicate, licensing/PII/consent, benchmark contamination ve multimodal rights pipeline ayrıca gerekir |
+| Neural mixed precision | Native Vegai'de yok | BF16/FP16/FP8 numerical policy, master weights, loss scaling ve hardware kernels gerekir |
+| LMM evaluation gate | Contract/provenance test var; broad model-quality gate yok | held-out perplexity/task suites, contamination policy, modality quality, safety/red-team ve calibration gerekir |
+| GPU/NPU neural training backend | Optional OpenVINO GenAI text inference adapter var; neural training/joint dispatch yok | adapter inventory/OpenVINO context dispatch, neural training kernel veya CPU+GPU+NPU joint compute kanıtı değildir |
+| Dataset governance at LMM scale | Kısmi; document/asset source-license contract eklendi | semantic near-duplicate, licensing/PII/consent, benchmark contamination ve multimodal rights pipeline ayrıca gerekir |
 
 ## Bu değişiklikte bilinçli olarak eklenenler
 
@@ -74,12 +84,20 @@ edilebilir işlemsel eksikleri kapatır:
 7. existing candidate-checkpoint/atomic-state exactly-once semantics'in gerçek
    compiled CLI ile CTest integration doğrulaması;
 8. operator TSV retrieval için ayrı frozen held-out exact-grounding/abstention
-   evaluation, binary/checkpoint/KB digest binding ve release gate.
+   evaluation, binary/checkpoint/KB digest binding ve release gate;
+9. gerçek model backend'i için Unicode/subword tokenizer/model-artifact manifest,
+   deterministic long-context packer ve hash-chain conversation ledger;
+10. source/license/hash taşıyan Unicode FTS knowledge evidence ve
+    content-addressed image/audio/video asset registry;
+11. OpenVINO GenAI text, HTTPS OpenAI-compatible ve local multimodal worker
+    backend'leri için fail-closed capability/provenance gateway;
+12. actual gateway child-process latency ve backend-reported token ölçümü.
 
 Bunlar veri kaybı, silent duplicate, held-out contamination, capacity overflow,
-restart operasyon riski ve dar grounded-retrieval kalitesinin ölçülmeden
-publish edilmesi riskini azaltır. Semantic language quality, generative ability
-veya multimodal competence kanıtlamaz.
+restart operasyon riski, dar grounded-retrieval kalitesinin ölçülmeden publish
+edilmesi ve model input provenance riskini azaltır. Semantic language quality,
+generative ability veya multimodal competence kanıtlamaz; bunlar seçilen gerçek
+model ve ayrı evaluation ile kanıtlanmalıdır.
 
 ## Gerçek LMM hedefi için dürüst ayrı proje sınırı
 
@@ -108,5 +126,6 @@ savunulabilir değildir. Mevcut Vegai roadmap'i buna alternatif olarak
 İşlemsel ayrıntılar için [PRODUCTION_PRETRAINING.md](PRODUCTION_PRETRAINING.md),
 HDC data/checkpoint sözleşmesi için [PRETRAINING.md](PRETRAINING.md), continual
 transaction için [CONTINUOUS_PRETRAINING.md](CONTINUOUS_PRETRAINING.md),
-held-out retrieval gate/audit için [QUALITY_ASSURANCE.md](QUALITY_ASSURANCE.md)
+held-out retrieval gate/audit için [QUALITY_ASSURANCE.md](QUALITY_ASSURANCE.md),
+gerçek model gateway/Unicode/multimodal boundary için [LMM_RUNTIME.md](LMM_RUNTIME.md)
 ve Fortran core invariantları için [ARCHITECTURE.md](ARCHITECTURE.md) referanstır.

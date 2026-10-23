@@ -169,6 +169,33 @@ ayrı calibration setinde seçilmeli, frozen test setinde tuning yapılmamalıd�
 Ayrıntılar için [DIALOGUE_RETRIEVAL.md](../docs/DIALOGUE_RETRIEVAL.md) ve
 [QUALITY_ASSURANCE.md](../docs/QUALITY_ASSURANCE.md)'ye bakın.
 
+## 5. Optional LMM integration fixture'ı
+
+`lmm/mini_multilingual_model.json`, `lmm/mini_multilingual_request.json` ve
+`lmm/mini_multilingual_knowledge.jsonl`; Türkçe/Japonca/Arapça Unicode,
+long-context request, model capability manifest'i ve source-grounded evidence
+contract'i için **model-weightsiz sentetik** fixture'lardır. Bunlar bir gerçek
+LMM, dünya bilgisi, fluent response veya media reasoning benchmarkı değildir.
+
+```bash
+# Rust BPE tokenizer varsa gerçek tokenizer.json path'i de test edilir.
+make lmm-check
+
+# Unicode source knowledge -> evidence bundle
+python3 tools/lmm_knowledge.py build \
+  --input examples/lmm/mini_multilingual_knowledge.jsonl \
+  --output /tmp/vegai-lmm-knowledge.sqlite
+python3 tools/lmm_knowledge.py query \
+  --index /tmp/vegai-lmm-knowledge.sqlite --query '東京' \
+  --output /tmp/vegai-lmm-evidence.json
+```
+
+Gerçek generation için operator; model weights/artifacts, tokenizer JSON,
+source/license bilgisi ve backend seçimini sağlar. `worker` protocol'u
+image/audio/video alabilir; OpenVINO GenAI adapter'i bu repositoryde text-only
+olarak tanımlıdır. Ayrıntılı güvenlik, performance ve model package sözleşmesi
+[LMM_RUNTIME.md](../docs/LMM_RUNTIME.md)'dedir.
+
 ## Kesintisiz shard örneği
 
 Bu fixture tek dosyalı deterministic smoke/benchmark içindir. Production benzeri
@@ -181,7 +208,7 @@ publish kullanır; doğrudan `continue` komutunu durable checkpoint üzerinde
 semantics için
 [`docs/CONTINUOUS_PRETRAINING.md`](../docs/CONTINUOUS_PRETRAINING.md)'ye bakın.
 
-## 5. Production-data foundry fixture'ı
+## 6. Production-data foundry fixture'ı
 
 `production_dataset/mini_turkish_ascii_hdc/`, yukarıdaki 128-record sentetik
 fixture'ın source-controlled, immutable production-package örneğidir. Exact

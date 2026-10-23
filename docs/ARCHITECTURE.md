@@ -367,7 +367,29 @@ confidence, evaluation ve operasyon contract'i için
 [DIALOGUE_RETRIEVAL.md](DIALOGUE_RETRIEVAL.md) ve
 [QUALITY_ASSURANCE.md](QUALITY_ASSURANCE.md)'ye bakın.
 
-## 8. Paralellik ve performans sınırları
+## 8. Optional gerçek LMM integration plane
+
+Fortran HDC core'a Transformer olarak davranan yapay bir wrapper eklenmemistir.
+Bunun yerine `tools/lmm_contract.py` etrafinda ayri bir model-runtime boundary
+vardir. `vegai-lmm-model/v1`, gerçek backend engine/capability/context window,
+model artifact ve tokenizer identity'sini baglar; `tokenizers-json` kullanilirsa
+Unicode BPE/WordPiece/Unigram semantics modelin kendi tokenizer JSON'undan gelir.
+Native HDC ASCII tokenizer'i bu plane tarafindan degistirilmez.
+
+`lmm_session.py` hash-chain mesaj history'sini, `lmm_knowledge.py` source/license
+bagli Unicode FTS evidence'i, `lmm_assets.py` ise content-addressed image/audio/
+video referanslarini üretir. `lmm_gateway.py`, tam token budget'ine sigan pinned
+policy/evidence + complete recent turns'i seçer, asset SHA'larini dogrular ve
+yalniz capability ilan eden actual backend'e dispatch eder. OpenVINO GenAI text
+adapter'i, HTTPS OpenAI-compatible endpoint'i ve local multimodal worker protocol'u
+ayri seçeneklerdir. Missing backend/model/capability fail-closed olur.
+
+Bu plane serbest generation'i gerçek modelin output'u olarak mümkün kilar;
+factuality, safety, neural training, model quality veya GPU/NPU speed iddiasini
+tek basina kanitlamaz. Tam package/worker, privacy, long-context ve benchmark
+contract'i için [LMM_RUNTIME.md](LMM_RUNTIME.md)'ye bakın.
+
+## 9. Paralellik ve performans sınırları
 
 `hv_bind`, `hv_bundle3`, `hv_hamming` ve mask işlemlerinde `!$omp simd`
 ipucu bulunur. `mem_cleanup` global taraması `!$omp parallel do reduction(min:...)`
