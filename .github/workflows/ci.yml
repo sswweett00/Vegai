@@ -306,6 +306,70 @@ jobs:
           print(f"::notice title=Optimized pretraining comparison::{message}")
           PY
 
+      - name: Compare baseline and optimized deterministic pretraining hot path
+        run: |
+          set -euo pipefail
+          baseline_source="${RUNNER_TEMP}/vegai-pretraining-baseline"
+          baseline_build="${RUNNER_TEMP}/vegai-pretraining-baseline-build"
+          revision_report="${RUNNER_TEMP}/pretraining-revision-comparison.json"
+          cleanup_baseline() {
+            git worktree remove --force "$baseline_source" || true
+          }
+          trap cleanup_baseline EXIT
+          # This fixed pre-optimization commit is deliberately built with the
+          # same portable Make profile as the checked-out candidate.  Only the
+          # train child processes below are timed by the Python harness.
+          git fetch --no-tags --depth=1 origin e34fd22e485807108dd85957d869a2d880325dca
+          git worktree add --detach "$baseline_source" FETCH_HEAD
+          make -C "$baseline_source" pretrain BUILD_DIR="$baseline_build"
+          python3 tools/compare_pretraining_revisions.py \
+            --before-pretrain-bin "$baseline_build/vegai_pretrain" \
+            --after-pretrain-bin ./build/vegai_pretrain --repetitions 3 \
+            --output "$revision_report" > /dev/null
+          python3 - "$revision_report" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as source:
+              report = json.load(source)
+          hardware = report["hardware"]
+          with open(sys.argv[2], "a", encoding="utf-8") as summary:
+              print("## Same-run deterministic pretraining architecture comparison", file=summary)
+              print(file=summary)
+              print(
+                  "The fixed `e34fd22` baseline and this candidate were built with the same portable profile on "
+                  "this runner. Each sample covers one complete `vegai_pretrain train` process; compilation, fixture "
+                  "creation, checkpoint comparison, and harness work are excluded.",
+                  file=summary,
+              )
+              print(file=summary)
+              print(
+                  f"Host: `{hardware['cpu']['model']}` on `{hardware['host']['operating_system']} "
+                  f"{hardware['host']['operating_system_release']}`; OMP_NUM_THREADS=2.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("| Controlled workload | Before median s | After median s | Before token/s | After token/s | After speedup | Checkpoint bytes |", file=summary)
+              print("|---|---:|---:|---:|---:|---:|---:|", file=summary)
+              for workload in report["workloads"]:
+                  before = workload["before"]
+                  after = workload["after"]
+                  print(
+                      f"| {workload['name']} | {before['median_seconds']:.6f} | "
+                      f"{after['median_seconds']:.6f} | {before['training_tokens_per_second']:.3f} | "
+                      f"{after['training_tokens_per_second']:.3f} | "
+                      f"{workload['after_speedup_vs_before']:.4f}× | "
+                      f"{workload['checkpoint_byte_identical']} |",
+                      file=summary,
+                  )
+              print(file=summary)
+              print(
+                  "These are intentionally bottleneck-focused synthetic records, not a universal natural-corpus "
+                  "throughput claim. Byte equality is an exact semantic-regression condition.",
+                  file=summary,
+              )
+          PY
+
       - name: Compare deterministic single and multicore context construction
         run: |
           set -euo pipefail
