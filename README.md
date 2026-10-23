@@ -25,6 +25,10 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 - schema-checked streaming training-data boundary: JSONL/JSON/TXT/Parquet/Arrow
   rich record I/O, exact SQLite text-dedupe, label-imbalance/split audit ve
   explicit strict-HDC text projection;
+- hardcoded capability örnekleri/cevapları eklemeden operator metadata/policy'si
+  ile staged reasoning/problem-solving/coding veya başka hedef-domain curriculum
+  seçimi, held-out coverage gate'i, exact split isolation, immutable shard ledger
+  ve source+policy replay doğrulaması;
 - immutable context construction + source-ordered commit ile checkpoint-bit-tam
   deterministic OpenMP multi-core training; RAM/SSD/NUMA resource preflight;
 - hardcoded cevap üretmeyen, operator TSV bilgi bankasindan grounded HDC
@@ -55,6 +59,9 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 > ister; veri yönetişimi, checkpoint ve sınırlar [PRETRAINING.md](docs/PRETRAINING.md)'de, immutable
 > shard'larla crash-safe continual çalışma ise
 > [CONTINUOUS_PRETRAINING.md](docs/CONTINUOUS_PRETRAINING.md)'de açıkça tanımlıdır.
+> Rich metadata'dan policy-driven staged capability corpus seçimi ve replayable
+> lineage için [CAPABILITY_CURRICULUM.md](docs/CAPABILITY_CURRICULUM.md) kullanılır;
+> bu katman da tek başına reasoning/coding başarısı veya zeka iddiası değildir.
 > Gerçek LMM/LLM ile mevcut HDC production kapsamı arasındaki kaynak-temelli gap
 > analizi [LMM_SCOPE_AND_GAP_ANALYSIS.md](docs/LMM_SCOPE_AND_GAP_ANALYSIS.md)'dedir.
 > Operatorün gerçek modelini bağlayan Unicode/subword, long-context, source
@@ -174,12 +181,22 @@ make lmm-check
 python3 tools/corpus_manifest.py CORPUS.txt --output corpus-manifest.json \
   --source 'dataset URI/version' --license 'license ID' --strict-contract
 
-# JSONL/JSON/TXT/Parquet/Arrow rich data contract'i (Parquet/Arrow için pyarrow optional)
-# `make data-check` isolated .venv-dataio kurar (PEP 668-safe).
+# JSONL/JSON/TXT/Parquet/Arrow rich data contract'i (Parquet/Arrow için pyarrow optional).
+# `make data-check` isolated .venv-dataio kurar ve curriculum'un optional
+# Parquet/Arrow replay branch'ini de çalıştırır (PEP 668-safe).
 make data-check
 . .venv-dataio/bin/activate  # Windows: .venv-dataio\Scripts\activate
 python tools/training_dataset.py validate DATASET.jsonl --hdc-strict
 python tools/training_dataset.py convert DATASET.jsonl corpus-for-hdc.txt --hdc-strict
+
+# Operator policy'si ile rich metadata'dan strict staged curriculum package.
+# Template veri/ornek cevap degil, operatorun dolduracagi configuration skeleton'idir.
+python3 tools/capability_curriculum.py build DATASET.jsonl \
+  --policy REVIEWED-POLICY.json \
+  --output-dir releases/curriculum-release
+python3 tools/capability_curriculum.py verify --package releases/curriculum-release \
+  --source DATASET.jsonl --policy REVIEWED-POLICY.json
+make capability-check
 
 # Ordered immutable shard'larla crash-safe continual pretraining
 python3 tools/continuous_shard_manifest.py data/shards/000001.txt data/shards/000002.txt \
@@ -240,6 +257,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Resonator Network | `src/resonator_network.f90` | slot-spesifik codebook'larla çoklu-faktör çözümleme ve exact certification |
 | Corpus ingest | `src/text_tokenizer.f90`, `src/vocabulary.f90` | bounded ASCII canonicalization, collision-safe frequency vocabulary |
 | Rich training data I/O | `tools/training_data_io.py`, `tools/training_dataset.py` | JSONL/JSON/TXT/Parquet/Arrow schema boundary, streaming/batching, exact text dedupe, split/imbalance audit ve explicit strict-HDC projection |
+| Capability curriculum | `tools/capability_curriculum.py` | operator-defined metadata paths/tag/difficulty stage policy'si, SQLite exact-dedupe + split/annotation conflict gate'i, held-out/source coverage, strict text-only projection, immutable continuous ledger ve source+policy replay verification; hardcoded task data veya capability claim'i degil |
 | HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, hierarchical default + CPU-only coherent cross-fold option, deterministic OpenMP / optional OpenVINO immutable-context preparation + source-ordered CPU commit, mode-selective v5/v6 checkpoint/resume |
 | Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect`, CPU/OpenVINO context-provider execution switch ve nearest semantic diagnostic |
 | Grounded dialogue retrieval | `src/dialogue_retrieval.f90`, `app/chat.f90` | operator TSV response index'i, strict ASCII/OOV gate, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; free-form LLM generation degil |
@@ -266,7 +284,9 @@ Resonator Network sözleşmesi için [docs/RESONATOR_NETWORK.md](docs/RESONATOR_
 corpus veri hattı, yönetişim ve checkpoint sözleşmesi için
 [docs/PRETRAINING.md](docs/PRETRAINING.md), JSONL/JSON/TXT/Parquet/Arrow training-data
 şeması ve streaming dönüşüm sözleşmesi için
-[docs/TRAINING_DATA_FORMAT.md](docs/TRAINING_DATA_FORMAT.md), immutable shard ledger ve
+[docs/TRAINING_DATA_FORMAT.md](docs/TRAINING_DATA_FORMAT.md), operator policy'si ile
+hardcoded veri eklemeden staged target-domain curriculum packaging/replay için
+[docs/CAPABILITY_CURRICULUM.md](docs/CAPABILITY_CURRICULUM.md), immutable shard ledger ve
 crash-safe exactly-once continual pretraining için
 [docs/CONTINUOUS_PRETRAINING.md](docs/CONTINUOUS_PRETRAINING.md), data-driven grounded
 chat/retrieval sözleşmesi için [docs/DIALOGUE_RETRIEVAL.md](docs/DIALOGUE_RETRIEVAL.md),

@@ -12,6 +12,15 @@ için birlikte çalışır. Bu katman, `train`/`resume` için genel amaçlı bir
 scheduler değildir: düzenli, append-only bir veri ledger'ı ve sabit eğitim
 policy'si gerektirir.
 
+Rich metadata'dan target-domain stage shard'ları üretilecekse
+[`tools/capability_curriculum.py`](../tools/capability_curriculum.py), doğrudan
+bu controller'ın kabul ettiği ledger şemasını yayınlar. Curriculum compiler
+metadata/label'i HDC text'e eklemez; source+policy replay, held-out coverage ve
+exact split isolation kuralları için
+[CAPABILITY_CURRICULUM.md](CAPABILITY_CURRICULUM.md)'ye bakın. Controller yine
+de kendi manifest/payload/candidate/journal gate'lerini uygular; curriculum
+package bu gate'leri bypass etmez.
+
 ## 1. Model katmanı
 
 Fortran API'si:

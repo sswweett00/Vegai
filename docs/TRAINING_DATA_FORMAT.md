@@ -20,6 +20,7 @@ dönüştürmektir.
 | Native ingest contract | `src/text_tokenizer.f90`, `tools/corpus_manifest.py` | bir fiziksel satır = bir context boundary | 8.192 byte/record, 1.024 token/record, 48 byte/token, ASCII tokenization; silent truncation yok |
 | Continual/production control | `tools/continuous_pretrain.py`, `tools/production_dataset.py`, `tools/production_pretrain.py` | immutable TXT shard/ledger | exact SHA-256 dedupe, deterministic held-out split, resource/leakage gate, exactly-once checkpoint transaction |
 | **Yeni rich-data boundary** | `tools/training_data_io.py`, `tools/training_dataset.py` | JSONL/JSON/TXT/Parquet/Arrow ↔ logical record | schema validation, lazy streaming, batch I/O, conversion, quality telemetry, strict HDC text export |
+| Policy-driven curriculum | `tools/capability_curriculum.py` | rich annotated record + operator policy → ordered strict train shard/continuous ledger | configurable metadata tag/difficulty stage selection, exact split/annotation conflict rejection, held-out/source coverage gate, provenance/replay; hardcoded task examples veya labels text'e eklenmez |
 
 Akış aşağıdaki gibidir:
 
@@ -32,16 +33,27 @@ vegai-training-record/v1 logical records
         ▼
 rich prepared dataset  ──► JSONL / JSON / Parquet / Arrow
         │
-        └── write_hdc_corpus / --hdc-strict
-                   │ (text only; strict ASCII/LF/token limits)
+        ├── write_hdc_corpus / --hdc-strict
+        │          │ (text only; strict ASCII/LF/token limits)
+        │          ▼
+        │  production_dataset.py → immutable TXT shards → vegai_pretrain
+        │
+        └── capability_curriculum.py + reviewed metadata policy
+                   │ (selected train text only; held-out text never emitted)
                    ▼
-           production_dataset.py → immutable TXT shards → vegai_pretrain
+           immutable staged shards + continuous ledger → continual controller
 ```
 
 `label`, `source`, `split` ve `metadata` rich kayıt formatında korunur. Native
 HDC text export yalnız `text` alanını yazar. Bilinen topic label'larını token
 olarak enjekte etmek gerekiyorsa bu, otomatik yapılmaz; ayrı, versioned,
 provenance'a yazılmış **explicit weak-supervision** upstream adımı olmalıdır.
+
+Bu rich alanlardan metadata-policy ile stage seçmek için
+[CAPABILITY_CURRICULUM.md](CAPABILITY_CURRICULUM.md)'ye bakın. Bu ek katman
+TXT'ye sidecar metadata uydurmaz; policy'de seçilen `metadata` ve `source`
+alanları olan rich record'ları ister, sonra native shard'a yine yalnız `text`
+projection yapar.
 
 ## 2. Logical veri şeması
 

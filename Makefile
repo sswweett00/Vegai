@@ -40,7 +40,7 @@ PRETRAIN := $(BUILD_DIR)/vegai_pretrain
 CHAT := $(BUILD_DIR)/vegai_chat
 TEST_BINARY := $(BUILD_DIR)/vegai_tests
 
-.PHONY: all engine pretrain chat test run run-pretrain run-chat check data-check lmm-check dialogue-check clean clean-all debug portable native portable-test native-test
+.PHONY: all engine pretrain chat test run run-pretrain run-chat check data-check capability-check lmm-check dialogue-check clean clean-all debug portable native portable-test native-test
 
 # Default target: portable optimized GNU binaries without host-only ISA flags.
 all: engine pretrain chat
@@ -104,6 +104,13 @@ check:
 	python3 tools/verify_training_resource_plan.py
 	python3 tools/verify_openvino_provider.py
 	python3 tools/verify_openvino_context_worker.py
+	python3 tools/verify_capability_curriculum.py
+
+# Strict stdlib-only verification of policy-driven reasoning/problem-solving/
+# coding (or operator-defined) curriculum packaging.  It uses only temporary
+# protocol fixtures and does not install data adapters or train a model.
+capability-check:
+	python3 tools/verify_capability_curriculum.py
 
 # Real binary integration check for held-out retrieval grounding/abstention,
 # strict evaluator schema, input provenance and an intentional failed gate.
@@ -112,11 +119,13 @@ dialogue-check: $(PRETRAIN) $(CHAT)
 
 # Rich JSON/Parquet/Arrow data formats are optional rather than a dependency of
 # the portable Fortran runtime. This explicit target installs only the adapter
-# dependency, then runs streaming round-trip and production-adapter checks.
+# dependency, then runs streaming round-trip/production-adapter and optional
+# Parquet/Arrow curriculum-adapter checks.
 data-check:
 	@test -x "$(DATAIO_PYTHON)" || python3 -m venv "$(DATAIO_VENV)"
 	$(DATAIO_PYTHON) -m pip install --disable-pip-version-check -r requirements-dataio.txt
 	$(DATAIO_PYTHON) tools/verify_training_data_io.py
+	$(DATAIO_PYTHON) tools/verify_capability_curriculum.py
 
 # Optional real Unicode/BPE tokenizer path plus stdlib-only worker/context,
 # evidence, session, multimodal assets, held-out citation/abstention release,

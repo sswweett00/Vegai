@@ -11,6 +11,14 @@ aracı vardır:
   eğitim politikasını kimliklendirir; exact leakage audit/resource preflight
   yapar ve gerçek `continuous_pretrain.py` exactly-once controller'ını çağırır.
 
+Rich-record metadata'sından ordered domain/capability stage ledger üretmek için
+ayrı `tools/capability_curriculum.py` katmanı vardır. Bu layer doğrudan
+continual controller'ın manifestini üretir; policy-driven selection, source+
+policy replay ve held-out coverage kuralları için
+[CAPABILITY_CURRICULUM.md](CAPABILITY_CURRICULUM.md)'ye bakın. Production
+foundry'nin source snapshot, release-run, binary/policy provenance ve resource
+gate'leri yerine geçmez.
+
 > ## Mimari sınır — önemli
 >
 > Bu, Transformer/LLM/LMM ya da multimodal gradient-training runtime'ı değildir.
