@@ -20,7 +20,8 @@ yerine geçmez.
 |---|---|---|
 | `make check` | bağımsız reference property + demo | `Python reference verification: PASS` |
 | `make data-check` | optional PyArrow kurulumu; streaming JSONL/JSON/TXT/Parquet/Arrow round-trip, corruption ve production adapter | `training data I/O verification: PASS` |
-| `make lmm-check` | optional Rust Unicode/BPE tokenizer; long context, session ledger, knowledge evidence, image/audio/video asset registry, real worker protocol ve capability gate | `lmm runtime verification: PASS` |
+| `make lmm-check` | optional Rust Unicode/BPE tokenizer; long context, session ledger, knowledge evidence, image/audio/video asset registry, real worker protocol, held-out citation/abstention quality release gate ve capability gate | `lmm runtime verification: PASS` |
+| `python3 tools/lmm_quality_evaluation.py --cases ... --gateway-command-json ... --report ... --fail-on-gate` | gerçek configured model gateway ile held-out citation/abstention provenance ve release threshold | report yayınlanır; başarısız quality gate exit `3` |
 | `make dialogue-check` | real compiled chat ile held-out grounded/abstention metrikleri, report privacy/provenance, strict schema ve negative release gate | `dialogue evaluation verification: PASS` |
 | `make test` | native cebir, error path, memory, reasoning | `Checks: ..., failures: 0` |
 | `make debug` | bounds/runtime/FPE denetimli native test | başarısızlık yok |
@@ -156,9 +157,10 @@ LLM kalite degerlendirmesi degil, veri-kaynakli retrieval contract'idir.
 boundary'sini denetler: Unicode ve optional Rust BPE tokenizer, Turkish/Arabic/
 CJK FTS evidence retrieval, hash-chain session, deterministic token-budget long
 context, content-addressed image/audio/video asset, backend-owned worker output,
-provenance report, capability yoksa fail-closed rejection ve actual gateway
-child-process benchmark sınırı. Bu test bir modelin factuality, fluency veya
-multimodal reasoning benchmark'ı değildir; [LMM_RUNTIME.md](LMM_RUNTIME.md)
+provenance report, model-emitted citation/abstention gate, privacy-conscious
+held-out quality release gate, capability yoksa fail-closed rejection ve actual
+gateway child-process benchmark sınırı. Bu test bir modelin factuality, fluency
+veya multimodal reasoning benchmark'ı değildir; [LMM_RUNTIME.md](LMM_RUNTIME.md)
 contract'inin integration testidir.
 
 CI önce `tools/hardware_compatibility.py` ile CPU/OS/mimari/RAM/GPU/NPU

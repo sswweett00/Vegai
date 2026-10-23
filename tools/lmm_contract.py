@@ -41,8 +41,10 @@ MAX_ASSET_CONTEXT_TOKENS = 2_000_000
 MAX_MODEL_ARTIFACTS = 4_096
 MAX_GENERATION_TOKENS = 65_536
 MAX_IDENTIFIER_BYTES = 160
+ABSTENTION_MARKER = "[[vegai-abstain]]"
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
+_CITATION_MARKER = re.compile(r"\[\[vegai-source:([A-Za-z0-9][A-Za-z0-9._:-]{0,159})\]\]")
 _ALLOWED_ROLES = frozenset(("system", "user", "assistant", "tool"))
 _ALLOWED_MODALITIES = frozenset(("image", "audio", "video"))
 _ALLOWED_ENGINES = frozenset(("openvino-genai", "openai-compatible", "worker"))
@@ -722,6 +724,76 @@ class EvidenceBundle:
                 )
             )
         return tuple(messages)
+
+
+@dataclass(frozen=True, slots=True)
+class GroundingMarkers:
+    """Machine-readable provenance markers observed in backend-owned text.
+
+    The gateway never inserts these markers into a response. A model policy or
+    fine-tune must emit ``[[vegai-source:<evidence-id>]]`` itself. The optional
+    release/evaluation planes can then verify that the cited IDs were actually
+    supplied as evidence. ``[[vegai-abstain]]`` is an explicit no-answer marker,
+    not a claim that a model has solved factuality or uncertainty calibration.
+    """
+
+    citation_ids: tuple[str, ...]
+    abstention_markers: int
+    malformed_citation_marker: bool
+    malformed_abstention_marker: bool
+    substantive_response_bytes: int
+
+    @property
+    def abstained(self) -> bool:
+        return self.abstention_markers > 0
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "citation_ids": list(self.citation_ids),
+            "abstention_markers": self.abstention_markers,
+            "malformed_citation_marker": self.malformed_citation_marker,
+            "malformed_abstention_marker": self.malformed_abstention_marker,
+            "substantive_response_bytes": self.substantive_response_bytes,
+        }
+
+
+def parse_grounding_markers(text: str) -> GroundingMarkers:
+    """Parse bounded citation/abstention tags without altering backend output."""
+    validate_unicode_text(text, "response grounding text")
+    citation_ids = tuple(dict.fromkeys(match.group(1) for match in _CITATION_MARKER.finditer(text)))
+    require(len(citation_ids) <= MAX_EVIDENCE_ITEMS,
+            f"response grounding text exceeds {MAX_EVIDENCE_ITEMS} distinct citation markers")
+    malformed_citation = False
+    start = 0
+    while True:
+        position = text.find("[[vegai-source:", start)
+        if position < 0:
+            break
+        match = _CITATION_MARKER.match(text, position)
+        if match is None:
+            malformed_citation = True
+            start = position + len("[[vegai-source:")
+        else:
+            start = match.end()
+    malformed_abstention = False
+    start = 0
+    while True:
+        position = text.find("[[vegai-abstain", start)
+        if position < 0:
+            break
+        if text.startswith(ABSTENTION_MARKER, position):
+            start = position + len(ABSTENTION_MARKER)
+        else:
+            malformed_abstention = True
+            start = position + len("[[vegai-abstain")
+    stripped = _CITATION_MARKER.sub("", text).replace(ABSTENTION_MARKER, "").strip()
+    return GroundingMarkers(
+        citation_ids=citation_ids,
+        abstention_markers=text.count(ABSTENTION_MARKER),
+        malformed_citation_marker=malformed_citation,
+        malformed_abstention_marker=malformed_abstention,
+        substantive_response_bytes=len(stripped.encode("utf-8")),
+    )
 
 
 class TokenCounter(Protocol):

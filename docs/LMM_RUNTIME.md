@@ -42,7 +42,8 @@ LMM düzlemi şu bileşenlerden oluşur:
 | `tools/lmm_assets.py` | Görüntü/ses/video dosyalarını content-addressed store'a alır; MIME magic, source/license ve immutable hash kaydeder |
 | `tools/lmm_gateway.py` | Context + evidence + verified asset'leri gerçek backend'e yollar; model/request/evidence/assets provenance report üretir |
 | `tools/benchmark_lmm_gateway.py` | Sadece gerçek gateway child-process sürelerini ve backend token sayısını ölçer |
-| `tools/verify_lmm_runtime.py` | Unicode, BPE-ready tokenizer, model-manifest rehash, CJK/Arabic lexical retrieval, long context, üç medya tipi snapshot, local endpoint provenance ve capability-gate entegrasyon testi |
+| `tools/lmm_quality_evaluation.py` | Held-out gerçek gateway çağrılarında model-emitted citation/abstention contract'i, privacy-conscious report ve fail-closed release threshold'ları |
+| `tools/verify_lmm_runtime.py` | Unicode, BPE-ready tokenizer, model-manifest rehash, CJK/Arabic lexical retrieval, long context, üç medya tipi snapshot, local endpoint, quality-gate provenance ve capability-gate entegrasyon testi |
 
 ## 2. Gerçek serbest doğal dil üretimi
 
@@ -103,6 +104,25 @@ worker'ın decode ettiği medya bytes'ı manifest hash'ine bağlanır. Büyük r
 deployment'ta salt-okunur/immutable asset store ve worker'ın kendi SHA-256
 kontrolü kanıtlanmışsa `--worker-assets-mode direct` copy maliyetini kaldırır;
 bu modda path değişmezliği operatörün sorumluluğudur.
+
+### 2.4 Optional kanıt/citation output contract'i
+
+Gateway model yanıtına hiçbir citation veya abstention metni eklemez. Operatorün
+system policy'si/fine-tune'u aşağıdaki marker'ları **model output'u içinde**
+üretmelidir:
+
+```text
+[[vegai-source:document-id]]
+[[vegai-abstain]]
+```
+
+`--grounding-mode require-citations`, nonempty evidence bundle varken en az bir
+verilen document ID'sinin citation'ını zorunlu kılar. `--grounding-mode
+evidence-or-abstain`, evidence varsa citation; evidence yoksa tam bir abstention
+marker'ı ister. Bilinmeyen citation ile malformed citation/abstention marker'ı
+fail-closed olur; report marker gözlemini ve mevcut evidence ID'lerini taşır. Bu bir citation provenance
+kontrolüdür; modelin cümlesinin gerçekten doğru olduğu, kaynak metni anladığı
+veya iyi uncertainty calibration yaptığı anlamına gelmez.
 
 ## 3. Unicode ve gerçek subword tokenization
 
@@ -293,7 +313,45 @@ resident worker/API için command resident servise bağlanmalıdır. Report, yal
 backend'in döndürdüğü token count varsa output token/s verir; GPU/NPU hızlanma
 iddiası yapmaz.
 
-## 9. Doğrulama
+## 9. Held-out model kalite ve release gate
+
+`tools/lmm_quality_evaluation.py`, gerçek gateway command'ini her held-out case
+icin shell kullanmadan ve JSONL'i streaming okuyarak çalıştırır. Her
+`vegai-lmm-quality-case/v1` JSONL kaydı,
+model request'ini, backend'e verilecek evidence bundle'ı, izinli/zorunlu citation
+ID'lerini ve gerekirse abstention beklentisini taşır. Case'nin request/evidence
+metni ile backend'in ham yanıtı report'a kopyalanmaz; report yalnız SHA-256 veya
+opsiyonel `--case-id-hmac-key` HMAC case kimliği, response hash/byte sayısı,
+citation ID'leri ve generation-report hash'i taşır. Gateway/model/tokenizer/
+worker configuration identity'leri case'ler arasında aynı kalmalıdır; evaluator
+bu stable runtime identity'yi de report'a bağlar.
+
+Komut vector'ü `--request {request}` ve `--evidence {evidence}` biçiminde tam
+olarak birer placeholder ile
+`--print-json` içermelidir. Sabit model/backend/worker seçenekleri bu
+operator-owned JSON array'de kalır:
+
+```bash
+cat > heldout-gateway-command.json <<'JSON'
+["python3", "tools/lmm_gateway.py", "--model", "/secure/model.json",
+ "--request", "{request}", "--evidence", "{evidence}",
+ "--worker-command-json", "/secure/worker-command.json",
+ "--grounding-mode", "evidence-or-abstain", "--print-json"]
+JSON
+python3 tools/lmm_quality_evaluation.py \
+  --cases governed-heldout.jsonl \
+  --gateway-command-json heldout-gateway-command.json \
+  --report lmm-runs/heldout-quality.json --fail-on-gate
+```
+
+Default gate; case-pass rate, required-citation recall, invalid-citation case
+rate ve her case'in abstention beklentisi doğruluğu için sırasıyla `%100`,
+`%100`, `%0`, `%100` eşiklerini uygular. `--fail-on-gate` report yayınlandıktan sonra başarısız gate
+icin exit `3` verir. Bu metrikler operatorün kaliteli source/case tasarımıyla
+anlamlıdır; prose factuality, safety, preference, semantic reasoning veya
+LLM'lerden üstünlük yerine geçmez.
+
+## 10. Doğrulama
 
 ```bash
 python3 tools/verify_lmm_runtime.py
@@ -310,6 +368,8 @@ Test şunları denetler:
 - model-package manifest create/rehash ve değiştirilmiş artifact fail-closed rejection;
 - evidence ve asset SHA provenance'inin worker request/report'a taşınması;
 - local OpenAI-compatible endpoint'e gerçek text/image request payload'u;
+- model-emitted citation/abstention marker gateway gate'i ve privacy-conscious
+  held-out quality/release evaluator (başarılı ve bilinçli başarısız gate);
 - modality capability yoksa fail-closed rejection;
 - gerçek gateway child process benchmark sınırı.
 
@@ -317,7 +377,7 @@ Test şunları denetler:
 model ağırlığı içermez; yalnız operatorün kendi OpenVINO model package'ini
 çalıştırması için optional provider bağımlılığıdır.
 
-## 10. Hâlâ yapılmamış ve iddia edilmeyenler
+## 11. Hâlâ yapılmamış ve iddia edilmeyenler
 
 Bu entegrasyon aşağıdakileri otomatik olarak sağlamaz:
 

@@ -44,6 +44,7 @@ from lmm_contract import (
     FileIdentity,
     GenerationRequest,
     GenerationResponse,
+    GroundingMarkers,
     LMMBackendError,
     LMMContractError,
     LMMOptionalDependencyError,
@@ -54,6 +55,7 @@ from lmm_contract import (
     file_identity,
     load_tokenizer,
     pack_context,
+    parse_grounding_markers,
     render_prompt,
     require,
     require_unchanged,
@@ -385,6 +387,52 @@ def run_openai_compatible(
     )
 
 
+def validate_grounding(
+    mode: str,
+    evidence: EvidenceBundle | None,
+    response: GenerationResponse,
+) -> dict[str, object]:
+    """Optionally fail closed on model-emitted evidence/abstention markers.
+
+    This is provenance validation, not a truth oracle. The model must be taught
+    the marker policy by an operator-owned system message or fine-tune; the
+    gateway never changes the backend response to manufacture a passing result.
+    """
+    markers: GroundingMarkers = parse_grounding_markers(response.text)
+    evidence_ids = set() if evidence is None else {item.document_id for item in evidence.items}
+    unknown = sorted(set(markers.citation_ids).difference(evidence_ids))
+    if mode != "off":
+        require(not markers.malformed_citation_marker,
+                "backend response contains a malformed [[vegai-source:<id>]] citation marker")
+        require(not markers.malformed_abstention_marker,
+                "backend response contains a malformed [[vegai-abstain]] marker")
+        require(not unknown,
+                "backend response cites evidence IDs not supplied to this request: " + ", ".join(unknown))
+        require(markers.substantive_response_bytes > 0,
+                "backend response contains only grounding control markers")
+        if mode == "require-citations":
+            require(evidence_ids, "--grounding-mode=require-citations requires a nonempty evidence bundle")
+            require(bool(markers.citation_ids), "backend response omitted a required evidence citation")
+            require(not markers.abstained, "backend response cannot abstain in require-citations mode")
+        else:
+            require(mode == "evidence-or-abstain", f"unsupported grounding mode: {mode!r}")
+            if evidence_ids:
+                require(bool(markers.citation_ids), "backend response omitted a required evidence citation")
+                require(not markers.abstained, "backend response cannot abstain while evidence is supplied")
+            else:
+                require(markers.abstention_markers == 1,
+                        "backend response must emit exactly one [[vegai-abstain]] marker when no evidence is supplied")
+                require(not markers.citation_ids,
+                        "backend response cannot cite evidence when no evidence is supplied")
+    result = markers.to_mapping()
+    result.update({
+        "mode": mode,
+        "available_evidence_document_ids": sorted(evidence_ids),
+        "unknown_citation_ids": unknown,
+    })
+    return result
+
+
 def output_collision(output: Path | None, dependencies: Sequence[Path]) -> None:
     if output is None:
         return
@@ -508,6 +556,7 @@ def run_generate(arguments: argparse.Namespace) -> int:
             arguments.timeout_seconds,
         )
     elapsed_seconds = time.monotonic() - started
+    grounding = validate_grounding(arguments.grounding_mode, evidence, response)
 
     # Rehash every byte dependency after the model call. The model backend may
     # be slow; a report is valid only if the request/model/evidence/assets it
@@ -562,6 +611,7 @@ def run_generate(arguments: argparse.Namespace) -> int:
         },
         "context": context.to_mapping(include_content=False),
         "evidence_document_ids": [] if evidence is None else [item.document_id for item in evidence.items],
+        "grounding": grounding,
         "backend": {
             "name": response.backend,
             "requested_device": arguments.device if backend == "openvino-genai" else None,
@@ -597,6 +647,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", required=True, type=Path, help="vegai-lmm-model/v1 immutable manifest")
     parser.add_argument("--request", required=True, type=Path, help="vegai-lmm-request/v1 JSON object")
     parser.add_argument("--evidence", type=Path, help="optional vegai-lmm-evidence/v1 bundle from lmm_knowledge.py")
+    parser.add_argument("--grounding-mode", choices=("off", "require-citations", "evidence-or-abstain"), default="off",
+                        help="optional model-output provenance gate; model must emit documented citation/abstention markers itself")
     parser.add_argument("--asset-registry", type=Path, help="strict JSONL content-addressed asset registry")
     parser.add_argument("--asset-root", type=Path, help="root containing asset registry relative paths")
     parser.add_argument("--model-root", type=Path, help="root containing immutable declared model artifacts")

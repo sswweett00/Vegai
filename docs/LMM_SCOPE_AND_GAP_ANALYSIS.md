@@ -20,7 +20,7 @@ multimodal neural runtime yapmaz.
 | Yeni production control plane | disk-backed exact raw-record dedupe, content-addressed shards, deterministic held-out split, exact leakage gate, max-vocabulary capacity preflight, binary/data/policy provenance |
 | Grounded diyalog retrieval | checkpoint semantic HV + operator TSV prompt/response index, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; cevap TSV'den gelir |
 | Grounded retrieval quality gate | versioned held-out JSONL, stateless real-binary exact prompt/abstention metrikleri, immutable input digest binding, privacy-conscious report ve explicit release threshold'lari |
-| Optional LMM integration plane | Unicode/subword model-tokenizer manifest, hash-chained long dialogue, provenance-bound FTS evidence, content-addressed image/audio/video asset registry ve gerçek OpenVINO/API/worker backend gateway'i; model ağırlığı depoda değildir |
+| Optional LMM integration plane | Unicode/subword model-tokenizer manifest, hash-chained long dialogue, provenance-bound FTS evidence, content-addressed image/audio/video asset registry, model-emitted citation/abstention release gate ve gerçek OpenVINO/API/worker backend gateway'i; model ağırlığı depoda değildir |
 
 Bu sistem, bounded semantic prototype/retrieval ve symbolic factor reasoning için
 üretim kalitesinde operation sözleşmeleri taşıyabilir. Model kapasitesi ve
@@ -35,18 +35,21 @@ veya safety policy yerine gecmez.
 
 Yeni held-out evaluator bu dar retrieval contract'inde bilinmeyen kalite
 durumunu azaltir: expected prompt veya expected abstention'i gerçek compiled
-chat binary'si ile olcer ve release threshold'unu fail-closed uygular. Ancak
-LMM evaluation gate satirindaki eksigi kapatmaz; perplexity, multimodal task,
-contamination, factuality veya safety/red-team evaluation yapmaz.
+chat binary'si ile olcer ve release threshold'unu fail-closed uygular. Bu
+HDC evaluator yalnız retrieval contract'ini ölçer. Ayrı LMM citation/abstention
+gate'i eklense de; perplexity, multimodal task, contamination, factuality veya
+safety/red-team evaluation yapmaz.
 
 `tools/lmm_gateway.py` ile ayrı bir LMM integration plane eklendi. Bu plane,
 gerçek bir operator-supplied OpenVINO GenAI modelini, HTTPS OpenAI-compatible
 endpoint'i veya local multimodal worker'ı bağlayabilir; Unicode/subword tokenizer
 ve immutable model artifact manifest'iyle context pack eder. Image/audio/video
-ancak gerçek backend capability'si ilan edildiğinde worker'a geçer. Bu bir LMM
-runtime'ın tümünü Fortran HDC çekirdeğine dönüştürmez ve ağırlık/model kalitesi
-iddiası taşımaz. Ayrıntılı contract için [LMM_RUNTIME.md](LMM_RUNTIME.md)'ye
-bakın.
+ancak gerçek backend capability'si ilan edildiğinde worker'a geçer.
+`lmm_quality_evaluation.py`, gerçek configured gateway üzerinde held-out
+citation/abstention contract'ini release threshold ile ölçer; response'u
+hardcode etmez veya factuality iddia etmez. Bu bir LMM runtime'ın tümünü Fortran
+HDC çekirdeğine dönüştürmez ve ağırlık/model kalitesi iddiası taşımaz. Ayrıntılı
+contract için [LMM_RUNTIME.md](LMM_RUNTIME.md)'ye bakın.
 
 ## Gerçek LMM/LLM için eksik zorunlu katmanlar
 
@@ -62,7 +65,7 @@ yeni data plane, model runtime ve test yüzeyi gerektirir.
 | Multimodal encoders/fusion | Asset registry + worker protocol var; native encoder/fusion yok | image/audio/video decoding, vision/audio encoder, alignment/fusion, modality batching ve safety policy gerçek VLM/AV worker tarafından sağlanmalıdır |
 | Distributed training | Yok | data/model/pipeline parallelism, collectives, gradient synchronization, elastic fault recovery ve sharded optimizer/checkpoint gerekir |
 | Neural mixed precision | Native Vegai'de yok | BF16/FP16/FP8 numerical policy, master weights, loss scaling ve hardware kernels gerekir |
-| LMM evaluation gate | Contract/provenance test var; broad model-quality gate yok | held-out perplexity/task suites, contamination policy, modality quality, safety/red-team ve calibration gerekir |
+| LMM evaluation gate | Held-out gerçek gateway citation/abstention contract + release threshold var; broad model-quality gate yok | held-out perplexity/task suites, contamination policy, modality quality, safety/red-team ve calibration gerekir |
 | GPU/NPU neural training backend | Optional OpenVINO GenAI text inference adapter var; neural training/joint dispatch yok | adapter inventory/OpenVINO context dispatch, neural training kernel veya CPU+GPU+NPU joint compute kanıtı değildir |
 | Dataset governance at LMM scale | Kısmi; document/asset source-license contract eklendi | semantic near-duplicate, licensing/PII/consent, benchmark contamination ve multimodal rights pipeline ayrıca gerekir |
 
@@ -91,7 +94,10 @@ edilebilir işlemsel eksikleri kapatır:
     content-addressed image/audio/video asset registry;
 11. OpenVINO GenAI text, HTTPS OpenAI-compatible ve local multimodal worker
     backend'leri için fail-closed capability/provenance gateway;
-12. actual gateway child-process latency ve backend-reported token ölçümü.
+12. model-emitted evidence citation/explicit abstention marker doğrulaması ve
+    gerçek gateway child process'leri üzerinde privacy-conscious held-out LMM
+    quality/release gate;
+13. actual gateway child-process latency ve backend-reported token ölçümü.
 
 Bunlar veri kaybı, silent duplicate, held-out contamination, capacity overflow,
 restart operasyon riski, dar grounded-retrieval kalitesinin ölçülmeden publish
@@ -127,5 +133,7 @@ savunulabilir değildir. Mevcut Vegai roadmap'i buna alternatif olarak
 HDC data/checkpoint sözleşmesi için [PRETRAINING.md](PRETRAINING.md), continual
 transaction için [CONTINUOUS_PRETRAINING.md](CONTINUOUS_PRETRAINING.md),
 held-out retrieval gate/audit için [QUALITY_ASSURANCE.md](QUALITY_ASSURANCE.md),
-gerçek model gateway/Unicode/multimodal boundary için [LMM_RUNTIME.md](LMM_RUNTIME.md)
-ve Fortran core invariantları için [ARCHITECTURE.md](ARCHITECTURE.md) referanstır.
+gerçek model gateway/Unicode/multimodal boundary için [LMM_RUNTIME.md](LMM_RUNTIME.md),
+target-domain'de ölçülebilir LMM üstünlüğü roadmap'i için
+[LMM_EXCELLENCE_ARCHITECTURE.md](LMM_EXCELLENCE_ARCHITECTURE.md) ve Fortran core
+invariantları için [ARCHITECTURE.md](ARCHITECTURE.md) referanstır.

@@ -193,7 +193,10 @@ python3 tools/lmm_knowledge.py query \
 Gerçek generation için operator; model weights/artifacts, tokenizer JSON,
 source/license bilgisi ve backend seçimini sağlar. `worker` protocol'u
 image/audio/video alabilir; OpenVINO GenAI adapter'i bu repositoryde text-only
-olarak tanımlıdır. Ayrıntılı güvenlik, performance ve model package sözleşmesi
+olarak tanımlıdır. Operatorün gerçek backend'i için held-out citation/abstention
+release gate'i `tools/lmm_quality_evaluation.py` ile çalışır; case'ler request +
+evidence içerir, report ham prompt/response tutmaz. Ayrıntılı güvenlik,
+performance, model package ve quality-gate sözleşmesi
 [LMM_RUNTIME.md](../docs/LMM_RUNTIME.md)'dedir.
 
 ## Kesintisiz shard örneği

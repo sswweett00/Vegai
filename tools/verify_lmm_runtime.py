@@ -37,6 +37,7 @@ KNOWLEDGE = ROOT / "tools" / "lmm_knowledge.py"
 SESSION = ROOT / "tools" / "lmm_session.py"
 GATEWAY = ROOT / "tools" / "lmm_gateway.py"
 BENCHMARK = ROOT / "tools" / "benchmark_lmm_gateway.py"
+QUALITY_EVALUATOR = ROOT / "tools" / "lmm_quality_evaluation.py"
 MODEL_MANIFEST_TOOL = ROOT / "tools" / "lmm_model_manifest.py"
 MODEL_FIXTURE = ROOT / "examples" / "lmm" / "mini_multilingual_model.json"
 REQUEST_FIXTURE = ROOT / "examples" / "lmm" / "mini_multilingual_request.json"
@@ -307,6 +308,202 @@ print(json.dumps({
                     and report_payload["backend"]["worker_snapshot_bytes"] > 0,
                     "gateway did not report bounded hash-checked worker media snapshot delivery")
 
+            # A held-out quality gate runs a real configured gateway command;
+            # it accepts only backend-emitted evidence/abstention markers and
+            # retains output hashes rather than raw held-out text in its report.
+            quality_worker = workspace / "quality-worker.py"
+            quality_worker.write_text(
+                """import json, sys
+payload = json.load(sys.stdin)
+request_id = payload['request']['id']
+evidence = [message for message in payload['messages'] if message['id'].startswith('evidence:')]
+if request_id == 'eval-bad-citation':
+    assert any(message['id'] == 'evidence:turkish' for message in evidence)
+    text = 'Yanlis kaynak. [[vegai-source:unknown]]'
+elif request_id == 'eval-malformed-citation':
+    assert any(message['id'] == 'evidence:turkish' for message in evidence)
+    text = 'Bozuk kaynak marker. [[vegai-source:turkish'
+elif request_id == 'eval-malformed-abstention':
+    assert any(message['id'] == 'evidence:turkish' for message in evidence)
+    text = 'Bozuk abstention marker. [[vegai-abstain'
+elif request_id.startswith('eval-grounded'):
+    assert any(message['id'] == 'evidence:turkish' for message in evidence)
+    text = 'Kaynakli model cevabi. [[vegai-source:turkish]]'
+elif request_id == 'eval-abstain':
+    assert not evidence
+    text = 'Yeterli kanit yok. [[vegai-abstain]]'
+else:
+    raise AssertionError(request_id)
+print(json.dumps({
+  'schema_version': 'vegai-lmm-worker-response/v1',
+  'text': text,
+  'finish_reason': 'stop',
+  'input_tokens': 7,
+  'output_tokens': 5,
+  'backend': 'synthetic-quality-worker',
+  'device': None
+}, ensure_ascii=False))
+""",
+                encoding="utf-8",
+                newline="\n",
+            )
+            quality_worker_command = workspace / "quality-worker-command.json"
+            write_json(quality_worker_command, [sys.executable, str(quality_worker)])
+            grounded_evidence = json.loads(evidence.read_text(encoding="utf-8"))
+            abstain_evidence = dict(grounded_evidence)
+            abstain_evidence["items"] = []
+            grounded_request = {
+                "schema_version": "vegai-lmm-request/v1", "id": "eval-grounded", "max_new_tokens": 32,
+                "temperature": 0, "top_p": 1,
+                "messages": [
+                    {"id": "quality-policy", "role": "system", "pinned": True,
+                     "content": [{"type": "text", "text": "Kanita dayali yanitlarda kaynak markerini kendin yaz."}]},
+                    {"id": "quality-user", "role": "user", "pinned": False,
+                     "content": [{"type": "text", "text": "İstanbul için kaynaklı yanıt ver."}]},
+                ],
+            }
+            abstain_request = dict(grounded_request)
+            abstain_request["id"] = "eval-abstain"
+            abstain_request["messages"] = [
+                grounded_request["messages"][0],
+                {"id": "quality-user-abstain", "role": "user", "pinned": False,
+                 "content": [{"type": "text", "text": "Kanıt yoksa açıkça abstain et."}]},
+            ]
+            quality_cases = workspace / "quality-cases.jsonl"
+            quality_case_rows = [
+                {
+                    "schema_version": "vegai-lmm-quality-case/v1", "id": "grounded-citation",
+                    "request": grounded_request, "evidence": grounded_evidence,
+                    "required_citation_ids": ["turkish"], "allowed_citation_ids": ["turkish"],
+                    "require_abstention": False,
+                },
+                {
+                    "schema_version": "vegai-lmm-quality-case/v1", "id": "unsupported-abstention",
+                    "request": abstain_request, "evidence": abstain_evidence,
+                    "required_citation_ids": [], "allowed_citation_ids": [], "require_abstention": True,
+                },
+            ]
+            quality_cases.write_text(
+                "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in quality_case_rows),
+                encoding="utf-8", newline="\n",
+            )
+            quality_command = workspace / "quality-gateway-command.json"
+            write_json(
+                quality_command,
+                [
+                    sys.executable, str(GATEWAY), "--model", str(MODEL_FIXTURE), "--request", "{request}",
+                    "--evidence", "{evidence}", "--worker-command-json", str(quality_worker_command),
+                    "--grounding-mode", "evidence-or-abstain", "--print-json",
+                ],
+            )
+            quality_hmac_key = workspace / "quality-case-hmac.key"
+            quality_hmac_key.write_bytes(b"synthetic-quality-case-secret")
+            quality_report = workspace / "quality-report.json"
+            quality_result = run(
+                [
+                    sys.executable, str(QUALITY_EVALUATOR), "--cases", str(quality_cases),
+                    "--gateway-command-json", str(quality_command), "--case-id-hmac-key", str(quality_hmac_key),
+                    "--report", str(quality_report), "--fail-on-gate",
+                ]
+            )
+            require(json.loads(quality_result.stdout)["release_gate_passed"],
+                    "held-out LMM quality evaluator did not pass its valid gateway cases")
+            quality_payload = json.loads(quality_report.read_text(encoding="utf-8"))
+            require(quality_payload["quality_gate"]["passed"] and len(quality_payload["cases"]) == 2,
+                    "quality report did not record the configured held-out cases")
+            require(quality_payload["configuration"]["case_id_privacy"] == "hmac-sha256"
+                    and quality_payload["dependencies"]["case_id_hmac_key"]["path"] == "<redacted>",
+                    "quality report did not apply private optional held-out case HMAC handling")
+            require(all(len(case["case"]) == 64 and "text" not in case["response"] for case in quality_payload["cases"]),
+                    "quality report exposed held-out response text or case identifiers")
+
+            malformed_quality_command = workspace / "malformed-quality-gateway-command.json"
+            write_json(
+                malformed_quality_command,
+                [
+                    sys.executable, str(GATEWAY), "--model", "{request}", "--request", str(REQUEST_FIXTURE),
+                    "--evidence", "{evidence}", "--print-json",
+                ],
+            )
+            malformed_quality_command_run = run(
+                [
+                    sys.executable, str(QUALITY_EVALUATOR), "--cases", str(quality_cases),
+                    "--gateway-command-json", str(malformed_quality_command),
+                    "--report", str(workspace / "must-not-exist-quality-report.json"),
+                ],
+                expected=2,
+            )
+            require("direct value of --request" in malformed_quality_command_run.stdout,
+                    "quality evaluator accepted an unbound request placeholder command")
+
+            bad_citation_request = dict(grounded_request)
+            bad_citation_request["id"] = "eval-bad-citation"
+            bad_citation_path = workspace / "bad-citation-request.json"
+            write_json(bad_citation_path, bad_citation_request)
+            bad_citation = run(
+                [
+                    sys.executable, str(GATEWAY), "--model", str(MODEL_FIXTURE), "--request", str(bad_citation_path),
+                    "--evidence", str(evidence), "--worker-command-json", str(quality_worker_command),
+                    "--grounding-mode", "require-citations",
+                ],
+                expected=2,
+            )
+            require("not supplied" in bad_citation.stdout,
+                    "gateway accepted a model citation absent from the supplied evidence bundle")
+
+            malformed_citation_request = dict(grounded_request)
+            malformed_citation_request["id"] = "eval-malformed-citation"
+            malformed_citation_path = workspace / "malformed-citation-request.json"
+            write_json(malformed_citation_path, malformed_citation_request)
+            malformed_citation = run(
+                [
+                    sys.executable, str(GATEWAY), "--model", str(MODEL_FIXTURE), "--request", str(malformed_citation_path),
+                    "--evidence", str(evidence), "--worker-command-json", str(quality_worker_command),
+                    "--grounding-mode", "require-citations",
+                ],
+                expected=2,
+            )
+            require("malformed" in malformed_citation.stdout,
+                    "gateway accepted a malformed model citation marker")
+
+            malformed_abstention_request = dict(grounded_request)
+            malformed_abstention_request["id"] = "eval-malformed-abstention"
+            malformed_abstention_path = workspace / "malformed-abstention-request.json"
+            write_json(malformed_abstention_path, malformed_abstention_request)
+            malformed_abstention = run(
+                [
+                    sys.executable, str(GATEWAY), "--model", str(MODEL_FIXTURE), "--request", str(malformed_abstention_path),
+                    "--evidence", str(evidence), "--worker-command-json", str(quality_worker_command),
+                    "--grounding-mode", "require-citations",
+                ],
+                expected=2,
+            )
+            require("malformed" in malformed_abstention.stdout,
+                    "gateway accepted a malformed model abstention marker")
+
+            negative_quality_case = workspace / "negative-quality-cases.jsonl"
+            negative_row = dict(quality_case_rows[0])
+            negative_row["id"] = "incorrect-abstention-expectation"
+            negative_row["request"] = dict(grounded_request)
+            negative_row["request"]["id"] = "eval-grounded-negative"
+            negative_row["require_abstention"] = True
+            negative_row["required_citation_ids"] = []
+            negative_row["allowed_citation_ids"] = []
+            negative_quality_case.write_text(json.dumps(negative_row, ensure_ascii=False, sort_keys=True) + "\n",
+                                             encoding="utf-8", newline="\n")
+            negative_quality_report = workspace / "negative-quality-report.json"
+            negative_quality = run(
+                [
+                    sys.executable, str(QUALITY_EVALUATOR), "--cases", str(negative_quality_case),
+                    "--gateway-command-json", str(quality_command), "--report", str(negative_quality_report), "--fail-on-gate",
+                ],
+                expected=3,
+            )
+            require(not json.loads(negative_quality.stdout)["release_gate_passed"]
+                    and negative_quality_report.is_file()
+                    and not json.loads(negative_quality_report.read_text(encoding="utf-8"))["quality_gate"]["passed"],
+                    "quality release gate did not publish a failing report for an invalid abstention expectation")
+
             benchmark_child_report = workspace / "benchmark-child-report.json"
             benchmark_command = workspace / "benchmark-command.json"
             write_json(
@@ -446,7 +643,7 @@ server.handle_request()
         print(f"lmm runtime verification: FAIL: {error}", file=sys.stderr)
         return 1
 
-    print("lmm runtime verification: PASS (Unicode, subword-ready contract, model manifest, long context, assets, knowledge, session, worker snapshot, endpoint provenance, capability gate)")
+    print("lmm runtime verification: PASS (Unicode, subword-ready contract, model manifest, long context, assets, knowledge, session, worker snapshot, endpoint provenance, held-out quality gate, capability gate)")
     return 0
 
 
