@@ -458,8 +458,9 @@ contains
       type(pretrain_execution_report_t) :: default_execution, serial_execution, parallel_execution
       type(hv_t) :: semantic_hv, semantic_before_extension, semantic_after_extension
       character(len=TOKEN_LEN) :: nearest_token
+      character(len=8) :: checkpoint_magic
       integer :: unit, io_status
-      integer(int32) :: status, slot, nearest_slot
+      integer(int32) :: status, slot, nearest_slot, checkpoint_version
       logical :: found
       real :: similarity
 
@@ -706,6 +707,19 @@ contains
                        'hierarchical checkpoint restores semantic prototypes')
       call pretrain_checkpoint_save(coherent_model, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'coherent checkpoint save succeeds')
+      open(newunit=unit, file=CHECKPOINT_PATH, status='old', access='stream', form='unformatted', &
+           action='read', iostat=io_status)
+      call assert_true(io_status == 0, 'coherent checkpoint header opens')
+      if (io_status == 0) then
+         read(unit, iostat=io_status) checkpoint_magic, checkpoint_version
+         close(unit)
+         call assert_true(io_status == 0 .and. checkpoint_magic == 'VGHDC001', &
+                          'coherent checkpoint header is readable')
+         if (checkpoint_version /= 6_int32) then
+            write(error_unit, '(A,I0)') 'ERROR: coherent checkpoint header version=', checkpoint_version
+         end if
+         call assert_i32_equal(checkpoint_version, 6_int32, 'coherent checkpoint uses format version six')
+      end if
       call pretrain_checkpoint_load(CHECKPOINT_PATH, restored, status)
       if (status /= PT_OK) write(error_unit, '(A,I0)') 'ERROR: coherent checkpoint load status=', status
       call assert_i32_equal(status, PT_OK, 'coherent checkpoint load succeeds')
