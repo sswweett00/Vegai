@@ -419,6 +419,15 @@ uygulanmalıdır:
 5. **Değerlendirme ayrımı:** train/dev/test kaynak overlap'ini ve duplicate
    kayıtları denetleyin. Benchmark sonuçlarını training corpus'a sızdırmayın.
 
+Rich JSONL/JSON/Parquet/Arrow kaynakları için önce
+`tools/training_dataset.py` ile `vegai-training-record/v1` schema/quality audit'i
+çalıştırın; exact text dedupe, label imbalance ve deterministic train/validation/test
+hash split'i bu aşamada görünür olur. Native eğitim doğrudan bu rich alanları
+okumaz: yalnız explicit strict text export veya `production_dataset.py
+--input-format ...` adapter'ı `record.text` alanını ASCII/LF corpus'a projection
+yapar. Tam schema ve format-I/O sözleşmesi
+[TRAINING_DATA_FORMAT.md](TRAINING_DATA_FORMAT.md)'dedir.
+
 `tools/corpus_manifest.py` ağ erişimi yapmadan caller'ın sağladığı yerel
 corpus için SHA-256, byte/record sayısı ve Vegai ASCII ingest preflight
 telemetrisi üretir. Bu, hukuki/etik değerlendirmeyi otomatikleştirmez; manifest

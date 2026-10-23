@@ -25,13 +25,25 @@ aracı vardır:
 
 ### 1. Fail-closed veri foundry
 
-Builder kaynak corpus'u indirmez, normalize etmez ve UTF-8'i sessizce ASCII'ye
+`--input-format txt` (varsayılan) yolunda **uncompressed** strict corpus için
+builder kaynak corpus'u indirmez, normalize etmez ve UTF-8'i sessizce ASCII'ye
 çevirmez. Her fiziksel kaydın şu Vegai tokenizer sözleşmesine uymasını ister:
 
 - LF sonlandırmalı kayıt; CRLF kabul edilmez;
 - ASCII byte; token karakteri `A-Z a-z 0-9 _ '`;
 - en çok 8.192 payload byte/kayıt, 48 byte/token ve 1.024 token/kayıt;
 - tokenizer tarafından dropped/truncated token yok.
+
+JSONL/JSON/Parquet/Arrow için `--input-format` açıkça seçilebilir. `.txt.gz`
+de aynı adapter yolundan decompress + revalidate edilir. Bu yol önce
+`vegai-training-record/v1` schema-valid record stream'ini okur, sonra yalnız
+`record.text` alanını aynı strict ASCII/token contract'iyle private canonical
+TXT snapshot'a projection eder. `label`, `split`, `source` ve `metadata` native
+HDC text'e eklenmez. `dataset.json.input_adapter`, raw structured source'un
+SHA-256/byte count'unu ve canonical TXT snapshot'ın SHA-256/byte count'unu
+birlikte bağlar; runner bu bağ varsa doğrular. Ayrıntılı rich-data schema,
+compression ve conversion sınırları için
+[TRAINING_DATA_FORMAT.md](TRAINING_DATA_FORMAT.md) belgesine bakın.
 
 Unicode, PII temizleme, lisans filtresi, dil/kalite filtresi veya dedupe öncesi
 normalizasyon gerekiyorsa bunlar **ayrı, versioned ve izlenebilir** bir upstream

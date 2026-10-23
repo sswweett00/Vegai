@@ -90,7 +90,47 @@ veya production throughput iddiası değildir. Kaydedilmiş CI önce/sonra değe
 [`docs/PRETRAINING_MODE_COMPARISON.md`](../docs/PRETRAINING_MODE_COMPARISON.md)
 belgesindedir.
 
-## 3. Veri odakli grounded diyalog fixture'i
+## 3. Rich training-data schema fixture'ı
+
+`training_data/mini_turkish_ascii_records.jsonl`, yeni
+`vegai-training-record/v1` sözleşmesinin **16 kayıt / 4 label** içeren tamamen
+sentetik örneğidir. `id`, `label`, `source` ve JSON `metadata` alanlarını
+korur; `text` alanlarının tümü strict ASCII HDC export ile uyumludur. Bu
+fixture gerçek Türkçe anlama, sınıf dengesi veya production corpus iddiası
+değildir.
+
+```bash
+# Parquet/Arrow round-trip dahil data-I/O verifier için isolated dependency environment
+make data-check
+. .venv-dataio/bin/activate
+
+# Schema + strict native-text contract + label imbalance audit
+python tools/training_dataset.py validate \
+  examples/training_data/mini_turkish_ascii_records.jsonl --hdc-strict
+
+# Metadata korunarak deterministic exact-dedupe + train/validation/test split
+python tools/training_dataset.py prepare \
+  examples/training_data/mini_turkish_ascii_records.jsonl \
+  --output-dir /tmp/vegai-rich-fixture-prepared --output-format parquet \
+  --output-compression zstd
+
+# Mevcut immutable production foundry yalnız text'i explicit projection eder.
+python tools/production_dataset.py \
+  --input examples/training_data/mini_turkish_ascii_records.jsonl --input-format jsonl \
+  --output-dir /tmp/vegai-rich-fixture-production \
+  --source 'Vegai synthetic rich fixture/v1' --license MIT \
+  --retrieved-at 'source-controlled fixture' \
+  --preprocessing 'ASCII-safe fixture; no label-to-text injection' \
+  --validation-basis-points 2500
+```
+
+`tools/verify_training_data_io.py` fixture'ın record count/label setini ve her
+text'in strict HDC compatibility'sini CI'da doğrular; ayrıca tüm supported
+format round-trip, corruption ve raw-source-to-canonical-text provenance
+binding testlerini çalıştırır. Ayrıntılı format sözleşmesi
+[`docs/TRAINING_DATA_FORMAT.md`](../docs/TRAINING_DATA_FORMAT.md)'dedir.
+
+## 4. Veri odakli grounded diyalog fixture'i
 
 `dialogue/mini_turkish_hdc_dialogue.tsv`, yukaridaki mini corpus'un active
 ASCII token'lariyla yazilmis sentetik `prompt<TAB>response` bilgi bankasidir.
@@ -122,7 +162,7 @@ publish kullanır; doğrudan `continue` komutunu durable checkpoint üzerinde
 semantics için
 [`docs/CONTINUOUS_PRETRAINING.md`](../docs/CONTINUOUS_PRETRAINING.md)'ye bakın.
 
-## 4. Production-data foundry fixture'ı
+## 5. Production-data foundry fixture'ı
 
 `production_dataset/mini_turkish_ascii_hdc/`, yukarıdaki 128-record sentetik
 fixture'ın source-controlled, immutable production-package örneğidir. Exact

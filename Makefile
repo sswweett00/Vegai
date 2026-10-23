@@ -18,6 +18,11 @@ LDFLAGS ?= $(OPENMP_FLAGS)
 PORTABLE_BUILD_DIR ?= build-portable
 NATIVE_BUILD_DIR ?= build-native
 NATIVE_OPT_FLAGS ?= -O3 -march=native -mtune=native -funroll-loops
+# Keep optional PyArrow outside the system interpreter: Debian/PEP 668 hosts
+# commonly reject global pip installs. Override DATAIO_PYTHON for an existing
+# managed environment if desired.
+DATAIO_VENV ?= .venv-dataio
+DATAIO_PYTHON ?= $(DATAIO_VENV)/bin/python
 
 SOURCES := src/hyper_types.f90 src/text_tokenizer.f90 src/vocabulary.f90 \
            src/symbolic_memory.f90 src/resonator_network.f90 src/reasoning_core.f90 \
@@ -31,7 +36,7 @@ PRETRAIN := $(BUILD_DIR)/vegai_pretrain
 CHAT := $(BUILD_DIR)/vegai_chat
 TEST_BINARY := $(BUILD_DIR)/vegai_tests
 
-.PHONY: all engine pretrain chat test run run-pretrain run-chat check clean clean-all debug portable native portable-test native-test
+.PHONY: all engine pretrain chat test run run-pretrain run-chat check data-check clean clean-all debug portable native portable-test native-test
 
 # Default target: portable optimized GNU binaries without host-only ISA flags.
 all: engine pretrain chat
@@ -95,6 +100,14 @@ check:
 	python3 tools/verify_training_resource_plan.py
 	python3 tools/verify_openvino_provider.py
 	python3 tools/verify_openvino_context_worker.py
+
+# Rich JSON/Parquet/Arrow data formats are optional rather than a dependency of
+# the portable Fortran runtime. This explicit target installs only the adapter
+# dependency, then runs streaming round-trip and production-adapter checks.
+data-check:
+	@test -x "$(DATAIO_PYTHON)" || python3 -m venv "$(DATAIO_VENV)"
+	$(DATAIO_PYTHON) -m pip install --disable-pip-version-check -r requirements-dataio.txt
+	$(DATAIO_PYTHON) tools/verify_training_data_io.py
 
 clean:
 	rm -rf $(BUILD_DIR)

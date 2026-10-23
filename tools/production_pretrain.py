@@ -234,6 +234,27 @@ def load_dataset_contract(path: Path) -> DatasetContract:
     require(all(type(source.get(key)) is int and source[key] >= 0 for key in (
         "bytes", "physical_lf_records", "empty_or_punctuation_records_filtered",
     )), "dataset source snapshot counters are malformed")
+    # Rich JSON/Arrow/Parquet sources are projected once into canonical strict
+    # text before packaging. Old TXT-only v1 packages have no adapter field and
+    # remain valid; new packages bind raw source provenance to that text stream.
+    input_adapter = payload.get("input_adapter")
+    if input_adapter is not None:
+        require(isinstance(input_adapter, dict), "dataset input_adapter must be an object")
+        require(
+            input_adapter.get("schema") == "vegai-training-data-adapter/v1"
+            and input_adapter.get("source_format") in {"txt", "jsonl", "json", "parquet", "arrow"}
+            and isinstance(input_adapter.get("contract"), str) and bool(input_adapter["contract"]),
+            "dataset input_adapter schema, source format, or projection contract is malformed",
+        )
+        require_sha256(input_adapter.get("source_sha256"), "input-adapter raw source digest")
+        require_sha256(input_adapter.get("canonical_hdc_text_sha256"), "input-adapter canonical text digest")
+        require(
+            input_adapter["canonical_hdc_text_sha256"] == source["sha256"]
+            and type(input_adapter.get("source_bytes")) is int and input_adapter["source_bytes"] >= 0
+            and type(input_adapter.get("canonical_hdc_text_bytes")) is int
+            and input_adapter["canonical_hdc_text_bytes"] == source["bytes"],
+            "dataset input_adapter does not bind the canonical strict text source snapshot",
+        )
     deduplication = payload.get("deduplication")
     require(
         isinstance(deduplication, dict)

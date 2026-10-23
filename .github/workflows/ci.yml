@@ -20,6 +20,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes gfortran cmake ninja-build
 
+      - name: Install training-data format dependency
+        run: python3 -m pip install --disable-pip-version-check -r requirements-dataio.txt
+
       - name: Configure checked OpenMP build
         run: |
           cmake -S . -B build-ci -G Ninja \
@@ -88,6 +91,9 @@ jobs:
             --retrieved-at 'source-controlled fixture' --preprocessing none --strict-contract
           python3 -m json.tool "${RUNNER_TEMP}/toy-manifest.json" > /dev/null
           python3 tools/verify_example_corpus.py
+
+      - name: Verify streaming training-data formats and production adapter
+        run: python3 tools/verify_training_data_io.py
 
       - name: Run HDC pretraining CLI smoke test
         run: |

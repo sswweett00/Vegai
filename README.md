@@ -22,6 +22,9 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 - iki-pass vocabulary, allocation-free ASCII ingest, streaming positional-context
   Hebbian öğrenme, checkpoint/resume telemetry ve SHA-256 journal'lı continual
   shard pretraining içeren HDC/VSA corpus pipeline;
+- schema-checked streaming training-data boundary: JSONL/JSON/TXT/Parquet/Arrow
+  rich record I/O, exact SQLite text-dedupe, label-imbalance/split audit ve
+  explicit strict-HDC text projection;
 - immutable context construction + source-ordered commit ile checkpoint-bit-tam
   deterministic OpenMP multi-core training; RAM/SSD/NUMA resource preflight;
 - hardcoded cevap üretmeyen, operator TSV bilgi bankasindan grounded HDC
@@ -137,6 +140,13 @@ python3 tools/compare_pretraining_modes.py --pretrain-bin ./build/vegai_pretrain
 python3 tools/corpus_manifest.py CORPUS.txt --output corpus-manifest.json \
   --source 'dataset URI/version' --license 'license ID' --strict-contract
 
+# JSONL/JSON/TXT/Parquet/Arrow rich data contract'i (Parquet/Arrow için pyarrow optional)
+# `make data-check` isolated .venv-dataio kurar (PEP 668-safe).
+make data-check
+. .venv-dataio/bin/activate  # Windows: .venv-dataio\Scripts\activate
+python tools/training_dataset.py validate DATASET.jsonl --hdc-strict
+python tools/training_dataset.py convert DATASET.jsonl corpus-for-hdc.txt --hdc-strict
+
 # Ordered immutable shard'larla crash-safe continual pretraining
 python3 tools/continuous_shard_manifest.py data/shards/000001.txt data/shards/000002.txt \
   --output data/continual-ledger.json --source 'dataset version' --license 'license ID'
@@ -195,6 +205,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Akıl yürütme | `src/reasoning_core.f90` | role–filler frame, n-gram, kural bankası, analogik transfer |
 | Resonator Network | `src/resonator_network.f90` | slot-spesifik codebook'larla çoklu-faktör çözümleme ve exact certification |
 | Corpus ingest | `src/text_tokenizer.f90`, `src/vocabulary.f90` | bounded ASCII canonicalization, collision-safe frequency vocabulary |
+| Rich training data I/O | `tools/training_data_io.py`, `tools/training_dataset.py` | JSONL/JSON/TXT/Parquet/Arrow schema boundary, streaming/batching, exact text dedupe, split/imbalance audit ve explicit strict-HDC projection |
 | HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, hierarchical default + CPU-only coherent cross-fold option, deterministic OpenMP / optional OpenVINO immutable-context preparation + source-ordered CPU commit, mode-selective v5/v6 checkpoint/resume |
 | Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect`, CPU/OpenVINO context-provider execution switch ve nearest semantic diagnostic |
 | Grounded dialogue retrieval | `src/dialogue_retrieval.f90`, `app/chat.f90` | operator TSV response index'i, strict ASCII/OOV gate, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; free-form LLM generation degil |
@@ -217,7 +228,9 @@ iddia etmiyoruz. Sıfır-kayıplı 64-byte hizalama gerekiyorsa derleyici/ABI'ye
 Ayrıntılı tasarım ve invariantlar için [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
 Resonator Network sözleşmesi için [docs/RESONATOR_NETWORK.md](docs/RESONATOR_NETWORK.md),
 corpus veri hattı, yönetişim ve checkpoint sözleşmesi için
-[docs/PRETRAINING.md](docs/PRETRAINING.md), immutable shard ledger ve
+[docs/PRETRAINING.md](docs/PRETRAINING.md), JSONL/JSON/TXT/Parquet/Arrow training-data
+şeması ve streaming dönüşüm sözleşmesi için
+[docs/TRAINING_DATA_FORMAT.md](docs/TRAINING_DATA_FORMAT.md), immutable shard ledger ve
 crash-safe exactly-once continual pretraining için
 [docs/CONTINUOUS_PRETRAINING.md](docs/CONTINUOUS_PRETRAINING.md), data-driven grounded
 chat/retrieval sözleşmesi için [docs/DIALOGUE_RETRIEVAL.md](docs/DIALOGUE_RETRIEVAL.md), production data foundry,

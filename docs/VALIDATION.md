@@ -19,6 +19,7 @@ yerine geçmez.
 | Komut | Kapsam | Beklenen sonuç |
 |---|---|---|
 | `make check` | bağımsız reference property + demo | `Python reference verification: PASS` |
+| `make data-check` | optional PyArrow kurulumu; streaming JSONL/JSON/TXT/Parquet/Arrow round-trip, corruption ve production adapter | `training data I/O verification: PASS` |
 | `make test` | native cebir, error path, memory, reasoning | `Checks: ..., failures: 0` |
 | `make debug` | bounds/runtime/FPE denetimli native test | başarısızlık yok |
 | `make run` | 512+ sembollü demo | frame, analogy, 4 causal adım ve 3-factor Resonator PASS |
@@ -33,7 +34,13 @@ yerine geçmez.
 | `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties`, donanım/OpenVINO contract testleri, `vegai_example_pretraining`, `vegai_dialogue_retrieval`, `vegai_continuous_pretraining`, `vegai_production_pretraining`, `vegai_example_production_dataset_preflight` PASS |
 
 CI bunların checked CMake/OpenMP varyantını ve ayrıca optimize Make hedefini
-çalıştırır.
+çalıştırır. Rich-format CI adımı önce `requirements-dataio.txt` ile optional
+PyArrow'ı kurar, ardından `tools/verify_training_data_io.py` ile JSONL/JSON/TXT,
+Parquet zstd/snappy ve Arrow zstd round-trip; schema/missing-field/corrupt input
+rejection; bounded physical-line/JSON parsing; SQLite exact dedupe/label conflict;
+parallel file stream; strict HDC projection ve structured-source production
+foundry adaptasyonunu çalıştırır. Bu doğrulama format-I/O contract'ıdır; Fortran
+HDC semantic/throughput benchmarkı değildir.
 
 ## Native test kapsamı
 

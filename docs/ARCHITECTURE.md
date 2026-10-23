@@ -313,6 +313,17 @@ checksum saklanır.
 Ayrıntılı contract ve data governance için [PRETRAINING.md](PRETRAINING.md)'ye
 bakın.
 
+Native corpus sınırının **önünde**, `tools/training_data_io.py` ve
+`tools/training_dataset.py` schema-versioned `vegai-training-record/v1` data
+boundary'sini sağlar. JSONL/JSON/TXT/Parquet/Arrow reader'ları lazy/generator
+bazlıdır; rich `label`/`source`/`metadata` alanları native text'e otomatik
+katılmaz. SQLite-backed exact text-dedupe, label imbalance audit ve SHA-256
+hash split bu sınırda yapılabilir; yalnız explicit `write_hdc_corpus` projection'ı
+strict ASCII/LF corpus üretir. Böylece Fortran tokenizer sözleşmesi zayıflatılmaz
+ve rich source provenance canonical HDC text snapshot'a bağlanır. Ayrıntılı
+schema, compression/memory sınırı ve operasyon örnekleri için
+[TRAINING_DATA_FORMAT.md](TRAINING_DATA_FORMAT.md)'ye bakın.
+
 Bu Fortran data plane'in üstünde Python production control plane bulunur:
 `production_dataset.py`, strict ASCII/LF record'ları disk-backed exact SHA-256
 dedupe, exact min-frequency-1 train vocabulary count ve deterministic held-out

@@ -26,6 +26,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+/.venv-dataio/
 
 # Runtime artifacts and locally governed corpora/checkpoints
 *.out

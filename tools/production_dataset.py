@@ -53,6 +53,7 @@ from corpus_manifest import (
     inspect_short_record,
     is_token_byte,
 )
+from training_data_io import TrainingDataError, infer_format, iter_records, write_hdc_corpus
 
 
 DATASET_SCHEMA = "vegai-production-dataset/v1"
@@ -195,6 +196,53 @@ def snapshot_source(source: Path, destination: Path) -> tuple[str, int]:
         destination.unlink(missing_ok=True)
         raise DatasetBuildError(f"cannot snapshot source corpus {source}: {error}") from error
     return digest.hexdigest(), byte_count
+
+
+def materialize_structured_input_as_hdc_text(
+    source: Path,
+    destination: Path,
+    input_format: str,
+) -> tuple[str, int, dict[str, Any]]:
+    """Project a rich input stream into the only corpus form native HDC accepts.
+
+    The adapter is deliberately fail-closed: it streams schema-valid records,
+    validates every ``text`` value against the same strict ASCII/token limits,
+    then writes exactly one LF-terminated canonical text record. Labels,
+    metadata and source fields remain in the rich source layer and are never
+    appended to HDC text implicitly.  The returned provenance binds both raw
+    source bytes and the canonical corpus used by the existing foundry.
+    """
+    raw_digest = sha256_file(source)
+    try:
+        raw_bytes = source.stat().st_size
+    except OSError as error:
+        raise DatasetBuildError(f"cannot stat structured source {source}: {error}") from error
+    try:
+        report = write_hdc_corpus(
+            destination,
+            iter_records(source, format=input_format, error_policy="raise"),
+            strict=True,
+            atomic=False,
+        )
+    except TrainingDataError as error:
+        raise DatasetBuildError(f"structured input adapter rejected {source}: {error}") from error
+    try:
+        unchanged = sha256_file(source) == raw_digest and source.stat().st_size == raw_bytes
+    except OSError as error:
+        raise DatasetBuildError(f"cannot recheck structured source {source}: {error}") from error
+    require(unchanged, f"source corpus changed while adapting: {source}")
+    return report.sha256, report.bytes_written, {
+        "schema": "vegai-training-data-adapter/v1",
+        "source_format": input_format,
+        "source_sha256": raw_digest,
+        "source_bytes": raw_bytes,
+        "canonical_hdc_text_sha256": report.sha256,
+        "canonical_hdc_text_bytes": report.bytes_written,
+        "contract": (
+            "Only schema-valid record.text values are exported. Labels, split, source, and metadata are not "
+            "silently injected into native HDC training text."
+        ),
+    }
 
 
 def iter_strict_lf_records(path: Path, label: Path | None = None) -> Iterator[tuple[int, bytes]]:
@@ -406,6 +454,10 @@ def build_dataset(arguments: argparse.Namespace) -> dict[str, Any]:
     source = arguments.input.resolve()
     output = arguments.output_dir.resolve()
     require(source.is_file(), f"input corpus is not a regular file: {source}")
+    try:
+        input_format = infer_format(source, arguments.input_format)
+    except TrainingDataError as error:
+        raise DatasetBuildError(str(error)) from error
     require(not output.exists(), f"output directory already exists; refusing to overwrite: {output}")
     require(arguments.max_shard_bytes > 0, "--max-shard-bytes must be positive")
     require(arguments.max_shard_tokens > 0, "--max-shard-tokens must be positive")
@@ -421,11 +473,27 @@ def build_dataset(arguments: argparse.Namespace) -> dict[str, Any]:
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.building-", dir=output.parent))
     digest_index: sqlite3.Connection | None = None
     try:
-        # Never package directly from a caller-controlled path.  The retained
-        # snapshot is the exact byte stream whose digest/provenance is emitted,
-        # and it is removed before atomic publication.
+        # Never package directly from a caller-controlled path. Uncompressed
+        # TXT keeps its historic byte snapshot path; a .txt.gz source is
+        # explicitly decompressed/revalidated through the same adapter as rich
+        # formats. Rich inputs are streamed into the strict LF/ASCII text shape
+        # that the native Fortran trainer and the existing foundry consume.
         source_snapshot = staging / ".source-snapshot.txt"
-        source_digest, source_bytes = snapshot_source(source, source_snapshot)
+        if input_format == "txt" and source.suffix.lower() != ".gz":
+            source_digest, source_bytes = snapshot_source(source, source_snapshot)
+            input_adapter = {
+                "schema": "vegai-training-data-adapter/v1",
+                "source_format": "txt",
+                "source_sha256": source_digest,
+                "source_bytes": source_bytes,
+                "canonical_hdc_text_sha256": source_digest,
+                "canonical_hdc_text_bytes": source_bytes,
+                "contract": "Strict TXT input is already the canonical native HDC corpus stream.",
+            }
+        else:
+            source_digest, source_bytes, input_adapter = materialize_structured_input_as_hdc_text(
+                source, source_snapshot, input_format
+            )
         digest_index = create_digest_index(staging / ".exact-record-dedup.sqlite")
         provenance = {
             "source": arguments.source,
@@ -483,8 +551,11 @@ def build_dataset(arguments: argparse.Namespace) -> dict[str, Any]:
         # A normal source mutation is rejected rather than silently assigning
         # the caller's path a digest for different bytes.  The private snapshot
         # remains the immutable truth used for package construction.
-        require(sha256_file(source) == source_digest and source.stat().st_size == source_bytes,
-                f"source corpus changed while packaging: {source}")
+        require(
+            sha256_file(source) == input_adapter["source_sha256"]
+            and source.stat().st_size == input_adapter["source_bytes"],
+            f"source corpus changed while packaging: {source}",
+        )
         require(train.entries, "deduplication/filtering left no training records")
         unique_training_tokens = training_unique_tokens(digest_index)
         if validation is not None:
@@ -512,12 +583,16 @@ def build_dataset(arguments: argparse.Namespace) -> dict[str, Any]:
             "declared_provenance": provenance,
             "source": {
                 "input_filename": source.name,
+                # This is the immutable strict-LF corpus snapshot actually
+                # consumed by the existing HDC foundry. The raw structured
+                # source identity remains in input_adapter below.
                 "sha256": source_digest,
                 "bytes": source_bytes,
                 "physical_lf_records": source_records,
                 "empty_or_punctuation_records_filtered": source_empty_records,
                 "strict_preflight": preflight_dict(source_stats),
             },
+            "input_adapter": input_adapter,
             "deduplication": {
                 "mode": arguments.deduplicate,
                 "identity": "sha256(raw-record-without-lf)",
@@ -574,7 +649,14 @@ def build_dataset(arguments: argparse.Namespace) -> dict[str, Any]:
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", required=True, type=Path, help="local LF/ASCII corpus to package")
+    parser.add_argument(
+        "--input", required=True, type=Path,
+        help="local strict TXT corpus or schema-valid JSONL/JSON/Parquet/Arrow source to package",
+    )
+    parser.add_argument(
+        "--input-format", choices=("auto", "jsonl", "json", "txt", "parquet", "arrow"), default="auto",
+        help="source format (default: infer from extension; rich inputs are explicitly projected through text)",
+    )
     parser.add_argument("--output-dir", required=True, type=Path, help="new immutable dataset directory to publish")
     parser.add_argument("--source", required=True, help="dataset/source identifier or URI recorded in immutable provenance")
     parser.add_argument("--license", required=True, help="license/usage identifier recorded in immutable provenance")
