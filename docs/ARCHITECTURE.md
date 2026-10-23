@@ -355,9 +355,17 @@ Session yalniz son `max_history_turns` user-prompt HV'sini fixed-capacity ring
 dizisinde tutar. Mevcut prompt ile bounded history tekrar bundle edilir; index,
 checkpoint ve training state mutasyona ugramaz. Exact scan `O(N)` oldugu icin
 module tek-host, bounded knowledge base contract'idir; buyuk-scale ANN/remote
-search bir adapter olarak ayri tasarlanmalidir. Ayrintili veri, confidence ve
-operasyon contract'i için [DIALOGUE_RETRIEVAL.md](DIALOGUE_RETRIEVAL.md)'ye
-bakın.
+search bir adapter olarak ayri tasarlanmalidir.
+
+Bu retrieval plane'in ustunde `tools/dialogue_evaluation.py` ayri bir release
+quality plane saglar: history kapali held-out JSONL case'lerini gerçek
+`vegai_chat` ile calistirir, exact expected-prompt grounding ile expected
+abstention'i olcer, raw prompt yerine hash raporlar ve checkpoint/KB/binary
+kimliklerini baglar. Bu tool response uretmez veya HDC semantics'ini degistirmez;
+operatore threshold calibration ve publish gate verir. Ayrintili veri,
+confidence, evaluation ve operasyon contract'i için
+[DIALOGUE_RETRIEVAL.md](DIALOGUE_RETRIEVAL.md) ve
+[QUALITY_ASSURANCE.md](QUALITY_ASSURANCE.md)'ye bakın.
 
 ## 8. Paralellik ve performans sınırları
 

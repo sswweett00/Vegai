@@ -36,7 +36,7 @@ PRETRAIN := $(BUILD_DIR)/vegai_pretrain
 CHAT := $(BUILD_DIR)/vegai_chat
 TEST_BINARY := $(BUILD_DIR)/vegai_tests
 
-.PHONY: all engine pretrain chat test run run-pretrain run-chat check data-check clean clean-all debug portable native portable-test native-test
+.PHONY: all engine pretrain chat test run run-pretrain run-chat check data-check dialogue-check clean clean-all debug portable native portable-test native-test
 
 # Default target: portable optimized GNU binaries without host-only ISA flags.
 all: engine pretrain chat
@@ -100,6 +100,11 @@ check:
 	python3 tools/verify_training_resource_plan.py
 	python3 tools/verify_openvino_provider.py
 	python3 tools/verify_openvino_context_worker.py
+
+# Real binary integration check for held-out retrieval grounding/abstention,
+# strict evaluator schema, input provenance and an intentional failed gate.
+dialogue-check: $(PRETRAIN) $(CHAT)
+	python3 tools/verify_dialogue_evaluation.py --pretrain-bin $(PRETRAIN) --chat-bin $(CHAT)
 
 # Rich JSON/Parquet/Arrow data formats are optional rather than a dependency of
 # the portable Fortran runtime. This explicit target installs only the adapter

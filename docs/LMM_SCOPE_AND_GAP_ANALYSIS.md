@@ -19,6 +19,7 @@ multimodal neural runtime yapmaz.
 | Optional Intel boundary | OpenVINO yalnız supported positional/hybrid/hierarchical immutable packed-HDC context preparation için; explicit CPU policy native fused kernel'dir. Center-dependent coherent cross-fold mode CPU/OpenMP-only'dir; GPU/NPU execution ayrıca doğrulanmalıdır |
 | Yeni production control plane | disk-backed exact raw-record dedupe, content-addressed shards, deterministic held-out split, exact leakage gate, max-vocabulary capacity preflight, binary/data/policy provenance |
 | Grounded diyalog retrieval | checkpoint semantic HV + operator TSV prompt/response index, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; cevap TSV'den gelir |
+| Grounded retrieval quality gate | versioned held-out JSONL, stateless real-binary exact prompt/abstention metrikleri, immutable input digest binding, privacy-conscious report ve explicit release threshold'lari |
 
 Bu sistem, bounded semantic prototype/retrieval ve symbolic factor reasoning için
 üretim kalitesinde operation sözleşmeleri taşıyabilir. Model kapasitesi ve
@@ -30,6 +31,12 @@ bilgi bankasindan retrieval ile gelir; model yeni paragraf/token sample etmez.
 Similarity/margin gate'i gecilmezse abstain eder. Bu, hardcoded reply yerine
 data-driven grounded UX icin yararlidir; LLM sohbet zekasi, factual guarantee
 veya safety policy yerine gecmez.
+
+Yeni held-out evaluator bu dar retrieval contract'inde bilinmeyen kalite
+durumunu azaltir: expected prompt veya expected abstention'i gerçek compiled
+chat binary'si ile olcer ve release threshold'unu fail-closed uygular. Ancak
+LMM evaluation gate satirindaki eksigi kapatmaz; perplexity, multimodal task,
+contamination, factuality veya safety/red-team evaluation yapmaz.
 
 ## Gerçek LMM/LLM için eksik zorunlu katmanlar
 
@@ -65,11 +72,14 @@ edilebilir işlemsel eksikleri kapatır:
 6. controller'a immutable manifest digest pin'i; child training sırasında
    ledger replacement'ın kabul edilmemesi;
 7. existing candidate-checkpoint/atomic-state exactly-once semantics'in gerçek
-   compiled CLI ile CTest integration doğrulaması.
+   compiled CLI ile CTest integration doğrulaması;
+8. operator TSV retrieval için ayrı frozen held-out exact-grounding/abstention
+   evaluation, binary/checkpoint/KB digest binding ve release gate.
 
-Bunlar veri kaybı, silent duplicate, held-out contamination, capacity overflow
-ve restart operasyon risklerini azaltır. Semantic language quality, generative
-ability veya multimodal competence kanıtlamaz.
+Bunlar veri kaybı, silent duplicate, held-out contamination, capacity overflow,
+restart operasyon riski ve dar grounded-retrieval kalitesinin ölçülmeden
+publish edilmesi riskini azaltır. Semantic language quality, generative ability
+veya multimodal competence kanıtlamaz.
 
 ## Gerçek LMM hedefi için dürüst ayrı proje sınırı
 
@@ -97,5 +107,6 @@ savunulabilir değildir. Mevcut Vegai roadmap'i buna alternatif olarak
 
 İşlemsel ayrıntılar için [PRODUCTION_PRETRAINING.md](PRODUCTION_PRETRAINING.md),
 HDC data/checkpoint sözleşmesi için [PRETRAINING.md](PRETRAINING.md), continual
-transaction için [CONTINUOUS_PRETRAINING.md](CONTINUOUS_PRETRAINING.md) ve
-Fortran core invariantları için [ARCHITECTURE.md](ARCHITECTURE.md) referanstır.
+transaction için [CONTINUOUS_PRETRAINING.md](CONTINUOUS_PRETRAINING.md),
+held-out retrieval gate/audit için [QUALITY_ASSURANCE.md](QUALITY_ASSURANCE.md)
+ve Fortran core invariantları için [ARCHITECTURE.md](ARCHITECTURE.md) referanstır.

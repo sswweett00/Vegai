@@ -28,7 +28,8 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 - immutable context construction + source-ordered commit ile checkpoint-bit-tam
   deterministic OpenMP multi-core training; RAM/SSD/NUMA resource preflight;
 - hardcoded cevap üretmeyen, operator TSV bilgi bankasindan grounded HDC
-  retrieval yapan bounded chat/REPL yuzeyi ve abstention kapisi;
+  retrieval yapan bounded chat/REPL yuzeyi, abstention kapisi ve held-out
+  grounding/abstention release-quality evaluator'ü;
 - yerel Fortran özellik/entegrasyon testleri, bağımsız Python referans modeli
   ve GitHub Actions ile denetimli derleme.
 
@@ -132,6 +133,21 @@ export OMP_NUM_THREADS=2 OMP_PROC_BIND=close OMP_PLACES=cores
 # knowledge base'den gelir, esik gecmezse answer uydurulmaz.
 ./build/vegai_chat ask mini.vgai examples/dialogue/mini_turkish_hdc_dialogue.tsv \
   --prompt "okul ders" --max-entries 64 --history-turns 0
+
+# Held-out grounded retrieval/abstention release gate. Bu LLM benchmarki degil;
+# versioned bir domain knowledge-base'in guvenilirlik olcumudur.
+python3 tools/dialogue_evaluation.py \
+  --chat-bin ./build/vegai_chat --checkpoint mini.vgai \
+  --knowledge examples/dialogue/mini_turkish_hdc_dialogue.tsv \
+  --evaluation examples/dialogue/mini_turkish_hdc_evaluation.jsonl \
+  --output mini-dialogue-quality.json --max-entries 64 \
+  --min-similarity 0.90 --min-margin 0.00 \
+  --min-grounded-prompt-accuracy 1.0 --min-grounded-precision 1.0 \
+  --min-grounded-recall 1.0 --min-abstain-precision 1.0 --min-abstain-recall 1.0 \
+  --max-false-grounded-cases 0 --max-false-abstain-cases 0
+# Hassas held-out prompt'lar icin yukaridaki komuta repository disi bir
+# --case-hmac-key-file /secure/dialogue-eval.key ekleyin.
+
 python3 tools/verify_example_corpus.py --pretrain-bin ./build/vegai_pretrain
 python3 tools/compare_pretraining_modes.py --pretrain-bin ./build/vegai_pretrain \
   --repetitions 3 --omp-threads 1
@@ -209,6 +225,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, hierarchical default + CPU-only coherent cross-fold option, deterministic OpenMP / optional OpenVINO immutable-context preparation + source-ordered CPU commit, mode-selective v5/v6 checkpoint/resume |
 | Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect`, CPU/OpenVINO context-provider execution switch ve nearest semantic diagnostic |
 | Grounded dialogue retrieval | `src/dialogue_retrieval.f90`, `app/chat.f90` | operator TSV response index'i, strict ASCII/OOV gate, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; free-form LLM generation degil |
+| Dialogue quality release gate | `tools/dialogue_evaluation.py` | versioned held-out JSONL ile stateless exact prompt grounding/abstention olcumu, immutable input digest binding, privacy-conscious report ve threshold gate |
 | Continual transaction + health audit | `tools/continuous_shard_manifest.py`, `tools/continuous_pretrain.py`, `tools/continuous_pretrain_status.py` | immutable SHA-256 ledger, strict ingest gate, candidate generation, atomic state journal, read-only checkpoint/prefix/payload audit |
 | Production data/run control | `tools/production_dataset.py`, `tools/production_pretrain.py` | disk-backed exact record/token dedupe, deterministic held-out split, content-addressed shard package, exact leakage + vocabulary-capacity gate, immutable binary/data/policy provenance, real exactly-once run wrapper |
 | Kaynak preflight | `tools/training_resource_plan.py` | bounded RAM/checkpoint storage estimate, CPU/NUMA/OpenMP recommendation, static accelerator truth contract |
@@ -233,7 +250,9 @@ corpus veri hattı, yönetişim ve checkpoint sözleşmesi için
 [docs/TRAINING_DATA_FORMAT.md](docs/TRAINING_DATA_FORMAT.md), immutable shard ledger ve
 crash-safe exactly-once continual pretraining için
 [docs/CONTINUOUS_PRETRAINING.md](docs/CONTINUOUS_PRETRAINING.md), data-driven grounded
-chat/retrieval sözleşmesi için [docs/DIALOGUE_RETRIEVAL.md](docs/DIALOGUE_RETRIEVAL.md), production data foundry,
+chat/retrieval sözleşmesi için [docs/DIALOGUE_RETRIEVAL.md](docs/DIALOGUE_RETRIEVAL.md),
+tüm system quality audit'i ve held-out release gate için
+[docs/QUALITY_ASSURANCE.md](docs/QUALITY_ASSURANCE.md), production data foundry,
 record-level leakage gate ve immutable run provenance için
 [docs/PRODUCTION_PRETRAINING.md](docs/PRODUCTION_PRETRAINING.md), gerçek LMM/LLM
 hedefine ilişkin kapsam/gap analizi için

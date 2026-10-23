@@ -153,6 +153,13 @@ if(VEGAI_BUILD_TESTS)
                     --chat-bin $<TARGET_FILE:vegai_chat>
         )
         add_test(
+            NAME vegai_dialogue_evaluation
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_dialogue_evaluation.py
+                    --pretrain-bin $<TARGET_FILE:vegai_pretrain>
+                    --chat-bin $<TARGET_FILE:vegai_chat>
+        )
+        set_tests_properties(vegai_dialogue_evaluation PROPERTIES TIMEOUT 180)
+        add_test(
             NAME vegai_continuous_pretraining
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_continuous_pretraining.py
                     --pretrain-bin $<TARGET_FILE:vegai_pretrain>

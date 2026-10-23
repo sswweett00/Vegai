@@ -36,6 +36,10 @@ hyper_types + text_tokenizer + hdc_pretraining checkpoint
 - `tools/verify_dialogue_retrieval.py`: gerçek derlenmis `vegai_pretrain` ve
   `vegai_chat` ile runtime TSV cevabi, abstention, strict failure ve REPL
   contract'ini denetler.
+- `tools/dialogue_evaluation.py`: versioned held-out JSONL setinde stateless
+  grounded-prompt accuracy/precision/recall ve abstention metriklerini ölçer;
+  checkpoint/KB/binary/source digest'lerini report'a bağlar ve explicit release
+  threshold'larını gate eder.
 
 Bu ayrim chat UX'ini training/continual journal/production control-plane'den
 ayri tutar. Dialogue index checkpoint'e yazilmaz; bilgi bankasinin versionu,
@@ -145,6 +149,45 @@ ister. Varsayilan daha esnek mod, en az `--min-known-tokens` active token varsa
 bilinmeyen filler token'lari sayar ve raporlar; cevap yine similarity/margin
 kapisindan gecmek zorundadir.
 
+## Held-out kalite değerlendirmesi ve release gate
+
+Grounding eşiğini yalnız örnek prompt'a bakarak seçmek güvenilirlik kanıtı
+değildir. `tools/dialogue_evaluation.py`, gerçek `vegai_chat ask` binary'sini
+versioned JSONL held-out case seti üzerinde history kapalı çalıştırır. Her case
+ya beklenen KB prompt'unu ya da açık `expected_prompt: null` abstention
+beklentisini taşır. Report raw prompt/response yerine SHA-256 prompt kimlikleri
+veya `--case-hmac-key-file` verildiğinde keyed HMAC-SHA-256 kimlikleri,
+checkpoint/KB/binary/evaluation-set digest'leri ve şu metrikleri yazar:
+
+- exact grounded-prompt accuracy, precision ve recall;
+- abstain precision/recall;
+- false grounding, wrong prompt ve false abstention sayıları;
+- explicit quality gate sonucu.
+
+Hassas held-out setlerde HMAC key'i repository/report dışında saklanır; report
+key path'ini redact eder ve yalnız key-byte SHA-256 kimliğini bağlar.
+
+```bash
+python3 tools/dialogue_evaluation.py \
+  --chat-bin ./build/vegai_chat --checkpoint /tmp/mini.vgai \
+  --knowledge examples/dialogue/mini_turkish_hdc_dialogue.tsv \
+  --evaluation examples/dialogue/mini_turkish_hdc_evaluation.jsonl \
+  --output /tmp/mini-dialogue-quality.json \
+  --max-entries 64 --min-similarity 0.90 --min-margin 0.00 \
+  --min-grounded-prompt-accuracy 1.0 --min-grounded-precision 1.0 \
+  --min-grounded-recall 1.0 --min-abstain-precision 1.0 --min-abstain-recall 1.0 \
+  --max-false-grounded-cases 0 --max-false-abstain-cases 0
+```
+
+Sentetik fixture için `1.0` eşikleri yalnız contract smoke testidir; gerçek
+release'te eşikler domain riski, yeterli case sayısı ve ayrı calibration seti
+ile belirlenmelidir. Threshold seçimi validation setinde yapılır; aynı frozen
+test setinde tuning yapmak leakage'dir. Exit `3`, teknik evaluation tamamlanıp
+kalite gate'inin geçmediğini; exit `2`, evaluation contract'inin çalışmadığını
+belirtir. Bu katman LLM benchmarkı, factual truth oracle veya safety alignment
+kanıtı değildir. Tam audit ve kalite planı
+[QUALITY_ASSURANCE.md](QUALITY_ASSURANCE.md)'dedir.
+
 ## Test contract'i
 
 CTest'teki `vegai_dialogue_retrieval` gerçek Fortran binary'leriyle:
@@ -156,7 +199,10 @@ CTest'teki `vegai_dialogue_retrieval` gerçek Fortran binary'leriyle:
 - OOV user prompt, malformed TSV ve capacity/duplicate prompt error'larini;
 - stateful `repl` yolunu;
 - native Fortran property testinde bounded session ring, strict TSV load,
-  deterministic exact retrieval ve reset davranisini denetler.
+  deterministic exact retrieval ve reset davranisini denetler;
+- `vegai_dialogue_evaluation`, real binaries ile held-out exact grounding,
+  expected abstention, privacy-preserving report, malformed evaluation schema
+  ve intentionally failed release-gate davranisini denetler.
 
 Bu testler retrieval/data-contract dogrulamasidir. Held-out natural-language
 kalitesi, güvenlik veya factual accuracy icin versioned bilgi bankasi, source

@@ -145,10 +145,29 @@ grounding esigi gecmezse abstain eder. Once mini checkpoint'i egittikten sonra:
   --max-entries 64 --history-turns 3
 ```
 
-Bu sekiz response gercek bilgi, dogal Turkce kalite veya LLM cevabi degildir;
-data contract ve grounded retrieval integration fixture'idir. TSV strict
-ASCII/LF, tek TAB ve active-checkpoint-prompt sozlesmesine uymalidir. Ayrintilar
-icin [DIALOGUE_RETRIEVAL.md](../docs/DIALOGUE_RETRIEVAL.md)'ye bakın.
+`dialogue/mini_turkish_hdc_evaluation.jsonl`, ayni sentetik domain icin sekiz
+exact grounding case'i ve bir expected-abstention case'i tasir. Gercek compiled
+chat ile versioned held-out quality/gate smoke testi icin:
+
+```bash
+python3 tools/dialogue_evaluation.py \
+  --chat-bin ./build/vegai_chat --checkpoint mini.vgai \
+  --knowledge examples/dialogue/mini_turkish_hdc_dialogue.tsv \
+  --evaluation examples/dialogue/mini_turkish_hdc_evaluation.jsonl \
+  --output /tmp/mini-dialogue-quality.json --max-entries 64 \
+  --min-similarity 0.90 --min-margin 0.00 \
+  --min-grounded-prompt-accuracy 1 --min-grounded-precision 1 \
+  --min-grounded-recall 1 --min-abstain-precision 1 --min-abstain-recall 1 \
+  --max-false-grounded-cases 0 --max-false-abstain-cases 0
+```
+
+Bu sekiz response, dokuz evaluation case'i ve `1.0` smoke eşikleri gerçek bilgi,
+doğal Türkçe kalite veya LLM cevabı değildir; data contract ve grounded
+retrieval integration fixture'idir. TSV strict ASCII/LF, tek TAB ve
+active-checkpoint-prompt sözleşmesine uymalıdır. Gerçek release threshold'u
+ayrı calibration setinde seçilmeli, frozen test setinde tuning yapılmamalıdır.
+Ayrıntılar için [DIALOGUE_RETRIEVAL.md](../docs/DIALOGUE_RETRIEVAL.md) ve
+[QUALITY_ASSURANCE.md](../docs/QUALITY_ASSURANCE.md)'ye bakın.
 
 ## Kesintisiz shard örneği
 
