@@ -40,6 +40,11 @@ module hyper_types
    type, public :: hv_bitacc_t
       integer(int64) :: planes(HV_BITACC_PLANES, HV_WORDS) = 0_int64
       integer(int32) :: sample_count = 0_int32
+      ! `initialized_planes` makes the bounded reset path safe: callers may
+      ! clear only the planes their next bundle can reach, and an add lazily
+      ! clears a newly required higher plane before it is observed.  The public
+      ! no-argument reset still clears all planes for ordinary API callers.
+      integer(int32) :: initialized_planes = HV_BITACC_PLANES
    end type hv_bitacc_t
 
    ! 64 x 256 signed counters = 32 KiB.  This intentionally fits in a typical
@@ -225,13 +230,16 @@ contains
       if (bit_shift == 0_int32) then
          !$omp simd
          do word = 1, HV_WORDS
-            src_hi = modulo(word - 1_int32 - word_shift, HV_WORDS) + 1_int32
+            src_hi = word - word_shift
+            if (src_hi <= 0_int32) src_hi = src_hi + HV_WORDS
             res%bits(word) = v%bits(src_hi)
          end do
       else
          do word = 1, HV_WORDS
-            src_hi = modulo(word - 1_int32 - word_shift, HV_WORDS) + 1_int32
-            src_lo = modulo(word - 2_int32 - word_shift, HV_WORDS) + 1_int32
+            src_hi = word - word_shift
+            if (src_hi <= 0_int32) src_hi = src_hi + HV_WORDS
+            src_lo = src_hi - 1_int32
+            if (src_lo <= 0_int32) src_lo = src_lo + HV_WORDS
             res%bits(word) = ior(ishft(v%bits(src_hi), bit_shift), &
                                   ishft(v%bits(src_lo), bit_shift - WORD_BITS))
          end do
@@ -380,12 +388,51 @@ contains
    ! A streaming, word-parallel equivalent of an unsigned per-bit population
    ! counter.  It is intended for bounded context bundling where every input has
    ! unit weight; weighted Hebbian accumulation continues to use hv_acc_t.
-   pure subroutine hv_bitacc_reset(acc)
+   !
+   ! Context construction normally knows its maximum item count before the
+   ! first add.  `maximum_items` lets that hot path clear only the population
+   ! planes it can reach instead of writing all eleven 2 KiB planes for every
+   ! small center context.  The no-argument public contract remains a complete
+   ! reset.  Later adds safely initialize a newly needed plane if a caller's
+   ! bound was conservative or underestimated.
+   pure subroutine hv_bitacc_reset(acc, maximum_items)
       type(hv_bitacc_t), intent(inout) :: acc
+      integer(int32), intent(in), optional :: maximum_items
+      integer(int32) :: planes_to_clear
 
-      acc%planes = 0_int64
+      planes_to_clear = HV_BITACC_PLANES
+      if (present(maximum_items)) then
+         if (maximum_items > 0_int32 .and. maximum_items <= HV_BITACC_MAX_ITEMS) then
+            planes_to_clear = hv_bitacc_required_planes(maximum_items)
+         end if
+      end if
+      acc%planes(1:planes_to_clear, :) = 0_int64
       acc%sample_count = 0_int32
+      acc%initialized_planes = planes_to_clear
    end subroutine hv_bitacc_reset
+
+   pure function hv_bitacc_required_planes(item_count) result(plane_count)
+      integer(int32), intent(in) :: item_count
+      integer(int32) :: plane_count, remaining
+
+      plane_count = 0_int32
+      if (item_count <= 0_int32) return
+      remaining = item_count
+      do while (remaining > 0_int32)
+         plane_count = plane_count + 1_int32
+         remaining = remaining / 2_int32
+      end do
+   end function hv_bitacc_required_planes
+
+   pure subroutine hv_bitacc_ensure_planes(acc, required_planes)
+      type(hv_bitacc_t), intent(inout) :: acc
+      integer(int32), intent(in) :: required_planes
+
+      if (required_planes <= acc%initialized_planes) return
+      if (required_planes > HV_BITACC_PLANES) return
+      acc%planes(acc%initialized_planes + 1_int32:required_planes, :) = 0_int64
+      acc%initialized_planes = required_planes
+   end subroutine hv_bitacc_ensure_planes
 
    ! Adds a binary hypervector to each independent bit counter.  The carry
    ! chain is a ripple adder over bit planes, but each plane contains 64 HDC
@@ -405,20 +452,25 @@ contains
       integer(int64), intent(in) :: vector_words(HV_WORDS)
       integer(int32), intent(out) :: status
       integer(int64) :: carry, previous
-      integer(int32) :: word, plane
+      integer(int32) :: word, plane, required_planes
 
       status = HV_OK
       if (acc%sample_count >= HV_BITACC_MAX_ITEMS) then
          status = HV_ERR_ACCUMULATOR_OVERFLOW
          return
       end if
+      required_planes = hv_bitacc_required_planes(acc%sample_count + 1_int32)
+      call hv_bitacc_ensure_planes(acc, required_planes)
 
       do word = 1, HV_WORDS
          carry = vector_words(word)
-         do plane = 1, HV_BITACC_PLANES
+         do plane = 1, required_planes
             previous = acc%planes(plane, word)
             acc%planes(plane, word) = ieor(previous, carry)
             carry = iand(previous, carry)
+            ! Once a word's carry is zero, untouched higher planes are already
+            ! correct.  This is especially common for small local contexts.
+            if (carry == 0_int64) exit
          end do
       end do
       acc%sample_count = acc%sample_count + 1_int32
@@ -433,31 +485,38 @@ contains
       integer(int32), intent(in) :: shift_bits
       integer(int32), intent(out) :: status
       integer(int64) :: carry, previous, permuted_word
-      integer(int32) :: total_shift, word_shift, bit_shift, word, plane, source_hi, source_lo
+      integer(int32) :: total_shift, word_shift, bit_shift, word, plane, source_hi, source_lo, required_planes
 
       status = HV_OK
       if (acc%sample_count >= HV_BITACC_MAX_ITEMS) then
          status = HV_ERR_ACCUMULATOR_OVERFLOW
          return
       end if
+      required_planes = hv_bitacc_required_planes(acc%sample_count + 1_int32)
+      call hv_bitacc_ensure_planes(acc, required_planes)
 
       total_shift = modulo(shift_bits, HV_BITS)
       word_shift = total_shift / WORD_BITS
       bit_shift = modulo(total_shift, WORD_BITS)
       do word = 1, HV_WORDS
-         source_hi = modulo(word - 1_int32 - word_shift, HV_WORDS) + 1_int32
+         ! Equivalent to modulo(word - 1 - word_shift, HV_WORDS) + 1,
+         ! without an integer division in this inner packed-HV loop.
+         source_hi = word - word_shift
+         if (source_hi <= 0_int32) source_hi = source_hi + HV_WORDS
          if (bit_shift == 0_int32) then
             permuted_word = vector_words(source_hi)
          else
-            source_lo = modulo(word - 2_int32 - word_shift, HV_WORDS) + 1_int32
+            source_lo = source_hi - 1_int32
+            if (source_lo <= 0_int32) source_lo = source_lo + HV_WORDS
             permuted_word = ior(ishft(vector_words(source_hi), bit_shift), &
                                 ishft(vector_words(source_lo), bit_shift - WORD_BITS))
          end if
          carry = permuted_word
-         do plane = 1, HV_BITACC_PLANES
+         do plane = 1, required_planes
             previous = acc%planes(plane, word)
             acc%planes(plane, word) = ieor(previous, carry)
             carry = iand(previous, carry)
+            if (carry == 0_int64) exit
          end do
       end do
       acc%sample_count = acc%sample_count + 1_int32
@@ -473,23 +532,27 @@ contains
       integer(int32), intent(in) :: shift_bits
       integer(int32), intent(out) :: status
       integer(int64) :: carry, previous, permuted_word, topical_word
-      integer(int32) :: total_shift, word_shift, bit_shift, word, plane, source_hi, source_lo
+      integer(int32) :: total_shift, word_shift, bit_shift, word, plane, source_hi, source_lo, required_planes
 
       status = HV_OK
       if (acc%sample_count > HV_BITACC_MAX_ITEMS - 2_int32) then
          status = HV_ERR_ACCUMULATOR_OVERFLOW
          return
       end if
+      required_planes = hv_bitacc_required_planes(acc%sample_count + 2_int32)
+      call hv_bitacc_ensure_planes(acc, required_planes)
 
       total_shift = modulo(shift_bits, HV_BITS)
       word_shift = total_shift / WORD_BITS
       bit_shift = modulo(total_shift, WORD_BITS)
       do word = 1, HV_WORDS
-         source_hi = modulo(word - 1_int32 - word_shift, HV_WORDS) + 1_int32
+         source_hi = word - word_shift
+         if (source_hi <= 0_int32) source_hi = source_hi + HV_WORDS
          if (bit_shift == 0_int32) then
             permuted_word = vector_words(source_hi)
          else
-            source_lo = modulo(word - 2_int32 - word_shift, HV_WORDS) + 1_int32
+            source_lo = source_hi - 1_int32
+            if (source_lo <= 0_int32) source_lo = source_lo + HV_WORDS
             permuted_word = ior(ishft(vector_words(source_hi), bit_shift), &
                                 ishft(vector_words(source_lo), bit_shift - WORD_BITS))
          end if
@@ -498,10 +561,11 @@ contains
          acc%planes(1, word) = ieor(ieor(previous, permuted_word), topical_word)
          carry = ior(iand(previous, permuted_word), &
                      ior(iand(previous, topical_word), iand(permuted_word, topical_word)))
-         do plane = 2, HV_BITACC_PLANES
+         do plane = 2, required_planes
             previous = acc%planes(plane, word)
             acc%planes(plane, word) = ieor(previous, carry)
             carry = iand(previous, carry)
+            if (carry == 0_int64) exit
          end do
       end do
       acc%sample_count = acc%sample_count + 2_int32
@@ -517,22 +581,27 @@ contains
       integer(int64), intent(in), optional :: tie_seed
       type(hv_t) :: res, tie_breaker
       integer(int64) :: seed, equal_mask, greater_mask
-      integer(int32) :: word, plane, threshold
+      integer(int32) :: word, plane, threshold, required_planes
+      logical :: needs_tie_breaker
 
       if (acc%sample_count == 0_int32) then
          res = hv_zero()
          return
       end if
 
-      seed = int(z'000000000466F45D', int64)
-      if (present(tie_seed)) seed = tie_seed
-      tie_breaker = hv_from_seed(seed)
+      required_planes = hv_bitacc_required_planes(acc%sample_count)
+      needs_tie_breaker = modulo(acc%sample_count, 2_int32) == 0_int32
+      if (needs_tie_breaker) then
+         seed = int(z'000000000466F45D', int64)
+         if (present(tie_seed)) seed = tie_seed
+         tie_breaker = hv_from_seed(seed)
+      end if
       threshold = acc%sample_count / 2_int32
 
       do word = 1, HV_WORDS
          equal_mask = not(0_int64)
          greater_mask = 0_int64
-         do plane = HV_BITACC_PLANES, 1, -1
+         do plane = required_planes, 1, -1
             if (btest(threshold, plane - 1_int32)) then
                equal_mask = iand(equal_mask, acc%planes(plane, word))
             else
@@ -540,7 +609,7 @@ contains
                equal_mask = iand(equal_mask, not(acc%planes(plane, word)))
             end if
          end do
-         if (modulo(acc%sample_count, 2_int32) == 0_int32) then
+         if (needs_tie_breaker) then
             res%bits(word) = ior(greater_mask, iand(equal_mask, tie_breaker%bits(word)))
          else
             res%bits(word) = greater_mask
@@ -603,7 +672,7 @@ contains
       integer(int64), intent(in) :: selection_seed
       type(hv_t), intent(out) :: mask
       integer(int32), intent(out) :: status
-      integer(int64) :: state, random_word, positive_random
+      integer(int64) :: state, random_word
       integer(int32) :: selected, position, word, bit, attempts
 
       mask = hv_zero()
@@ -619,10 +688,12 @@ contains
       attempts = 0_int32
       do while (selected < selected_bits)
          call splitmix64_next(state, random_word)
-         positive_random = iand(random_word, huge(0_int64))
-         position = int(modulo(positive_random, int(HV_BITS, int64)), int32)
-         word = position / WORD_BITS + 1_int32
-         bit = modulo(position, WORD_BITS)
+         ! HV_BITS and WORD_BITS are powers of two.  Selecting the low 14 bits
+         ! is exactly the former nonnegative modulo-16,384 result, while
+         ! avoiding a signed modulo/divide in every exact-mask draw.
+         position = int(iand(random_word, int(HV_BITS - 1_int32, int64)), int32)
+         word = ishft(position, -6) + 1_int32
+         bit = iand(position, WORD_BITS - 1_int32)
          if (.not. btest(mask%bits(word), bit)) then
             mask%bits(word) = ibset(mask%bits(word), bit)
             selected = selected + 1_int32
@@ -631,8 +702,8 @@ contains
          attempts = attempts + 1_int32
          if (attempts >= HV_BITS * 16_int32 .and. selected < selected_bits) then
             do position = 0, HV_BITS - 1_int32
-               word = position / WORD_BITS + 1_int32
-               bit = modulo(position, WORD_BITS)
+               word = ishft(position, -6) + 1_int32
+               bit = iand(position, WORD_BITS - 1_int32)
                if (.not. btest(mask%bits(word), bit)) then
                   mask%bits(word) = ibset(mask%bits(word), bit)
                   selected = selected + 1_int32

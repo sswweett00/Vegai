@@ -64,6 +64,8 @@ def main() -> int:
                 fail("planner did not calculate a positive RAM reservation")
             if memory["required_available_bytes"] <= memory.get("model_payload_bytes", 0):
                 fail("planner reservation omitted vocabulary/staging/headroom")
+            if memory.get("line_update_scratch_bytes") != 128 * 4:
+                fail("planner omitted the capacity-indexed repeated-center scratch allocation")
             checkpoint_plan = plan.get("checkpoint", {})
             if checkpoint_plan.get("path") != str(checkpoint.resolve()):
                 fail("planner did not preserve checkpoint path")

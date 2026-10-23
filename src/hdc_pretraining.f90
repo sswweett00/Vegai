@@ -90,6 +90,10 @@ module hdc_pretraining
       ! on the same line.  A compiler without OpenMP ignores the directives and
       ! remains serial; this flag is intentionally not checkpoint state.
       logical :: parallel_context_build = .true.
+      ! Do not launch an OpenMP team for a tiny record: scheduling and staging
+      ! overhead can exceed the immutable HDC arithmetic.  This is an
+      ! execution-only adaptive threshold, not checkpoint/model semantics.
+      integer(int32) :: parallel_min_contexts = 32_int32
       ! Optional OpenVINO execution settings; none of these affect checkpoint
       ! semantics.  The worker receives pre-positioned immutable base-vector
       ! items and returns contexts; CPU applies commits in source order.
@@ -112,6 +116,13 @@ module hdc_pretraining
    ! device context dispatch without changing a resume contract.
    type, public :: pretrain_execution_report_t
       integer(int64) :: cpu_contexts = 0_int64
+      ! CPU contexts are split by the adaptive scheduler decision.  A
+      ! `parallel` value means the OpenMP worksharing path was selected; an
+      ! OpenMP-less compiler still executes that directive serially.
+      integer(int64) :: cpu_serial_contexts = 0_int64
+      integer(int64) :: cpu_parallel_contexts = 0_int64
+      integer(int64) :: cpu_serial_batches = 0_int64
+      integer(int64) :: cpu_parallel_batches = 0_int64
       integer(int64) :: openvino_contexts = 0_int64
       ! A resident worker session can process many record requests.  Keep the
       ! historic invocation counter as a request counter and report sessions
@@ -234,6 +245,10 @@ contains
       type(pretrain_execution_report_t), intent(inout) :: report
 
       report%cpu_contexts = 0_int64
+      report%cpu_serial_contexts = 0_int64
+      report%cpu_parallel_contexts = 0_int64
+      report%cpu_serial_batches = 0_int64
+      report%cpu_parallel_batches = 0_int64
       report%openvino_contexts = 0_int64
       report%openvino_worker_invocations = 0_int64
       report%openvino_worker_sessions = 0_int64
@@ -290,6 +305,11 @@ contains
       end if
       if (config%context_window <= 0_int32 .or. &
           config%context_window >= MAX_TOKENS_PER_LINE) then
+         status = PT_ERR_INVALID_ARGUMENT
+         return
+      end if
+      if (config%parallel_min_contexts <= 0_int32 .or. &
+          config%parallel_min_contexts > MAX_TOKENS_PER_LINE) then
          status = PT_ERR_INVALID_ARGUMENT
          return
       end if
@@ -777,21 +797,26 @@ contains
    ! an unbounded document memory: only records with at least twelve active
    ! tokens activate it, and the local update later caps its multiplicity by
    ! the bit-sliced accumulator capacity.
-   subroutine pretrain_build_line_topic_context(model, token_slots, n_tokens, line_context, &
-                                                active_count, status)
+   subroutine pretrain_build_line_topic_context(model, token_slots, n_tokens, active_count, line_context, status)
       type(hdc_pretrain_model_t), intent(in) :: model
       integer(int32), intent(in) :: token_slots(:)
-      integer(int32), intent(in) :: n_tokens
+      integer(int32), intent(in) :: n_tokens, active_count
       type(hv_t), intent(out) :: line_context
-      integer(int32), intent(out) :: active_count
       integer(int32), intent(out) :: status
       type(hv_bitacc_t) :: line_accumulator
       integer(int32) :: token_index, slot, add_status
 
       line_context = hv_zero()
-      active_count = 0_int32
       status = PT_OK
-      call hv_bitacc_reset(line_accumulator)
+      ! The caller already counts active vocabulary hits while tokenizing.  Do
+      ! not construct/reset a 16,384-bit topic accumulator for short records:
+      ! those records cannot consume the hierarchical channel at all.
+      if (active_count < HIERARCHICAL_MIN_ACTIVE_TOKENS) return
+      if (active_count > n_tokens) then
+         status = PT_ERR_INVALID_ARGUMENT
+         return
+      end if
+      call hv_bitacc_reset(line_accumulator, active_count)
       do token_index = 1, n_tokens
          slot = token_slots(token_index)
          if (slot == 0_int32) cycle
@@ -800,11 +825,8 @@ contains
             status = PT_ERR_HYPERVECTOR
             return
          end if
-         active_count = active_count + 1_int32
       end do
-      if (active_count >= HIERARCHICAL_MIN_ACTIVE_TOKENS) then
-         line_context = hv_bitacc_finalize(line_accumulator, model%tie_seed)
-      end if
+      line_context = hv_bitacc_finalize(line_accumulator, model%tie_seed)
    end subroutine pretrain_build_line_topic_context
 
    ! Determine which centers will update and the exact experience counter that
@@ -813,7 +835,8 @@ contains
    ! later in source order.  Preplanning lets context construction run safely in
    ! parallel without changing repeated-token semantics.
    subroutine pretrain_plan_line_updates(model, config, token_slots, n_tokens, update_required, &
-                                         neighbor_counts, experiences_before, status)
+                                         neighbor_counts, experiences_before, line_update_counts, touched_slots, &
+                                         update_count, status)
       type(hdc_pretrain_model_t), intent(in) :: model
       type(hdc_pretrain_config_t), intent(in) :: config
       integer(int32), intent(in) :: token_slots(:)
@@ -821,59 +844,84 @@ contains
       logical, intent(out) :: update_required(:)
       integer(int32), intent(out) :: neighbor_counts(:)
       integer(int64), intent(out) :: experiences_before(:)
+      ! Reusable capacity-indexed scratch avoids the old O(record_length^2)
+      ! backward scan for repeated centers.  Only slots touched by this record
+      ! are reset, so the extra bounded storage is not cleared per line.
+      integer(int32), intent(inout) :: line_update_counts(:)
+      integer(int32), intent(out) :: touched_slots(:)
+      integer(int32), intent(out) :: update_count
       integer(int32), intent(out) :: status
-      integer(int32) :: center_index, neighbor_index, center_slot, neighbor_slot, previous_index
-      integer(int32) :: neighbours
-      integer(int64) :: expected_experience
+      integer(int32) :: center_index, center_slot, touched_count, left_index, right_index
+      integer(int32) :: neighbours, active_prefix(0:MAX_TOKENS_PER_LINE)
+      integer(int64) :: expected_experience, prior_updates
 
       status = PT_OK
+      update_count = 0_int32
       update_required = .false.
       neighbor_counts = 0_int32
       experiences_before = 0_int64
       if (n_tokens < 0_int32 .or. n_tokens > size(token_slots, kind=int32) .or. &
           n_tokens > size(update_required, kind=int32) .or. n_tokens > size(neighbor_counts, kind=int32) .or. &
-          n_tokens > size(experiences_before, kind=int32)) then
+          n_tokens > size(experiences_before, kind=int32) .or. &
+          size(line_update_counts, kind=int32) < model%vocabulary%capacity .or. &
+          size(touched_slots, kind=int32) < n_tokens) then
          status = PT_ERR_INVALID_ARGUMENT
          return
       end if
 
+      ! Prefix active counts make all bounded-window neighbor cardinalities
+      ! O(record_length), including the largest legal window, rather than an
+      ! O(record_length * window) nested scan.
+      active_prefix(0) = 0_int32
+      do center_index = 1, n_tokens
+         active_prefix(center_index) = active_prefix(center_index - 1_int32)
+         if (token_slots(center_index) /= 0_int32) then
+            active_prefix(center_index) = active_prefix(center_index) + 1_int32
+         end if
+      end do
       do center_index = 1, n_tokens
          center_slot = token_slots(center_index)
          if (center_slot == 0_int32) cycle
-         neighbours = 0_int32
-         do neighbor_index = max(1_int32, center_index - config%context_window), &
-                             min(n_tokens, center_index + config%context_window)
-            if (neighbor_index == center_index) cycle
-            neighbor_slot = token_slots(neighbor_index)
-            if (neighbor_slot /= 0_int32) neighbours = neighbours + 1_int32
-         end do
+         left_index = max(1_int32, center_index - config%context_window)
+         right_index = min(n_tokens, center_index + config%context_window)
+         ! The active center is included in this closed interval and is removed
+         ! explicitly, yielding exactly the prior offset-loop cardinality.
+         neighbours = active_prefix(right_index) - active_prefix(left_index - 1_int32) - 1_int32
          if (neighbours > 0_int32) then
             update_required(center_index) = .true.
             neighbor_counts(center_index) = neighbours
+            update_count = update_count + 1_int32
          end if
       end do
 
-      ! At most MAX_TOKENS_PER_LINE centers exist, so a bounded source-order
-      ! scan avoids a capacity-sized scratch table and preserves an exact
-      ! counter value even when one token is repeated many times in a record.
+      touched_count = 0_int32
       do center_index = 1, n_tokens
          if (.not. update_required(center_index)) cycle
          center_slot = token_slots(center_index)
-         expected_experience = model%experience_count(center_slot)
-         do previous_index = 1, center_index - 1
-            if (update_required(previous_index) .and. token_slots(previous_index) == center_slot) then
-               if (expected_experience == huge(0_int64)) then
-                  status = PT_ERR_COUNTER_OVERFLOW
-                  return
-               end if
-               expected_experience = expected_experience + 1_int64
-            end if
-         end do
+         if (center_slot < 1_int32 .or. center_slot > model%vocabulary%capacity) then
+            status = PT_ERR_INVALID_ARGUMENT
+            return
+         end if
+         if (line_update_counts(center_slot) == 0_int32) then
+            touched_count = touched_count + 1_int32
+            touched_slots(touched_count) = center_slot
+         end if
+         prior_updates = int(line_update_counts(center_slot), int64)
+         if (model%experience_count(center_slot) > huge(0_int64) - prior_updates) then
+            status = PT_ERR_COUNTER_OVERFLOW
+            return
+         end if
+         expected_experience = model%experience_count(center_slot) + prior_updates
          if (expected_experience == huge(0_int64)) then
             status = PT_ERR_COUNTER_OVERFLOW
             return
          end if
          experiences_before(center_index) = expected_experience
+         line_update_counts(center_slot) = line_update_counts(center_slot) + 1_int32
+      end do
+
+      do center_index = 1, touched_count
+         line_update_counts(touched_slots(center_index)) = 0_int32
       end do
    end subroutine pretrain_plan_line_updates
 
@@ -881,12 +929,12 @@ contains
    ! state and is therefore OpenMP-safe.  Its output is committed separately in
    ! source order by pretrain_apply_center_update.
    subroutine pretrain_construct_center_context(model, config, token_slots, n_tokens, center_index, &
-                                                line_topic_context, line_active_tokens, experience_before, &
-                                                context_bits, status)
+                                                expected_neighbor_count, line_topic_context, line_active_tokens, &
+                                                experience_before, context_bits, status)
       type(hdc_pretrain_model_t), intent(in) :: model
       type(hdc_pretrain_config_t), intent(in) :: config
       integer(int32), intent(in) :: token_slots(:)
-      integer(int32), intent(in) :: n_tokens, center_index
+      integer(int32), intent(in) :: n_tokens, center_index, expected_neighbor_count
       type(hv_t), intent(in) :: line_topic_context
       integer(int32), intent(in) :: line_active_tokens
       integer(int64), intent(in) :: experience_before
@@ -896,13 +944,14 @@ contains
       type(hv_bitacc_t) :: bit_accumulator
       type(hv_t) :: neighbor, positioned, context
       integer(int32) :: center_slot, offset, neighbor_index, neighbor_slot
-      integer(int32) :: add_status, shift_bits, neighbors, global_items, global_index
+      integer(int32) :: add_status, shift_bits, neighbors, global_items, global_index, maximum_items
       integer(int64) :: tie_seed
       logical :: reference_kernel, topic_mode
 
       status = PT_OK
       context_bits = 0_int64
-      if (center_index < 1_int32 .or. center_index > n_tokens) then
+      if (center_index < 1_int32 .or. center_index > n_tokens .or. &
+          expected_neighbor_count <= 0_int32) then
          status = PT_ERR_INVALID_ARGUMENT
          return
       end if
@@ -919,7 +968,18 @@ contains
       if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL) then
          call hv_acc_reset(legacy_accumulator)
       else
-         call hv_bitacc_reset(bit_accumulator)
+         maximum_items = expected_neighbor_count
+         if (topic_mode) maximum_items = 2_int32 * maximum_items
+         if (config%context_mode == PT_CONTEXT_HIERARCHICAL .and. &
+             line_active_tokens >= HIERARCHICAL_MIN_ACTIVE_TOKENS) then
+            maximum_items = maximum_items + min(HIERARCHICAL_GLOBAL_CONTEXT_WEIGHT, &
+                                                HV_BITACC_MAX_ITEMS - maximum_items)
+         end if
+         if (maximum_items <= 0_int32 .or. maximum_items > HV_BITACC_MAX_ITEMS) then
+            status = PT_ERR_HYPERVECTOR
+            return
+         end if
+         call hv_bitacc_reset(bit_accumulator, maximum_items)
       end if
       neighbors = 0_int32
       do offset = -config%context_window, config%context_window
@@ -970,7 +1030,10 @@ contains
          end if
          neighbors = neighbors + 1_int32
       end do
-      if (neighbors == 0_int32) return
+      if (neighbors == 0_int32 .or. neighbors /= expected_neighbor_count) then
+         status = PT_ERR_HYPERVECTOR
+         return
+      end if
 
       if (config%context_mode == PT_CONTEXT_HIERARCHICAL .and. &
           line_active_tokens >= HIERARCHICAL_MIN_ACTIVE_TOKENS) then
@@ -1732,27 +1795,30 @@ contains
       character(len=TOKEN_LEN) :: tokens(MAX_TOKENS_PER_LINE)
       integer(int32) :: token_slots(MAX_TOKENS_PER_LINE)
       integer :: unit, io_status, allocation_status
-      integer(int32) :: token_index, n_tokens, slot, vocab_status, line_active_tokens
+      integer(int32) :: token_index, n_tokens, slot, vocab_status, line_active_tokens, update_count
       integer(int64) :: non_ascii_count
       integer(int64), allocatable :: prepared_context_bits(:, :), experiences_before(:)
-      integer(int32), allocatable :: neighbor_counts(:), prepared_status(:)
+      integer(int32), allocatable :: neighbor_counts(:), prepared_status(:), line_update_counts(:)
+      integer(int32) :: touched_slots(MAX_TOKENS_PER_LINE)
       logical, allocatable :: update_required(:)
-      type(hv_t) :: line_topic_context, prepared_context
-      logical :: eof, found, overlong, truncated, provider_used
+      type(hv_t) :: line_topic_context
+      logical :: eof, found, overlong, truncated, provider_used, construct_in_parallel
 
       status = PT_OK
       allocate(prepared_context_bits(HV_WORDS, MAX_TOKENS_PER_LINE), &
                experiences_before(MAX_TOKENS_PER_LINE), neighbor_counts(MAX_TOKENS_PER_LINE), &
                prepared_status(MAX_TOKENS_PER_LINE), update_required(MAX_TOKENS_PER_LINE), &
-               stat=allocation_status)
+               line_update_counts(model%vocabulary%capacity), stat=allocation_status)
       if (allocation_status /= 0) then
          status = PT_ERR_ALLOCATION
          return
       end if
+      line_update_counts = 0_int32
       open(newunit=unit, file=trim(corpus_path), status='old', action='read', &
            form='formatted', iostat=io_status)
       if (io_status /= 0) then
-         deallocate(prepared_context_bits, experiences_before, neighbor_counts, prepared_status, update_required)
+         deallocate(prepared_context_bits, experiences_before, neighbor_counts, prepared_status, update_required, &
+                    line_update_counts)
          status = PT_ERR_IO
          return
       end if
@@ -1792,12 +1858,14 @@ contains
          end if
 
          token_slots = 0_int32
+         line_active_tokens = 0_int32
          do token_index = 1, n_tokens
             call add_nonnegative(metrics%raw_tokens, 1_int64, status)
             if (status /= PT_OK) exit
             call vocab_lookup(model%vocabulary, tokens(token_index), slot, found, vocab_status, .true.)
             if (found) then
                token_slots(token_index) = slot
+               line_active_tokens = line_active_tokens + 1_int32
                call add_nonnegative(metrics%active_tokens, 1_int64, status)
             else if (vocab_status == VOCAB_ERR_NOT_FOUND) then
                call add_nonnegative(metrics%oov_tokens, 1_int64, status)
@@ -1809,18 +1877,22 @@ contains
          if (status /= PT_OK) exit
 
          line_topic_context = hv_zero()
-         line_active_tokens = 0_int32
-         if (config%context_mode == PT_CONTEXT_HIERARCHICAL) then
-            call pretrain_build_line_topic_context(model, token_slots, n_tokens, line_topic_context, &
-                                                   line_active_tokens, status)
+         if (config%context_mode == PT_CONTEXT_HIERARCHICAL .and. &
+             line_active_tokens >= HIERARCHICAL_MIN_ACTIVE_TOKENS) then
+            call pretrain_build_line_topic_context(model, token_slots, n_tokens, line_active_tokens, &
+                                                   line_topic_context, status)
             if (status /= PT_OK) exit
          end if
 
          call pretrain_plan_line_updates(model, config, token_slots, n_tokens, update_required, &
-                                         neighbor_counts, experiences_before, status)
+                                         neighbor_counts, experiences_before, line_update_counts, touched_slots, &
+                                         update_count, status)
          if (status /= PT_OK) exit
-         prepared_context_bits = 0_int64
-         prepared_status = PT_OK
+         if (update_count == 0_int32) cycle
+         ! Each selected CPU/provider path writes every update column and
+         ! status before the ordered commit below.  Do not clear the 2 MiB
+         ! staging matrix for every short input line: untouched columns are
+         ! never read, and a full wipe was pure memory-bandwidth overhead.
          provider_used = .false.
          if (config%context_provider == PT_CONTEXT_PROVIDER_OPENVINO) then
             if (present(execution)) execution%openvino_provider_requested = .true.
@@ -1839,23 +1911,29 @@ contains
                status = PT_OK
                if (present(execution)) then
                   execution%openvino_fallback_contexts = execution%openvino_fallback_contexts + &
-                                                          int(count(update_required(1:n_tokens)), int64)
+                                                          int(update_count, int64)
                end if
             else if (status /= PT_OK) then
                exit
             end if
          end if
          if (.not. provider_used) then
-            if (config%parallel_context_build) then
-               ! Context construction touches immutable base vectors only.  Each
-               ! iteration has its own output column and status element; commits
+            ! Launching a team for each tiny natural-language record is often
+            ! slower than the bounded packed-HV work itself.  Large records
+            ! still use the immutable OpenMP stage; both paths commit below in
+            ! source order and therefore share identical checkpoint semantics.
+            construct_in_parallel = config%parallel_context_build .and. &
+                                    update_count >= config%parallel_min_contexts
+            if (construct_in_parallel) then
+               ! Context construction touches immutable base vectors only. Each
+               ! iteration owns its output column and status element; commits
                ! below deliberately remain in corpus source order.
 !$omp parallel do schedule(static)
                do token_index = 1, n_tokens
                   if (.not. update_required(token_index)) cycle
                   call pretrain_construct_center_context(model, config, token_slots, n_tokens, token_index, &
-                                                         line_topic_context, line_active_tokens, &
-                                                         experiences_before(token_index), &
+                                                         neighbor_counts(token_index), line_topic_context, &
+                                                         line_active_tokens, experiences_before(token_index), &
                                                          prepared_context_bits(:, token_index), &
                                                          prepared_status(token_index))
                end do
@@ -1864,14 +1942,22 @@ contains
                do token_index = 1, n_tokens
                   if (.not. update_required(token_index)) cycle
                   call pretrain_construct_center_context(model, config, token_slots, n_tokens, token_index, &
-                                                         line_topic_context, line_active_tokens, &
-                                                         experiences_before(token_index), &
+                                                         neighbor_counts(token_index), line_topic_context, &
+                                                         line_active_tokens, experiences_before(token_index), &
                                                          prepared_context_bits(:, token_index), &
                                                          prepared_status(token_index))
                end do
             end if
-            if (present(execution)) execution%cpu_contexts = execution%cpu_contexts + &
-                                                              int(count(update_required(1:n_tokens)), int64)
+            if (present(execution)) then
+               execution%cpu_contexts = execution%cpu_contexts + int(update_count, int64)
+               if (construct_in_parallel) then
+                  execution%cpu_parallel_contexts = execution%cpu_parallel_contexts + int(update_count, int64)
+                  execution%cpu_parallel_batches = execution%cpu_parallel_batches + 1_int64
+               else
+                  execution%cpu_serial_contexts = execution%cpu_serial_contexts + int(update_count, int64)
+                  execution%cpu_serial_batches = execution%cpu_serial_batches + 1_int64
+               end if
+            end if
          end if
          do token_index = 1, n_tokens
             if (.not. update_required(token_index)) cycle
@@ -1886,15 +1972,16 @@ contains
             if (.not. update_required(token_index)) cycle
             call add_nonnegative(metrics%context_pairs, int(neighbor_counts(token_index), int64), status)
             if (status /= PT_OK) exit
-            prepared_context%bits = prepared_context_bits(:, token_index)
-            call pretrain_apply_center_update(model, token_slots(token_index), prepared_context%bits, &
+            call pretrain_apply_center_update(model, token_slots(token_index), &
+                                              prepared_context_bits(:, token_index), &
                                               experiences_before(token_index), metrics, status)
             if (status /= PT_OK) exit
          end do
          if (status /= PT_OK) exit
       end do
       close(unit)
-      deallocate(prepared_context_bits, experiences_before, neighbor_counts, prepared_status, update_required)
+      deallocate(prepared_context_bits, experiences_before, neighbor_counts, prepared_status, update_required, &
+                 line_update_counts)
    end subroutine train_one_epoch
 
    subroutine pretrain_train_file(model, corpus_path, config, metrics, status, execution)

@@ -29,8 +29,9 @@ Aşağıdaki hesapları raporlar:
 
 - iki 16.384-bit HDC plane + `int64` experience counter için slot başına kesin
   packed model payload'u: `4,104 byte`;
-- vocabulary/hash ABI allowance, 2 MiB bounded OpenMP context staging ve
-  varsayılan `%25` headroom ile conservative available-RAM reservation;
+- vocabulary/hash ABI allowance, 2 MiB bounded OpenMP context staging, capacity
+  başına 4-byte repeated-center planner scratch ve varsayılan `%25` headroom
+  ile conservative available-RAM reservation;
 - checkpoint için conservative disk boyutu ve seçilen checkpoint path'inin
   filesystem free-space değeri;
 - CPU physical-core bilgisi bulunabiliyorsa onu tercih eden `OMP_NUM_THREADS`,
@@ -69,17 +70,23 @@ olmalıdır; network/distributed filesystem atomicity semantiğini deployment
 
 `hdc_pretraining` artık her input record için iki aşama kullanır:
 
-1. immutable `base_bits` üzerinden tüm center context'leri bağımsız biçimde
-   hazırlanır; OpenMP varsa bu aşama `parallel do` ile çok core kullanabilir;
+1. immutable `base_bits` üzerinden tüm eligible center context'leri bağımsız
+   biçimde hazırlanır; adaptive scheduler record'da en az
+   `--parallel-min-contexts` (varsayılan 32) update varsa OpenMP `parallel do`
+   seçer, küçük record'larda team-launch maliyeti olmadan serial kalır;
 2. prototype ve experience updates corpus kaynak sırasıyla commit edilir.
 
 İkinci aşama bilinçli olarak sıralıdır. Aynı token bir record içinde tekrar
-ediyorsa experience-count/tie seed sırası semantiktir. Planner, her center'ın
-beklenen counter değerini önceden belirler ve commit'te doğrular; hatalı
+ediyorsa experience-count/tie seed sırası semantiktir. Planner, capacity-indexed
+`int32` occurrence scratch ile her center'ın beklenen counter değerini O(update)
+önceden belirler, active-prefix count ile neighbor cardinality'lerini O(token)
+hesaplar, yalnız touched slots'u resetler ve commit'te doğrular; hatalı
 scheduler sonucu sessiz semantic drift yerine hata verir. Bu nedenle
 `OMP_NUM_THREADS=1` ve `OMP_NUM_THREADS=N` checkpoint byte'ları aynı olmalıdır.
-`--serial-context-build`, yalnız debug/regression amacıyla parallel hazırlığı
-kapatır; checkpoint formatı veya öğrenme semantiği değildir.
+CLI'nın `CPU serial/parallel context batches` ve `...contexts` sayaçları seçilen
+execution path'i görünür kılar. `--serial-context-build`, yalnız
+debug/regression amacıyla parallel hazırlığı kapatır; `--parallel-min-contexts`
+de checkpoint formatı veya öğrenme semantiği değildir.
 
 Önerilen başlangıç:
 
@@ -91,7 +98,8 @@ export OMP_PLACES=cores
 
 ./build/vegai_pretrain train /data/corpus.txt /fast-ssd/checkpoints/model.vgai \
   --max-vocab 50000 --min-frequency 3 --window 4 --position-shift 73 \
-  --context-mode hierarchical --epochs 3 --strict --parallel-context-build
+  --context-mode hierarchical --epochs 3 --strict --parallel-context-build \
+  --parallel-min-contexts 32
 ```
 
 Küçük satırlar, düşük context window, disk-bound corpus veya hyperthread-only

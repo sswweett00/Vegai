@@ -117,6 +117,45 @@ Dolayısıyla 20.000 slotun yalnız iki HDC düzlemi yaklaşık 78.1 MiB'dir;
 vocabulary/hash ve allocator overhead buna eklenir. Çalışma zamanında
 `pretrain_model_footprint_bytes` tahmini resident payload'u raporlar.
 
+### 2.1. Ölçülen hot-path mimarisi ve semantik sınırlar
+
+Eğitim hot path'i compiler flag ile değil, aşağıdaki bounded execution değişimleri
+ile azaltılır. Bunların hiçbiri checkpoint payload'una girmez veya source-order
+öğrenme sırasını değiştirmez:
+
+- `hv_bitacc_t`, bilinen maksimum bundle cardinality için yalnız gerekli binary
+  carry plane'lerini resetler; daha yüksek bir plane ilk kez gerekli olduğunda
+  güvenli biçimde lazy-clear edilir. Örneğin window-4 positional context dört,
+  local hybrid beş plane ile tamamlanır; fiziksel üst sınır 2.047 item / 11
+  plane olarak kalır. Odd cardinality majority'de tie oluşmayacağı için
+  tie-break vector de üretilmez.
+- Repeated center'ların `experience_before` planlaması artık aynı record'un
+  önceki bütün center'larını tekrar taramaz. Capacity başına bir `int32`
+  occurrence scratch tablosu ve en çok 1.024 touched-slot listesi ile
+  source-order sayaçları O(update) hesaplanır; scratch yalnız touched slotlar
+  için temizlenir. Active-token prefix sum ile bütün bounded-window neighbor
+  cardinality'leri de O(token) hesaplanır; context bundle'ın kendisi doğal
+  olarak her gerçek neighbor katkısını yine işler.
+- 256 × 1.024 `int64` context staging matrisi her record öncesi sıfırlanmaz.
+  Yalnız `update_required` kolonları yazılır ve daha sonra yalnız onlar okunur;
+  böylece kısa record'larda gereksiz yaklaşık 2 MiB memory-bandwidth write
+  kaldırılır.
+- Hierarchical whole-record accumulator yalnız ≥12 active token olduğunda
+  kurulur. Kısa record'lar zaten bit-tam local `hybrid` semantiğine sahip olduğu
+  için burada allocator/reset/bundle işi yapılmaz.
+- Adaptive scheduler, varsayılan olarak bir record'da en az 32 eligible center
+  varsa OpenMP worksharing seçer; daha küçük record'lar serial immutable path'e
+  gider. CLI çıktıdaki `CPU serial/parallel context batches` ve `...contexts`
+  sayaçları seçilen execution path'i raporlar. Bu telemetry throughput veya
+  hardware utilisation iddiası değildir.
+
+Bit-sliced bounded reset, planner scratch ve staging allocation sabit capacity
+ile sınırlıdır. Resource preflight bu planner scratch'ı (`4 × --max-vocab`
+byte) ayrıca RAM estimate'ine dahil eder. En önemlisi, context'ler immutable
+`B(w)` üzerinden hazırlanır fakat `S(w)` ve experience sayaçları sonra aynı
+orijinal token sırası ile commit edilir; serial/parallel veya threshold seçimi
+checkpoint byte'larını değiştirmemelidir.
+
 ## 3. Input contract ve veri kaybı telemetrisi
 
 Tokenizer bilerek Unicode tokenizer değildir. Her byte ASCII olarak ele alınır:
@@ -184,7 +223,8 @@ cmake --build build --parallel
 | `--window N` | 4 | her yönde context yarıçapı |
 | `--position-shift N` | 73 | relative position başına bit shift |
 | `--context-mode MODE` | `hierarchical` | `legacy`, bit-tam hızlı `positional`, local positional+topical `hybrid` veya `hybrid`e yalnız ≥12 active-token kayıtta bounded whole-record topical evidence ekleyen kalite-odaklı `hierarchical` |
-| `--parallel-context-build` | açık | immutable per-record context construction için OpenMP; source-ordered prototype commit sayesinde thread count checkpoint semantiğini değiştirmez |
+| `--parallel-context-build` | açık | immutable per-record context construction için OpenMP; yalnız record update sayısı eşikteyse team açılır, source-ordered prototype commit sayesinde thread count checkpoint semantiğini değiştirmez |
+| `--parallel-min-contexts N` | 32 | execution-only adaptive scheduler eşiği; N'den az eligible center içeren kısa record'lar team-launch/staging maliyetinden kaçınmak için serial hazırlanır |
 | `--serial-context-build` | kapalı | yalnız debug/regression için parallel context hazırlığını kapatır; checkpoint state değildir |
 | `--epochs N` | 1 | ikinci corpus geçişi sayısı |
 | `--initial-plasticity N` | 25 | başlangıç selected-dimension yüzdesi |
@@ -198,8 +238,9 @@ cmake --build build --parallel
 `resume`, checkpoint'ten vocabulary threshold/capacity, `window`, shift,
 context encoder, plasticity ve tie seed'ini geri alır; yalnız `--epochs`,
 `--strict`, `--query` ve execution-only `--reference-context-kernel`,
-`--parallel-context-build` / `--serial-context-build` seçeneklerini kabul eder
-ve vocabulary'yi değiştirmez. Bu implementation/execution switches checkpoint
+`--parallel-context-build` / `--serial-context-build` /
+`--parallel-min-contexts` seçeneklerini kabul eder ve vocabulary'yi değiştirmez.
+Bu implementation/execution switches checkpoint
 semantiği veya payload değildir; reference switch `continue` için de yalnız
 benchmark/regression amacıyla kullanılabilir. `continue` aynı
 uyumlu config'i geri alır, önce yeni shard'ın token'larını vocabulary'ye ekler,
@@ -233,10 +274,12 @@ python3 tools/training_resource_plan.py --corpus CORPUS.txt \
 ```
 
 Araç RAM/storage lower-bound estimate'i, CPU topology, NUMA/RAM-channel
-best-effort telemetry ve OpenMP placement önerisi üretir. SSD/HDD ve dual-RAM
+best-effort telemetry ve OpenMP placement önerisi üretir; ayrıca capacity başına
+4-byte source-order planner scratch'ını da dahil eder. SSD/HDD ve dual-RAM
 channel seçimi OS/firmware tarafından yönetilir; Vegai bunları zorlamaz.
 Deterministic OpenMP context construction, immutable base vectors üzerinde
-paralel çalışır; model update'leri kaynak sırası ile commit edilir. Bu yüzden
+paralel çalışır; adaptive scheduler küçük record'larda serial kalabilir, model
+update'leri ise her durumda kaynak sırası ile commit edilir. Bu yüzden
 `OMP_NUM_THREADS=1` ve çok-thread run checkpoint byte'ları eşit olmalıdır.
 
 ```bash

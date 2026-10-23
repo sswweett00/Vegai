@@ -159,8 +159,8 @@ contains
             index = index + 1
          case ('--max-vocab', '--min-frequency', '--window', '--position-shift', '--context-mode', '--epochs', &
                '--initial-plasticity', '--minimum-plasticity', '--decay-events', '--query', '--context-provider', &
-               '--openvino-worker', '--openvino-python', '--openvino-device', '--openvino-work-dir', &
-               '--openvino-min-contexts', '--openvino-timeout-ms')
+               '--parallel-min-contexts', '--openvino-worker', '--openvino-python', '--openvino-device', &
+               '--openvino-work-dir', '--openvino-min-contexts', '--openvino-timeout-ms')
             if (index == last_argument) then
                parse_status = PT_ERR_INVALID_ARGUMENT
                return
@@ -214,6 +214,8 @@ contains
                case default
                   io_status = 1
                end select
+            case ('--parallel-min-contexts')
+               read(value, *, iostat=io_status) parsed_config%parallel_min_contexts
             case ('--openvino-worker')
                parsed_config%openvino_worker = value
                io_status = 0
@@ -283,8 +285,9 @@ contains
             parsed_config%openvino_fallback_cpu = .true.
             parsed_config%openvino_require_accelerator = .false.
             index = index + 1
-         case ('--epochs', '--query', '--context-provider', '--openvino-worker', '--openvino-python', &
-               '--openvino-device', '--openvino-work-dir', '--openvino-min-contexts', '--openvino-timeout-ms')
+         case ('--epochs', '--query', '--context-provider', '--parallel-min-contexts', '--openvino-worker', &
+               '--openvino-python', '--openvino-device', '--openvino-work-dir', '--openvino-min-contexts', &
+               '--openvino-timeout-ms')
             if (index == last_argument) then
                parse_status = PT_ERR_INVALID_ARGUMENT
                return
@@ -307,6 +310,8 @@ contains
                case default
                   io_status = 1
                end select
+            case ('--parallel-min-contexts')
+               read(value, *, iostat=io_status) parsed_config%parallel_min_contexts
             case ('--openvino-worker')
                parsed_config%openvino_worker = value
                io_status = 0
@@ -410,6 +415,11 @@ contains
       write(output_unit, '(A,I0)') '  tokenizer truncations: ', metrics%tokenizer_truncations
       write(output_unit, '(A,I0)') '  non-ASCII input bytes: ', metrics%non_ascii_bytes
       write(output_unit, '(A,I0)') '  dropped overlong records: ', metrics%overlong_records
+      write(output_unit, '(A,I0)') '  adaptive parallel minimum contexts: ', active_config%parallel_min_contexts
+      write(output_unit, '(A,I0)') '  CPU serial context batches: ', execution%cpu_serial_batches
+      write(output_unit, '(A,I0)') '  CPU parallel context batches: ', execution%cpu_parallel_batches
+      write(output_unit, '(A,I0)') '  CPU serial-built contexts: ', execution%cpu_serial_contexts
+      write(output_unit, '(A,I0)') '  CPU parallel-built contexts: ', execution%cpu_parallel_contexts
       if (active_config%context_provider == PT_CONTEXT_PROVIDER_OPENVINO) then
          write(output_unit, '(A,A)') '  requested context provider: ', &
                                     trim(pretrain_context_provider_name(active_config%context_provider))
@@ -530,7 +540,8 @@ contains
       write(output_unit, '(A)') '  hierarchical adds bounded whole-record topical evidence for long records'
       write(output_unit, '(A)') '  continue first extends vocabulary from one immutable shard, then trains it'
       write(output_unit, '(A)') '  --initial-plasticity N --minimum-plasticity N --decay-events N --strict --query TOKEN'
-      write(output_unit, '(A)') '  --parallel-context-build (default) builds immutable per-record contexts with OpenMP when available'
+      write(output_unit, '(A)') '  --parallel-context-build (default) builds immutable per-record contexts with OpenMP when worthwhile'
+      write(output_unit, '(A)') '  --parallel-min-contexts N launches OpenMP only at N record updates (default 32; execution-only)'
       write(output_unit, '(A)') '  --serial-context-build disables that execution-only parallel stage for diagnosis'
       write(output_unit, '(A)') '  --reference-context-kernel is an exact benchmark/regression implementation switch'
       write(output_unit, '(A)') '  --context-provider cpu|openvino --openvino-worker PATH --openvino-python CMD --openvino-device DEVICE'

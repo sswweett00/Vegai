@@ -86,6 +86,23 @@ contains
                               'bit-sliced bundle matches signed accumulator at every cardinality')
       end do
 
+      ! A bounded reset intentionally leaves irrelevant high carry planes
+      ! untouched.  Growing through several powers of two must lazily clear
+      ! each newly needed plane and remain equivalent to the signed oracle.
+      ! Reuse bit_accumulator after its prior eight-input state to exercise
+      ! stale high-plane initialization rather than a freshly zeroed object.
+      call hv_acc_reset(accumulator)
+      call hv_bitacc_reset(bit_accumulator, 3_int32)
+      do i = 1, size(bundle_inputs)
+         call hv_acc_add(accumulator, bundle_inputs(i), status)
+         call assert_i32_equal(status, HV_OK, 'bounded-reset reference accumulator accepts input')
+         call hv_bitacc_add(bit_accumulator, bundle_inputs(i), status)
+         call assert_i32_equal(status, HV_OK, 'bounded-reset bit accumulator accepts input')
+         call assert_hv_equal(hv_bitacc_finalize(bit_accumulator, 991_int64), &
+                              hv_acc_finalize(accumulator, 991_int64), &
+                              'bounded-reset bit accumulator lazily initializes carry planes')
+      end do
+
       ! The fused raw-SoA kernels must preserve every counter plane, not merely
       ! the final bundled vector.  This is the optimization used by fast HDC
       ! pretraining context updates.
@@ -437,6 +454,7 @@ contains
       type(hdc_pretrain_config_t) :: reference_config, hierarchical_config, local_only_config
       type(hdc_pretrain_config_t) :: context_serial_config, context_parallel_config
       type(pretrain_metrics_t) :: vocabulary_metrics, train_metrics, extension_metrics
+      type(pretrain_execution_report_t) :: default_execution, serial_execution, parallel_execution
       type(hv_t) :: semantic_hv, semantic_before_extension, semantic_after_extension
       character(len=TOKEN_LEN) :: nearest_token
       integer :: unit, io_status
@@ -483,13 +501,18 @@ contains
       call assert_true(pretrain_model_footprint_bytes(model_a) > 0_int64, &
                        'pretraining model reports resident footprint')
 
-      call pretrain_train_file(model_a, CORPUS_PATH, config, train_metrics, status)
+      call pretrain_train_file(model_a, CORPUS_PATH, config, train_metrics, status, default_execution)
       call assert_i32_equal(status, PT_OK, 'streaming HDC training pass succeeds')
       call assert_true(train_metrics%raw_tokens == 24_int64, 'training pass counts raw tokens')
       call assert_true(train_metrics%active_tokens == 24_int64, 'all fixture tokens are active')
       call assert_true(train_metrics%oov_tokens == 0_int64, 'fixture corpus has no OOV tokens')
       call assert_true(train_metrics%context_pairs == 60_int64, 'windowed ordered context count is exact')
       call assert_true(train_metrics%center_updates == 24_int64, 'one prototype update occurs per active center')
+      call assert_true(default_execution%cpu_serial_batches == 6_int64 .and. &
+                       default_execution%cpu_serial_contexts == 24_int64, &
+                       'adaptive scheduler avoids OpenMP teams for short records by default')
+      call assert_true(default_execution%cpu_parallel_batches == 0_int64, &
+                       'short-record fixture does not select the parallel scheduler')
       call assert_true(model_a%training_epochs_completed == 1_int64, 'one completed epoch is recorded')
 
       call pretrain_lookup_token(model_a, 'king', slot, found, status)
@@ -537,16 +560,27 @@ contains
       context_serial_config%parallel_context_build = .false.
       context_parallel_config = context_serial_config
       context_parallel_config%parallel_context_build = .true.
+      ! Force the adaptive scheduler's OpenMP path even for this deliberately
+      ! short repeated-center fixture.
+      context_parallel_config%parallel_min_contexts = 1_int32
       call pretrain_build_vocabulary(context_serial_model, PARALLEL_CONTEXT_PATH, context_serial_config, &
                                      vocabulary_metrics, status)
       call assert_i32_equal(status, PT_OK, 'serial context fixture vocabulary succeeds')
-      call pretrain_train_file(context_serial_model, PARALLEL_CONTEXT_PATH, context_serial_config, train_metrics, status)
+      call pretrain_train_file(context_serial_model, PARALLEL_CONTEXT_PATH, context_serial_config, &
+                               train_metrics, status, serial_execution)
       call assert_i32_equal(status, PT_OK, 'serial context fixture training succeeds')
       call pretrain_build_vocabulary(context_parallel_model, PARALLEL_CONTEXT_PATH, context_parallel_config, &
                                      vocabulary_metrics, status)
       call assert_i32_equal(status, PT_OK, 'parallel context fixture vocabulary succeeds')
-      call pretrain_train_file(context_parallel_model, PARALLEL_CONTEXT_PATH, context_parallel_config, train_metrics, status)
+      call pretrain_train_file(context_parallel_model, PARALLEL_CONTEXT_PATH, context_parallel_config, &
+                               train_metrics, status, parallel_execution)
       call assert_i32_equal(status, PT_OK, 'parallel context fixture training succeeds')
+      call assert_true(serial_execution%cpu_serial_batches == 3_int64 .and. &
+                       serial_execution%cpu_parallel_batches == 0_int64, &
+                       'explicit serial configuration reports only serial scheduler batches')
+      call assert_true(parallel_execution%cpu_parallel_batches == 3_int64 .and. &
+                       parallel_execution%cpu_serial_batches == 0_int64, &
+                       'minimum-context override forces parallel scheduler batches')
       call assert_true(all(context_serial_model%base_bits == context_parallel_model%base_bits), &
                        'parallel context construction preserves base identities')
       call assert_true(all(context_serial_model%semantic_bits == context_parallel_model%semantic_bits), &

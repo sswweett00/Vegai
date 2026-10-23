@@ -126,6 +126,13 @@ def validate(output: str, training_tokens: int, context_pairs: int) -> None:
     require(metric(training, "out-of-vocabulary tokens") == 0, "long fixture produced OOV tokens")
     require(metric(training, "ordered context pairs") == context_pairs, "unexpected ordered context-pair count")
     require(metric(training, "prototype updates") == training_tokens, "unexpected prototype updates")
+    # This controlled long-record workload must exercise the adaptive OpenMP
+    # branch, not merely compare two serial fallbacks.
+    require(metric(training, "CPU serial context batches") == 0, "long fixture unexpectedly took the serial scheduler")
+    require(
+        metric(training, "CPU parallel context batches") == RECORDS * EPOCHS,
+        "long fixture did not select the parallel scheduler for every record",
+    )
 
 
 def benchmark(binary: Path, corpus: Path, threads: int, repetitions: int, workdir: Path, training_tokens: int, context_pairs: int) -> tuple[dict[str, Any], Path]:

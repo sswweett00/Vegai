@@ -281,4 +281,17 @@ throughput iddiası olarak karşılaştırılmamalıdır.
 - Checkpoint writer v5'tir; reader v4/v5 kabul eder ve checksum'ı dosyanın
   kendi version değeriyle doğrular.
 - Hierarchical global signal satırda bir kez üretilir, yalnız ≥12 active token
-  için etkinleşir ve local context accumulator kapasitesiyle bounded kalır.
+  için etkinleşir ve local context accumulator kapasitesiyle bounded kalır;
+  eşik altındaki record için topic accumulator kurulmaz.
+- Bounded bit accumulator reset'i yalnız bilinen cardinality'nin erişebileceği
+  carry plane'lerini yazar; daha yüksek plane'e geçiş lazy-clear ile güvenlidir.
+  Odd majority finalization tie vector üretmez. Bu execution detayı
+  fused/reference semantic equality sözleşmesini değiştirmez.
+- Repeated-center experience planner'ı capacity-indexed occurrence scratch ve
+  sparse touched-slot reset kullanır; eski per-center backward scan'in quadratic
+  bölümünü kaldırır. Active-prefix count da bütün window neighbor cardinality'lerini
+  O(token) belirler. Resource plan scratch için `4 × max-vocab` byte ayırır.
+- CPU scheduler küçük record'larda OpenMP team açmak yerine serial immutable
+  context path'ini seçer (`--parallel-min-contexts`, default 32). Controlled
+  long-record timing harness'i output telemetry ile parallel branch'in gerçekten
+  seçildiğini doğrular; commit yine source order'dadır.
