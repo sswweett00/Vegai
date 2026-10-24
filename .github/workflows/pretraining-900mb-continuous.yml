@@ -57,11 +57,13 @@ jobs:
         run: |
           set -uo pipefail
           set +e
+          # The experiment controller requires RUN_DIR to be empty at entry;
+          # keep command output outside its immutable lineage boundary.
           python3 tools/run_900mb_continuous_pretraining.py \
             --pretrain-bin "${GITHUB_WORKSPACE}/build-900mb/vegai_pretrain" \
             --run-dir "${VEGAI_900MB_RUN_DIR}" \
             --omp-threads 2 --train-timeout-seconds 2400 --quality-timeout-seconds 180 \
-            | tee "${VEGAI_900MB_RUN_DIR}/runner-stdout.json"
+            | tee "${RUNNER_TEMP}/vegai-900mb-continuous-runner-stdout.json"
           runner_status=${PIPESTATUS[0]}
           set -e
           if [ "$runner_status" -ne 0 ] && [ -f "${VEGAI_900MB_RUN_DIR}/experiment-report.json" ]; then
@@ -155,6 +157,7 @@ jobs:
           name: exact-900mb-90mb-continuation-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/vegai-900mb-continuous/
+            ${{ runner.temp }}/vegai-900mb-continuous-runner-stdout.json
             !${{ runner.temp }}/vegai-900mb-continuous/.quality-redaction.key
           if-no-files-found: warn
           retention-days: 14
