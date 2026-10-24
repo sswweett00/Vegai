@@ -165,8 +165,24 @@ için benchmark değildir. Cache armında
 `hits + misses = raw_tokens`, iki değerin de pozitif olması; cache-off armında
 ikisi de sıfır olması ve iki checkpoint byte/SHA'sının eşit olması zorunludur.
 Raporlanan `cache_speedup_vs_no_cache` minimum eşik değildir: CPU topology,
-compiler, filesystem, process startup ve thermal durum etkileyebilir. İlk gerçek
-CI sonucu aşağıdaki attestation bölümüne run URL'siyle eklenmelidir.
+compiler, filesystem, process startup ve thermal durum etkileyebilir.
+
+### İlk doğrulanmış lookup-cache CI gözlemi
+
+[GitHub Actions run 40103290586](https://github.com/sswweett00/Vegai/actions/runs/40103290586)
+(commit `28f0eaa`, AMD EPYC 7763 64-Core Processor, hosted Linux runner; üç
+alternating repetition) gerçek child-process ölçümünü başarıyla tamamladı:
+
+| Arm | Median train s | Training token/s | Cache hit / miss | Checkpoint |
+|---|---:|---:|---:|---|
+| canonical hash lookup (`--no-lookup-cache`) | 0.400487 | ≈20,455.096 | 0 / 0 | cache arm ile byte-tam eşit |
+| exact-token direct-map (`--lookup-cache`) | 0.398502 | ≈20,556.986 | 8,064 / 128 (her run) | **byte-tam eşit** |
+
+Bu controlled collision-sensitive fixture için ratio **1.0050×** oldu. Küçük
+fark hosted-runner varyansından ayrı bir general speedup kanıtı değildir; CI'nın
+asıl acceptance koşulları cache hit/miss partition ve semantic checkpoint
+eşitliğidir. Farklı vocabulary load factor, record topology, CPU ve corpus'ta
+ayrı ölçüm gereklidir.
 
 ## Aynı-run baseline → hot-path mimarisi karşılaştırması
 
