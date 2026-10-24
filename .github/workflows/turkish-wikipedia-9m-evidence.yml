@@ -2,6 +2,14 @@ name: Real 9M Turkish Wikipedia training and retrieval evidence
 
 on:
   workflow_dispatch:
+  # A workflow_dispatch-only file is not discoverable by GitHub until it has
+  # reached the default branch.  This intentionally narrow push trigger lets
+  # the first evidence run execute from its reviewed PR branch; ordinary source
+  # or documentation pushes do not spend a corpus-training run.
+  push:
+    branches: [arena/4f78773c-vegai]
+    paths:
+      - '.github/workflows/turkish-wikipedia-9m-evidence.yml'
 
 permissions:
   contents: read
