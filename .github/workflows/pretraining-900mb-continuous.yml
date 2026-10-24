@@ -55,12 +55,30 @@ jobs:
 
       - name: Run exact 900MB train, exact 90MB continuation, and quality regression gate
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          set +e
           python3 tools/run_900mb_continuous_pretraining.py \
             --pretrain-bin "${GITHUB_WORKSPACE}/build-900mb/vegai_pretrain" \
             --run-dir "${VEGAI_900MB_RUN_DIR}" \
             --omp-threads 2 --train-timeout-seconds 2400 --quality-timeout-seconds 180 \
             | tee "${VEGAI_900MB_RUN_DIR}/runner-stdout.json"
+          runner_status=${PIPESTATUS[0]}
+          set -e
+          if [ "$runner_status" -ne 0 ] && [ -f "${VEGAI_900MB_RUN_DIR}/experiment-report.json" ]; then
+            # Keep the check annotation bounded and free of raw held-out data;
+            # the artifact carries the full redacted report for diagnosis.
+            failure=$(python3 - "${VEGAI_900MB_RUN_DIR}/experiment-report.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          report = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          text = str(report.get("failure", report.get("status", "unknown failure"))).replace("\n", " ")
+          print(text[:900])
+          PY
+            )
+            echo "::error title=900MB continuation experiment failed::$failure"
+          fi
+          exit "$runner_status"
 
       - name: Publish train-only timing and regression decision
         if: always()
