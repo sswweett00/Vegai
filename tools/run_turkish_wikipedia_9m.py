@@ -261,8 +261,18 @@ def emit_segment(
     emitted = 0
     records = 0
     cursor = 0
+    # A token without an active neighbour is correctly counted as an active
+    # lexical occurrence by the native reader, but cannot receive an HDC
+    # context/prototype update.  Preserve the stronger experiment contract by
+    # emitting only pairs (or longer even-sized chunks); isolated selected
+    # source terms remain an explicit filter boundary rather than inflated
+    # "trained token" accounting.  The target is required to be even below.
     while cursor < len(segment) and emitted < remaining:
         take = min(TOKENS_PER_RECORD, len(segment) - cursor, remaining - emitted)
+        if take % 2 != 0:
+            take = take - 1
+        if take < 2:
+            exit
         record = " ".join(segment[cursor : cursor + take])
         encoded = record.encode("ascii", "strict")
         require(len(encoded) <= MAX_NATIVE_RECORD_BYTES, "generated native record exceeds 8,192 bytes")
@@ -291,8 +301,8 @@ def validate_generated_corpus(corpus: Path, expected_tokens: int) -> dict[str, A
                 require(len(record) <= MAX_NATIVE_RECORD_BYTES, "generated corpus record exceeds native limit")
                 rendered = record.decode("ascii", "strict")
                 fields = rendered.split(" ")
-                require(fields and all(TOKEN_PATTERN.fullmatch(item) is not None for item in fields),
-                        "generated corpus contains a token outside the native grammar")
+                require(len(fields) >= 2 and all(TOKEN_PATTERN.fullmatch(item) is not None for item in fields),
+                        "generated corpus contains an invalid token or a contextless one-token record")
                 records += 1
                 tokens += len(fields)
                 maximum_record_bytes = max(maximum_record_bytes, len(record))
@@ -322,6 +332,7 @@ def prepare_corpus(
     vocabulary_size: int,
 ) -> dict[str, Any]:
     require(target_tokens >= 9_000_000, "target token count must not be below 9,000,000")
+    require(target_tokens % 2 == 0, "target token count must be even so every emitted token has a context neighbour")
     require(vocabulary_size > 11, "selected vocabulary must contain more than eleven terms")
     counts, source_identity = scan_source_vocabulary(source_raw)
     require(len(counts) >= vocabulary_size,
@@ -395,6 +406,8 @@ def prepare_corpus(
             "selected_vocabulary_file": selected_vocabulary_output.name,
             "selected_vocabulary_sha256": sha256_file(selected_vocabulary_output)["sha256"],
             "filtered_token_is_record_boundary": True,
+            "contextless_singleton_segments_dropped": True,
+            "minimum_tokens_per_output_record": 2,
             "maximum_tokens_per_output_record": TOKENS_PER_RECORD,
             "source_records_consumed_until_target": source_records_consumed,
             "source_normalised_tokens_considered_until_target": source_tokens_considered,

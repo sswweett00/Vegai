@@ -42,7 +42,9 @@ uygulanır:
    token (frekans azalan, lexical tie-break) seçilir.
 5. Kaynak sırası korunur. Seçili olmayan her token record boundary'dir;
    dolayısıyla filtrelenmiş kelimelerin iki tarafı yapay biçimde komşu olmaz.
-   Her çıktı record'u en çok 128 token ve 8,192 byte'tır.
+   Tek seçili token içeren segmentler de atılır: context'i olmayan bir token
+   native okuyucuda active görünse bile prototype update alamaz. Her çıktı
+   record'u 2 ile 128 token ve en çok 8,192 byte'tır.
 6. Seçilmiş gerçek kaynak token'larından 9,000,000 tane yazılır. `--max-vocab
    32768 --min-frequency 1` ile her yazılmış token checkpoint'in active
    vocabulary'sine sığar. Native eğitim metrikleri hem `raw tokens` hem
