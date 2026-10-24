@@ -2,6 +2,24 @@ name: Exact 900 MB and 90 MB continuous pretraining quality gate
 
 on:
   workflow_dispatch:
+  # The large native evidence run is intentionally narrow rather than a
+  # blanket PR cost: trigger only when its training/gating implementation or
+  # own contract changes. Manual dispatch remains available after merge.
+  pull_request:
+    paths:
+      - '.github/workflows/pretraining-900mb-continuous.yml'
+      - 'app/pretrain.f90'
+      - 'src/**'
+      - 'tools/continuous_pretrain.py'
+      - 'tools/continuous_quality_gate.py'
+      - 'tools/pretraining_quality_evaluation.py'
+      - 'tools/run_900mb_continuous_pretraining.py'
+      - 'tools/synthetic_pretraining_fixture.py'
+      - 'tools/training_resource_plan.py'
+      - 'tools/verify_900mb_continuous_pretraining.py'
+      - 'tools/verify_continuous_quality_regression.py'
+      - 'CMakeLists.txt'
+      - 'Makefile'
 
 permissions:
   contents: read
