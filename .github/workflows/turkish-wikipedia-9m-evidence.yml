@@ -1,0 +1,149 @@
+name: Real 9M Turkish Wikipedia training and retrieval evidence
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# This is an explicitly dispatched, evidence-producing corpus run.  Do not
+# cancel it just because a later documentation or source follow-up arrives:
+# either the immutable report succeeds or the failure artifact records why.
+concurrency:
+  group: turkish-wikipedia-9m-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  real-turkish-corpus:
+    name: Native 9M Turkish Wikipedia RESONANT run
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install GNU Fortran toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gfortran
+
+      - name: Compile portable native Fortran executables
+        run: make pretrain chat BUILD_DIR=build-turkish-9m
+
+      - name: Allocate ignored evidence paths
+        run: |
+          run_dir="${RUNNER_TEMP}/vegai-turkish-wikipedia-9m"
+          mkdir -p "$run_dir"
+          echo "VEGAI_TURKISH_9M_DIR=$run_dir" >> "$GITHUB_ENV"
+
+      - name: Retrieve versioned open corpus and independent dialogue source
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/tdd-ai/trwiki-67.git "${VEGAI_TURKISH_9M_DIR}/trwiki-67-metadata"
+          git clone --depth 1 https://github.com/Aliumutcan/Turkish_NLP_FAQ_DATASET.git "${VEGAI_TURKISH_9M_DIR}/turkish-faq"
+          curl --fail --location --retry 4 --retry-delay 5 --connect-timeout 30 \
+            --output "${VEGAI_TURKISH_9M_DIR}/trwiki-67.tar.bz2" \
+            'https://zenodo.org/record/5213891/files/trwiki-67.tar.bz2?download=1'
+          mkdir -p "${VEGAI_TURKISH_9M_DIR}/trwiki-67-extracted"
+          tar -xjf "${VEGAI_TURKISH_9M_DIR}/trwiki-67.tar.bz2" \
+            -C "${VEGAI_TURKISH_9M_DIR}/trwiki-67-extracted"
+
+      - name: Train real 9M native-token corpus and collect eleven plus eleven retrievals
+        run: |
+          set -euo pipefail
+          python3 tools/run_turkish_wikipedia_9m.py \
+            --pretrain-bin "${GITHUB_WORKSPACE}/build-turkish-9m/vegai_pretrain" \
+            --chat-bin "${GITHUB_WORKSPACE}/build-turkish-chat/vegai_chat" \
+            --source-root "${VEGAI_TURKISH_9M_DIR}/trwiki-67-extracted" \
+            --source-repo "${VEGAI_TURKISH_9M_DIR}/trwiki-67-metadata" \
+            --source-archive "${VEGAI_TURKISH_9M_DIR}/trwiki-67.tar.bz2" \
+            --faq-repo "${VEGAI_TURKISH_9M_DIR}/turkish-faq" \
+            --run-dir "${VEGAI_TURKISH_9M_DIR}/experiment" \
+            --target-tokens 9000000 --vocabulary-size 32768 --epochs 2 --omp-threads 2 \
+            --train-timeout-seconds 3600 --inspect-timeout-seconds 300
+
+      - name: Publish native timing, provenance, and retrieval summary
+        if: always()
+        run: |
+          python3 - "${VEGAI_TURKISH_9M_DIR}/experiment/experiment-report.json" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          report_path = Path(sys.argv[1])
+          summary_path = Path(sys.argv[2])
+          with summary_path.open("a", encoding="utf-8") as summary:
+              print("## Real Turkish Wikipedia 9M-native-token evidence", file=summary)
+              print(file=summary)
+              if not report_path.is_file():
+                  failure = report_path.with_name("experiment-failure.json")
+                  if failure.is_file():
+                      print("```json", file=summary)
+                      print(failure.read_text(encoding="utf-8"), file=summary)
+                      print("```", file=summary)
+                  else:
+                      print("No experiment report was published; inspect the failing workflow step.", file=summary)
+                  raise SystemExit(0)
+              report = json.loads(report_path.read_text(encoding="utf-8"))
+              corpus = report["corpus"]["output"]
+              training = report["training"]
+              provenance = report["provenance"]["Turkish_Wikipedia_training_source"]
+              print("The elapsed time below measures only the native `vegai_pretrain train` child.", file=summary)
+              print(file=summary)
+              print("```text", file=summary)
+              print(
+                  f"source_revision={provenance['dataset_project_revision']}; "
+                  f"source_license={provenance['declared_license']}; "
+                  f"corpus_sha256={corpus['sha256']}; native_tokens={corpus['native_token_count']}; "
+                  f"train_seconds={training['train_process_wall_seconds']:.6f}; "
+                  f"tokens_per_second={training['raw_training_tokens_per_second']:.3f}",
+                  file=summary,
+              )
+              print("```", file=summary)
+              print(file=summary)
+              print("### 11 checkpoint semantic nearest-neighbour probes", file=summary)
+              print("| query | nearest neighbour | bipolar similarity |", file=summary)
+              print("| --- | --- | ---: |", file=summary)
+              for item in report["semantic_retrieval"]["results"]:
+                  print(f"| {item['query']} | {item['nearest_semantic_neighbour']} | {item['bipolar_similarity']:.5f} |", file=summary)
+              print(file=summary)
+              print("### 11 grounded TSV retrievals", file=summary)
+              print("| # | best similarity | runner-up | margin | grounded |", file=summary)
+              print("| ---: | ---: | ---: | ---: | --- |", file=summary)
+              for item in report["grounded_dialogue"]["results"]:
+                  print(
+                      f"| {item['ordinal']} | {item['best_bipolar_similarity']:.5f} | "
+                      f"{item['runner_up_bipolar_similarity']:.5f} | {item['grounding_margin']:.5f} | "
+                      f"{str(item['grounded']).lower()} |",
+                      file=summary,
+                  )
+              print(file=summary)
+              print(
+                  "The semantic table is checkpoint nearest-neighbour evidence. The dialogue answers are literal, "
+                  "ASCII-normalized fields retrieved from a separately versioned TSV, not LLM-generated prose. "
+                  "Neither table establishes held-out natural-language quality, factuality, or general intelligence.",
+                  file=summary,
+              )
+          PY
+
+      - name: Upload compact provenance and retrieval evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: turkish-wikipedia-9m-evidence-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/vegai-turkish-wikipedia-9m/experiment/evidence/
+            ${{ runner.temp }}/vegai-turkish-wikipedia-9m/experiment/experiment-failure.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload native checkpoint separately
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: turkish-wikipedia-9m-checkpoint-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/vegai-turkish-wikipedia-9m/experiment/turkish_wikipedia_9m_resonant.vgai
+            ${{ runner.temp }}/vegai-turkish-wikipedia-9m/experiment/evidence/checkpoint.sha256
+          if-no-files-found: error
+          retention-days: 30

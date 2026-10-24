@@ -102,7 +102,10 @@ jobs:
           checkpoint="${RUNNER_TEMP}/vegai-smoke.vgai"
           ./build-ci/vegai_pretrain train examples/corpus/toy_hdc_corpus.txt "$checkpoint" \
             --max-vocab 64 --min-frequency 2 --window 2 --epochs 1 --query king
-          ./build-ci/vegai_pretrain inspect "$checkpoint" --query dog
+          active_vocab="${RUNNER_TEMP}/vegai-smoke-active-vocabulary.tsv"
+          ./build-ci/vegai_pretrain inspect "$checkpoint" --query dog --active-vocabulary-file "$active_vocab"
+          test -s "$active_vocab"
+          awk -F '\t' 'NF != 2 || $1 !~ /^[a-z0-9_\047]+$/ || $2 !~ /^[1-9][0-9]*$/ { exit 1 }' "$active_vocab"
           ./build-ci/vegai_pretrain resume examples/corpus/toy_hdc_corpus.txt "$checkpoint" \
             --epochs 1 --query queen
 

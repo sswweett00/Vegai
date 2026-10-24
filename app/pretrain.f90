@@ -7,7 +7,7 @@ program vegai_pretrain
    use hdc_pretraining
    implicit none
 
-   character(len=512) :: command, corpus_path, checkpoint_path, query, query_file
+   character(len=512) :: command, corpus_path, checkpoint_path, query, query_file, active_vocabulary_file
    type(hdc_pretrain_model_t) :: model
    type(hdc_pretrain_config_t) :: config
    type(pretrain_metrics_t) :: vocabulary_metrics, training_metrics
@@ -94,11 +94,16 @@ program vegai_pretrain
       call get_command_argument(2, checkpoint_path)
       query = ''
       query_file = ''
-      call parse_inspect_options(3, argument_count, query, query_file, status)
+      active_vocabulary_file = ''
+      call parse_inspect_options(3, argument_count, query, query_file, active_vocabulary_file, status)
       if (status /= PT_OK) call fail_with_status('invalid inspect option', status)
       call pretrain_checkpoint_load(trim(checkpoint_path), model, status)
       if (status /= PT_OK) call fail_with_status('checkpoint load failed', status)
       call print_model_summary(model)
+      if (len_trim(active_vocabulary_file) > 0) then
+         call write_active_vocabulary_file(model, trim(active_vocabulary_file), status)
+         if (status /= PT_OK) call fail_with_status('active-vocabulary export failed', status)
+      end if
       if (len_trim(query_file) > 0) then
          call maybe_query_file(model, trim(query_file), status)
       else
@@ -362,15 +367,17 @@ contains
       end do
    end subroutine parse_resume_options
 
-   subroutine parse_inspect_options(first_argument, last_argument, parsed_query, parsed_query_file, parse_status)
+   subroutine parse_inspect_options(first_argument, last_argument, parsed_query, parsed_query_file, &
+                                    parsed_active_vocabulary_file, parse_status)
       integer, intent(in) :: first_argument, last_argument
-      character(len=*), intent(out) :: parsed_query, parsed_query_file
+      character(len=*), intent(out) :: parsed_query, parsed_query_file, parsed_active_vocabulary_file
       integer(int32), intent(out) :: parse_status
       character(len=512) :: option, value
       integer :: index
 
       parsed_query = ''
       parsed_query_file = ''
+      parsed_active_vocabulary_file = ''
       parse_status = PT_OK
       index = first_argument
       do while (index <= last_argument)
@@ -393,6 +400,12 @@ contains
                return
             end if
             parsed_query_file = value
+         case ('--active-vocabulary-file')
+            if (len_trim(parsed_active_vocabulary_file) > 0) then
+               parse_status = PT_ERR_INVALID_ARGUMENT
+               return
+            end if
+            parsed_active_vocabulary_file = value
          case default
             parse_status = PT_ERR_INVALID_ARGUMENT
             return
@@ -489,6 +502,42 @@ contains
       write(output_unit, '(A,I0)') '  estimated resident bytes: ', pretrain_model_footprint_bytes(trained_model)
    end subroutine print_model_summary
 
+   ! Export only checkpoint-active entries in a stable, machine-readable form.
+   ! This is an inspection surface, not a checkpoint format: the caller can use
+   ! the resulting ASCII TSV to choose runtime probes whose tokens are known to
+   ! this exact model revision.  Frequencies are the checkpoint vocabulary-pass
+   ! counts, not post-training semantic scores.
+   subroutine write_active_vocabulary_file(trained_model, requested_output_file, export_status)
+      type(hdc_pretrain_model_t), intent(in) :: trained_model
+      character(len=*), intent(in) :: requested_output_file
+      integer(int32), intent(out) :: export_status
+      integer :: unit, io_status
+      integer(int32) :: slot
+
+      export_status = PT_OK
+      if (len_trim(requested_output_file) == 0) then
+         export_status = PT_ERR_INVALID_ARGUMENT
+         return
+      end if
+      open(newunit=unit, file=trim(requested_output_file), status='replace', action='write', &
+           form='formatted', iostat=io_status)
+      if (io_status /= 0) then
+         export_status = PT_ERR_IO
+         return
+      end if
+      do slot = 1_int32, trained_model%vocabulary%count
+         if (.not. trained_model%vocabulary%active(slot)) cycle
+         write(unit, '(A,A,I0)', iostat=io_status) trim(trained_model%vocabulary%tokens(slot)), &
+              achar(9), trained_model%vocabulary%frequencies(slot)
+         if (io_status /= 0) then
+            export_status = PT_ERR_IO
+            exit
+         end if
+      end do
+      close(unit, iostat=io_status)
+      if (io_status /= 0 .and. export_status == PT_OK) export_status = PT_ERR_IO
+   end subroutine write_active_vocabulary_file
+
    ! Batch diagnostic path for benchmark and operator workflows.  Each nonblank
    ! physical record supplies exactly one tokenizer-valid query token; output
    ! remains the same three-line query block used by --query.
@@ -569,7 +618,7 @@ contains
       write(output_unit, '(A)') '    [--reference-context-kernel] [--lookup-cache|--no-lookup-cache]'
       write(output_unit, '(A)') '  vegai_pretrain continue SHARD CHECKPOINT [--epochs N] [--strict] [--query TOKEN]'
       write(output_unit, '(A)') '    [--reference-context-kernel] [--lookup-cache|--no-lookup-cache]'
-      write(output_unit, '(A)') '  vegai_pretrain inspect CHECKPOINT [--query TOKEN | --query-file PATH]'
+      write(output_unit, '(A)') '  vegai_pretrain inspect CHECKPOINT [--query TOKEN | --query-file PATH] [--active-vocabulary-file PATH]'
       write(output_unit, '(A)') 'Train options:'
       write(output_unit, '(A)') '  --max-vocab N --min-frequency N --window N --position-shift N --context-mode MODE --epochs N'
       write(output_unit, '(A)') '  MODE: legacy, positional, hybrid, hierarchical, coherent, debiased, or resonant'
