@@ -190,6 +190,11 @@ if(VEGAI_BUILD_TESTS)
         )
         set_tests_properties(vegai_lmm_release_governor PROPERTIES TIMEOUT 180)
         add_test(
+            NAME vegai_lmm_release_registry
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_lmm_release_registry.py
+        )
+        set_tests_properties(vegai_lmm_release_registry PROPERTIES TIMEOUT 180)
+        add_test(
             NAME vegai_lmm_portfolio
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_lmm_portfolio.py
         )

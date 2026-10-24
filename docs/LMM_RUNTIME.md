@@ -47,8 +47,9 @@ LMM düzlemi şu bileşenlerden oluşur:
 | `tools/lmm_quality_evaluation.py` | Held-out gerçek gateway çağrılarında model-emitted citation/abstention contract'i, privacy-conscious report ve fail-closed release threshold'ları |
 | `tools/lmm_portfolio.py` | Immutable manifest + passed quality report + target-domain evaluation card ile deterministic expert model routing veya bağımsız panel planı; `single-best` gerçek dispatch'i |
 | `tools/lmm_release_governor.py` | Frozen portfolio/task baseline-candidate identity'leri üzerinde aggregate-only shadow → bounded canary → promote/rollback karar/state chain'i ve external traffic directive |
+| `tools/lmm_release_registry.py` | Verified governor artifact'lerini canonical strict-LF local hash-chain ledger'da single-host expected-state CAS ile serialize eder; privacy-safe authoritative head raporu verir |
 | `tools/lmm_tool_orchestrator.py` | Request+registry-bound typed read-only tool planı, prior-result reference, no-shell private execution, distinct verifier ve gateway-ready evidence publication |
-| `tools/verify_lmm_runtime.py`, `tools/verify_lmm_portfolio.py`, `tools/verify_lmm_tool_orchestrator.py`, `tools/verify_lmm_release_governor.py` | Runtime boundary ile domain-routing/privacy/provenance/fail-closed dispatch, verified tool plan ve release-governance entegrasyon testleri |
+| `tools/verify_lmm_runtime.py`, `tools/verify_lmm_portfolio.py`, `tools/verify_lmm_tool_orchestrator.py`, `tools/verify_lmm_release_governor.py`, `tools/verify_lmm_release_registry.py` | Runtime boundary ile domain-routing/privacy/provenance/fail-closed dispatch, verified tool plan ve release-governance/authoritative-head entegrasyon testleri |
 
 ## 2. Gerçek serbest doğal dil üretimi
 
@@ -388,10 +389,29 @@ Governor input'u raw session/request/evidence/response değildir: strict LF
 aggregate telemetry ve opaque replay IDs'dir. Decision raw ID/path içermez;
 external controller için `shadow-mirror-only`, `bounded-canary`,
 `candidate-promoted` veya `baseline-only-rollback` directive'i üretir. Traffic
-enforcement, telemetry integrity, signed release head/CAS, provider revision
-attestation, privacy/tenant isolation ve emergency kill switch bu Python
-control plane'in dışında kalır. Tam contract:
+enforcement, telemetry integrity, signed/distributed release head, provider
+revision attestation, privacy/tenant isolation ve emergency kill switch bu
+Python control plane'in dışında kalır. Tam contract:
 [LMM_RELEASE_GOVERNANCE.md](LMM_RELEASE_GOVERNANCE.md).
+
+### 10.2 Local authoritative release registry
+
+`tools/lmm_release_registry.py`, governor'ın deliberate multi-child artifact
+özelliğini canlı controller için tek-host authoritative head'e çevirir. `record`
+current state SHA-256'yi CAS token olarak ister (`GENESIS` yalnız initial
+event'tir); policy/governor/registry implementation identity'sini, direct
+predecessor'u, immutable consumed observation-batch dependency'sini ve exact
+traffic directive'i yeniden doğrular. Accepted events strict-LF JSONL
+hash-chain'e exclusive local lock ve atomic publish ile yazılır. `inspect`
+policy argument'iyle historical ledger'ı privacy-safe digest/phase/directive
+olarak tekrar doğrular.
+
+Bu layer model veya telemetry güvenilirliği vermez ve route config'i uygulamaz.
+Aynı zamanda signing, remote append-only retention, distributed lock/consensus
+ve HA failover çözümü değildir: multi-host controller signed remote registry ve
+transactional traffic-control boundary kullanmalıdır. Local registry sayesinde
+rejected competing/stale child'ın bu host ledger'ında canonical head olması
+engellenir; gerçek provider/traffic-plane apply sonucu ayrıca denetlenmelidir.
 
 ## 11. Typed, verified tool-use plane
 
@@ -420,9 +440,10 @@ python3 tools/verify_lmm_runtime.py
 python3 tools/verify_lmm_portfolio.py
 python3 tools/verify_lmm_tool_orchestrator.py
 python3 tools/verify_lmm_release_governor.py
+python3 tools/verify_lmm_release_registry.py
 ```
 
-Bu dört test birlikte şunları denetler:
+Bu beş test birlikte şunları denetler:
 
 - Türkçe, Arapça ve Japonca Unicode retrieval;
 - `tokenizers` kuruluysa gerçek `tokenizer.json` BPE yolu;
@@ -443,6 +464,9 @@ Bu dört test birlikte şunları denetler:
   conservative promotion/rollback, aggregate-only privacy, replay/forged
   telemetry/state semantic/tamper ve required quality/reliability/safety/cost/
   latency policy gates;
+- authoritative local `GENESIS`/state-head CAS, competing-child rejection,
+  consumed batch/directive binding, strict-LF hash-chain, stale-lock, ledger
+  corruption, policy mismatch ve path/raw-ID privacy gates;
 - modality capability yoksa fail-closed rejection;
 - gerçek gateway child process benchmark sınırı.
 
@@ -463,9 +487,10 @@ Bu entegrasyon aşağıdakileri otomatik olarak sağlamaz:
 - LMM benchmark, human preference, red-team veya multimodal task score'u;
 - kernel/container sandbox, network egress policy, real verifier independence,
   mutating-tool authorization/idempotency veya tool-use benchmark'ı;
-- signed deployment registry/CAS, live traffic enforcement, trustworthy online
-  telemetry, provider weight attestation, tenant isolation veya automatic
-  production safety approval.
+- signed/distributed deployment registry/CAS, live traffic enforcement,
+  trustworthy online telemetry, provider weight attestation, tenant isolation
+  veya automatic production safety approval. (Local registry yalnız single-host
+  serialization sağlar.)
 
 Bu yüzden bu katman “LMM eklendi” demek için yeterli bir operational boundary
 sağlar; “Vegai artık evrensel LMM'den daha iyi” sonucu çıkarmaz. Gerçek kalite

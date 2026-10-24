@@ -37,6 +37,7 @@ evidence marker contract'ini ölçer; factual entailment yerine geçmez.
 | `tools/lmm_portfolio.py generate` | `single-best` kararıyla private request/evidence snapshot'ı üzerinden gerçek gateway çağrısı; model ve input provenance'ını yeniden doğrular |
 | `tools/lmm_quality_evaluation.py` | Candidate'in citation/abstention held-out release report'unu üretir; portföy seçimi bu report'un manifest SHA'sını doğrular |
 | `tools/lmm_release_governor.py` | Router'ın offline eligible baseline/candidate seçimini immutable shadow → bounded canary → promote/rollback release state'ine bağlar; raw prompt/response saklamaz ve external traffic directive üretir |
+| `tools/lmm_release_registry.py` | Verified governor artifacts için single-host authoritative expected-state CAS/hash-chain ledger; stale/competing child'ı reddeder, raw telemetry/path saklamaz |
 | `tools/verify_lmm_portfolio.py` | Synthetic worker ile domain selection, gerçek dispatch, panel bağımsızlığı, raw-text privacy ve fail-closed negative cases |
 
 Tüm gerçek modeller, gateway command'leri, evaluation suite'leri ve scorecard
@@ -249,11 +250,15 @@ confidence evidence yoksa canary'yi korur veya rollback yapar. Raw
 request/response router/gateway tarafında kalır; governor'a yalnız opaque ID'li
 aggregate observation girer.
 
-Bu, router'ın deployment controller'a dönüştüğü anlamına gelmez. Signed release
-registry, provider weight/runtime attestation, telemetry trust, tenant
-isolation, traffic splitting, atomic expected-head/CAS, alerting ve emergency
-kill switch external platform sorumluluğundadır. Tam policy/state/decision
-schema'sı: [LMM_RELEASE_GOVERNANCE.md](LMM_RELEASE_GOVERNANCE.md).
+Bu, router'ın deployment controller'a dönüştüğü anlamına gelmez.
+`lmm_release_registry.py`, verified governor artifact'leri için single-host
+atomic expected-state CAS/hash-chain head sağlar; controller directive'i ancak
+başarılı local `record` event'inden sonra ele almalıdır. Ancak signed/distributed
+release registry, provider weight/runtime attestation, telemetry trust, tenant
+isolation, traffic splitting, controller-to-route-config transaction, alerting
+ve emergency kill switch external platform sorumluluğundadır. Tam
+policy/state/decision/ledger schema'sı:
+[LMM_RELEASE_GOVERNANCE.md](LMM_RELEASE_GOVERNANCE.md).
 
 ## 7. Fail-closed ve provenance davranışı
 
@@ -282,6 +287,7 @@ dışında değiştirmediği ayrıca provider attestation ile kanıtlanmalıdır
 ```bash
 python3 tools/verify_lmm_portfolio.py
 python3 tools/verify_lmm_release_governor.py
+python3 tools/verify_lmm_release_registry.py
 make lmm-check
 ```
 
@@ -293,5 +299,7 @@ immutable worker-config output collision'ını ve held-out runtime'dan sapmış
 worker config rejection'ını test eder. `verify_lmm_release_governor.py` ise
 ayrı synthetic fixture ile immutable portfolio binding, shadow→canary geçişi,
 promotion/rollback, aggregate privacy, replay/forged identity/tamper ve required
-live-metric gates'ini test eder. Synthetic worker/metric gerçek domain score
-veya LMM üstünlüğü sonucu değildir.
+live-metric gates'ini test eder. `verify_lmm_release_registry.py`, `GENESIS` /
+current-head CAS, competing child, batch/directive binding, lock/hash-chain ve
+privacy fail-closed gates'ini denetler. Synthetic worker/metric gerçek domain
+score veya LMM üstünlüğü sonucu değildir.

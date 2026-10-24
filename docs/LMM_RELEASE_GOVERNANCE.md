@@ -294,12 +294,86 @@ python3 tools/lmm_release_governor.py inspect \
   --decision-output releases/r2026-10/decision-001-audit.json
 ```
 
+### 4.1 Tek-host authoritative head: `lmm_release_registry.py`
+
+Governor immutable artifact üreticisidir; aynı predecessor state'ten iki geçerli
+child state üretilebilmesi normaldir. Bir controller'ın directive uygulamadan
+önce **tek canonical head** seçmesi gerekir. Bu repository'deki
+`tools/lmm_release_registry.py`, bu boşluğu aynı host üzerindeki bir ledger için
+kapatır. `record`, supplied policy/state/decision'ı governor contract'ine göre
+yeniden doğrular ve ancak current authoritative state SHA-256 ile eşleşen CAS
+isteğini kabul eder:
+
+```bash
+# Init artifact'ini ilk authoritative event olarak kaydet. GENESIS yalnız ilk
+# event içindir; report'taki head_state_sha256 sonraki çağrının expected head'idir.
+python3 tools/lmm_release_registry.py record \
+  --policy releases/r2026-10/policy.json \
+  --state releases/r2026-10/state-000.json \
+  --decision releases/r2026-10/decision-000.json \
+  --ledger releases/r2026-10/authoritative-release.jsonl \
+  --expected-state-sha256 GENESIS
+
+# Advance artifact'i yalnız controller'ın reload ettiği current head'in direct
+# child'ıysa kaydet; stale/parallel child exit 2 ile reddedilir.
+python3 tools/lmm_release_registry.py record \
+  --policy releases/r2026-10/policy.json \
+  --state releases/r2026-10/state-001.json \
+  --decision releases/r2026-10/decision-001.json \
+  --ledger releases/r2026-10/authoritative-release.jsonl \
+  --expected-state-sha256 '<previous authoritative head_state_sha256>'
+
+# Audit/read path policy, governor ve registry implementation identity'lerini
+# tekrar bağlar; output yalnız digest, phase ve traffic directive taşır.
+python3 tools/lmm_release_registry.py inspect \
+  --policy releases/r2026-10/policy.json \
+  --ledger releases/r2026-10/authoritative-release.jsonl
+```
+
+Ledger canonical-JSON, strict-LF JSONL hash-chain'dir. Her event; immutable policy/governor/
+registry source identity'lerini, baseline/candidate deployment identity'lerini,
+state/decision SHA+byte reference'larını, state sequence/phase/outcome'u ve
+reconstructed traffic directive'i bağlar. Artifact path'i, raw
+prompt/response, observation ID, replication ID veya observation body event'e
+konmaz. Advanced decision'ın redacted `observation_batch` reference'ı state'in
+son immutable consumed batch digest'iyle de eşleşmelidir. Registry source
+identity de event'e bağlanır: tool sürümü değişirse eski ledger yeni source ile
+inspect edilmez; operator exact historical tool artifact'ini retain etmeli veya
+new policy/release altında açık migration yapmalıdır.
+
+Publish, exclusive local lock altında gerçekleşir; lock sahibi otomatik olarak
+stale lock silmez. Accepted event'ler temporary file + file `fsync` + atomic
+replace (ve host izin verirse directory `fsync`) ile yazılır. `GENESIS` yalnız
+sequence 0 için, sonraki çağrıda ise exact authoritative state SHA zorunludur.
+Terminal `promoted`/`rolled_back` head sonrasında yeni child, illegal phase
+transition, previous-state mismatch, policy/governor/source mismatch veya
+forged directive fail-closed reddedilir.
+
+Bu mekanizma **yalnız local filesystem/tek host serialization** sağlar. Ledger
+imzasızdır; hash-chain accidental corruption ve bağlanmamış değişikliği görünür
+kılar, ayrıcalıklı bir writer'ın ledger'ı yeniden yazmasını engelleyen
+cryptographic signature değildir. Multi-host/HA deployment; signed append-only
+remote registry, distributed lease/consensus, immutable artifact retention,
+controller-to-traffic-config transaction ve operator recovery procedure
+sağlamak zorundadır. Local lock NFS/object-store lock veya distributed traffic
+enforcement yerine geçmez.
+
+Operasyonel sıra önemlidir: initial decision, telemetry toplamadan veya
+herhangi bir directive uygulamadan önce `GENESIS` CAS ile kaydedilir; her
+`advance` artifact'i de traffic config'e gitmeden önce reload edilmiş current
+head'e karşı kaydedilir. `record` başarılı olup route-config transaction
+başarısızsa, controller event'i güvenli biçimde reconcile/rollback edebilmelidir;
+registry tek başına iki sistem arasında transaction yapmaz.
+
 Her output path yeni olmalıdır; input veya var olan artifact overwrite edilmez.
 Controller şunları kendi trust boundary'sinde yapmalıdır:
 
-1. policy/state/decision SHA-256 zincirini ve authorized signer/registry kaydını
+1. single-host kullanımda governor artifact'ini `record` CAS ile authoritative
+   head'e bağlamak; HA/multi-host kullanımda bunun yerine veya bunun üstünde
+   signed append-only remote registry ve distributed expected-head mekanizmasını
    doğrulamak;
-2. directive phase'i atomik/idempotent biçimde route config'e uygulamak;
+2. accepted event'in directive phase'ini atomik/idempotent biçimde route
+   config'e uygulamak ve apply result'ını kendi audit sisteminde bağlamak;
 3. model server revision, tokenizer/template, tool policy, provider endpoint,
    weight/SBOM attestation ve tenant/network policy'yi policy-bound deployment
    identity ile doğrulamak;
@@ -309,26 +383,36 @@ Controller şunları kendi trust boundary'sinde yapmalıdır:
    incident response ve stale-decision expiry uygulamak.
 
 Aynı state'ten iki ayrı advance branch'i teknik olarak farklı immutable
-artifacts oluşturabilir. Governor single-writer distributed lock/registry
-olmadığı için controller compare-and-swap expected head veya append-only signed
-release ledger kullanmalı ve yalnız bir child state'i authoritative kabul
-etmelidir.
+artifacts oluşturabilir. Local registry stale child'ı kendi host ledger'ında
+reddeder; governor veya local lock, distributed lock/registry değildir.
+Controller distributed ortamda yalnız signed append-only authoritative registry
+ile seçilmiş child state'i uygulamalıdır.
 
 ## 5. Test ve kapsam sınırı
 
 ```bash
 python3 tools/verify_lmm_release_governor.py
+python3 tools/verify_lmm_release_registry.py
 make release-check
+make release-registry-check
 make lmm-check
 ```
 
-Synthetic verifier; immutable governor/portfolio/model/gateway/evaluation/held-out
-quality binding'ini, initial shadow directive'ini, shadow-disabled direct-canary
-policy'sini, shadow pass → bounded canary geçişini, conservative promotion'u,
-confident canary rollback'i,
+`verify_lmm_release_governor.py`; immutable governor/portfolio/model/gateway/
+evaluation/held-out quality binding'ini, initial shadow directive'ini,
+shadow-disabled direct-canary policy'sini, shadow pass → bounded canary
+geçişini, conservative promotion'u, confident canary rollback'i,
 aggregate-only privacy'yi, duplicate/replay/forged-identity/malformed JSON,
 state semantic, tampered artifact, policy-completeness ve no-replace gates'i
-denetler. Fixture worker ve metrics gerçek model ölçümü değildir.
+denetler.
+
+`verify_lmm_release_registry.py`; gerçek governor fixture'larıyla `GENESIS`
+registration, current-head CAS/replay rejection, competing child rejection,
+shadow → canary → promote serialization, state-consumed observation batch ile
+decision dependency binding, reconstructed directive binding, stale lock,
+ledger hash-chain corruption, privacy/path leak ve wrong-policy rejection'ını
+denetler. Fixture worker, metrics ve filesystem lock gerçek model ölçümü,
+telemetry authenticity, signing veya distributed traffic enforcement değildir.
 
 Bu modül şunları **garanti etmez**:
 
@@ -336,6 +420,9 @@ Bu modül şunları **garanti etmez**:
   Gemini ölçeğinde compute/data;
 - external telemetry'nin dürüstlüğü, online quality/safety label'ının gerçekliği
   veya provider'ın endpoint arkasında revision değiştirmemesi;
+- signed remote registry, distributed consensus/lease, immutable remote audit
+  retention veya ledger writer'ın cryptographic authorization'ı; local ledger
+  yalnız tek-host CAS/hash-chain contract'ıdır;
 - traffic enforcement, network/OS sandbox, tenant isolation, key management,
   PII deletion/retention veya regulator compliance;
 - shadow request'inin candidate tarafından safe işlendiği, response'un factual

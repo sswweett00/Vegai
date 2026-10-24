@@ -47,7 +47,8 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
   evidence publication sağlayan read-only Verified Tool Orchestration plane'i;
 - frozen portfolio/model/gateway/held-out identity'lerine bağlı, raw
   prompt/response saklamayan aggregate telemetry ile shadow → bounded canary →
-  promote/rollback kararını veren immutable LMM Release Governor control plane'i;
+  promote/rollback kararını veren immutable LMM Release Governor ve verified
+  artifact'ler için single-host CAS/hash-chain authoritative-head control plane'i;
 - yerel Fortran özellik/entegrasyon testleri, bağımsız Python referans modeli
   ve GitHub Actions ile denetimli derleme.
 
@@ -86,6 +87,14 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 > time-uniform conservative bound ve aggregate-only telemetry kullanır. Model
 > eğitmez, canlı trafiği route/enforce etmez, raw prompt/response saklamaz,
 > provider weight attestation veya genel üstünlük kanıtı değildir. Sözleşme:
+> [LMM_RELEASE_GOVERNANCE.md](docs/LMM_RELEASE_GOVERNANCE.md).
+>
+> **Authoritative release head notu:** `lmm_release_registry.py`, verified
+> governor state/decision artifact'lerini local strict-LF hash-chain ledger'a
+> CAS ile serialize eder; stale/competing child ve forged directive'i
+> fail-closed reddeder. Bu, yalnız tek-host filesystem lock/atomic publish
+> katmanıdır: signed remote registry, distributed consensus, live traffic
+> enforcement ve telemetry authenticity değildir. Sözleşme:
 > [LMM_RELEASE_GOVERNANCE.md](docs/LMM_RELEASE_GOVERNANCE.md).
 >
 > **Corpus pretraining notu:** `vegai_pretrain`, Transformer/LLM eğitimi değil;
@@ -141,8 +150,10 @@ make optimizer-check
 # Verified read-only LMM tool plan/control-plane contract
 make tool-check
 
-# Immutable shadow/canary LMM release, rollback and privacy contract
+# Immutable shadow/canary LMM release, rollback, privacy and local CAS contract
 make release-check
+# Registry-only authoritative-head/CAS/hash-chain contract
+make release-registry-check
 
 # Sınır denetimli hata ayıklama derlemesi
 make debug
@@ -325,7 +336,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Dialogue quality release gate | `tools/dialogue_evaluation.py` | versioned held-out JSONL ile stateless exact prompt grounding/abstention olcumu, immutable input digest binding, privacy-conscious report ve threshold gate |
 | Optional LMM integration | `tools/lmm_contract.py`, `tools/lmm_model_manifest.py`, `tools/lmm_gateway.py`, `tools/lmm_quality_evaluation.py`, `tools/lmm_portfolio.py`, `tools/lmm_session.py`, `tools/lmm_knowledge.py`, `tools/lmm_assets.py` | gerçek external model backend'i için Unicode/subword tokenizer binding, model-artifact hash, long-context packer, source evidence, content-addressed media, held-out citation/abstention release gate, measured domain-expert routing/independent-panel planı ve fail-closed provenance; model weights/native neural training degil |
 | Verified tool orchestration | `tools/lmm_tool_orchestrator.py` | model/operator action planını exact request+registry binding, typed multi-step output reference, no-shell private worker execution, separate verifier digest ve gateway-ready evidence ile yürütür; final answer, OS sandbox veya universal reasoning claim'i değil |
-| LMM release governance | `tools/lmm_release_governor.py` | frozen portfolio/task/model/gateway/evaluation/held-out-quality provenance'ı, zorunlu quality/reliability/safety/cost/latency policy'si, aggregate-only shadow → bounded canary → promote/rollback state chain'i ve external traffic directive üretir; live routing, telemetry trust veya model superiority claim'i değil |
+| LMM release governance | `tools/lmm_release_governor.py`, `tools/lmm_release_registry.py` | frozen portfolio/task/model/gateway/evaluation/held-out-quality provenance'ı, zorunlu quality/reliability/safety/cost/latency policy'si, aggregate-only shadow → bounded canary → promote/rollback state chain'i, external traffic directive'i ve single-host authoritative CAS/hash-chain head üretir; live routing, signed distributed registry, telemetry trust veya model superiority claim'i değil |
 | Continual transaction + health audit | `tools/continuous_shard_manifest.py`, `tools/continuous_pretrain.py`, `tools/continuous_pretrain_status.py` | immutable SHA-256 ledger, strict ingest gate, candidate generation, atomic state journal, read-only checkpoint/prefix/payload audit |
 | Production data/run control | `tools/production_dataset.py`, `tools/production_pretrain.py` | disk-backed exact record/token dedupe, deterministic held-out split, content-addressed shard package, exact leakage + vocabulary-capacity gate, immutable binary/data/policy provenance, real exactly-once run wrapper |
 | Kaynak preflight | `tools/training_resource_plan.py` | bounded RAM/checkpoint storage estimate, CPU/NUMA/OpenMP recommendation, static accelerator truth contract |

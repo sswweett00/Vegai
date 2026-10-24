@@ -21,8 +21,9 @@ yerine geçmez.
 | `make check` | bağımsız reference/property/demo + stdlib control-plane contract'leri | tüm çağrılar `PASS` |
 | `make data-check` | optional PyArrow kurulumu; streaming JSONL/JSON/TXT/Parquet/Arrow round-trip, corruption, production adapter ve curriculum compiler'ın optional Parquet/Arrow replay'i | `training data I/O verification: PASS` + `capability curriculum verification: PASS (... Parquet/Arrow=checked)` |
 | `make capability-check` | stdlib-only policy-driven curriculum build/replay, strict text-only projection, held-out/source coverage, split/annotation conflict, no-output failure, controller-ledger ve tamper rejection | `capability curriculum verification: PASS` |
-| `make lmm-check` | optional Rust Unicode/BPE tokenizer; long context, session ledger, knowledge evidence, image/audio/video asset registry, real worker protocol, held-out citation/abstention quality release gate, measured domain-expert routing/panel, typed verified read-only tool plan, immutable shadow/canary release governor ve capability gate | `lmm runtime verification: PASS` + `lmm portfolio verification: PASS` + `LMM tool orchestrator verification: PASS` + `LMM release governor verification: PASS` |
-| `make release-check` | frozen portfolio/task/model/gateway/evaluation/held-out-quality identity, required five live metric policy, aggregate-only shadow/canary transition, conservative promotion/rollback, privacy/replay/tamper gates | `LMM release governor verification: PASS (...)` |
+| `make lmm-check` | optional Rust Unicode/BPE tokenizer; long context, session ledger, knowledge evidence, image/audio/video asset registry, real worker protocol, held-out citation/abstention quality release gate, measured domain-expert routing/panel, typed verified read-only tool plan, immutable shadow/canary governor + single-host authoritative registry ve capability gate | `lmm runtime verification: PASS` + `lmm portfolio verification: PASS` + `LMM tool orchestrator verification: PASS` + `LMM release governor verification: PASS` + `LMM release registry verification: PASS` |
+| `make release-check` | frozen portfolio/task/model/gateway/evaluation/held-out-quality identity, required five live metric policy, aggregate-only shadow/canary transition, conservative promotion/rollback, privacy/replay/tamper + local authoritative expected-head CAS/hash-chain gates | `LMM release governor verification: PASS (...)` + `LMM release registry verification: PASS (...)` |
+| `make release-registry-check` | stdlib-only canonical strict-LF local ledger: `GENESIS`/state-SHA CAS, direct transition serialization, decision batch/directive binding, lock, hash-chain, policy identity ve privacy gates | `LMM release registry verification: PASS (...)` |
 | `make optimizer-check` | algorithm/optimizer identity binding, repeated held-out bounded observations, Hoeffding confidence, robust Pareto, no-replace and negative gate | `evidential optimizer verification: PASS` |
 | `make tool-check` | request/registry-bound typed read-only tool plan, predecessor output reference, no-shell executor, distinct verifier, evidence provenance/privacy and negative gates | `LMM tool orchestrator verification: PASS` |
 | `python3 tools/lmm_tool_orchestrator.py execute --registry ... --request ... --plan ... --evidence-output ... --report-output ...` | gerçek configured tool'ları pass eden typed result'tan gateway-ready evidence'e dönüştürür | başarıda exit `0`; shell/tool/verifier/provenance/schema failure için exit `2`; raw request/argument/result report'a girmez |
@@ -30,6 +31,7 @@ yerine geçmez.
 | `python3 tools/lmm_quality_evaluation.py --cases ... --gateway-command-json ... --report ... --fail-on-gate` | gerçek configured model gateway ile held-out citation/abstention provenance ve release threshold | report yayınlanır; başarısız quality gate exit `3` |
 | `python3 tools/lmm_portfolio.py route --portfolio ... --task ... --request ... --evidence ... --output ...` | immutable model/gateway/quality/evaluation-card binding ile target-domain candidate seçimi veya panel planı | eligible candidate yoksa exit `2`; raw request/response rapora girmez |
 | `python3 tools/lmm_release_governor.py init/advance/inspect --policy ... --state... --decision-output ...` | frozen router candidate/baseline identity üzerinde aggregate-only shadow/canary state ve external traffic directive | malformed/tampered/replayed telemetry/state veya inconclusive kanıt exit `2`; raw prompt/response/telemetry ID decision'a girmez |
+| `python3 tools/lmm_release_registry.py record/inspect --policy ... --ledger ...` | verified governor state/decision'larından privacy-safe single-host authoritative release head; `record` için `GENESIS` veya current state SHA expected-head token'ı | stale/competing/terminal child, mismatched batch/directive/policy/governor veya corrupt ledger exit `2`; signed remote registry/traffic enforcement değildir |
 | `make dialogue-check` | real compiled chat ile held-out grounded/abstention metrikleri, report privacy/provenance, strict schema ve negative release gate | `dialogue evaluation verification: PASS` |
 | `make test` | native cebir, error path, memory, reasoning | `Checks: ..., failures: 0` |
 | `make debug` | bounds/runtime/FPE denetimli native test | başarısızlık yok |
@@ -42,7 +44,7 @@ yerine geçmez.
 | `python3 tools/verify_openvino_provider.py` | optional Intel OpenVINO provider preflight/truth contract | `OpenVINO provider verification: PASS` |
 | `python3 tools/verify_openvino_context_worker.py` | uint32-lane worker protocol, neutral tie/complement padding, resident graph-cache reuse; runtime yoksa fail-closed | `OpenVINO context worker verification: PASS` |
 | `python3 tools/verify_openvino_context_provider.py --pretrain-bin build/vegai_pretrain` | native-CPU bypass timing/equality guard + strict resident OpenVINO graph checkpoint equality (runtime yoksa SKIP) | `OpenVINO context provider verification: PASS` |
-| `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties`, `vegai_tokenless_signal_field`, `vegai_evidential_optimizer`, `vegai_lmm_tool_orchestrator`, `vegai_lmm_release_governor`, donanım/OpenVINO contract testleri, `vegai_example_pretraining`, `vegai_dialogue_retrieval`, `vegai_dialogue_evaluation`, `vegai_lmm_runtime`, `vegai_lmm_portfolio`, `vegai_continuous_pretraining`, `vegai_production_pretraining`, `vegai_capability_curriculum`, `vegai_example_production_dataset_preflight` PASS |
+| `ctest --test-dir build` | CMake entegrasyonu | `vegai_fortran_properties`, `vegai_tokenless_signal_field`, `vegai_evidential_optimizer`, `vegai_lmm_tool_orchestrator`, `vegai_lmm_release_governor`, `vegai_lmm_release_registry`, donanım/OpenVINO contract testleri, `vegai_example_pretraining`, `vegai_dialogue_retrieval`, `vegai_dialogue_evaluation`, `vegai_lmm_runtime`, `vegai_lmm_portfolio`, `vegai_continuous_pretraining`, `vegai_production_pretraining`, `vegai_capability_curriculum`, `vegai_example_production_dataset_preflight` PASS |
 
 CI bunların checked CMake/OpenMP varyantını ve ayrıca optimize Make hedefini
 çalıştırır. Rich-format CI adımı `requirements-dataio.txt` ile optional PyArrow
@@ -174,7 +176,11 @@ unmeasured gateway command ve runtime-drift rejection'ını test eder.
 `vegai_lmm_release_governor`, ayrı synthetic fixture ile frozen portfolio
 binding, shadow→canary transition, conservative promotion/rollback,
 aggregate-only privacy, replay/forged identity/state semantic/tamper ve required
-quality/reliability/safety/cost/latency policy gates'ini doğrular. Bu testler
+quality/reliability/safety/cost/latency policy gates'ini doğrular.
+`vegai_lmm_release_registry`, aynı governor fixture'ları üzerinde `GENESIS` ve
+state-head CAS, competing child rejection, direct phase serialization,
+consumed-batch/directive binding, strict-LF hash-chain/tamper, stale lock,
+policy mismatch ve raw identifier/path privacy gates'ini doğrular. Bu testler
 factuality, fluency veya multimodal reasoning benchmark'ı değildir;
 [LMM_RUNTIME.md](LMM_RUNTIME.md), [LMM_PORTFOLIO_ROUTING.md](LMM_PORTFOLIO_ROUTING.md)
 ve [LMM_RELEASE_GOVERNANCE.md](LMM_RELEASE_GOVERNANCE.md) contract'lerinin

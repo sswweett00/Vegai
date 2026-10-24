@@ -123,10 +123,12 @@ harici servislerdir:
 - tenant isolation, rate limit, quota ve audit log retention policy.
 
 Bu repo artık `lmm_release_governor.py` ile frozen portfolio/task/model/gateway/
-held-out identity'lerini aggregate-only shadow/canary kararına bağlayan bir
-control-plane contract'i sağlar; ancak persistent signer/registry, live traffic
-enforcement, telemetry integrity ve distributed single-writer transaction yine
-external production servisidir.
+held-out identity'lerini aggregate-only shadow/canary kararına, ayrıca
+`lmm_release_registry.py` ile verified artifact'leri single-host authoritative
+expected-head CAS/hash-chain ledger'ına bağlayan bir control-plane contract'i
+sağlar. Persistent signer/remote registry, live traffic enforcement, telemetry
+integrity ve distributed single-writer transaction yine external production
+servisidir.
 
 ### 3.3 Algorithm/optimizer evidence governor
 
@@ -141,7 +143,7 @@ operator-declared target domain için falsifiable selection gate'tir. Matematik,
 provenance, no-replace publication ve bağımsız verifier:
 [EVIDENTIAL_OPTIMIZER.md](EVIDENTIAL_OPTIMIZER.md).
 
-### 3.4 Shadow/canary release governor
+### 3.4 Shadow/canary release governor ve local authoritative head
 
 `tools/lmm_release_governor.py`, router'ın offline eligible candidate kararını
 user-visible deployment'a otomatik sıçrama yaptırmadan önce denetler. Immutable
@@ -156,12 +158,16 @@ fail-closed `pending` üretir. Raw prompt/response veya telemetry identifier
 state/decision artifact'ine yazılmaz.
 
 Decision yalnız `shadow-mirror-only`, `bounded-canary`, `candidate-promoted` ya
-da `baseline-only-rollback` external traffic directive'idir. Model server'a
-route yapmaz, provider weights'i attest etmez, telemetry'nin dürüstlüğünü veya
-quality/safety label'larını doğrulamaz. Signed append-only registry, atomic
-controller CAS, tenant/network isolation, alerting ve emergency kill switch
-production owner tarafından uygulanmalıdır. Tam schema, istatistik, privacy ve
-non-claim sınırları: [LMM_RELEASE_GOVERNANCE.md](LMM_RELEASE_GOVERNANCE.md).
+da `baseline-only-rollback` external traffic directive'idir.
+`tools/lmm_release_registry.py`, decision/state pair'ini policy/governor/source
+identity, direct predecessor, consumed observation-batch ve directive binding
+ile local strict-LF ledger'a kaydedebilir; stale veya competing child local CAS
+ile reject edilir. Model server'a route yapmaz, provider weights'i attest etmez,
+telemetry'nin dürüstlüğünü veya quality/safety label'larını doğrulamaz. Signed
+append-only remote registry, distributed controller CAS, tenant/network
+isolation, alerting ve emergency kill switch production owner tarafından
+uygulanmalıdır. Tam schema, istatistik, privacy ve non-claim sınırları:
+[LMM_RELEASE_GOVERNANCE.md](LMM_RELEASE_GOVERNANCE.md).
 
 ## 4. Eğitim ve data factory mimarisi
 
@@ -285,9 +291,10 @@ kalan riskleri yayınlamalıdır.
    expert'i veya bağımsız paneli seçin.
 3. Frozen baseline/candidate route kararını `lmm_release_governor.py` policy'sine
    bağlayın; consented shadow → bounded canary → promote/rollback state chain'ini
-   signed controller CAS'i ile yürütün. Her policy quality/reliability/safety/
-   cost/latency live metrics'ini ve aggregate privacy protocol'ünü preregister
-   etmelidir.
+   her transition'da `lmm_release_registry.py record` ile local expected-head
+   CAS'e kaydedin. HA/multi-host ortamda buna ek olarak signed remote controller
+   CAS'i kullanın. Her policy quality/reliability/safety/cost/latency live
+   metrics'ini ve aggregate privacy protocol'ünü preregister etmelidir.
 4. Gerçek lisanslı model package'i `lmm_model_manifest.py create/verify` ile
    bağlayın; tokenizer/chat-template conformance testini ekleyin.
 5. Retrieval relevance + factual-entailment benchmark'ı, calibration ve human

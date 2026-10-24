@@ -416,8 +416,12 @@ geçen en iyi expert'i seçer veya farklı provider/family için bağımsız pan
 promotion saymaz: frozen baseline/candidate identity'lerini required
 quality/reliability/safety/cost/latency live policy'sine bağlar, raw text
 saklamayan aggregate shadow → bounded canary → promote/rollback state/decision
-artifacts üretir. Traffic split, signed state registry, provider runtime
-attestation ve telemetry trust external deployment controller sorumluluğundadır.
+artifacts üretir. `lmm_release_registry.py`, accepted governor artifact'lerini
+same-host strict-LF hash-chain ledger'da `GENESIS`/current-state expected-head
+CAS ile serialize eder; stale/competing child ile forged decision binding'ini
+fail-closed reddeder. Traffic split, signed/distributed state registry, provider
+runtime attestation ve telemetry trust external deployment controller
+sorumluluğundadır.
 
 Bu plane serbest generation'i gerçek modelin output'u olarak mümkün kilar;
 factuality, safety, neural training, model quality veya GPU/NPU speed iddiasini

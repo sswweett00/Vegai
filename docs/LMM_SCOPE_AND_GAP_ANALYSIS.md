@@ -22,6 +22,7 @@ multimodal neural runtime yapmaz.
 | Grounded diyalog retrieval | checkpoint semantic HV + operator TSV prompt/response index, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; cevap TSV'den gelir |
 | Grounded retrieval quality gate | versioned held-out JSONL, stateless real-binary exact prompt/abstention metrikleri, immutable input digest binding, privacy-conscious report ve explicit release threshold'lari |
 | Optional LMM integration plane | Unicode/subword model-tokenizer manifest, hash-chained long dialogue, provenance-bound FTS evidence, content-addressed image/audio/video asset registry, model-emitted citation/abstention release gate, measured domain-expert router/independent-panel planı, typed independently verified read-only tool planı ve gerçek OpenVINO/API/worker backend gateway'i; model ağırlığı depoda değildir |
+| LMM release control | Frozen portfolio/task/model/gateway/quality identity'leriyle aggregate-only shadow → canary → promote/rollback governor; verified artifact'ler için strict-LF canonical local hash-chain, single-host expected-state CAS ve privacy-safe head (`lmm_release_governor.py`, `lmm_release_registry.py`) |
 | Algorithm/optimizer evidence governor | Immutable algorithm/optimizer/training/artifact identity'lerini repeated held-out bounded observation ile Bonferroni-Hoeffding/Pareto gate'ten geçirir; actual optimizer veya neural training runtime değildir (`evidential_optimizer.py`) |
 
 Bu sistem, bounded semantic prototype/retrieval ve symbolic factor reasoning için
@@ -89,6 +90,7 @@ yeni data plane, model runtime ve test yüzeyi gerektirir.
 | Distributed training | Yok | data/model/pipeline parallelism, collectives, gradient synchronization, elastic fault recovery ve sharded optimizer/checkpoint gerekir |
 | Neural mixed precision | Native Vegai'de yok | BF16/FP16/FP8 numerical policy, master weights, loss scaling ve hardware kernels gerekir |
 | LMM evaluation gate | Held-out gerçek gateway citation/abstention contract + release threshold var; broad model-quality gate yok | held-out perplexity/task suites, contamination policy, modality quality, safety/red-team ve calibration gerekir |
+| Release authority / traffic enforcement | Aggregate-only governor + local canonical hash-chain, single-host expected-state CAS ve privacy-safe head var | signed remote append-only registry, distributed lease/consensus, provider attestation, controller-to-route-config transaction ve live traffic enforcement gerekir |
 | Tool-use/reasoning control plane | Typed read-only plan, request+registry binding, no-shell executor, prior-result reference, declared separate verifier ve gateway evidence var | OS sandbox/network policy, mutation authorization, real independent audit, tool availability/retry, semantic plan/result correctness ve held-out tool-use score gerekir |
 | GPU/NPU neural training backend | Optional OpenVINO GenAI text inference adapter var; neural training/joint dispatch yok | adapter inventory/OpenVINO context dispatch, neural training kernel veya CPU+GPU+NPU joint compute kanıtı değildir |
 | Dataset governance at LMM scale | Kısmi; document/asset source-license contract eklendi | semantic near-duplicate, licensing/PII/consent, benchmark contamination ve multimodal rights pipeline ayrıca gerekir |
@@ -130,7 +132,10 @@ edilebilir işlemsel eksikleri kapatır:
     baseline comparison, robust Pareto ve no-replace decision gate'i;
 16. actual LMM/operator tool planı için request+registry SHA binding, typed
     predecessor result reference, no-shell read-only executor, distinct verifier,
-    privacy-conscious report ve gateway-ready evidence publication.
+    privacy-conscious report ve gateway-ready evidence publication;
+17. immutable governor state/decision artifact'leri için strict-LF canonical
+    JSONL ledger, local lock + expected-state CAS, direct transition/batch/
+    directive binding, privacy-safe inspect ve negative-gate verification.
 
 Bunlar veri kaybı, silent duplicate, held-out contamination, capacity overflow,
 restart operasyon riski, dar grounded-retrieval kalitesinin ölçülmeden publish
