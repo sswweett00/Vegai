@@ -466,59 +466,6 @@ contains
       cache_index = int(iand(mixed, PRETRAIN_LOOKUP_CACHE_MASK), int32) + 1_int32
    end function pretrain_lookup_cache_index
 
-   ! Fast-path an active-vocabulary lookup without weakening collision safety.
-   ! Every direct-map hit compares the full padded token; every miss calls the
-   ! canonical vocabulary hash table with the already-computed fingerprint.
-   subroutine pretrain_lookup_active_cached(model, token, cache_tokens, cache_fingerprints, cache_slots, &
-                                            cache_used, slot, found, cache_hit, status)
-      type(hdc_pretrain_model_t), intent(in) :: model
-      character(len=*), intent(in) :: token
-      character(len=TOKEN_LEN), intent(inout) :: cache_tokens(:)
-      integer(int64), intent(inout) :: cache_fingerprints(:)
-      integer(int32), intent(inout) :: cache_slots(:)
-      logical, intent(inout) :: cache_used(:)
-      integer(int32), intent(out) :: slot
-      logical, intent(out) :: found, cache_hit
-      integer(int32), intent(out) :: status
-      integer(int64) :: fingerprint
-      integer(int32) :: cache_index
-
-      slot = 0_int32
-      found = .false.
-      cache_hit = .false.
-      ! This private helper is called only with train_one_epoch's fixed-size
-      ! PRETRAIN_LOOKUP_CACHE_SLOTS scratch arrays. Avoid per-token descriptor
-      ! size checks on the hot path; allocation is validated once before the
-      ! corpus stream begins.
-      status = PT_OK
-      fingerprint = vocab_token_fingerprint(token)
-      cache_index = pretrain_lookup_cache_index(fingerprint)
-      if (cache_used(cache_index) .and. cache_fingerprints(cache_index) == fingerprint .and. &
-          cache_tokens(cache_index) == token) then
-         cache_hit = .true.
-         slot = cache_slots(cache_index)
-         found = slot > 0_int32
-         if (found) then
-            status = VOCAB_OK
-         else
-            status = VOCAB_ERR_NOT_FOUND
-         end if
-         return
-      end if
-
-      call vocab_lookup_fingerprint(model%vocabulary, token, fingerprint, slot, found, status, .true.)
-      if (status == VOCAB_OK .or. status == VOCAB_ERR_NOT_FOUND) then
-         cache_used(cache_index) = .true.
-         cache_fingerprints(cache_index) = fingerprint
-         cache_tokens(cache_index) = token
-         if (found) then
-            cache_slots(cache_index) = slot
-         else
-            cache_slots(cache_index) = 0_int32
-         end if
-      end if
-   end subroutine pretrain_lookup_active_cached
-
    subroutine add_metrics(destination, source, status)
       type(pretrain_metrics_t), intent(inout) :: destination
       type(pretrain_metrics_t), intent(in) :: source
@@ -2149,8 +2096,8 @@ contains
       integer(int32) :: token_slots(MAX_TOKENS_PER_LINE)
       integer :: unit, io_status, allocation_status
       integer(int32) :: token_index, n_tokens, slot, vocab_status, line_active_tokens, line_topic_active_tokens
-      integer(int32) :: debiased_distinct_tokens, update_count
-      integer(int64) :: non_ascii_count
+      integer(int32) :: debiased_distinct_tokens, update_count, lookup_cache_index
+      integer(int64) :: non_ascii_count, lookup_fingerprint
       integer(int64), allocatable :: prepared_context_bits(:, :), experiences_before(:)
       integer(int64), allocatable :: lookup_cache_fingerprints(:)
       integer(int32), allocatable :: neighbor_counts(:), prepared_status(:), line_update_counts(:), lookup_cache_slots(:)
@@ -2227,9 +2174,37 @@ contains
             if (status /= PT_OK) exit
             lookup_cache_hit = .false.
             if (config%vocabulary_lookup_cache) then
-               call pretrain_lookup_active_cached(model, tokens(token_index), lookup_cache_tokens, &
-                                                  lookup_cache_fingerprints, lookup_cache_slots, lookup_cache_used, &
-                                                  slot, found, lookup_cache_hit, vocab_status)
+               ! Keep the direct-map test in this innermost loop rather than
+               ! passing cache descriptors through a per-token helper. The key
+               ! is still fingerprint + full fixed-width token text; every
+               ! collision remains a canonical collision-safe vocabulary miss.
+               lookup_fingerprint = vocab_token_fingerprint(tokens(token_index))
+               lookup_cache_index = pretrain_lookup_cache_index(lookup_fingerprint)
+               if (lookup_cache_used(lookup_cache_index) .and. &
+                   lookup_cache_fingerprints(lookup_cache_index) == lookup_fingerprint .and. &
+                   lookup_cache_tokens(lookup_cache_index) == tokens(token_index)) then
+                  lookup_cache_hit = .true.
+                  slot = lookup_cache_slots(lookup_cache_index)
+                  found = slot > 0_int32
+                  if (found) then
+                     vocab_status = VOCAB_OK
+                  else
+                     vocab_status = VOCAB_ERR_NOT_FOUND
+                  end if
+               else
+                  call vocab_lookup_fingerprint(model%vocabulary, tokens(token_index), lookup_fingerprint, &
+                                                slot, found, vocab_status, .true.)
+                  if (vocab_status == VOCAB_OK .or. vocab_status == VOCAB_ERR_NOT_FOUND) then
+                     lookup_cache_used(lookup_cache_index) = .true.
+                     lookup_cache_fingerprints(lookup_cache_index) = lookup_fingerprint
+                     lookup_cache_tokens(lookup_cache_index) = tokens(token_index)
+                     if (found) then
+                        lookup_cache_slots(lookup_cache_index) = slot
+                     else
+                        lookup_cache_slots(lookup_cache_index) = 0_int32
+                     end if
+                  end if
+               end if
                if (present(execution)) then
                   if (lookup_cache_hit) then
                      call add_nonnegative(execution%vocabulary_lookup_cache_hits, 1_int64, status)
