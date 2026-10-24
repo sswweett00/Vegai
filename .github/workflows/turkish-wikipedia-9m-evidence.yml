@@ -17,6 +17,9 @@ permissions:
 # This is an explicitly dispatched, evidence-producing corpus run.  Do not
 # cancel it just because a later documentation or source follow-up arrives:
 # either the immutable report succeeds or the failure artifact records why.
+# The controller rejects a corpus record with fewer than two active tokens, so
+# the 9M count is also a real prototype-update count rather than lexical-only
+# reader telemetry.
 concurrency:
   group: turkish-wikipedia-9m-${{ github.ref }}
   cancel-in-progress: false
