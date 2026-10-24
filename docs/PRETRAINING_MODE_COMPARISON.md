@@ -76,18 +76,19 @@ ayrı zorunlu invariant'lardır.
 
 #### İlk doğrulanmış resonant controlled sonuç
 
-[GitHub Actions run 40127066062](https://github.com/sswweett00/Vegai/actions/runs/40127066062)
-(`995cb7e`, Intel Xeon Platinum 8573C hosted Linux, `OMP_NUM_THREADS=1`) gerçek
+[GitHub Actions run 40127316053](https://github.com/sswweett00/Vegai/actions/runs/40127316053)
+(`3276a3b`, Intel Xeon Platinum 8370C hosted Linux, `OMP_NUM_THREADS=1`) gerçek
 compiled Fortran binary, native property tests ve üçer child-process repetition
 ile bu gate'i geçti. Aynı 64-query base fixture'da `hybrid` mean self-excluded
 Top-1 similarity **`0.138813`**, `resonant` **`0.285841`** oldu; fark
-**`+0.147028`** olup `+0.02` acceptance sınırının üzerindedir. Bu önce/sonra
-karşılaştırmasında yalnız context mode farklıdır; compilation, fixture
-construction, inspect ve Python harness timing'e dahil değildir. `resonant`
-train-time/throughput değeri aynı workflow summary'sinde raporlanır ve sonraki
-run'larda quality gate ile birlikte izlenir. Sonuç repository-authored
-in-corpus cluster diagnostic'idir; held-out domain accuracy, doğal dil anlama
-veya genel zekâ iddiası değildir.
+**`+0.147028`** olup `+0.02` acceptance sınırının üzerindedir. Aynı child-only
+scope'ta hybrid medianı `0.149586 s`, resonant medianı `0.149916 s` ve resonant
+throughput'u `13,660.998 token/s` idi (`hybrid/resonant = 0.9978×`; bu hostta
+%0.22 daha yavaş). Bu önce/sonra karşılaştırmasında yalnız context mode
+farklıdır; compilation, fixture construction, inspect ve Python harness
+zamanlamaya dahil değildir. Sonuç repository-authored in-corpus cluster
+diagnostic'idir; held-out domain accuracy, doğal dil anlama veya genel zekâ
+iddiası değildir.
 
 ### C. Fused/reference semantic-preservation hız karşılaştırması
 
