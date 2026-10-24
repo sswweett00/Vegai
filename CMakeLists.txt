@@ -139,6 +139,17 @@ if(VEGAI_BUILD_TESTS)
             NAME vegai_hardware_compatibility
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_hardware_compatibility.py
         )
+        # A platform-neutral smoke check uses CMake target-file paths (including
+        # the .exe suffix on Windows), runs the actual engine, then creates and
+        # inspects a same-host checkpoint. It deliberately does not imply that
+        # stream-unformatted checkpoints are portable across compiler/ABI pairs.
+        add_test(
+            NAME vegai_portable_runtime_smoke
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_portable_runtime.py
+                    --engine-bin $<TARGET_FILE:hds_engine>
+                    --pretrain-bin $<TARGET_FILE:vegai_pretrain>
+        )
+        set_tests_properties(vegai_portable_runtime_smoke PROPERTIES TIMEOUT 120)
         add_test(
             NAME vegai_training_resource_plan
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_training_resource_plan.py

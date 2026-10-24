@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 from typing import Any
 
@@ -104,18 +105,24 @@ def existing_parent(path: Path) -> Path:
 
 def storage_probe(path: Path) -> dict[str, Any]:
     location = existing_parent(path)
+    # shutil.disk_usage is implemented on both POSIX and Windows.  The former
+    # statvfs-only implementation left Windows with unknown free space, which
+    # weakened --require-ready exactly where CMake portability is intended.
     try:
-        stat = os.statvfs(location)
-        free_bytes = stat.f_bavail * stat.f_frsize
-        total_bytes = stat.f_blocks * stat.f_frsize
-    except (AttributeError, OSError):
+        usage = shutil.disk_usage(location)
+        free_bytes = usage.free
+        total_bytes = usage.total
+        probe_method = "shutil.disk_usage"
+    except OSError:
         free_bytes = None
         total_bytes = None
+        probe_method = "unavailable"
     return {
         "path": str(path),
         "probe_directory": str(location),
         "free_bytes": free_bytes,
         "total_bytes": total_bytes,
+        "probe_method": probe_method,
         "filesystem_type": "not-inferred-portably",
         "ssd_note": (
             "Vegai uses ordinary streaming file I/O and works on SSD, HDD, network, or removable filesystems. "

@@ -58,6 +58,16 @@ def main() -> int:
                 fail("hardware profile omitted operating system")
             if not isinstance(host.get("architecture"), str) or not host["architecture"]:
                 fail("hardware profile omitted architecture")
+            if not isinstance(host.get("architecture_family"), str) or not host["architecture_family"]:
+                fail("hardware profile omitted normalized architecture family")
+            if not isinstance(host.get("pointer_bits"), int) or host["pointer_bits"] <= 0:
+                fail("hardware profile omitted pointer-width metadata")
+            if host.get("byte_order") not in {"little", "big"}:
+                fail("hardware profile omitted byte-order metadata")
+            if portability.get("portable_cpu_build_candidate") is not True:
+                fail("hardware profile did not expose a portable CPU build candidate for current CI architecture")
+            if not isinstance(portability.get("architecture_contract"), str) or not portability["architecture_contract"]:
+                fail("hardware profile omitted architecture portability contract")
             if not isinstance(cpu.get("model"), str) or not cpu["model"]:
                 fail("hardware profile omitted CPU model fallback")
             if backend.get("kind") != "portable-cpu":

@@ -50,7 +50,7 @@ FIXTURE_9MIB_REPORT ?= pretraining-runs/synthetic_hdc_9mib.json
 # remain ignored. Prefer the dedicated GitHub workflow for CI-hosted evidence.
 CONTINUOUS_900_RUN_DIR ?= pretraining-runs/synthetic_900mb_then_90mb
 
-.PHONY: all engine pretrain field chat test run run-pretrain run-field run-chat check field-check optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check quality-check continuous-quality-check attested-pretrain-check lookup-cache-compare fixture-9mib verify-fixture-9mib pretrain-9mib pretrain-900mb-continuous clean clean-all debug portable native portable-test native-test
+.PHONY: all engine pretrain field chat test portable-runtime-check run run-pretrain run-field run-chat check field-check optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check quality-check continuous-quality-check attested-pretrain-check lookup-cache-compare fixture-9mib verify-fixture-9mib pretrain-9mib pretrain-900mb-continuous clean clean-all debug portable native portable-test native-test
 
 # Default target: portable optimized GNU binaries without host-only ISA flags.
 all: engine pretrain field chat
@@ -83,6 +83,12 @@ $(TEST_BINARY): $(SOURCES) $(TEST_SOURCES) | $(BUILD_DIR)
 
 test: $(TEST_BINARY)
 	OMP_NUM_THREADS=$${OMP_NUM_THREADS:-2} $(TEST_BINARY)
+
+# Same-host binary launch/train/inspect smoke contract. CMake is the preferred
+# cross-platform entry point; this GNU Make convenience target mirrors it on
+# POSIX hosts without claiming checkpoint interchange across ABI boundaries.
+portable-runtime-check: $(ENGINE) $(PRETRAIN)
+	python3 tools/verify_portable_runtime.py --engine-bin "$(ENGINE)" --pretrain-bin "$(PRETRAIN)"
 
 run: $(ENGINE)
 	OMP_NUM_THREADS=$${OMP_NUM_THREADS:-2} $(ENGINE)

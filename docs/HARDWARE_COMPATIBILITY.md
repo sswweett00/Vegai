@@ -14,7 +14,38 @@ ile ARM64 gibi başka mimarilerde aynı kaynak kodunun derlenebilmesini hedefler
 > cross-fold global evidence kullanır; current OpenVINO worker ABI'si bunu
 > taşımadığından CPU/OpenMP-only'dir.
 
-## 1. CPU profilleri
+## 1. Uyumluluk kapsamı ve doğrulama katmanları
+
+"Bütün işletim sistemleri ve bütün donanımlar" için peşinen mutlak çalışma veya
+aynı performans garantisi verilemez: compiler sürümü, libc/runtime, dosya sistemi,
+driver, CPU ISA/endianness ve accelerator ABI'si bunların her birini etkiler.
+Vegai bunu ölçülebilir katmanlara ayırır:
+
+| Katman | Sözleşme | Kanıt / davranış |
+|---|---|---|
+| Portable CPU kaynak yolu | Standard Fortran 2023 + host-ISA bayrağı olmayan CMake profili | Aynı hedef OS/CPU üzerinde yeniden derlenir; zorunlu GPU/NPU runtime'ı yoktur. |
+| Serial fallback | OpenMP bulunmadan da aynı CPU semantiği | `portable-serial` preset'i `VEGAI_ENABLE_OPENMP=OFF` ile derler. |
+| OpenMP CPU yolu | Runtime bulunursa immutable context aşamasını paralelleştirir | Sıralı commit korunur; throughput hosta özeldir. |
+| Optional accelerator | OpenVINO provider yalnız açıkça seçilirse kullanılır | Driver/device/bit-exact contract yoksa CPU fallback veya explicit failure; adapter listesi hızlandırma iddiası değildir. |
+| Checkpoint taşınması | ABI-local stream-unformatted dosya | OS/CPU/compiler geçişinde checkpoint'i taşınabilir saymaz; hedefte yeniden train veya aynı ABI gerekir. |
+
+`CMakePresets.json` üç açık profil sağlar: `portable`, `portable-serial` ve
+host-only `native`. `.github/workflows/portable-platforms.yml`, source/launcher
+sözleşmesini Linux x86-64 ve ARM64, macOS ARM64 ve Windows x86-64 üzerinde
+serial portable profile ile çalıştıracak şekilde tanımlanmıştır. Bu workflow her
+platformda gerçek `hds_engine` çalıştırır, küçük bir corpus ile `vegai_pretrain
+train` çağrısı yapar ve oluşan checkpoint'i **aynı binary** ile inspect eder.
+Bu, compiler/OS/launcher/path uyumluluğu kanıtıdır; platformlar arası checkpoint
+interchange veya bir CPU'nun diğerinden hızlı olduğu iddiası değildir.
+
+Bilinmeyen veya CI'da henüz ölçülmemiş BSD, RISC-V, POWER, s390x ya da özel
+embedded hedeflerde kaynak portable-build *adayı*dır; hedefte Fortran 2023
+compiler + CMake ile configure/build/smoke sonucu alınmadan desteklenmiş olarak
+sunulmaz. `hardware_compatibility.py` architecture family, pointer width ve byte
+order'ı raporlar; `unknown` bir envanter sonucu derleme başarısızlığı değildir,
+ama doğrulanmış-platform rozeti de değildir.
+
+## 2. CPU profilleri
 
 ### `portable` — varsayılan ve dağıtılabilir profil
 
@@ -27,7 +58,17 @@ binary üretimi varsayılan davranış olmaktan çıkar.
 make clean-all
 make all                         # ./build/vegai_pretrain, portable profile
 
-# CMake: Linux, macOS ve Windows için önerilen yol.
+# CMake preset: Linux, macOS ve Windows için önerilen yol.
+cmake --preset portable
+cmake --build --preset portable --parallel
+ctest --preset portable
+
+# OpenMP runtime istemeyen en geniş fallback profile:
+cmake --preset portable-serial
+cmake --build --preset portable-serial --parallel
+ctest --preset portable-serial
+
+# Preset kullanmayan eşdeğer CMake çağrısı:
 cmake -S . -B build-portable -DVEGAI_CPU_TARGET=portable \
   -DVEGAI_ENABLE_OPENMP=ON -DVEGAI_BUILD_TESTS=ON
 cmake --build build-portable --parallel
@@ -64,7 +105,7 @@ python3 tools/compare_pretraining_build_profiles.py \
   --repetitions 3 --omp-threads 1
 ```
 
-## 2. Intel Core Ultra 5 125H
+## 3. Intel Core Ultra 5 125H
 
 Ultra 5 125H için güvenli seçim portable profildir. Bu repo CPU backend'i
 kullandığı için işlemciye özel AVX-512, CUDA, oneAPI GPU, NPU veya Arc API
@@ -81,7 +122,7 @@ nedeniyle 125H'nin core/thread sayısıyla doğrusal hızlanma varsayılmamalıd
 `tools/compare_pretraining_threads.py` ile aynı hostta byte equality + gerçek
 child-process sürelerini ölçün.
 
-## 3. Entegre grafik, discrete GPU ve NPU
+## 4. Entegre grafik, discrete GPU ve NPU
 
 Portable varsayılan Vegai binary'si zorunlu bir GPU/NPU compute backend'i
 veya vendor runtime yüklemez: CUDA, OpenCL, SYCL/oneAPI, Metal ve Vulkan
@@ -132,7 +173,7 @@ context_worker.py` aynı lane ABI'sini actual immutable-context dispatch'te
 kullanır. Train CLI runtime output'ı GPU/NPU execution'ı yalnız worker mask'i
 bunu doğruladığında true raporlar.
 
-## 4. İşletim sistemi ve compiler yolu
+## 5. İşletim sistemi ve compiler yolu
 
 ### Linux
 
@@ -147,9 +188,13 @@ GCC formula'sının major-version suffix'i hosta göre değiştiği için uygun
 `gfortran-N` executable'ını seçin:
 
 ```bash
-FC=gfortran-N cmake -S . -B build-portable -DVEGAI_CPU_TARGET=portable
-cmake --build build-portable --parallel
-ctest --test-dir build-portable --output-on-failure
+FC=gfortran-N cmake --preset portable
+cmake --build --preset portable --parallel
+ctest --preset portable
+
+# OpenMP runtime olmadan aynı CPU semantiğini smoke-test etmek için:
+FC=gfortran-N cmake --preset portable-serial
+cmake --build --preset portable-serial --parallel
 ```
 
 Apple Silicon için ayrıca ARM64 toolchain üzerinde yeniden derleme gerekir;
@@ -157,23 +202,44 @@ x86-64 macOS binary'si universal binary değildir.
 
 ### Windows
 
-Windows'ta GNU Make yerine CMake önerilir. GNU Fortran (örneğin MSYS2/MinGW)
-veya Intel ifx ile bir Developer/PowerShell terminalinde uygun compiler'ı
-CMake'e verin:
+Windows'ta GNU Make yerine CMake önerilir. GNU Fortran (örneğin MSYS2 UCRT64
+`mingw-w64-ucrt-x86_64-gcc-fortran`) veya Intel ifx ile uygun compiler'ı CMake'e
+verin. En geniş runtime fallback için OpenMP'siz portable preset'i seçin:
 
 ```powershell
-cmake -S . -B build-portable -DVEGAI_CPU_TARGET=portable `
-  -DVEGAI_ENABLE_OPENMP=ON -DVEGAI_BUILD_TESTS=ON
-cmake --build build-portable --config Release --parallel
-ctest --test-dir build-portable -C Release --output-on-failure
-.\build-portable\vegai_pretrain.exe help
+cmake --preset portable-serial
+cmake --build --preset portable-serial --parallel
+.\build\portable-serial\vegai_pretrain.exe help
+python tools\verify_portable_runtime.py `
+  --engine-bin .\build\portable-serial\hds_engine.exe `
+  --pretrain-bin .\build\portable-serial\vegai_pretrain.exe
 ```
+
+MSYS2 shell içindeyseniz aynı yollar slash biçiminde kullanılabilir. Windows
+runner smoke check'i checkpoint'i aynı `.exe` ile train+inspect eder; `.vgai`
+dosyasını macOS/Linux binary'sine kopyalayıp okumayı test veya sözleşme olarak
+sunmaz.
 
 Compiler'ın Fortran 2023 conformance seçeneği desteklenmiyorsa CMake bunu
 uyarı olarak gösterir; platforma uygun current compiler veya explicit compiler
 flag kullanılmalıdır.
 
-## 5. Checkpoint sınırı
+### Aynı-host portable runtime gate
+
+CMake ile üretilen binary için platformdan bağımsız launch/train/inspect gate:
+
+```bash
+python3 tools/verify_portable_runtime.py \
+  --engine-bin ./build/portable-serial/hds_engine \
+  --pretrain-bin ./build/portable-serial/vegai_pretrain
+```
+
+Windows'ta executable suffix'i `.exe` olur. Bu gate command-line path, temporary
+checkpoint creation ve aynı binary ile inspect akışını doğrular; benchmark
+zamanı kaydetmez ve compiler/OS değişince checkpoint'in taşınacağını iddia
+etmez.
+
+## 6. Checkpoint sınırı
 
 Source/build portability, checkpoint binary interchange garantisi değildir.
 `.vgai` dosyası stream-unformatted formatta compiler/ABI/endianness ailesine
@@ -181,7 +247,7 @@ bağlıdır. Başka OS, CPU mimarisi veya compiler'a geçerken corpus manifesti,
 source commit, compiler bilgisi ve config'i saklayın; hedef hostta yeniden train
 etmek veya aynı ABI toolchain'i kullanmak güvenli yoldur.
 
-## 6. Gerçek ölçüm kaydı
+## 7. Gerçek ölçüm kaydı
 
 `tools/compare_pretraining_modes.py` ve build-profile comparison raporları
 CPU modeli, OS, mimari, logical CPU sayısı ve GPU adapter sayısını JSON

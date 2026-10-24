@@ -236,6 +236,24 @@ SSD, dual-channel/NUMA ve çok-core planı için
 [RESOURCE_AWARE_TRAINING.md](docs/RESOURCE_AWARE_TRAINING.md)'ye; platform/
 CPU/checkpoint sınırları için [HARDWARE_COMPATIBILITY.md](docs/HARDWARE_COMPATIBILITY.md)'ye bakın.
 
+Linux, macOS ve Windows için CMake presetleri tercih edin. `portable-serial`,
+OpenMP veya herhangi bir GPU/NPU runtime'ını gerektirmeyen en geniş CPU
+fallback'idir; platformlar arası checkpoint binary interchange vaadi değildir:
+
+```bash
+cmake --preset portable-serial
+cmake --build --preset portable-serial --parallel
+python3 tools/verify_portable_runtime.py \
+  --engine-bin ./build/portable-serial/hds_engine \
+  --pretrain-bin ./build/portable-serial/vegai_pretrain
+```
+
+Kaynak/launcher contract'i için Linux x86-64/ARM64, macOS ARM64 ve Windows
+x86-64 portable smoke workflow'u tanımlıdır. Bu, her olası OS/CPU/driver
+kombinasyonunda performans veya binary checkpoint taşınabilirliği garantisi
+anlamına gelmez; doğrulanmış kapsam ve hedefte çalıştırma adımları
+[HARDWARE_COMPATIBILITY.md](docs/HARDWARE_COMPATIBILITY.md)'dedir.
+
 ### CMake / CTest
 
 ```bash

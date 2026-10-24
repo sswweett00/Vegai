@@ -73,6 +73,13 @@ def main() -> int:
                 fail("planner did not preserve checkpoint path")
             if not isinstance(checkpoint_plan.get("estimated_max_bytes"), int) or checkpoint_plan["estimated_max_bytes"] <= 0:
                 fail("planner did not calculate checkpoint storage")
+            storage = checkpoint_plan.get("storage", {})
+            if storage.get("probe_method") != "shutil.disk_usage":
+                fail(f"planner did not use the cross-platform disk probe: {storage.get('probe_method')!r}")
+            if not isinstance(storage.get("free_bytes"), int) or storage["free_bytes"] <= 0:
+                fail("planner did not report usable checkpoint filesystem free space")
+            if not isinstance(storage.get("total_bytes"), int) or storage["total_bytes"] < storage["free_bytes"]:
+                fail("planner reported malformed checkpoint filesystem capacity")
             environment = plan.get("cpu_execution", {}).get("environment", {})
             if environment.get("OMP_PROC_BIND") != "close" or environment.get("OMP_PLACES") != "cores":
                 fail("planner omitted affinity-safe OpenMP recommendations")

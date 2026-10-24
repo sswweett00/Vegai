@@ -22,14 +22,41 @@ import os
 from pathlib import Path
 import platform
 import re
+import struct
 import subprocess
 import sys
 from typing import Any, Iterable
 
 
 SCHEMA = "vegai-hardware-compatibility/v2"
+# These are the operating systems exercised by the repository's portable
+# build/runtime workflow. Other systems retain a best-effort profile rather
+# than being silently represented as tested platforms.
 RECOGNIZED_OPERATING_SYSTEMS = {"Linux", "Darwin", "Windows"}
 DISPLAY_PATTERNS = ("vga compatible controller", "3d controller", "display controller")
+
+
+def _normalise_architecture(value: str) -> str:
+    """Return a stable architecture family without assuming a vendor ISA."""
+    key = value.strip().casefold().replace("-", "_")
+    aliases = {
+        "x86_64": "x86_64",
+        "amd64": "x86_64",
+        "x64": "x86_64",
+        "i386": "x86_32",
+        "i486": "x86_32",
+        "i586": "x86_32",
+        "i686": "x86_32",
+        "x86": "x86_32",
+        "aarch64": "aarch64",
+        "arm64": "aarch64",
+        "armv8l": "aarch64",
+        "ppc64le": "ppc64le",
+        "ppc64": "ppc64",
+        "s390x": "s390x",
+        "riscv64": "riscv64",
+    }
+    return aliases.get(key, "unknown")
 
 
 def _read_text(path: Path) -> str | None:
@@ -414,6 +441,9 @@ def collect_hardware_profile() -> dict[str, Any]:
     separately validated provider and is reported as disabled until then.
     """
     operating_system = platform.system() or "unknown"
+    raw_architecture = platform.machine() or "unknown"
+    architecture_family = _normalise_architecture(raw_architecture)
+    pointer_bits = struct.calcsize("P") * 8
     if operating_system == "Linux":
         cpu_model = _linux_cpu_model()
         gpu_adapters = _linux_gpu_adapters()
@@ -459,7 +489,10 @@ def collect_hardware_profile() -> dict[str, Any]:
         "host": {
             "operating_system": operating_system,
             "operating_system_release": platform.release() or "unknown",
-            "architecture": platform.machine() or "unknown",
+            "architecture": raw_architecture,
+            "architecture_family": architecture_family,
+            "pointer_bits": pointer_bits,
+            "byte_order": sys.byteorder,
             "python_implementation": platform.python_implementation(),
             "python_version": platform.python_version(),
         },
@@ -489,6 +522,16 @@ def collect_hardware_profile() -> dict[str, Any]:
         },
         "portability": {
             "recognized_operating_system": operating_system in RECOGNIZED_OPERATING_SYSTEMS,
+            "portable_cpu_build_candidate": architecture_family != "unknown" and pointer_bits >= 32,
+            "architecture_contract": (
+                "The CPU backend uses standard Fortran integer/bit operations and contains no mandatory x86, ARM, "
+                "CUDA, Metal, OpenCL, or vendor GPU instruction path. A target still needs its own Fortran 2023-capable "
+                "toolchain build; an inventory report is not a successful compilation proof."
+            ),
+            "byte_order_contract": (
+                "Training arithmetic does not reinterpret host byte layouts. Stream-unformatted checkpoints remain local "
+                "to a compiler/ABI/endianness family, and the optional OpenVINO lane worker rejects unsupported endian ABI."
+            ),
             "portable_build_contract": (
                 "The portable profile emits no host-specific ISA flags. Build separately on each target "
                 "architecture with a Fortran 2023-capable compiler."
@@ -509,7 +552,8 @@ def compact_hardware_summary(profile: dict[str, Any]) -> str:
     adapters = profile["gpu_adapters"]
     return (
         f"os={host['operating_system']} {host['operating_system_release']}; "
-        f"arch={host['architecture']}; cpu={cpu['model']}; logical_cpus={cpu['logical_processors']}; "
+        f"arch={host['architecture']} ({host.get('architecture_family')}, {host.get('pointer_bits')}-bit, "
+        f"{host.get('byte_order')}-endian); cpu={cpu['model']}; logical_cpus={cpu['logical_processors']}; "
         f"physical_cores={cpu['topology'].get('physical_cores')}; gpu_adapters={len(adapters)}; "
         f"npu_adapters={len(profile['npu_adapters'])}; backend=portable-cpu"
     )
@@ -522,7 +566,7 @@ def render_text(profile: dict[str, Any]) -> str:
     lines = [
         "Vegai hardware compatibility profile",
         f"OS: {host['operating_system']} {host['operating_system_release']}",
-        f"Architecture: {host['architecture']}",
+        f"Architecture: {host['architecture']} ({host.get('architecture_family')}, {host.get('pointer_bits')}-bit, {host.get('byte_order')}-endian)",
         f"CPU: {cpu['model']}",
         f"Logical processors: {cpu['logical_processors']}",
         f"Physical cores (best effort): {cpu['topology'].get('physical_cores')}",
@@ -547,6 +591,8 @@ def render_text(profile: dict[str, Any]) -> str:
         [
             "Integrated GPU policy: " + backend["integrated_gpu_contract"],
             "Accelerator dispatch policy: " + backend["accelerator_dispatch_contract"],
+            "Portable CPU build candidate: " + str(profile["portability"].get("portable_cpu_build_candidate")),
+            "Architecture policy: " + profile["portability"]["architecture_contract"],
             "Portable build policy: " + profile["portability"]["portable_build_contract"],
             "Checkpoint policy: " + profile["portability"]["checkpoint_contract"],
         ]
