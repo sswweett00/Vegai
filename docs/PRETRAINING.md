@@ -756,7 +756,8 @@ farkını; aynı hybrid config için reference rotate-then-add ile fused kernel
 checkpoint byte eşitliği + süre oranını; ayrıca 16-token-record kontrollü fixture
 üzerinde `hybrid → hierarchical → coherent` Top-1 cohesion diagnostic'ini
 raporlar. Coherent arm için kabul koşulu hybrid same-cluster Top-1 sonucunu
-geriletmemektir; resonant ölçümü de fixture-bound semantic-retrieval evidence'tır,
+geriletmemektir; resonant arm için controlled mean Top-1 similarity farkı
+`> 0.02` fail-closed şarttır. Bu fixture-bound semantic-retrieval evidence'ı,
 pozitif farkın her doğal-dil corpus'una genellenmesi değildir. Bunlar kontrollü
 tanılardır; doğal dil yeteneği veya production throughput garantisi değildir. CI ayrıca `tools/compare_pretraining_lookup_cache.py`
 ile cache açık/kapalı, checkpoint-byte-identical real child-process comparator'ı

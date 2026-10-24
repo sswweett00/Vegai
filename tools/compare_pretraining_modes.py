@@ -326,12 +326,17 @@ def main() -> int:
             )
             # RESONANT's first epoch is exactly HYBRID; its second epoch uses
             # only an immutable semantic snapshot captured before streaming
-            # updates begin. Report the controlled retrieval delta separately
-            # from speed so the evidence remains a narrow fixture diagnostic,
-            # not a general-intelligence claim.
+            # updates begin. Gate a deliberately modest controlled retrieval
+            # delta separately from speed so the evidence remains a narrow
+            # fixture diagnostic, not a general-intelligence claim.
             resonant_semantic_gain = (
                 quality["resonant"]["mean_top1_similarity"]
                 - quality["hybrid"]["mean_top1_similarity"]
+            )
+            require(
+                resonant_semantic_gain > 0.02,
+                "resonant epoch-frozen semantic feedback did not preserve its controlled "
+                f"retrieval gain over hybrid: {resonant_semantic_gain:.6f}",
             )
 
             # A true before/after optimization comparison: only the hidden
@@ -472,6 +477,9 @@ def main() -> int:
                     "resonant_same_cluster_top1_hit_delta_vs_hybrid": (
                         quality["resonant"]["same_cluster_top1_hits"]
                         - quality["hybrid"]["same_cluster_top1_hits"]
+                    ),
+                    "resonant_speedup_vs_hybrid": round(
+                        speed["hybrid"]["median_seconds"] / speed["resonant"]["median_seconds"], 4
                     ),
                     "hybrid_mean_top1_similarity_relative_gain_percent": round(
                         100.0 * hybrid_semantic_gain / quality["positional"]["mean_top1_similarity"], 3

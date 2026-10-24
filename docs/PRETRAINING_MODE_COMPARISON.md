@@ -67,10 +67,27 @@ mean Top-1 similarity artışı `> 0.01` olmalıdır.
 `resonant`in birinci epoch'u `hybrid` ile bit-tam aynıdır; ikinci epoch'ta yalnız
 başlangıçta frozen learned semantic plane topical input olur. Comparator,
 `resonant_mean_top1_similarity_gain_vs_hybrid` ile same-cluster hit delta'sını
-raporlar. Bu delta controlled fixture için gerçek semantic-retrieval evidence'ı
-olsa da genel corpus/LLM yeteneği veya her veri dağılımında pozitif gain garantisi
-olmaz. Native testte fused/reference equality, checkpoint-resume equality ve
-v8 lineage ayrı zorunlu invariant'lardır.
+ve `resonant_speedup_vs_hybrid` değerini raporlar. Bu repository fixture'ı için
+mean Top-1 similarity gain **`> 0.02`** fail-closed acceptance koşuludur. Bu
+delta controlled fixture için gerçek semantic-retrieval evidence'ı olsa da genel
+corpus/LLM yeteneği veya her veri dağılımında pozitif gain garantisi olmaz.
+Native testte fused/reference equality, checkpoint-resume equality ve v8 lineage
+ayrı zorunlu invariant'lardır.
+
+#### İlk doğrulanmış resonant controlled sonuç
+
+[GitHub Actions run 40127066062](https://github.com/sswweett00/Vegai/actions/runs/40127066062)
+(`995cb7e`, Intel Xeon Platinum 8573C hosted Linux, `OMP_NUM_THREADS=1`) gerçek
+compiled Fortran binary, native property tests ve üçer child-process repetition
+ile bu gate'i geçti. Aynı 64-query base fixture'da `hybrid` mean self-excluded
+Top-1 similarity **`0.138813`**, `resonant` **`0.285841`** oldu; fark
+**`+0.147028`** olup `+0.02` acceptance sınırının üzerindedir. Bu önce/sonra
+karşılaştırmasında yalnız context mode farklıdır; compilation, fixture
+construction, inspect ve Python harness timing'e dahil değildir. `resonant`
+train-time/throughput değeri aynı workflow summary'sinde raporlanır ve sonraki
+run'larda quality gate ile birlikte izlenir. Sonuç repository-authored
+in-corpus cluster diagnostic'idir; held-out domain accuracy, doğal dil anlama
+veya genel zekâ iddiası değildir.
 
 ### C. Fused/reference semantic-preservation hız karşılaştırması
 
