@@ -183,6 +183,26 @@ python3 tools/compare_pretraining_revisions.py \
 Bu ikinci komut cross-lineage checkpoint farklılığını bekler; ortaya çıkan
 runtime ratio ancak bu spesifik version transition için descriptive telemetry'dir.
 
+### v7 sampler transition: gözlenen CI telemetry
+
+[GitHub Actions run 40090215964](https://github.com/sswweett00/Vegai/actions/runs/40090215964)
+(commit `fe184a9`, AMD EPYC 7763 64-Core Processor / Linux `7.0.0-1017-azure`,
+`OMP_NUM_THREADS=2`, üç timed repetition) historical v5/v6 sampler lineage'i
+ve v7 Floyd/complement lineage'i arasında aşağıdaki ölçümü verdi:
+
+| Fixture | Baseline median train s | v7 median train s | Baseline token/s | v7 token/s | v7/baseline runtime ratio | Checkpoint contract |
+|---|---:|---:|---:|---:|---:|---|
+| `short_records` | 0.094152 | 0.092003 | ≈43,504.121 | ≈44,520.287 | 1.0234× | intentional versioned algorithm transition |
+| `repeated_centers` | 0.202346 | 0.157675 | ≈80,970.219 | ≈103,909.941 | 1.2833× | intentional versioned algorithm transition |
+
+Her taraf kendi repeat'inde deterministic kaldı. Transition contract ayrıca yeni
+binary'nin gerçek baseline checkpoint'ini bir ek epoch için byte-tam resume
+etmesini zorunlu kıldı ve CI bu gate'i geçti. Bununla birlikte fresh v7
+checkpoint'i v5/v6 checkpoint'iyle bilerek aynı değildir; bu iki runtime oranı
+semantic-equivalent optimizasyon veya genel throughput/capability iddiası olarak
+okunmamalıdır. Compile, fixture, checkpoint comparison ve harness süreleri
+ölçüye dahil değildir.
+
 ## V4: deterministic single-core / multi-core context construction
 
 [GitHub Actions run 39839135866](https://github.com/sswweett00/Vegai/actions/runs/39839135866)
