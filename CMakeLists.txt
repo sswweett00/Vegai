@@ -143,6 +143,23 @@ if(VEGAI_BUILD_TESTS)
             NAME vegai_training_resource_plan
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_training_resource_plan.py
         )
+        # This creates/streams an exact 9 MiB synthetic fixture and exercises
+        # report lineage with a fake executable. The separate GitHub workflow
+        # runs the same contract against the real compiled Fortran binary.
+        add_test(
+            NAME vegai_9mib_pretraining_contract
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_9mib_pretraining.py
+        )
+        set_tests_properties(vegai_9mib_pretraining_contract PROPERTIES TIMEOUT 120)
+        # A small instance of the same schema verifies that the bounded runner
+        # parses the actual compiled Fortran train/inspect ABI. The dedicated
+        # workflow owns the full 9 MiB real-binary measurement.
+        add_test(
+            NAME vegai_9mib_pretraining_real_binary
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_9mib_pretraining_real_binary.py
+                    --pretrain-bin $<TARGET_FILE:vegai_pretrain>
+        )
+        set_tests_properties(vegai_9mib_pretraining_real_binary PROPERTIES TIMEOUT 240)
         add_test(
             NAME vegai_openvino_provider_contract
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_openvino_provider.py

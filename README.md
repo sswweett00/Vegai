@@ -113,6 +113,10 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 > ister; veri yönetişimi, checkpoint ve sınırlar [PRETRAINING.md](docs/PRETRAINING.md)'de, immutable
 > shard'larla crash-safe continual çalışma ise
 > [CONTINUOUS_PRETRAINING.md](docs/CONTINUOUS_PRETRAINING.md)'de açıkça tanımlıdır.
+> Tam 9 MiB sentetik structural fixture ile real binary/checkpoint/throughput
+> zinciri ise [PRETRAINING_9MIB.md](docs/PRETRAINING_9MIB.md)'de tanımlıdır:
+> bu yalnız streaming ve operasyon sözleşmesi testidir, gerçek dil/domain bilgisi
+> veya genel kapasite kanıtı değildir.
 > Target-domain semantic-neighbour kalite iddiası gerekiyorsa hardcoded fixture
 > yerine operator-held-out case/policy ile gerçek checkpoint release gate'i
 > [PRETRAINING_QUALITY_GATE.md](docs/PRETRAINING_QUALITY_GATE.md)'deki sözleşme
@@ -145,6 +149,11 @@ make run
 make pretrain
 make field
 make chat
+
+# Exact 9 MiB deterministic structural fixture + real train child attestation.
+# Bu bir natural-language/domain-quality dataset'i değildir; runtime artifacts
+# Git'e eklenmez. Ayrıntılı lineage ve ölçüm scope'u docs/PRETRAINING_9MIB.md'de.
+make pretrain-9mib
 
 # Raw byte-event field: independent Python oracle + compiled CLI contract
 make field-check
@@ -351,6 +360,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Capability curriculum | `tools/capability_curriculum.py` | operator-defined metadata paths/tag/difficulty stage policy'si, SQLite exact-dedupe + split/annotation conflict gate'i, held-out/source coverage, strict text-only projection, immutable continuous ledger ve source+policy replay verification; hardcoded task data veya capability claim'i degil |
 | Evidential Pareto Optimizer | `tools/evidential_optimizer.py` | gerçek algorithm/optimizer config ve artifact hash'lerini repeated held-out bounded metric'lerle Bonferroni-Hoeffding confidence + robust Pareto gate üzerinden seçer; neural optimizer/runtime veya universal-best claim'i değil |
 | HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, hierarchical default + CPU-only coherent cross-fold option, deterministic OpenMP / optional OpenVINO immutable-context preparation + source-ordered CPU commit, v7 Floyd/complement sampler checkpoint lineage with v4–v6 deterministic-resume compatibility |
+| Exact 9 MiB train attestation | `tools/synthetic_pretraining_fixture.py`, `tools/run_9mib_pretraining.py` | strict-ASCII deterministic topology fixture, streaming manifest/digest verification, resource preflight, bounded one-child train timing, checkpoint/inspect SHA lineage; structural fixture only, domain-quality evidence değil |
 | Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect`, CPU/OpenVINO context-provider execution switch ve nearest semantic diagnostic |
 | Pretraining checkpoint quality gate | `tools/pretraining_quality_evaluation.py`, `tools/production_pretrain.py` | operator-held-out semantic-neighbour annotation/policy ile real inspect batch'i, immutable evaluator/binary/checkpoint/case/policy binding, HMAC-redacted report ve fail-closed optional production release; genel LLM/LMM quality benchmarkı değil |
 | Grounded dialogue retrieval | `src/dialogue_retrieval.f90`, `app/chat.f90` | operator TSV response index'i, strict ASCII/OOV gate, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; free-form LLM generation degil |
@@ -408,7 +418,8 @@ sözleşmesi için [docs/LMM_PORTFOLIO_ROUTING.md](docs/LMM_PORTFOLIO_ROUTING.md
 LMM excellence/evidence roadmap'i için
 [docs/LMM_EXCELLENCE_ARCHITECTURE.md](docs/LMM_EXCELLENCE_ARCHITECTURE.md),
 fixture üzerinde gerçek yürütme telemetrisi için [docs/EXAMPLE_PRETRAINING_RUN.md](docs/EXAMPLE_PRETRAINING_RUN.md),
-önce/sonra hız ve controlled semantic-cohesion sonuçları için
+tam 9 MiB sentetik fixture'ın binary/checkpoint/throughput attestation sözleşmesi için
+[docs/PRETRAINING_9MIB.md](docs/PRETRAINING_9MIB.md), önce/sonra hız ve controlled semantic-cohesion sonuçları için
 [docs/PRETRAINING_MODE_COMPARISON.md](docs/PRETRAINING_MODE_COMPARISON.md),
 CPU/iGPU/OS portable build sözleşmesi için
 [docs/HARDWARE_COMPATIBILITY.md](docs/HARDWARE_COMPATIBILITY.md), RAM/SSD,

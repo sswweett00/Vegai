@@ -37,6 +37,7 @@ __pycache__/
 /checkpoints/
 /production-datasets/
 /production-runs/
+/pretraining-runs/
 /lmm-models/
 /lmm-assets/
 /lmm-knowledge/

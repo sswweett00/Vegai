@@ -41,8 +41,13 @@ PRETRAIN := $(BUILD_DIR)/vegai_pretrain
 FIELD := $(BUILD_DIR)/vegai_field
 CHAT := $(BUILD_DIR)/vegai_chat
 TEST_BINARY := $(BUILD_DIR)/vegai_tests
+# Runtime-only exact-size benchmark artifacts are intentionally ignored by Git.
+FIXTURE_9MIB_CORPUS ?= corpora/synthetic_hdc_9mib.txt
+FIXTURE_9MIB_MANIFEST ?= corpora/synthetic_hdc_9mib.manifest.json
+FIXTURE_9MIB_CHECKPOINT ?= checkpoints/synthetic_hdc_9mib.vgai
+FIXTURE_9MIB_REPORT ?= pretraining-runs/synthetic_hdc_9mib.json
 
-.PHONY: all engine pretrain field chat test run run-pretrain run-field run-chat check field-check optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check quality-check clean clean-all debug portable native portable-test native-test
+.PHONY: all engine pretrain field chat test run run-pretrain run-field run-chat check field-check optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check quality-check fixture-9mib verify-fixture-9mib pretrain-9mib clean clean-all debug portable native portable-test native-test
 
 # Default target: portable optimized GNU binaries without host-only ISA flags.
 all: engine pretrain field chat
@@ -117,6 +122,7 @@ check:
 	python3 tools/verify_example_corpus.py
 	python3 tools/verify_hardware_compatibility.py
 	python3 tools/verify_training_resource_plan.py
+	python3 tools/verify_9mib_pretraining.py
 	python3 tools/verify_openvino_provider.py
 	python3 tools/verify_openvino_context_worker.py
 	python3 tools/verify_pretraining_revision_comparison.py
@@ -164,6 +170,27 @@ dialogue-check: $(PRETRAIN) $(CHAT)
 # measures a narrow semantic-neighbour contract, not general model intelligence.
 quality-check: $(PRETRAIN)
 	python3 tools/verify_pretraining_quality_evaluation.py --pretrain-bin $(PRETRAIN)
+
+# A deterministic, provenance-labelled 9 MiB structural fixture. It carries no
+# third-party text and must not be interpreted as domain or language knowledge.
+fixture-9mib:
+	python3 tools/synthetic_pretraining_fixture.py generate \
+		--output "$(FIXTURE_9MIB_CORPUS)" --manifest "$(FIXTURE_9MIB_MANIFEST)" \
+		--target-bytes 9MiB --overwrite
+
+verify-fixture-9mib:
+	python3 tools/synthetic_pretraining_fixture.py verify \
+		--corpus "$(FIXTURE_9MIB_CORPUS)" --manifest "$(FIXTURE_9MIB_MANIFEST)"
+
+# The runner's elapsed metric encloses only this one train child process;
+# generation, preflight, inspection, report formatting, and compilation are
+# deliberately outside it. Outputs remain ignored runtime artifacts.
+pretrain-9mib: pretrain fixture-9mib
+	python3 tools/run_9mib_pretraining.py \
+		--pretrain-bin "$(PRETRAIN)" --corpus "$(FIXTURE_9MIB_CORPUS)" \
+		--manifest "$(FIXTURE_9MIB_MANIFEST)" --checkpoint "$(FIXTURE_9MIB_CHECKPOINT)" \
+		--report "$(FIXTURE_9MIB_REPORT)" --max-vocab 1024 --min-frequency 1 \
+		--window 2 --context-mode hierarchical --epochs 1 --omp-threads 2 --overwrite
 
 # Rich JSON/Parquet/Arrow data formats are optional rather than a dependency of
 # the portable Fortran runtime. This explicit target installs only the adapter

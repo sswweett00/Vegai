@@ -1,0 +1,148 @@
+name: Synthetic 9 MiB pretraining attestation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/pretraining-9mib.yml'
+      - 'Makefile'
+      - 'app/pretrain.f90'
+      - 'src/**'
+      - 'tools/synthetic_pretraining_fixture.py'
+      - 'tools/run_9mib_pretraining.py'
+      - 'tools/verify_9mib_pretraining.py'
+      - 'tools/verify_9mib_pretraining_real_binary.py'
+      - 'tools/training_resource_plan.py'
+      - 'tools/hardware_compatibility.py'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/pretraining-9mib.yml'
+      - 'Makefile'
+      - 'app/pretrain.f90'
+      - 'src/**'
+      - 'tools/synthetic_pretraining_fixture.py'
+      - 'tools/run_9mib_pretraining.py'
+      - 'tools/verify_9mib_pretraining.py'
+      - 'tools/verify_9mib_pretraining_real_binary.py'
+      - 'tools/training_resource_plan.py'
+      - 'tools/hardware_compatibility.py'
+
+permissions:
+  contents: read
+
+# Do not cancel an already-running evidence-producing train child merely
+# because a documentation/implementation follow-up arrives on the same PR.
+concurrency:
+  group: synthetic-9mib-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  real-fortran-fixture-run:
+    name: Real Fortran 9 MiB fixture run
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install GNU Fortran toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gfortran
+
+      - name: Verify fixture and runner contracts before compilation
+        run: python3 tools/verify_9mib_pretraining.py
+
+      - name: Compile portable Fortran 2023 pretraining binary
+        run: make pretrain BUILD_DIR=build-9mib
+
+      - name: Allocate ignored runtime paths
+        run: |
+          run_dir="${RUNNER_TEMP}/vegai-9mib"
+          mkdir -p "$run_dir"
+          echo "VEGAI_9MIB_RUN_DIR=$run_dir" >> "$GITHUB_ENV"
+
+      - name: Generate and streaming-verify exact 9 MiB fixture
+        run: |
+          set -euo pipefail
+          python3 tools/synthetic_pretraining_fixture.py generate \
+            --output "${VEGAI_9MIB_RUN_DIR}/synthetic_hdc_9mib.txt" \
+            --manifest "${VEGAI_9MIB_RUN_DIR}/synthetic_hdc_9mib.manifest.json" \
+            --target-bytes 9MiB \
+            | tee "${VEGAI_9MIB_RUN_DIR}/fixture-generation.json"
+          python3 tools/synthetic_pretraining_fixture.py verify \
+            --corpus "${VEGAI_9MIB_RUN_DIR}/synthetic_hdc_9mib.txt" \
+            --manifest "${VEGAI_9MIB_RUN_DIR}/synthetic_hdc_9mib.manifest.json" \
+            | tee "${VEGAI_9MIB_RUN_DIR}/fixture-verification.json"
+
+      - name: Preflight and run one real 9 MiB Fortran training child
+        run: |
+          set -euo pipefail
+          python3 tools/run_9mib_pretraining.py \
+            --pretrain-bin "${GITHUB_WORKSPACE}/build-9mib/vegai_pretrain" \
+            --corpus "${VEGAI_9MIB_RUN_DIR}/synthetic_hdc_9mib.txt" \
+            --manifest "${VEGAI_9MIB_RUN_DIR}/synthetic_hdc_9mib.manifest.json" \
+            --checkpoint "${VEGAI_9MIB_RUN_DIR}/synthetic_hdc_9mib.vgai" \
+            --report "${VEGAI_9MIB_RUN_DIR}/run-report.json" \
+            --max-vocab 1024 --min-frequency 1 --window 2 --position-shift 41 \
+            --context-mode hierarchical --epochs 1 --omp-threads 2 --timeout-seconds 1200 \
+            | tee "${VEGAI_9MIB_RUN_DIR}/runner-stdout.json"
+
+      - name: Publish attested train-only timing summary
+        if: always()
+        run: |
+          python3 - "${VEGAI_9MIB_RUN_DIR}/run-report.json" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          report_path = Path(sys.argv[1])
+          summary_path = Path(sys.argv[2])
+          with summary_path.open("a", encoding="utf-8") as summary:
+              print("## Synthetic exact-9-MiB HDC pretraining", file=summary)
+              print(file=summary)
+              if not report_path.is_file():
+                  print("No runner report was produced; inspect the failed workflow step/log.", file=summary)
+                  raise SystemExit(0)
+              report = json.loads(report_path.read_text(encoding="utf-8"))
+              print(f"Status: `{report.get('status', 'unknown')}`", file=summary)
+              if report.get("status") != "succeeded":
+                  print(file=summary)
+                  print("```json", file=summary)
+                  print(json.dumps(report.get("failure", {}), sort_keys=True), file=summary)
+                  print("```", file=summary)
+                  raise SystemExit(0)
+              fixture = report["fixture"]["verification"]
+              measurement = report["measurement"]
+              checkpoint = report["checkpoint"]
+              metrics = report["train"]["metrics"]
+              message = (
+                  f"bytes={fixture['corpus']['bytes']}; "
+                  f"corpus_sha256={fixture['corpus']['sha256']}; "
+                  f"raw_tokens={metrics['raw tokens']}; "
+                  f"elapsed_seconds={measurement['train_process_wall_seconds']:.6f}; "
+                  f"raw_tokens_per_second={measurement['raw_training_tokens_per_second']:.3f}; "
+                  f"checkpoint_sha256={checkpoint['sha256']}"
+              )
+              print("The elapsed value scopes only one `vegai_pretrain train` child process. Fixture generation, ", end="", file=summary)
+              print("verification, preflight, compilation, inspect, report formatting, and CI overhead are excluded.", file=summary)
+              print(file=summary)
+              print("```text", file=summary)
+              print(message, file=summary)
+              print("```", file=summary)
+              print(file=summary)
+              print("This corpus is a deterministic structural fixture, not evidence of natural-language, factual, ", end="", file=summary)
+              print("domain, safety, or general-model capability.", file=summary)
+          print(f"::notice title=Exact 9 MiB synthetic pretraining::{message}" if report_path.is_file() and report.get("status") == "succeeded" else "")
+          PY
+
+      - name: Upload ephemeral fixture, report, and checkpoint lineage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-9mib-pretraining-${{ github.run_id }}
+          path: ${{ runner.temp }}/vegai-9mib/
+          if-no-files-found: warn
+          retention-days: 14
