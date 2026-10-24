@@ -130,6 +130,42 @@ bu küçük test normal native doğrulamayı kısa tutar. Full 9 MiB model koşu
 ayrı CI job'ında kaldığı için bu Python contract testi model eğitimi yerine
 geçmez.
 
+## Kaydedilmiş gerçek Fortran koşusu
+
+Bu mekanizma ilk kez aşağıdaki GitHub Actions pull-request job'ında gerçek
+GNU Fortran/OpenMP binary ile çalıştırıldı:
+
+- kaynak commit: [`5f48f38`](https://github.com/sswweett00/Vegai/commit/5f48f38fe6ea79d63533ac289ab58ee9f48b5ac7);
+- workflow/job: [Synthetic 9 MiB pretraining attestation #40091559976](https://github.com/sswweett00/Vegai/actions/runs/40091559976),
+  `Real Fortran 9 MiB fixture run` (GitHub-hosted `ubuntu-latest`);
+- fixture: `9,437,184` byte, `15,942` physical record, `255,058` raw token,
+  `1,024` unique token;
+- corpus SHA-256:
+  `979a1e9938599c0d80b7b52082f79ee84a4ae936690e482aed7492600d65e454`;
+- manifest SHA-256 (deterministic canonical output):
+  `cb44f95b08dc565c9af5dbcddbc0b448a0303359d7dcfe939d97f519fc9a5180`;
+- config: `max-vocab=1024`, `min-frequency=1`, `window=2`,
+  `position-shift=41`, `context-mode=hierarchical`, `epochs=1`,
+  `OMP_NUM_THREADS=2`;
+- yalnız train child wall-clock: **`9.123744 s`**;
+- raw token throughput: **`27955.411 token/s`**;
+- checkpoint SHA-256:
+  `a09e5e55e9dcbac99fd65eff030dfe4f1e545b7fb4e86f3867c34711cd3b1ff2`.
+
+Runner'ın success contract'i bu koşuda active token sayısının raw token sayısına
+eşit olmasını, OOV/truncation/non-ASCII/overlong record sayaçlarının sıfır
+olmasını, checkpoint'in nonempty olmasını ve manifest probe ile ayrı
+`inspect` çağrısının başarılı olmasını da zorunlu kıldı. Full report, binary
+SHA-256 ve checkpoint boyutu, 14 gün saklanan
+`synthetic-9mib-pretraining-40091559976` GitHub Actions artifact'indedir
+(artifact ID `12559336717`; koşu anındaki expiry `2026-11-07`).
+
+Bu tek gözlem derleme, fixture generation, verification, resource preflight,
+inspection, artifact upload ve CI queue/overhead'i içermeyen train-only
+ölçümdür. Farklı runner, CPU, OMP thread sayısı, compiler veya config ile
+karşılaştırılabilir bir hız iddiası değildir; production/domain kalite ölçümü
+de hiç değildir.
+
 ## Gerçek üretim corpus'una geçiş
 
 Lisansı, kaynak URL/kimliği, kullanım izni, hedef-domain tanımı ve held-out
