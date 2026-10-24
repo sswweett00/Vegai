@@ -42,7 +42,7 @@ FIELD := $(BUILD_DIR)/vegai_field
 CHAT := $(BUILD_DIR)/vegai_chat
 TEST_BINARY := $(BUILD_DIR)/vegai_tests
 
-.PHONY: all engine pretrain field chat test run run-pretrain run-field run-chat check field-check optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check clean clean-all debug portable native portable-test native-test
+.PHONY: all engine pretrain field chat test run run-pretrain run-field run-chat check field-check optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check quality-check clean clean-all debug portable native portable-test native-test
 
 # Default target: portable optimized GNU binaries without host-only ISA flags.
 all: engine pretrain field chat
@@ -157,6 +157,12 @@ capability-check:
 # strict evaluator schema, input provenance and an intentional failed gate.
 dialogue-check: $(PRETRAIN) $(CHAT)
 	python3 tools/verify_dialogue_evaluation.py --pretrain-bin $(PRETRAIN) --chat-bin $(CHAT)
+
+# Real compiled checkpoint inspection plus strict held-out case/policy,
+# HMAC-redaction, provenance and intentional failed-gate verification. This
+# measures a narrow semantic-neighbour contract, not general model intelligence.
+quality-check: $(PRETRAIN)
+	python3 tools/verify_pretraining_quality_evaluation.py --pretrain-bin $(PRETRAIN)
 
 # Rich JSON/Parquet/Arrow data formats are optional rather than a dependency of
 # the portable Fortran runtime. This explicit target installs only the adapter

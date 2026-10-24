@@ -9,7 +9,9 @@ It adds the operational controls commonly required around large-model training:
 * immutable dataset/binary identity and resolved-policy provenance;
 * an exact disk-backed train/validation record-leakage audit by default;
 * RAM/checkpoint-space preflight before child training starts;
-* a single-writer run lock plus atomic planned/result/failure reports; and
+* a single-writer run lock plus atomic planned/result/failure reports;
+* an optional operator-held-out semantic-neighbour checkpoint quality gate with
+  HMAC-redacted report provenance; and
 * a real shard-level exactly-once checkpoint ledger, never a simulated metric.
 
 The scope is intentional: this orchestrates the repository's deterministic
@@ -24,10 +26,12 @@ import argparse
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import sqlite3
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -44,6 +48,16 @@ from continuous_pretrain import (
 from corpus_manifest import DEFAULT_MAX_LINE_BYTES, DEFAULT_MAX_TOKENS_PER_LINE, DEFAULT_TOKEN_LENGTH
 from hardware_compatibility import collect_hardware_profile
 from production_dataset import DATASET_SCHEMA, DIGEST_INDEX_SCHEMA, DatasetBuildError, iter_strict_lf_records
+from pretraining_quality_evaluation import MAX_CASES as QUALITY_MAX_CASES
+from pretraining_quality_evaluation import MAX_CHECKPOINT_BYTES as QUALITY_MAX_CHECKPOINT_BYTES
+from pretraining_quality_evaluation import (
+    PretrainingQualityEvaluationError,
+    QualityPolicy,
+    evaluator_binding,
+    gate_failures,
+    scratch_directory,
+    wilson_lower_bound_95,
+)
 from training_resource_plan import build_plan
 
 
@@ -54,8 +68,10 @@ LOCK_FILENAME = ".production-pretrain.lock"
 RUN_FILENAME = "run.json"
 RESULT_FILENAME = "result.json"
 FAILURE_FILENAME = "failure.json"
+QUALITY_REPORT_FILENAME = "quality-report.json"
 STATE_FILENAME = "state.json"
 BASIS_POINTS = 10_000
+QUALITY_EVALUATOR = ROOT / "tools" / "pretraining_quality_evaluation.py"
 
 
 class ProductionRunError(RuntimeError):
@@ -128,7 +144,7 @@ def git_revision() -> str | None:
     return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
 
 
-def policy_from_arguments(arguments: argparse.Namespace) -> dict[str, Any]:
+def policy_from_arguments(arguments: argparse.Namespace, quality_gate: dict[str, Any]) -> dict[str, Any]:
     policy = {
         "max_vocabulary": arguments.max_vocab,
         "min_frequency": arguments.min_frequency,
@@ -140,6 +156,14 @@ def policy_from_arguments(arguments: argparse.Namespace) -> dict[str, Any]:
         "minimum_plasticity_percent": arguments.minimum_plasticity,
         "plasticity_decay_events": arguments.decay_events,
     }
+    if quality_gate["mode"] != "not-configured":
+        # The quality evidence itself is part of the immutable run identity:
+        # a resumed controller must not silently swap held-out annotations or
+        # thresholds after training has begun. Secret redaction-key bytes are
+        # intentionally excluded; they affect report privacy, not semantics.
+        # Omitting an unconfigured gate preserves resumability of historical
+        # v1 operational runs with their pre-existing training-only policy.
+        policy["quality_gate"] = quality_gate
     require(policy["max_vocabulary"] > 0, "--max-vocab must be positive")
     require(policy["min_frequency"] == 1, "production continual path requires --min-frequency 1")
     require(policy["context_window"] > 0, "--window must be positive")
@@ -150,6 +174,56 @@ def policy_from_arguments(arguments: argparse.Namespace) -> dict[str, Any]:
             "plasticity policy is invalid")
     require(policy["plasticity_decay_events"] > 0, "--decay-events must be positive")
     return policy
+
+
+def quality_gate_binding_from_arguments(arguments: argparse.Namespace) -> dict[str, Any]:
+    """Validate optional held-out evidence before any mutable training action.
+
+    The legacy production controller remains usable for operational checkpoint
+    construction without a semantic release decision.  Supplying all three
+    evidence inputs enables a fail-closed gate for a completed checkpoint; an
+    explicit ``--require-quality-gate`` forbids the ungated mode.
+    """
+    supplied = [
+        arguments.quality_cases is not None,
+        arguments.quality_policy is not None,
+        arguments.quality_redaction_key_file is not None,
+    ]
+    if not any(supplied):
+        require(not arguments.require_quality_gate,
+                "--require-quality-gate needs --quality-cases, --quality-policy, and --quality-redaction-key-file")
+        require(arguments.quality_scratch_dir is None,
+                "--quality-scratch-dir requires configured --quality-cases, --quality-policy, and --quality-redaction-key-file")
+        return {"mode": "not-configured"}
+    require(all(supplied),
+            "quality evaluation requires --quality-cases, --quality-policy, and --quality-redaction-key-file together")
+    require(math.isfinite(arguments.quality_timeout_seconds) and arguments.quality_timeout_seconds > 0.0,
+            "--quality-timeout-seconds must be a finite positive number")
+    require(0 < arguments.quality_max_cases <= QUALITY_MAX_CASES,
+            f"--quality-max-cases must be in [1, {QUALITY_MAX_CASES}]")
+    try:
+        binding = evaluator_binding(
+            arguments.quality_cases,
+            arguments.quality_policy,
+            arguments.quality_redaction_key_file,
+            arguments.quality_max_cases,
+        )
+    except PretrainingQualityEvaluationError as error:
+        raise ProductionRunError(f"quality-gate preflight failed: {error}") from error
+    try:
+        scratch = scratch_directory(arguments.quality_scratch_dir)
+    except PretrainingQualityEvaluationError as error:
+        raise ProductionRunError(f"quality scratch preflight failed: {error}") from error
+    if scratch is None:
+        try:
+            scratch = Path(tempfile.gettempdir()).resolve(strict=True)
+        except OSError as error:
+            raise ProductionRunError(f"cannot resolve default quality scratch directory: {error}") from error
+    require(scratch.is_dir(), f"quality scratch directory is not a directory: {scratch}")
+    binding["maximum_cases"] = arguments.quality_max_cases
+    binding["timeout_seconds"] = arguments.quality_timeout_seconds
+    binding["scratch_directory"] = str(scratch)
+    return binding
 
 
 @dataclass(frozen=True)
@@ -438,6 +512,66 @@ def plan_resources(contract: DatasetContract, arguments: argparse.Namespace, che
     return plan
 
 
+QUALITY_SCRATCH_METADATA_BYTES = 2 * 1024 * 1024
+
+
+def quality_snapshot_required_bytes(checkpoint_bytes: int, binary_bytes: int, maximum_cases: int) -> int:
+    """Conservative local scratch requirement for private evaluator snapshots."""
+    require(checkpoint_bytes >= 0 and binary_bytes >= 0, "quality snapshot byte estimates must be nonnegative")
+    require(0 < maximum_cases <= QUALITY_MAX_CASES, "quality maximum case bound is invalid")
+    # Query rows are <=48 bytes plus LF. The inspect stream itself is bounded
+    # in memory, so only the binary/checkpoint copies and modest directory/query
+    # metadata need filesystem capacity.
+    return checkpoint_bytes + binary_bytes + maximum_cases * 49 + QUALITY_SCRATCH_METADATA_BYTES
+
+
+def quality_scratch_capacity(
+    quality_binding: dict[str, Any], binary: Path, checkpoint_bytes: int
+) -> dict[str, Any]:
+    """Fail before a snapshot can exhaust the operator-selected local volume."""
+    if quality_binding["mode"] == "not-configured":
+        return {"mode": "not-configured"}
+    scratch_value = quality_binding.get("scratch_directory")
+    require(isinstance(scratch_value, str) and scratch_value,
+            "quality binding omitted scratch directory")
+    scratch = Path(scratch_value)
+    require(scratch.is_dir(), f"quality scratch directory is unavailable: {scratch}")
+    try:
+        free_bytes = shutil.disk_usage(scratch).free
+        binary_bytes = binary.stat().st_size
+    except OSError as error:
+        raise ProductionRunError(f"cannot inspect quality scratch capacity: {error}") from error
+    required_bytes = quality_snapshot_required_bytes(
+        checkpoint_bytes, binary_bytes, int(quality_binding["maximum_cases"])
+    )
+    require(free_bytes >= required_bytes,
+            "quality scratch free space is below required private binary/checkpoint snapshot capacity "
+            f"({free_bytes} < {required_bytes} bytes)")
+    return {
+        "mode": "private-snapshot/v1",
+        "directory": str(scratch),
+        "free_bytes": free_bytes,
+        "required_bytes": required_bytes,
+        "checkpoint_bytes_basis": checkpoint_bytes,
+        "binary_bytes_basis": binary_bytes,
+        "query_case_bound": quality_binding["maximum_cases"],
+    }
+
+
+def quality_scratch_preflight(
+    quality_binding: dict[str, Any], binary: Path, resource_plan: dict[str, Any]
+) -> dict[str, Any]:
+    if quality_binding["mode"] == "not-configured":
+        return {"mode": "not-configured"}
+    checkpoint = resource_plan.get("checkpoint")
+    require(isinstance(checkpoint, dict) and type(checkpoint.get("estimated_max_bytes")) is int,
+            "resource plan omitted estimated checkpoint bytes for quality scratch preflight")
+    require(checkpoint["estimated_max_bytes"] <= QUALITY_MAX_CHECKPOINT_BYTES,
+            "estimated checkpoint exceeds the quality evaluator's private-snapshot cap "
+            f"({checkpoint['estimated_max_bytes']} > {QUALITY_MAX_CHECKPOINT_BYTES} bytes)")
+    return quality_scratch_capacity(quality_binding, binary, checkpoint["estimated_max_bytes"])
+
+
 class RunLock:
     def __init__(self, path: Path, recover_stale: bool) -> None:
         self.path = path
@@ -488,6 +622,7 @@ def initialize_or_verify_run(
     state_directory: Path,
     resource_plan: dict[str, Any],
     vocabulary_preflight: dict[str, int],
+    quality_scratch_preflight: dict[str, Any],
 ) -> dict[str, Any]:
     run_path = run_directory / RUN_FILENAME
     if run_path.exists():
@@ -516,6 +651,7 @@ def initialize_or_verify_run(
         "state_directory": str(state_directory),
         "vocabulary_preflight": vocabulary_preflight,
         "resource_plan": resource_plan,
+        "quality_scratch_preflight": quality_scratch_preflight,
         "hardware": collect_hardware_profile(),
         "contract": (
             "Shard-level exactly-once mutation is committed by continuous_pretrain.py state.json. "
@@ -564,6 +700,274 @@ def result_from_state(state_path: Path) -> dict[str, Any]:
     }
 
 
+def read_quality_report_snapshot(report_path: Path) -> tuple[dict[str, Any], str, int]:
+    """Read a bounded report once and reject duplicate-key/replacement tricks."""
+    try:
+        before = report_path.stat()
+        require(stat.S_ISREG(before.st_mode), "quality evaluator report is not a regular file")
+        require(before.st_size <= 32 * 1024 * 1024,
+                "quality evaluator report exceeds the 32 MiB production safety bound")
+        raw = report_path.read_bytes()
+        after = report_path.stat()
+    except OSError as error:
+        raise ProductionRunError(f"cannot read quality evaluator report {report_path}: {error}") from error
+    require(
+        (before.st_dev, before.st_ino, before.st_size) == (after.st_dev, after.st_ino, after.st_size)
+        and len(raw) == before.st_size,
+        "quality evaluator report changed while it was read",
+    )
+
+    def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ProductionRunError(f"quality evaluator report repeats JSON key {key!r}")
+            result[key] = value
+        return result
+
+    try:
+        parsed = json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicates)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ProductionRunError(f"quality evaluator report is malformed JSON: {error}") from error
+    require(isinstance(parsed, dict), "quality evaluator report must be a JSON object")
+    return parsed, hashlib.sha256(raw).hexdigest(), len(raw)
+
+
+def report_number(value: object, label: str, minimum: float, maximum: float) -> float:
+    require(type(value) in {int, float}, f"quality evaluator report {label} must be numeric")
+    parsed = float(value)
+    require(math.isfinite(parsed) and minimum <= parsed <= maximum,
+            f"quality evaluator report {label} is outside its finite bounds")
+    return parsed
+
+
+def require_report_close(actual: object, expected: float, label: str) -> None:
+    parsed = report_number(actual, label, -1.0, 1.0)
+    require(math.isclose(parsed, expected, rel_tol=0.0, abs_tol=1e-12),
+            f"quality evaluator report {label} disagrees with its case results")
+
+
+def validate_quality_report_measurement(
+    report: dict[str, Any], quality_binding: dict[str, Any], gate: dict[str, Any]
+) -> None:
+    """Recompute the public aggregate gate from privacy-redacted case rows.
+
+    The evaluator source is already SHA-bound, but its atomically published
+    report is still treated as an untrusted child artifact.  This prevents a
+    malformed/replaced report from claiming a pass merely by toggling its
+    aggregate booleans or metrics.  The recomputation needs no HMAC key and
+    therefore keeps raw held-out labels out of the production controller.
+    """
+    expected_requirements = quality_binding.get("requirements")
+    require(isinstance(expected_requirements, dict), "quality binding omitted gate requirements")
+    required_requirement_fields = {
+        "minimum_cases", "minimum_top1_accuracy", "minimum_top1_wilson_lower_bound_95",
+        "minimum_mean_similarity", "minimum_case_similarity", "maximum_incorrect_cases",
+    }
+    require(set(expected_requirements) == required_requirement_fields,
+            "quality binding has malformed gate requirements")
+    require(gate.get("requirements") == expected_requirements,
+            "quality evaluator report requirements differ from the immutable run binding")
+
+    evaluation = report.get("evaluation")
+    results = report.get("case_results")
+    metrics = report.get("metrics")
+    require(isinstance(evaluation, dict) and isinstance(results, list) and isinstance(metrics, dict),
+            "quality evaluator report omitted evaluation, case results, or metrics")
+    expected_count = quality_binding.get("case_count")
+    require(type(expected_count) is int and expected_count > 0,
+            "quality binding has malformed case count")
+    require(evaluation.get("declared_split") == "held-out",
+            "quality evaluator report is not declared held-out")
+    require(evaluation.get("case_count") == expected_count and len(results) == expected_count,
+            "quality evaluator report case count differs from immutable run binding")
+
+    correct = 0
+    similarities: list[float] = []
+    result_fields = {
+        "case_number", "case_id_hmac_sha256", "query_token_hmac_sha256",
+        "acceptable_neighbour_set_hmac_sha256", "observed_neighbour_hmac_sha256",
+        "top1_acceptable", "bipolar_similarity",
+    }
+    for number, result in enumerate(results, start=1):
+        require(isinstance(result, dict) and set(result) == result_fields,
+                "quality evaluator report has malformed or non-private case result fields")
+        require(type(result.get("case_number")) is int and result["case_number"] == number,
+                "quality evaluator report case numbering is not contiguous")
+        for field in (
+            "case_id_hmac_sha256", "query_token_hmac_sha256",
+            "acceptable_neighbour_set_hmac_sha256", "observed_neighbour_hmac_sha256",
+        ):
+            require_sha256(result.get(field), f"quality evaluator report {field}")
+        require(type(result.get("top1_acceptable")) is bool,
+                "quality evaluator report top1_acceptable must be boolean")
+        correct += int(result["top1_acceptable"])
+        similarities.append(report_number(result.get("bipolar_similarity"), "case similarity", -1.0, 1.0))
+
+    total = len(results)
+    incorrect = total - correct
+    top1_accuracy = correct / total
+    top1_wilson = wilson_lower_bound_95(correct, total)
+    mean_similarity = math.fsum(similarities) / total
+    minimum_similarity = min(similarities)
+    maximum_similarity = max(similarities)
+    require(type(metrics.get("correct_top1_cases")) is int and metrics["correct_top1_cases"] == correct,
+            "quality evaluator report correct-case total disagrees with case results")
+    require(type(metrics.get("incorrect_top1_cases")) is int and metrics["incorrect_top1_cases"] == incorrect,
+            "quality evaluator report incorrect-case total disagrees with case results")
+    require_report_close(metrics.get("top1_accuracy"), top1_accuracy, "top1_accuracy")
+    require_report_close(metrics.get("top1_wilson_lower_bound_95"), top1_wilson, "top1_wilson_lower_bound_95")
+    require_report_close(metrics.get("mean_bipolar_similarity"), mean_similarity, "mean_bipolar_similarity")
+    require_report_close(metrics.get("minimum_bipolar_similarity"), minimum_similarity, "minimum_bipolar_similarity")
+    require_report_close(metrics.get("maximum_bipolar_similarity"), maximum_similarity, "maximum_bipolar_similarity")
+
+    policy = QualityPolicy(
+        policy_id="production-bound-quality-policy",
+        minimum_cases=expected_requirements["minimum_cases"],
+        minimum_top1_accuracy=expected_requirements["minimum_top1_accuracy"],
+        minimum_top1_wilson_lower_bound_95=expected_requirements["minimum_top1_wilson_lower_bound_95"],
+        minimum_mean_similarity=expected_requirements["minimum_mean_similarity"],
+        minimum_case_similarity=expected_requirements["minimum_case_similarity"],
+        maximum_incorrect_cases=expected_requirements["maximum_incorrect_cases"],
+    )
+    failures = gate_failures(
+        policy, total, top1_accuracy, top1_wilson, mean_similarity, minimum_similarity, incorrect
+    )
+    require(gate.get("failures") == failures,
+            "quality evaluator report gate failures disagree with recomputed metrics")
+    require(gate.get("passed") is (not failures),
+            "quality evaluator report gate pass state disagrees with recomputed metrics")
+
+
+def quality_report_summary(
+    report_path: Path,
+    quality_binding: dict[str, Any],
+    binary_sha256: str,
+    checkpoint_sha256: str,
+) -> dict[str, Any]:
+    """Verify that a child evaluator's report binds this exact run candidate."""
+    report, report_sha256, report_bytes = read_quality_report_snapshot(report_path)
+    require(report.get("schema_version") == "vegai-pretraining-quality-report/v1",
+            "quality evaluator report has an unsupported schema")
+    require(report.get("status") == "completed", "quality evaluator report is not completed")
+    evaluator = report.get("evaluator")
+    provenance = report.get("provenance")
+    gate = report.get("quality_gate")
+    require(isinstance(evaluator, dict) and isinstance(provenance, dict) and isinstance(gate, dict),
+            "quality evaluator report omitted evaluator, provenance, or quality gate")
+    require(evaluator.get("sha256") == quality_binding["evaluator_source_sha256"],
+            "quality evaluator report is bound to a different evaluator source")
+    expected = {
+        "pretrain_binary": binary_sha256,
+        "checkpoint": checkpoint_sha256,
+        "case_manifest": quality_binding["case_manifest_sha256"],
+        "policy": quality_binding["policy_sha256"],
+    }
+    for label, digest in expected.items():
+        value = provenance.get(label)
+        require(isinstance(value, dict) and value.get("sha256") == digest,
+                f"quality evaluator report has wrong {label} provenance")
+    require(type(gate.get("passed")) is bool, "quality evaluator report has malformed quality_gate.passed")
+    validate_quality_report_measurement(report, quality_binding, gate)
+    return {
+        "report_sha256": report_sha256,
+        "report_bytes": report_bytes,
+        "passed": gate["passed"],
+    }
+
+
+def run_quality_gate(
+    binary: Path,
+    binary_sha256: str,
+    checkpoint: Path,
+    checkpoint_sha256: str,
+    run_directory: Path,
+    arguments: argparse.Namespace,
+    quality_binding: dict[str, Any],
+) -> dict[str, Any]:
+    """Run and independently bind a privacy-safe held-out checkpoint gate.
+
+    The production result intentionally records only report byte identity and
+    public policy identities.  It does not copy evaluator stdout, case labels,
+    token strings, or the HMAC secret path into a durable training manifest.
+    """
+    if quality_binding["mode"] == "not-configured":
+        return {
+            "status": "not-configured",
+            "release_eligible": False,
+            "contract": "No held-out semantic-neighbour release evidence was supplied for this run.",
+        }
+    report_path = run_directory / QUALITY_REPORT_FILENAME
+    command = [
+        sys.executable, str(QUALITY_EVALUATOR),
+        "--pretrain-bin", str(binary), "--checkpoint", str(checkpoint),
+        "--cases", str(arguments.quality_cases), "--policy", str(arguments.quality_policy),
+        "--redaction-key-file", str(arguments.quality_redaction_key_file),
+        "--output", str(report_path), "--max-cases", str(quality_binding.get("maximum_cases", QUALITY_MAX_CASES)),
+        "--scratch-dir", str(quality_binding.get("scratch_directory", tempfile.gettempdir())),
+        "--timeout-seconds", str(arguments.quality_timeout_seconds),
+    ]
+    try:
+        checkpoint_bytes = checkpoint.stat().st_size
+        require(checkpoint_bytes <= QUALITY_MAX_CHECKPOINT_BYTES,
+                "final checkpoint exceeds the quality evaluator's private-snapshot cap "
+                f"({checkpoint_bytes} > {QUALITY_MAX_CHECKPOINT_BYTES} bytes)")
+        runtime_scratch = quality_scratch_capacity(quality_binding, binary, checkpoint_bytes)
+        require(file_sha256(QUALITY_EVALUATOR) == quality_binding["evaluator_source_sha256"],
+                "quality evaluator source changed after quality preflight")
+        # The evaluator writes its privacy-safe report atomically. Its stdout
+        # is deliberately not retained by this wrapper: even a malformed or
+        # replaced child must not create an unbounded/sensitive durable log.
+        child = subprocess.run(
+            command, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
+        )
+        require(file_sha256(QUALITY_EVALUATOR) == quality_binding["evaluator_source_sha256"],
+                "quality evaluator source changed while quality gate was running")
+        report_summary = quality_report_summary(report_path, quality_binding, binary_sha256, checkpoint_sha256)
+    except (OSError, ValueError, json.JSONDecodeError, ProductionRunError) as error:
+        # Child output can contain operator-specific diagnostics.  The durable
+        # production result deliberately carries only this bounded category.
+        return {
+            "status": "execution-failed",
+            "release_eligible": False,
+            "reason": "evaluator-or-report-validation-failed",
+            "report_published": report_path.is_file(),
+        }
+    if child.returncode == 0 and report_summary["passed"]:
+        return {
+            "status": "passed",
+            "release_eligible": True,
+            "evaluator_exit_code": 0,
+            "private_snapshot_scratch": {
+                "free_bytes": runtime_scratch["free_bytes"],
+                "required_bytes": runtime_scratch["required_bytes"],
+            },
+            **report_summary,
+        }
+    if child.returncode == 3 and not report_summary["passed"]:
+        return {
+            "status": "failed",
+            "release_eligible": False,
+            "evaluator_exit_code": 3,
+            "private_snapshot_scratch": {
+                "free_bytes": runtime_scratch["free_bytes"],
+                "required_bytes": runtime_scratch["required_bytes"],
+            },
+            **report_summary,
+        }
+    return {
+        "status": "execution-failed",
+        "release_eligible": False,
+        "reason": "evaluator-exit-status-disagrees-with-validated-report",
+        "evaluator_exit_code": child.returncode,
+        "private_snapshot_scratch": {
+            "free_bytes": runtime_scratch["free_bytes"],
+            "required_bytes": runtime_scratch["required_bytes"],
+        },
+        **report_summary,
+    }
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pretrain-bin", required=True, type=Path, help="compiled vegai_pretrain executable")
@@ -575,6 +979,20 @@ def parse_arguments() -> argparse.Namespace:
         "--recover-locks", action="store_true",
         help="after operator review, remove stale production and continuous-controller locks before resuming",
     )
+    parser.add_argument("--quality-cases", type=Path,
+                        help="strict JSON held-out semantic-neighbour cases; supply with policy and redaction key")
+    parser.add_argument("--quality-policy", type=Path,
+                        help="strict JSON quality thresholds; supply with cases and redaction key")
+    parser.add_argument("--quality-redaction-key-file", type=Path,
+                        help="bounded local secret for HMAC-redacted quality-report identifiers")
+    parser.add_argument("--quality-max-cases", type=int, default=QUALITY_MAX_CASES,
+                        help=f"quality-case safety bound when evidence is configured (default: {QUALITY_MAX_CASES})")
+    parser.add_argument("--quality-scratch-dir", type=Path,
+                        help="local directory for private quality binary/checkpoint snapshots (default: OS temp directory)")
+    parser.add_argument("--quality-timeout-seconds", type=float, default=120.0,
+                        help="real checkpoint inspection timeout for an optional quality gate (default: 120)")
+    parser.add_argument("--require-quality-gate", action="store_true",
+                        help="reject an ungated run; requires all three --quality-* evidence inputs")
     parser.add_argument("--preflight-only", action="store_true", help="validate data/leakage/resources and write no training state")
     parser.add_argument("--skip-exact-leakage-audit", action="store_true", help="skip expensive exact held-out audit; recorded explicitly")
     parser.add_argument("--max-shards", type=int, help="commit at most this many pending immutable package shards")
@@ -598,7 +1016,8 @@ def main() -> int:
         require(arguments.max_shards is None or arguments.max_shards > 0, "--max-shards must be positive")
         require(arguments.omp_threads is None or arguments.omp_threads > 0, "--omp-threads must be positive")
         require(0.0 <= arguments.reserve_fraction <= 4.0, "--reserve-fraction must be between 0 and 4")
-        policy = policy_from_arguments(arguments)
+        quality_binding = quality_gate_binding_from_arguments(arguments)
+        policy = policy_from_arguments(arguments, quality_binding)
         binary = arguments.pretrain_bin.resolve()
         require(binary.is_file(), f"pretraining executable does not exist: {binary}")
         require(os.access(binary, os.X_OK), f"pretraining executable is not executable: {binary}")
@@ -632,14 +1051,22 @@ def main() -> int:
             finally:
                 shutil.rmtree(audit_scratch, ignore_errors=True)
             resource_plan = plan_resources(contract, arguments, state_directory / "planned-checkpoint.vgai")
+            quality_scratch = quality_scratch_preflight(quality_binding, binary, resource_plan)
             if arguments.preflight_only:
+                quality_preflight = (
+                    {"status": "validated-not-run", "release_eligible": False, "binding": quality_binding}
+                    if quality_binding["mode"] != "not-configured"
+                    else {"status": "not-configured", "release_eligible": False}
+                )
                 print(json.dumps({"dataset": str(contract.manifest_path), "leakage_audit": leakage,
                                   "vocabulary_preflight": vocabulary_preflight,
-                                  "resource_plan": resource_plan, "ready": True}, ensure_ascii=False, sort_keys=True))
+                                  "resource_plan": resource_plan, "quality_scratch_preflight": quality_scratch,
+                                  "quality_gate": quality_preflight,
+                                  "ready": True}, ensure_ascii=False, sort_keys=True))
                 return 0
             initialize_or_verify_run(
                 run_directory, arguments.resume_run, fingerprint, contract, binary, state_directory,
-                resource_plan, vocabulary_preflight,
+                resource_plan, vocabulary_preflight, quality_scratch,
             )
             state_directory.mkdir(parents=True, exist_ok=True)
             state_path = state_directory / STATE_FILENAME
@@ -688,18 +1115,69 @@ def main() -> int:
                     "continuous state regressed relative to the production run baseline")
             summary["committed_this_invocation"] = committed_this_invocation
             summary["accepted_training_tokens_this_invocation"] = tokens_this_invocation
+            if quality_binding["mode"] != "not-configured" and summary["committed_shards"] < len(contract.train_shards):
+                # A partial exactly-once invocation has a valid transactional
+                # checkpoint, but it is not a candidate for the declared full
+                # dataset release decision.  Do not turn bounded operational
+                # batches into a misleading failed model-quality result.
+                quality_gate = {
+                    "status": "deferred",
+                    "release_eligible": False,
+                    "reason": "pending-immutable-training-shards",
+                    "committed_shards": summary["committed_shards"],
+                    "required_shards": len(contract.train_shards),
+                    "binding": quality_binding,
+                }
+            else:
+                checkpoint_name = summary.get("checkpoint")
+                checkpoint_digest = summary.get("checkpoint_sha256")
+                if quality_binding["mode"] == "not-configured":
+                    quality_gate = {
+                        "status": "not-configured",
+                        "release_eligible": False,
+                        "contract": "No held-out semantic-neighbour release evidence was supplied for this run.",
+                    }
+                else:
+                    require(isinstance(checkpoint_name, str) and checkpoint_name,
+                            "continuous state omitted final checkpoint name before quality evaluation")
+                    require(isinstance(checkpoint_digest, str) and len(checkpoint_digest) == 64,
+                            "continuous state omitted final checkpoint digest before quality evaluation")
+                    checkpoint = (state_directory / checkpoint_name).resolve()
+                    try:
+                        checkpoint.relative_to(state_directory.resolve())
+                    except ValueError as error:
+                        raise ProductionRunError("continuous state checkpoint escapes state directory") from error
+                    require(checkpoint.is_file(), "continuous state final checkpoint is missing before quality evaluation")
+                    require(file_sha256(checkpoint) == checkpoint_digest,
+                            "continuous state final checkpoint digest changed before quality evaluation")
+                    quality_gate = run_quality_gate(
+                        binary, binary_sha256, checkpoint, checkpoint_digest,
+                        run_directory, arguments, quality_binding,
+                    )
             result = {
                 "schema": RESULT_SCHEMA,
                 "status": "success",
                 "finished_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                # This timer is intentionally stopped before any held-out
+                # inspection: it remains the continuous training controller
+                # wall-clock interval, not evaluator/report overhead.
                 "elapsed_train_controller_seconds": elapsed,
                 "leakage_audit": leakage,
                 "vocabulary_preflight": vocabulary_preflight,
+                "quality_scratch_preflight": quality_scratch,
                 "command": command,
                 "child_output_sha256": hashlib.sha256(child.stdout.encode("utf-8")).hexdigest(),
                 "child_output_tail": child.stdout[-8000:],
                 "continuous_state": summary,
+                "quality_gate": quality_gate,
             }
+            if quality_gate["status"] in {"failed", "execution-failed"}:
+                result["status"] = "failed"
+                atomic_write_json(run_directory / FAILURE_FILENAME, result)
+                atomic_write_json(run_directory / RESULT_FILENAME, result)
+                raise ProductionRunError(
+                    f"held-out semantic quality gate {quality_gate['status']}; see {run_directory / QUALITY_REPORT_FILENAME}"
+                )
             atomic_write_json(run_directory / RESULT_FILENAME, result)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0

@@ -36,12 +36,13 @@ LMM düzlemi şu bileşenlerden oluşur:
 
 | Bileşen | Sorumluluk |
 |---|---|
-| `tools/lmm_contract.py` | Versioned schema, Unicode doğrulama, model/tokenizer/asset manifest'i, exact token-budget context packer, worker protocol ve atomic report araçları |
+| `tools/lmm_contract.py` | Versioned schema, Unicode doğrulama, model/tokenizer/asset manifest'i, exact token-budget context packer, evidence trust-boundary ve strict structured-response contract araçları |
 | `tools/lmm_model_manifest.py` | Gerçek local model package'ini recursively hash'leyip manifest üretir ve inference öncesi artifact doğrulaması yapar |
 | `tools/lmm_session.py` | Hash-chain ile korunmuş uzun sohbet geçmişi; history'yi `vegai-lmm-request/v1` haline getirir |
 | `tools/lmm_knowledge.py` | Operator-owned Unicode JSONL belgelerinden SQLite FTS5 indeks üretir; kaynak/izin/hash taşıyan evidence bundle döndürür |
 | `tools/lmm_assets.py` | Görüntü/ses/video dosyalarını content-addressed store'a alır; MIME magic, source/license ve immutable hash kaydeder |
-| `tools/lmm_gateway.py` | Context + evidence + verified asset'leri gerçek backend'e yollar; model/request/evidence/assets provenance report üretir |
+| `tools/lmm_gateway.py` | Context + evidence + verified asset'leri gerçek backend'e yollar; bounded worker I/O, redirect-rejecting endpoint transport, optional structured-output validation ve provenance report üretir |
+| `tools/lmm_process.py` | Gateway, held-out evaluator, portfolio dispatch ve benchmark için shared no-shell bounded stdin/stdout/stderr/timeout child runner |
 | `tools/benchmark_lmm_gateway.py` | Sadece gerçek gateway child-process sürelerini ve backend token sayısını ölçer |
 | `tools/lmm_gateway_template.py` | Shell kullanmayan shared `{request}`/`{evidence}` gateway argv template doğrulaması; redirect/duplicate placeholder ve response-retention'i reddeder |
 | `tools/lmm_quality_evaluation.py` | Held-out gerçek gateway çağrılarında model-emitted citation/abstention contract'i, privacy-conscious report ve fail-closed release threshold'ları |
@@ -91,6 +92,12 @@ Audio/video protocol'u provider'lar arasında standart olmadığı için bu back
 onları fail-closed reddeder. Remote provider'ın gerçek ağırlık/revision'ı
 cryptographically doğrulanamaz; manifest'teki `model_id`/`revision` operatörün
 configuration claim'idir ve provider-side model attestation yerine geçmez.
+Gateway HTTPS'i varsayılan yapar, remote plaintext HTTP'yi reddeder, ambient
+`HTTP(S)_PROXY` routing'ini varsayılan olarak devre dışı bırakır ve HTTP
+redirect'lerini takip etmez; böylece bearer-authenticated request başka bir URL'ye
+sessizce tekrar gönderilmez. Managed proxy zorunluysa operator bunu açıkça
+`--allow-environment-proxy` ile kabul eder. Bu yine de operator-owned DNS/egress
+allowlist veya provider attestation yerine geçmez.
 
 ### 2.3 `worker`
 
@@ -98,7 +105,10 @@ configuration claim'idir ve provider-side model attestation yerine geçmez.
 yerel VLM/AV modelini bağlamak için tasarlanmıştır. Gateway shell kullanmaz;
 trusted worker command'i bir JSON string-array dosyasından okunur ve stdin'e
 tek bir `vegai-lmm-worker-request/v1` objesi gönderilir. Worker stdout'a tam
-bir `vegai-lmm-worker-response/v1` döndürmelidir.
+bir `vegai-lmm-worker-response/v1` döndürmelidir. Gateway stdout'u 8 MiB,
+stderr'i 1 MiB ve request delivery'yi 32 MiB ile bounded stream olarak işler;
+cap aşımı, timeout veya açık kalan pipe report yayınlanmadan fail-closed olur.
+Bu, worker sandbox'ı veya worker'ın semantic doğruluğu değildir.
 
 Worker request, asset'in raw bytes'ını değil doğrulanmış local path, SHA-256,
 MIME, modality ve context-token cost'unu taşır. Varsayılan
@@ -129,6 +139,45 @@ marker'ı ister. Bilinmeyen citation ile malformed citation/abstention marker'ı
 fail-closed olur; report marker gözlemini ve mevcut evidence ID'lerini taşır. Bu bir citation provenance
 kontrolüdür; modelin cümlesinin gerçekten doğru olduğu, kaynak metni anladığı
 veya iyi uncertainty calibration yaptığı anlamına gelmez.
+
+### 2.5 Operator-owned structured response contract
+
+Doğal dil yanıtı doğrudan otomasyon, tool planı veya UI state'i olarak tüketmek
+LMM sistemlerinde kırılgan bir sınırdır. Gateway'e isteğe bağlı
+`--response-contract CONTRACT.json` verildiğinde backend'in **tam response
+text'i**, markdown fence veya açıklama olmadan, strict JSON olarak parse edilir
+ve `vegai-lmm-structured-response-contract/v1` ile doğrulanır. Contract,
+operator tarafından sağlanır; modelden türetilmez veya gateway içinde domain
+cevabı hardcode edilmez.
+
+```json
+{
+  "schema_version": "vegai-lmm-structured-response-contract/v1",
+  "id": "support-decision-v1",
+  "root": {
+    "type": "object",
+    "properties": {
+      "answer": {"type": "string", "minimum_bytes": 1, "maximum_bytes": 4096},
+      "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+      "needs_human": {"type": "boolean"}
+    },
+    "required": ["answer", "confidence", "needs_human"],
+    "additional_properties": false
+  }
+}
+```
+
+Desteklenen dar grammar: bounded object/array/string, finite number/integer,
+boolean ve `null`dır. Contract duplicate JSON key, `NaN`/`Infinity`, missing
+required property, undeclared property (`additional_properties: false` ise),
+tip/bounds veya nesting ihlalinde fail-closed olur. `additional_properties: true`
+ile açıkça kabul edilen branch'ler dahil tüm response JSON ağacı 24 seviye ve
+65.536 node ile sınırlıdır. Report raw parsed object'i varsayılan olarak
+saklamaz; contract identity, contract id ve canonical JSON
+digest'i taşır. Contract dosyası model çağrısından önce/sonra rehash edilir ve
+held-out quality/portfolio runtime identity'sine dahildir; değiştirmek yeni
+quality evidence gerektirir. Bu syntax/shape doğrulamasıdır; field'ların semantik doğruluğu, factuality veya
+modelin confidence calibration'ı için held-out evaluator gerekir.
 
 ## 3. Unicode ve gerçek subword tokenization
 
@@ -226,10 +275,19 @@ python3 tools/lmm_knowledge.py query \
 ```
 
 Evidence bundle, text SHA-256, source/license ve index identity ile birlikte
-gateway'e verilir. Gateway bunları açık delimiters ile pinned context'e ekler ve
-report'a document id listesini yazar. Kaynak metni prompt injection içerebilir;
-delimiter tek başına güvenlik garantisi değildir. Source review, ACL, license,
-PII ve task-specific factual evaluation operator sorumluluğundadır.
+gateway'e verilir. Gateway önce source-free, sabit bir `system` safety boundary
+mesajı ekler; ardından her retrieved document'i açık delimiter ile **pinned
+`user`-role data** olarak iletir. Böylece arbitrary source text veya source
+metadata'sı operator system policy ile aynı role sahip olmaz; caller'ın leading
+system policy mesajları safety boundary'den önce korunur. Safety message ve
+pinned evidence normal token budget'e dahildir; sığmıyorsa gateway eski context'i
+sessizce bozmak yerine fail-closed olur. Report document id listesini taşır.
+
+Bu role separation yalnız temel bir prompt-injection azaltımıdır: model hala
+untrusted text'i yanlış takip edebilir ve client'ın arbitrary `system` message
+sunabildiği tenant/authentication boundary'yi gateway tek başına çözmez. Source
+review, ACL, license, PII/data-exfiltration policy ve task-specific factual
+evaluation operator sorumluluğundadır.
 
 ## 6. Görüntü, ses ve video input plane
 
@@ -311,6 +369,12 @@ python3 tools/benchmark_lmm_gateway.py \
   --command-json benchmark-command.json --warmups 1 --repetitions 5 \
   --output lmm-runs/benchmark.json
 ```
+
+Gateway, held-out quality evaluator, portfolio dispatcher ve benchmark harness
+ortak bounded child runner kullanır: parse edilen stdout 8 MiB, stderr 1 MiB
+ile sınırlıdır; stderr yalnız digest+byte count olarak tutulur. Timeout, cap veya
+exit sonrası açık inherited pipe fail-closed olur. Bu I/O koruması child modelin
+veya provider'ın güvenilir/sandboxed olduğu anlamına gelmez.
 
 Benchmark yalnız gateway child command'inin süresini ölçer. Compiler, fixture
 oluşturma ve Python aggregation süreleri sample dışındadır. Command model'i her
@@ -452,8 +516,9 @@ Bu beş test birlikte şunları denetler:
 - token-budget context eviction ve full-turn korunması;
 - content-addressed image/audio/video registry ve hash-checked worker snapshot;
 - model-package manifest create/rehash ve değiştirilmiş artifact fail-closed rejection;
-- evidence ve asset SHA provenance'inin worker request/report'a taşınması;
-- local OpenAI-compatible endpoint'e gerçek text/image request payload'u;
+- evidence trust-role isolation, asset SHA provenance'inin worker request/report'a taşınması;
+- strict structured-response contract'in positive/negative/over-nested backend output gate'i ve bounded worker stdout fail-closed davranışı;
+- local OpenAI-compatible endpoint'e gerçek text/image request payload'u ve redirect-rejection transport gate'i;
 - model-emitted citation/abstention marker gateway gate'i ve privacy-conscious
   held-out quality/release evaluator (başarılı ve bilinçli başarısız gate);
 - measured domain-expert portfolio ranking, bağımsız panel, selected gateway

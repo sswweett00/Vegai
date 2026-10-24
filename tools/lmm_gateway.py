@@ -26,15 +26,15 @@ import json
 import os
 from pathlib import Path
 import ssl
-import subprocess
 import sys
 import tempfile
 import time
 from typing import Any, Mapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
+from lmm_process import run_bounded_process
 from lmm_contract import (
     GENERATION_REPORT_SCHEMA,
     MAX_JSON_BYTES,
@@ -50,9 +50,11 @@ from lmm_contract import (
     LMMOptionalDependencyError,
     ModelManifest,
     PackedContext,
+    StructuredResponseContract,
     build_worker_request,
     canonical_json_bytes,
     file_identity,
+    load_structured_response_contract,
     load_tokenizer,
     pack_context,
     parse_grounding_markers,
@@ -60,12 +62,15 @@ from lmm_contract import (
     require,
     require_unchanged,
     resolve_package_path,
+    validate_structured_response,
     verify_model_artifacts,
     write_json_atomic,
 )
 
 
 MAX_WORKER_OUTPUT_BYTES = 8 * 1024 * 1024
+MAX_WORKER_STDERR_BYTES = 1 * 1024 * 1024
+MAX_WORKER_INPUT_BYTES = 32 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_MAX_INLINE_IMAGE_BYTES = 10 * 1024 * 1024
 # Snapshot delivery avoids a pathname TOCTOU for trusted multimodal workers.
@@ -117,31 +122,36 @@ def parse_worker_response(output: bytes) -> GenerationResponse:
     return response
 
 
+def invoke_worker_bounded(
+    command: Sequence[str], payload: bytes, timeout_seconds: float
+) -> tuple[int, bytes, str, int]:
+    """Run a worker under the shared bounded LMM child-process contract."""
+    result = run_bounded_process(
+        command,
+        cwd=Path(__file__).resolve().parents[1],
+        timeout_seconds=timeout_seconds,
+        stdout_limit_bytes=MAX_WORKER_OUTPUT_BYTES,
+        stderr_limit_bytes=MAX_WORKER_STDERR_BYTES,
+        stdin_bytes=payload,
+        stdin_limit_bytes=MAX_WORKER_INPUT_BYTES,
+        label="multimodal worker",
+    )
+    return result.returncode, result.stdout, result.stderr_sha256, result.stderr_bytes
+
+
 def run_worker(
     command: Sequence[str],
     payload: Mapping[str, object],
     timeout_seconds: float,
 ) -> GenerationResponse:
-    try:
-        completed = subprocess.run(
-            list(command),
-            input=canonical_json_bytes(payload),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-            timeout=timeout_seconds,
-            cwd=Path(__file__).resolve().parents[1],
-        )
-    except subprocess.TimeoutExpired as error:
-        raise LMMBackendError(f"multimodal worker exceeded {timeout_seconds} seconds") from error
-    except OSError as error:
-        raise LMMBackendError(f"cannot launch multimodal worker: {error}") from error
-    if completed.returncode != 0:
-        stderr_digest = hashlib.sha256(completed.stderr).hexdigest()
+    returncode, stdout, stderr_digest, stderr_bytes = invoke_worker_bounded(
+        command, canonical_json_bytes(payload), timeout_seconds
+    )
+    if returncode != 0:
         raise LMMBackendError(
-            f"multimodal worker exited {completed.returncode}; stderr-sha256={stderr_digest}, stderr-bytes={len(completed.stderr)}"
+            f"multimodal worker exited {returncode}; stderr-sha256={stderr_digest}, stderr-bytes={stderr_bytes}"
         )
-    return parse_worker_response(completed.stdout)
+    return parse_worker_response(stdout)
 
 
 def _open_readonly_no_follow(path: Path, label: str):
@@ -318,10 +328,18 @@ def response_text_from_openai_payload(payload: object) -> str:
     raise LMMBackendError("OpenAI-compatible endpoint returned no text content")
 
 
+class RejectRedirects(HTTPRedirectHandler):
+    """Do not replay bearer-authenticated model requests to a new URL."""
+
+    def redirect_request(self, request: Request, *args: object, **kwargs: object) -> Request | None:
+        return None
+
+
 def run_openai_compatible(
     endpoint: str,
     api_key_env: str | None,
     allow_insecure_http: bool,
+    allow_environment_proxy: bool,
     model: ModelManifest,
     request: GenerationRequest,
     context: PackedContext,
@@ -330,11 +348,14 @@ def run_openai_compatible(
     timeout_seconds: float,
 ) -> GenerationResponse:
     parsed = urlparse(endpoint)
-    require(parsed.scheme in {"https", "http"} and bool(parsed.netloc), "--endpoint must be an absolute HTTP(S) URL")
+    require(parsed.scheme in {"https", "http"} and bool(parsed.netloc) and bool(parsed.hostname),
+            "--endpoint must be an absolute HTTP(S) URL")
+    require(parsed.username is None and parsed.password is None and not parsed.fragment,
+            "--endpoint must not contain credentials or a fragment")
     require(parsed.scheme == "https" or allow_insecure_http,
             "refusing plaintext HTTP endpoint; pass --allow-insecure-http only for a trusted local test deployment")
     if parsed.scheme == "http":
-        require(parsed.hostname in {"127.0.0.1", "::1", "localhost"},
+        require(parsed.hostname.lower() in {"127.0.0.1", "::1", "localhost"},
                 "plaintext HTTP is restricted to a loopback test endpoint; use HTTPS for remote services")
     token: str | None = None
     if api_key_env is not None:
@@ -354,10 +375,22 @@ def run_openai_compatible(
     http_request = Request(endpoint, data=canonical_json_bytes(payload), headers=headers, method="POST")
     try:
         ssl_context = ssl.create_default_context() if parsed.scheme == "https" else None
-        with urlopen(http_request, timeout=timeout_seconds, context=ssl_context) as response:
+        # Do not silently inherit HTTP(S)_PROXY for bearer-authenticated model
+        # traffic. An operator can opt in to a managed proxy explicitly.
+        handlers: list[object] = [RejectRedirects()]
+        if not allow_environment_proxy:
+            handlers.append(ProxyHandler({}))
+        if ssl_context is not None:
+            handlers.append(HTTPSHandler(context=ssl_context))
+        opener = build_opener(*handlers)
+        with opener.open(http_request, timeout=timeout_seconds) as response:
             raw = response.read(MAX_WORKER_OUTPUT_BYTES + 1)
     except HTTPError as error:
         raw = error.read(MAX_WORKER_OUTPUT_BYTES + 1)
+        if 300 <= error.code < 400:
+            # Do not expose Location: it can contain query credentials, and do
+            # not let urllib replay our Authorization header to another host.
+            raise LMMBackendError("OpenAI-compatible endpoint attempted a redirect; redirects are disabled") from error
         digest = hashlib.sha256(raw).hexdigest()
         raise LMMBackendError(f"OpenAI-compatible endpoint returned HTTP {error.code}; response-sha256={digest}") from error
     except URLError as error:
@@ -465,6 +498,7 @@ def run_generate(arguments: argparse.Namespace) -> int:
     evidence_identity: FileIdentity | None = None
     asset_registry_identity: FileIdentity | None = None
     worker_config_identity: FileIdentity | None = None
+    response_contract_identity: FileIdentity | None = None
     if arguments.evidence is not None:
         dependencies.append(arguments.evidence.resolve())
         evidence_identity = file_identity(arguments.evidence, "evidence bundle", maximum_bytes=MAX_JSON_BYTES)
@@ -474,10 +508,20 @@ def run_generate(arguments: argparse.Namespace) -> int:
     if arguments.worker_command_json is not None:
         dependencies.append(arguments.worker_command_json.resolve())
         worker_config_identity = file_identity(arguments.worker_command_json, "worker command configuration", maximum_bytes=MAX_JSON_BYTES)
+    if arguments.response_contract is not None:
+        dependencies.append(arguments.response_contract.resolve())
+        response_contract_identity = file_identity(
+            arguments.response_contract, "structured-response contract", maximum_bytes=MAX_JSON_BYTES
+        )
     output_collision(arguments.output, dependencies)
 
     model = ModelManifest.from_file(model_path)
     request = GenerationRequest.from_file(request_path)
+    response_contract: StructuredResponseContract | None = None
+    if arguments.response_contract is not None:
+        response_contract, loaded_contract_identity = load_structured_response_contract(arguments.response_contract)
+        require(loaded_contract_identity == response_contract_identity,
+                "structured-response contract changed while it was being loaded")
     tokenizer_identity: FileIdentity | None = None
     tokenizer_path: Path | None = None
     if model.tokenizer.kind == "tokenizers-json":
@@ -548,6 +592,7 @@ def run_generate(arguments: argparse.Namespace) -> int:
             arguments.endpoint,
             arguments.api_key_env,
             arguments.allow_insecure_http,
+            arguments.allow_environment_proxy,
             model,
             request,
             context,
@@ -557,6 +602,9 @@ def run_generate(arguments: argparse.Namespace) -> int:
         )
     elapsed_seconds = time.monotonic() - started
     grounding = validate_grounding(arguments.grounding_mode, evidence, response)
+    structured_output = (
+        None if response_contract is None else validate_structured_response(response.text, response_contract)
+    )
 
     # Rehash every byte dependency after the model call. The model backend may
     # be slow; a report is valid only if the request/model/evidence/assets it
@@ -572,6 +620,8 @@ def run_generate(arguments: argparse.Namespace) -> int:
         require_unchanged(arguments.asset_registry, asset_registry_identity, "asset registry")
     if worker_config_identity is not None:
         require_unchanged(arguments.worker_command_json, worker_config_identity, "worker command configuration")
+    if response_contract_identity is not None:
+        require_unchanged(arguments.response_contract, response_contract_identity, "structured-response contract")
     for relative, identity in artifact_identities.items():
         require_unchanged(Path(identity.path), identity, f"model artifact {relative}")
     for asset_id, (_, identity) in verified_assets.items():
@@ -598,6 +648,7 @@ def run_generate(arguments: argparse.Namespace) -> int:
             "evidence": None if evidence_identity is None else evidence_identity.to_mapping(),
             "asset_registry": None if asset_registry_identity is None else asset_registry_identity.to_mapping(),
             "worker_command_configuration": None if worker_config_identity is None else worker_config_identity.to_mapping(),
+            "structured_response_contract": None if response_contract_identity is None else response_contract_identity.to_mapping(),
             "model_artifacts": {relative: identity.to_mapping() for relative, identity in artifact_identities.items()},
             "assets": {asset_id: identity.to_mapping() for asset_id, (_, identity) in verified_assets.items()},
         },
@@ -612,6 +663,7 @@ def run_generate(arguments: argparse.Namespace) -> int:
         "context": context.to_mapping(include_content=False),
         "evidence_document_ids": [] if evidence is None else [item.document_id for item in evidence.items],
         "grounding": grounding,
+        "structured_output": structured_output,
         "backend": {
             "name": response.backend,
             "requested_device": arguments.device if backend == "openvino-genai" else None,
@@ -647,6 +699,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", required=True, type=Path, help="vegai-lmm-model/v1 immutable manifest")
     parser.add_argument("--request", required=True, type=Path, help="vegai-lmm-request/v1 JSON object")
     parser.add_argument("--evidence", type=Path, help="optional vegai-lmm-evidence/v1 bundle from lmm_knowledge.py")
+    parser.add_argument("--response-contract", type=Path,
+                        help="optional strict vegai-lmm-structured-response-contract/v1; backend text must be exact JSON")
     parser.add_argument("--grounding-mode", choices=("off", "require-citations", "evidence-or-abstain"), default="off",
                         help="optional model-output provenance gate; model must emit documented citation/abstention markers itself")
     parser.add_argument("--asset-registry", type=Path, help="strict JSONL content-addressed asset registry")
@@ -664,6 +718,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--endpoint", help="HTTPS OpenAI-compatible /chat/completions endpoint")
     parser.add_argument("--api-key-env", help="environment variable containing endpoint bearer token; never stored in report")
     parser.add_argument("--allow-insecure-http", action="store_true", help="allow HTTP only for a trusted local test endpoint")
+    parser.add_argument("--allow-environment-proxy", action="store_true",
+                        help="explicitly allow HTTP(S)_PROXY environment routing for the endpoint request")
     parser.add_argument("--device", default="CPU", help="OpenVINO GenAI requested device, e.g. CPU/GPU/NPU")
     parser.add_argument("--timeout-seconds", type=parse_positive_float, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--output", type=Path, help="optional atomic provenance report path")

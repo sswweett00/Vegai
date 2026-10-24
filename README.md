@@ -24,6 +24,9 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 - iki-pass vocabulary, allocation-free ASCII ingest, streaming positional-context
   Hebbian öğrenme, checkpoint/resume telemetry ve SHA-256 journal'lı continual
   shard pretraining içeren HDC/VSA corpus pipeline;
+- operator-owned held-out semantic-neighbour annotation/policy ile gerçek
+  checkpoint inspect ABI'sini ölçen, HMAC-redacted report/provenance üreten ve
+  optional production release'i fail-closed durduran pretraining quality gate;
 - schema-checked streaming training-data boundary: JSONL/JSON/TXT/Parquet/Arrow
   rich record I/O, exact SQLite text-dedupe, label-imbalance/split audit ve
   explicit strict-HDC text projection;
@@ -110,6 +113,10 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 > ister; veri yönetişimi, checkpoint ve sınırlar [PRETRAINING.md](docs/PRETRAINING.md)'de, immutable
 > shard'larla crash-safe continual çalışma ise
 > [CONTINUOUS_PRETRAINING.md](docs/CONTINUOUS_PRETRAINING.md)'de açıkça tanımlıdır.
+> Target-domain semantic-neighbour kalite iddiası gerekiyorsa hardcoded fixture
+> yerine operator-held-out case/policy ile gerçek checkpoint release gate'i
+> [PRETRAINING_QUALITY_GATE.md](docs/PRETRAINING_QUALITY_GATE.md)'deki sözleşme
+> ile uygulanmalıdır; bu gate genel LLM/LMM zekâsı kanıtı değildir.
 > Rich metadata'dan policy-driven staged capability corpus seçimi ve replayable
 > lineage için [CAPABILITY_CURRICULUM.md](docs/CAPABILITY_CURRICULUM.md) kullanılır;
 > bu katman da tek başına reasoning/coding başarısı veya zeka iddiası değildir.
@@ -291,6 +298,19 @@ python3 tools/production_pretrain.py --pretrain-bin ./build/vegai_pretrain \
   --dataset production-datasets/release-v1/dataset.json \
   --run-dir production-runs/release-v1-hdc \
   --max-vocab 20000 --min-frequency 1 --context-mode hierarchical --epochs 1
+
+# Release-eligible checkpoint için operator-owned held-out semantic-neighbour
+# evidence ekleyin. Case/policy/key'i repository dışında yönetin.
+python3 tools/production_pretrain.py --pretrain-bin ./build/vegai_pretrain \
+  --dataset production-datasets/release-v1/dataset.json \
+  --run-dir production-runs/release-v1-hdc-quality \
+  --max-vocab 20000 --min-frequency 1 --context-mode hierarchical --epochs 1 \
+  --quality-cases /secure/evaluation/release-v1-cases.json \
+  --quality-policy /secure/evaluation/release-v1-policy.json \
+  --quality-redaction-key-file /secure/secrets/release-v1-quality.key \
+  --quality-scratch-dir /fast-local-ssd/vegai-quality-scratch \
+  --require-quality-gate
+make quality-check
 ```
 
 GNU CMake hedefi `-std=f2023` bayrağını uygulama, test ve kütüphane hedeflerine
@@ -332,13 +352,14 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Evidential Pareto Optimizer | `tools/evidential_optimizer.py` | gerçek algorithm/optimizer config ve artifact hash'lerini repeated held-out bounded metric'lerle Bonferroni-Hoeffding confidence + robust Pareto gate üzerinden seçer; neural optimizer/runtime veya universal-best claim'i değil |
 | HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, hierarchical default + CPU-only coherent cross-fold option, deterministic OpenMP / optional OpenVINO immutable-context preparation + source-ordered CPU commit, mode-selective v5/v6 checkpoint/resume |
 | Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect`, CPU/OpenVINO context-provider execution switch ve nearest semantic diagnostic |
+| Pretraining checkpoint quality gate | `tools/pretraining_quality_evaluation.py`, `tools/production_pretrain.py` | operator-held-out semantic-neighbour annotation/policy ile real inspect batch'i, immutable evaluator/binary/checkpoint/case/policy binding, HMAC-redacted report ve fail-closed optional production release; genel LLM/LMM quality benchmarkı değil |
 | Grounded dialogue retrieval | `src/dialogue_retrieval.f90`, `app/chat.f90` | operator TSV response index'i, strict ASCII/OOV gate, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; free-form LLM generation degil |
 | Dialogue quality release gate | `tools/dialogue_evaluation.py` | versioned held-out JSONL ile stateless exact prompt grounding/abstention olcumu, immutable input digest binding, privacy-conscious report ve threshold gate |
-| Optional LMM integration | `tools/lmm_contract.py`, `tools/lmm_model_manifest.py`, `tools/lmm_gateway.py`, `tools/lmm_quality_evaluation.py`, `tools/lmm_portfolio.py`, `tools/lmm_session.py`, `tools/lmm_knowledge.py`, `tools/lmm_assets.py` | gerçek external model backend'i için Unicode/subword tokenizer binding, model-artifact hash, long-context packer, source evidence, content-addressed media, held-out citation/abstention release gate, measured domain-expert routing/independent-panel planı ve fail-closed provenance; model weights/native neural training degil |
+| Optional LMM integration | `tools/lmm_contract.py`, `tools/lmm_model_manifest.py`, `tools/lmm_gateway.py`, `tools/lmm_quality_evaluation.py`, `tools/lmm_portfolio.py`, `tools/lmm_session.py`, `tools/lmm_knowledge.py`, `tools/lmm_assets.py` | gerçek external model backend'i için Unicode/subword tokenizer binding, model-artifact hash, long-context packer, trust-role-isolated source evidence, strict structured-output contract, bounded worker/redirect-safe transport, content-addressed media, held-out citation/abstention release gate, measured domain-expert routing/independent-panel planı ve fail-closed provenance; model weights/native neural training degil |
 | Verified tool orchestration | `tools/lmm_tool_orchestrator.py` | model/operator action planını exact request+registry binding, typed multi-step output reference, no-shell private worker execution, separate verifier digest ve gateway-ready evidence ile yürütür; final answer, OS sandbox veya universal reasoning claim'i değil |
 | LMM release governance | `tools/lmm_release_governor.py`, `tools/lmm_release_registry.py` | frozen portfolio/task/model/gateway/evaluation/held-out-quality provenance'ı, zorunlu quality/reliability/safety/cost/latency policy'si, aggregate-only shadow → bounded canary → promote/rollback state chain'i, external traffic directive'i ve single-host authoritative CAS/hash-chain head üretir; live routing, signed distributed registry, telemetry trust veya model superiority claim'i değil |
 | Continual transaction + health audit | `tools/continuous_shard_manifest.py`, `tools/continuous_pretrain.py`, `tools/continuous_pretrain_status.py` | immutable SHA-256 ledger, strict ingest gate, candidate generation, atomic state journal, read-only checkpoint/prefix/payload audit |
-| Production data/run control | `tools/production_dataset.py`, `tools/production_pretrain.py` | disk-backed exact record/token dedupe, deterministic held-out split, content-addressed shard package, exact leakage + vocabulary-capacity gate, immutable binary/data/policy provenance, real exactly-once run wrapper |
+| Production data/run control | `tools/production_dataset.py`, `tools/production_pretrain.py` | disk-backed exact record/token dedupe, deterministic held-out split, content-addressed shard package, exact leakage + vocabulary-capacity gate, immutable binary/data/policy provenance, real exactly-once run wrapper ve optional completed-checkpoint semantic quality release binding |
 | Kaynak preflight | `tools/training_resource_plan.py` | bounded RAM/checkpoint storage estimate, CPU/NUMA/OpenMP recommendation, static accelerator truth contract |
 | OpenVINO context worker | `tools/openvino_context_worker.py` | optional Intel uint32-lane immutable-context bridge; resident per-train service, dynamic-batch compiled-graph cache, execution mask / native-CPU bypass contract |
 | Çalıştırılabilir doğrulama | `app/main.f90` | %25 exact gürültü, analoji, causal chain ve 3-faktör Resonator demo |
@@ -359,7 +380,9 @@ raw-byte tokenless representation, exact Walsh contract ve semantic/physical
 sınırlar için [docs/TOKENLESS_SIGNAL_FIELD.md](docs/TOKENLESS_SIGNAL_FIELD.md),
 Resonator Network sözleşmesi için [docs/RESONATOR_NETWORK.md](docs/RESONATOR_NETWORK.md),
 corpus veri hattı, yönetişim ve checkpoint sözleşmesi için
-[docs/PRETRAINING.md](docs/PRETRAINING.md), JSONL/JSON/TXT/Parquet/Arrow training-data
+[docs/PRETRAINING.md](docs/PRETRAINING.md), operator-held-out HDC checkpoint
+semantic-neighbour quality/release contract'i için
+[docs/PRETRAINING_QUALITY_GATE.md](docs/PRETRAINING_QUALITY_GATE.md), JSONL/JSON/TXT/Parquet/Arrow training-data
 şeması ve streaming dönüşüm sözleşmesi için
 [docs/TRAINING_DATA_FORMAT.md](docs/TRAINING_DATA_FORMAT.md), operator policy'si ile
 hardcoded veri eklemeden staged target-domain curriculum packaging/replay için

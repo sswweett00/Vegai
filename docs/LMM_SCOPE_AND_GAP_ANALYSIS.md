@@ -21,7 +21,7 @@ multimodal neural runtime yapmaz.
 | Yeni production control plane | disk-backed exact raw-record dedupe, content-addressed shards, deterministic held-out split, exact leakage gate, max-vocabulary capacity preflight, binary/data/policy provenance |
 | Grounded diyalog retrieval | checkpoint semantic HV + operator TSV prompt/response index, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; cevap TSV'den gelir |
 | Grounded retrieval quality gate | versioned held-out JSONL, stateless real-binary exact prompt/abstention metrikleri, immutable input digest binding, privacy-conscious report ve explicit release threshold'lari |
-| Optional LMM integration plane | Unicode/subword model-tokenizer manifest, hash-chained long dialogue, provenance-bound FTS evidence, content-addressed image/audio/video asset registry, model-emitted citation/abstention release gate, measured domain-expert router/independent-panel planı, typed independently verified read-only tool planı ve gerçek OpenVINO/API/worker backend gateway'i; model ağırlığı depoda değildir |
+| Optional LMM integration plane | Unicode/subword model-tokenizer manifest, hash-chained long dialogue, trust-role-isolated FTS evidence, content-addressed image/audio/video asset registry, strict structured-output contract, model-emitted citation/abstention release gate, measured domain-expert router/independent-panel planı, typed independently verified read-only tool planı ve gerçek OpenVINO/API/worker backend gateway'i; model ağırlığı depoda değildir |
 | LMM release control | Frozen portfolio/task/model/gateway/quality identity'leriyle aggregate-only shadow → canary → promote/rollback governor; verified artifact'ler için strict-LF canonical local hash-chain, single-host expected-state CAS ve privacy-safe head (`lmm_release_governor.py`, `lmm_release_registry.py`) |
 | Algorithm/optimizer evidence governor | Immutable algorithm/optimizer/training/artifact identity'lerini repeated held-out bounded observation ile Bonferroni-Hoeffding/Pareto gate'ten geçirir; actual optimizer veya neural training runtime değildir (`evidential_optimizer.py`) |
 
@@ -64,8 +64,11 @@ safety/red-team evaluation yapmaz.
 `tools/lmm_gateway.py` ile ayrı bir LMM integration plane eklendi. Bu plane,
 gerçek bir operator-supplied OpenVINO GenAI modelini, HTTPS OpenAI-compatible
 endpoint'i veya local multimodal worker'ı bağlayabilir; Unicode/subword tokenizer
-ve immutable model artifact manifest'iyle context pack eder. Image/audio/video
-ancak gerçek backend capability'si ilan edildiğinde worker'a geçer.
+ve immutable model artifact manifest'iyle context pack eder. Retrieved evidence,
+source-free trusted safety mesajından sonra pinned user-data olarak taşınır;
+optional strict JSON response contract'i tool/UI tüketicisi için shape gate
+sağlar. Image/audio/video ancak gerçek backend capability'si ilan edildiğinde
+worker'a geçer.
 `lmm_quality_evaluation.py`, gerçek configured gateway üzerinde held-out
 citation/abstention contract'ini release threshold ile ölçer; response'u
 hardcode etmez veya factuality iddia etmez. `lmm_portfolio.py`, yalnız aynı
@@ -119,21 +122,24 @@ edilebilir işlemsel eksikleri kapatır:
 10. source/license/hash taşıyan Unicode FTS knowledge evidence ve
     content-addressed image/audio/video asset registry;
 11. OpenVINO GenAI text, HTTPS OpenAI-compatible ve local multimodal worker
-    backend'leri için fail-closed capability/provenance gateway;
-12. model-emitted evidence citation/explicit abstention marker doğrulaması ve
+    backend'leri için fail-closed capability/provenance gateway; bounded worker
+    pipes ve redirect-rejecting authenticated endpoint transport;
+12. retrieved evidence için trusted policy/data role separation ve operator-owned
+    strict structured JSON response contract gate'i;
+13. model-emitted evidence citation/explicit abstention marker doğrulaması ve
     gerçek gateway child process'leri üzerinde privacy-conscious held-out LMM
     quality/release gate;
-13. model manifest + quality report + target-domain evaluation card bağlayan,
+14. model manifest + quality report + target-domain evaluation card bağlayan,
     residency/safety/modality/SLO threshold'lu deterministic expert routing ve
     bağımsız panel planı;
-14. actual gateway child-process latency ve backend-reported token ölçümü;
-15. external algorithm/optimizer config, training contract ve artifact identity
+15. actual gateway child-process latency ve backend-reported token ölçümü;
+16. external algorithm/optimizer config, training contract ve artifact identity
     için repeated held-out bounded observation, conservative all-objective
     baseline comparison, robust Pareto ve no-replace decision gate'i;
-16. actual LMM/operator tool planı için request+registry SHA binding, typed
+17. actual LMM/operator tool planı için request+registry SHA binding, typed
     predecessor result reference, no-shell read-only executor, distinct verifier,
     privacy-conscious report ve gateway-ready evidence publication;
-17. immutable governor state/decision artifact'leri için strict-LF canonical
+18. immutable governor state/decision artifact'leri için strict-LF canonical
     JSONL ledger, local lock + expected-state CAS, direct transition/batch/
     directive binding, privacy-safe inspect ve negative-gate verification.
 

@@ -24,13 +24,12 @@ import hmac
 import json
 import math
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
-import time
 from typing import Any, Iterator, Mapping, Sequence
 
 from lmm_gateway_template import EVIDENCE_PLACEHOLDER, REQUEST_PLACEHOLDER, load_gateway_command_template
+from lmm_process import run_bounded_process
 from lmm_contract import (
     GENERATION_REPORT_SCHEMA,
     MAX_EVIDENCE_ITEMS,
@@ -60,6 +59,7 @@ MAX_CASESET_BYTES = 512 * 1024 * 1024
 MAX_CASES = 10_000
 MAX_HMAC_KEY_BYTES = 4 * 1024
 MAX_GATEWAY_STDOUT_BYTES = 8 * 1024 * 1024
+MAX_GATEWAY_STDERR_BYTES = 1 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 180.0
 
 
@@ -273,6 +273,7 @@ def stable_runtime_identity(report: Mapping[str, Any]) -> tuple[str, str]:
         "tokenizer",
         "asset_registry",
         "worker_command_configuration",
+        "structured_response_contract",
         "model_artifacts",
     )
     missing = [field for field in stable_fields if field not in identities]
@@ -290,30 +291,21 @@ def run_gateway_case(
     evidence_path: Path,
     timeout_seconds: float,
 ) -> GatewayObservation:
-    started = time.monotonic()
-    try:
-        completed = subprocess.run(
-            expand_command(command, request_path, evidence_path),
-            cwd=Path(__file__).resolve().parents[1],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise LMMQualityEvaluationError(f"quality gateway case exceeded {timeout_seconds} seconds") from error
-    except OSError as error:
-        raise LMMQualityEvaluationError(f"cannot launch quality gateway command: {error}") from error
-    elapsed = time.monotonic() - started
+    completed = run_bounded_process(
+        expand_command(command, request_path, evidence_path),
+        cwd=Path(__file__).resolve().parents[1],
+        timeout_seconds=timeout_seconds,
+        stdout_limit_bytes=MAX_GATEWAY_STDOUT_BYTES,
+        stderr_limit_bytes=MAX_GATEWAY_STDERR_BYTES,
+        label="quality gateway case",
+    )
+    elapsed = completed.elapsed_seconds
     if completed.returncode != 0:
         raise LMMQualityEvaluationError(
             "quality gateway command failed; "
-            f"stdout-sha256={sha256_bytes(completed.stdout)}, stderr-sha256={sha256_bytes(completed.stderr)}, "
-            f"exit={completed.returncode}"
+            f"stdout-sha256={sha256_bytes(completed.stdout)}, stderr-sha256={completed.stderr_sha256}, "
+            f"stderr-bytes={completed.stderr_bytes}, exit={completed.returncode}"
         )
-    require(len(completed.stdout) <= MAX_GATEWAY_STDOUT_BYTES,
-            f"quality gateway stdout exceeds {MAX_GATEWAY_STDOUT_BYTES} bytes")
     try:
         payload = json.loads(completed.stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:

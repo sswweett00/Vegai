@@ -22,7 +22,6 @@ import json
 import math
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
@@ -48,6 +47,7 @@ from lmm_contract import (
     validate_unicode_text,
     write_json_atomic,
 )
+from lmm_process import run_bounded_process
 from lmm_gateway_template import (
     GROUNDING_MODES,
     GatewayCommandTemplate,
@@ -70,6 +70,7 @@ MAX_DOMAINS_PER_CANDIDATE = 64
 MAX_RESIDENCIES_PER_CANDIDATE = 32
 MAX_PANEL_CANDIDATES = 8
 MAX_GATEWAY_STDOUT_BYTES = 8 * 1024 * 1024
+MAX_GATEWAY_STDERR_BYTES = 1 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 180.0
 _RUNTIME_IDENTITY_FIELDS = (
     "gateway_tool",
@@ -77,6 +78,7 @@ _RUNTIME_IDENTITY_FIELDS = (
     "tokenizer",
     "asset_registry",
     "worker_command_configuration",
+    "structured_response_contract",
     "model_artifacts",
 )
 _ALLOWED_MODALITIES = frozenset(("text", "image", "audio", "video"))
@@ -913,33 +915,27 @@ def generate(arguments: argparse.Namespace) -> int:
     require(state.task.strategy == "single-best" and len(selected) == 1,
             "generate supports only single-best routing; use route for an independent-panel plan and operator-owned adjudication")
     choice = selected[0]
-    started = time.monotonic()
+    started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="vegai-lmm-portfolio-") as directory:
         workspace = Path(directory)
         private_request = workspace / "request.json"
         private_evidence = workspace / "evidence.json"
         copy_private_input(arguments.request.resolve(), state.request_identity, private_request, "request")
         copy_private_input(arguments.evidence.resolve(), state.evidence_identity, private_evidence, "evidence")
-        try:
-            completed = subprocess.run(
-                expand_gateway_command(choice.runtime.command, private_request, private_evidence),
-                cwd=Path(__file__).resolve().parents[1],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=arguments.timeout_seconds,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as error:
-            raise LMMPortfolioError(f"selected gateway exceeded {arguments.timeout_seconds} seconds") from error
-        except OSError as error:
-            raise LMMPortfolioError(f"cannot launch selected gateway: {error}") from error
-    elapsed_seconds = time.monotonic() - started
+        completed = run_bounded_process(
+            expand_gateway_command(choice.runtime.command, private_request, private_evidence),
+            cwd=Path(__file__).resolve().parents[1],
+            timeout_seconds=arguments.timeout_seconds,
+            stdout_limit_bytes=MAX_GATEWAY_STDOUT_BYTES,
+            stderr_limit_bytes=MAX_GATEWAY_STDERR_BYTES,
+            label="selected gateway",
+        )
+    elapsed_seconds = time.perf_counter() - started
     if completed.returncode != 0:
         raise LMMPortfolioError(
             "selected gateway failed; "
-            f"stdout-sha256={sha256_bytes(completed.stdout)}, stderr-sha256={sha256_bytes(completed.stderr)}, "
-            f"exit={completed.returncode}"
+            f"stdout-sha256={sha256_bytes(completed.stdout)}, stderr-sha256={completed.stderr_sha256}, "
+            f"stderr-bytes={completed.stderr_bytes}, exit={completed.returncode}"
         )
     response, gateway_report, response_sha256 = parse_gateway_result(
         completed.stdout,

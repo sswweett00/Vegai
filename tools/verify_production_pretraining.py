@@ -59,7 +59,12 @@ def build_command(source: Path, output: Path) -> list[str]:
 
 
 def run_command(
-    binary: Path, dataset: Path, run_directory: Path, resume: bool = False, max_vocabulary: int = 64
+    binary: Path,
+    dataset: Path,
+    run_directory: Path,
+    resume: bool = False,
+    max_vocabulary: int = 64,
+    quality: tuple[Path, Path, Path] | None = None,
 ) -> list[str]:
     command = [
         sys.executable, str(RUN_TOOL), "--pretrain-bin", str(binary), "--dataset", str(dataset),
@@ -68,6 +73,12 @@ def run_command(
         "--epochs", "1", "--initial-plasticity", "25", "--minimum-plasticity", "1",
         "--decay-events", "8", "--omp-threads", "1",
     ]
+    if quality is not None:
+        cases, policy, redaction_key = quality
+        command.extend([
+            "--quality-cases", str(cases), "--quality-policy", str(policy),
+            "--quality-redaction-key-file", str(redaction_key), "--require-quality-gate",
+        ])
     if resume:
         command.append("--resume-run")
     return command
@@ -102,6 +113,75 @@ def files_under(root: Path) -> dict[str, bytes]:
         str(path.relative_to(root)): path.read_bytes()
         for path in sorted(root.rglob("*")) if path.is_file()
     }
+
+
+def quality_fixture(workspace: Path, train_rows: list[str], *, fail_gate: bool = False) -> tuple[Path, Path, Path]:
+    """Create held-out annotation metadata for the real production checkpoint.
+
+    All active fixture tokens other than a query are acceptable.  That makes
+    this a plumbing/provenance test rather than a claim about the tiny synthetic
+    corpus's semantic quality; the production evaluator still invokes the real
+    batch inspect ABI and enforces its release decision.
+    """
+    tokens = sorted({token for row in train_rows for token in row.split()})
+    if len(tokens) < 3:
+        fail("quality fixture needs at least three active training tokens")
+    cases = []
+    for index, token in enumerate(tokens[:2], start=1):
+        acceptable = [candidate for candidate in tokens if candidate != token]
+        if fail_gate and index == 1:
+            acceptable = ["unrelated_expected_token"]
+        cases.append(
+            {
+                "schema_version": "vegai-pretraining-quality-case/v1",
+                "id": f"production-quality-case-{index}",
+                "query_token": token,
+                "acceptable_neighbours": acceptable,
+            }
+        )
+    cases_path = workspace / ("quality-failed-cases.json" if fail_gate else "quality-cases.json")
+    policy_path = workspace / ("quality-failed-policy.json" if fail_gate else "quality-policy.json")
+    key_path = workspace / ("quality-failed.key" if fail_gate else "quality.key")
+    cases_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "vegai-pretraining-quality-cases/v1",
+                "evaluation_id": "production-quality-held-out-fixture-v1",
+                "declared_split": "held-out",
+                "annotation_provenance": {
+                    "source": "Vegai deterministic production-control verification fixture",
+                    "license": "MIT",
+                    "retrieved_at": "source-controlled verification fixture",
+                    "method": "real checkpoint release-gate plumbing fixture/v1",
+                },
+                "cases": cases,
+            },
+            ensure_ascii=True,
+            indent=2,
+            sort_keys=True,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "vegai-pretraining-quality-policy/v1",
+                "policy_id": "production-quality-fixture-policy-v1",
+                "minimum_cases": 2,
+                "minimum_top1_accuracy": 1.0,
+                "minimum_top1_wilson_lower_bound_95": 0.0,
+                "minimum_mean_similarity": -1.0,
+                "minimum_case_similarity": -1.0,
+                "maximum_incorrect_cases": 0,
+            },
+            ensure_ascii=True,
+            indent=2,
+            sort_keys=True,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    key_path.write_bytes(b"production-pretraining-quality-verifier-secret\n")
+    return cases_path, policy_path, key_path
 
 
 def main() -> int:
@@ -145,12 +225,39 @@ def main() -> int:
             if "max-vocab is below" not in capacity_rejected.stdout:
                 fail(f"unsafe vocabulary capacity was not rejected before training\n{capacity_rejected.stdout}")
 
+            quality = quality_fixture(workspace, train)
             run_directory = workspace / "production-run"
-            first = output_json(run(run_command(binary, dataset_a / "dataset.json", run_directory)))
+            first = output_json(run(run_command(binary, dataset_a / "dataset.json", run_directory, quality=quality)))
             if first.get("status") != "success":
                 fail(f"production run did not report success: {first}")
             if first.get("continuous_state", {}).get("committed_this_invocation") != 2:
                 fail(f"production result did not report both first-run shard commits: {first}")
+            quality_result = first.get("quality_gate")
+            if (
+                not isinstance(quality_result, dict)
+                or quality_result.get("status") != "passed"
+                or quality_result.get("release_eligible") is not True
+                or not isinstance(quality_result.get("report_sha256"), str)
+            ):
+                fail(f"production result did not bind a passed held-out quality gate: {first}")
+            scratch_preflight = first.get("quality_scratch_preflight")
+            if (
+                not isinstance(scratch_preflight, dict)
+                or scratch_preflight.get("mode") != "private-snapshot/v1"
+                or not isinstance(scratch_preflight.get("required_bytes"), int)
+                or not isinstance(scratch_preflight.get("free_bytes"), int)
+                or scratch_preflight["free_bytes"] < scratch_preflight["required_bytes"]
+            ):
+                fail(f"production run did not record a ready quality scratch preflight: {first}")
+            quality_report = run_directory / "quality-report.json"
+            if not quality_report.is_file():
+                fail("production result claimed a quality gate without publishing quality-report.json")
+            quality_report_text = quality_report.read_text(encoding="utf-8")
+            if any(token in quality_report_text for token in sorted({token for row in train for token in row.split()})):
+                fail("production quality report copied raw semantic case tokens instead of HMAC identifiers")
+            quality_report_payload = json.loads(quality_report_text)
+            if quality_report_payload.get("quality_gate", {}).get("passed") is not True:
+                fail(f"published production quality report is not a passing gate: {quality_report_payload}")
             leakage = first.get("leakage_audit")
             if not isinstance(leakage, dict) or leakage.get("mode") != "exact-sha256-record-sqlite/v1" or leakage.get("overlap_records") != 0:
                 fail(f"exact held-out leakage audit was not recorded: {first}")
@@ -196,7 +303,7 @@ def main() -> int:
                 fail(f"production state health report is inconsistent: {health}")
 
             state_before_resume = (run_directory / "state" / "state.json").read_bytes()
-            second = output_json(run(run_command(binary, dataset_a / "dataset.json", run_directory, resume=True)))
+            second = output_json(run(run_command(binary, dataset_a / "dataset.json", run_directory, resume=True, quality=quality)))
             if (
                 second.get("continuous_state", {}).get("committed_shards") != 2
                 or second.get("continuous_state", {}).get("committed_this_invocation") != 0
@@ -204,6 +311,64 @@ def main() -> int:
                 fail(f"resume did not retain exactly-once committed history: {second}")
             if (run_directory / "state" / "state.json").read_bytes() != state_before_resume:
                 fail("idempotent production resume changed durable continuous state")
+            if second.get("quality_gate", {}).get("status") != "passed":
+                fail(f"idempotent resume did not rebind a passed quality gate: {second}")
+
+            alternate_policy = workspace / "quality-policy-alternate.json"
+            alternate_policy_payload = json.loads(quality[1].read_text(encoding="utf-8"))
+            alternate_policy_payload["policy_id"] = "production-quality-fixture-policy-alternate-v1"
+            alternate_policy.write_text(
+                json.dumps(alternate_policy_payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            policy_swap = run(
+                run_command(
+                    binary, dataset_a / "dataset.json", run_directory, resume=True,
+                    quality=(quality[0], alternate_policy, quality[2]),
+                ),
+                expected=1,
+            )
+            if "existing run identity differs" not in policy_swap.stdout:
+                fail(f"resume accepted a swapped held-out quality policy\n{policy_swap.stdout}")
+
+            deferred_quality_run = workspace / "quality-deferred-run"
+            deferred = output_json(
+                run(
+                    run_command(binary, dataset_a / "dataset.json", deferred_quality_run, quality=quality)
+                    + ["--max-shards", "1"]
+                )
+            )
+            if (
+                deferred.get("status") != "success"
+                or deferred.get("quality_gate", {}).get("status") != "deferred"
+                or deferred.get("quality_gate", {}).get("release_eligible") is not False
+                or (deferred_quality_run / "quality-report.json").exists()
+            ):
+                fail(f"partial quality-configured run was not explicitly deferred: {deferred}")
+            completed_deferred = output_json(
+                run(run_command(binary, dataset_a / "dataset.json", deferred_quality_run, resume=True, quality=quality))
+            )
+            if completed_deferred.get("quality_gate", {}).get("status") != "passed":
+                fail(f"completed deferred run did not execute the final quality gate: {completed_deferred}")
+
+            failed_quality = quality_fixture(workspace, train, fail_gate=True)
+            failed_quality_run = workspace / "quality-failed-run"
+            rejected_quality = run(
+                run_command(binary, dataset_a / "dataset.json", failed_quality_run, quality=failed_quality), expected=1
+            )
+            if "held-out semantic quality gate failed" not in rejected_quality.stdout:
+                fail(f"failed held-out semantic quality gate was not surfaced\n{rejected_quality.stdout}")
+            failed_quality_result = json.loads((failed_quality_run / "result.json").read_text(encoding="utf-8"))
+            if (
+                failed_quality_result.get("status") != "failed"
+                or failed_quality_result.get("quality_gate", {}).get("status") != "failed"
+                or failed_quality_result.get("quality_gate", {}).get("release_eligible") is not False
+                or not (failed_quality_run / "failure.json").is_file()
+                or not (failed_quality_run / "quality-report.json").is_file()
+            ):
+                fail(f"failed quality gate did not fail closed with durable manifests: {failed_quality_result}")
+            if not (failed_quality_run / "state" / "state.json").is_file():
+                fail("failed quality gate erased the recoverable exactly-once training state")
 
             # A mutable source payload is caught by the continuous-ledger SHA
             # verification before the real training executable can consume it.
@@ -279,7 +444,7 @@ def main() -> int:
 
     print(
         "production pretraining verification: PASS "
-        "(deterministic foundry, exact dedupe/leakage gate, real exactly-once HDC run, read-only state health audit, provenance, idempotent resume)"
+        "(deterministic foundry, exact dedupe/leakage gate, real exactly-once HDC run, held-out quality pass/fail gate, read-only state health audit, provenance, idempotent resume)"
     )
     return 0
 

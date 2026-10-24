@@ -14,20 +14,20 @@ that reloads a model each sample.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 from pathlib import Path
 import statistics
-import subprocess
 import sys
-import time
 from typing import Any
 
 from lmm_contract import LMMContractError, FileIdentity, file_identity, require, require_unchanged, write_json_atomic
+from lmm_process import run_bounded_process
 
 
 DEFAULT_TIMEOUT_SECONDS = 300.0
+MAX_GATEWAY_STDOUT_BYTES = 8 * 1024 * 1024
+MAX_GATEWAY_STDERR_BYTES = 1 * 1024 * 1024
 
 
 def parse_positive_int(value: str) -> int:
@@ -64,27 +64,22 @@ def load_command(path: Path) -> tuple[list[str], FileIdentity]:
 
 
 def run_sample(command: list[str], timeout_seconds: float) -> dict[str, float | int | None]:
-    started = time.perf_counter()
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=Path(__file__).resolve().parents[1],
-            text=True,
-            encoding="utf-8",
-            errors="strict",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise LMMContractError(f"benchmark child exceeded {timeout_seconds} seconds") from error
-    elapsed = time.perf_counter() - started
+    completed = run_bounded_process(
+        command,
+        cwd=Path(__file__).resolve().parents[1],
+        timeout_seconds=timeout_seconds,
+        stdout_limit_bytes=MAX_GATEWAY_STDOUT_BYTES,
+        stderr_limit_bytes=MAX_GATEWAY_STDERR_BYTES,
+        label="benchmark child",
+    )
+    elapsed = completed.elapsed_seconds
     if completed.returncode != 0:
-        raise LMMContractError(f"benchmark child exited {completed.returncode}; stderr-sha256="
-                               f"{hashlib.sha256(completed.stderr.encode('utf-8')).hexdigest()}")
+        raise LMMContractError(
+            f"benchmark child exited {completed.returncode}; stderr-sha256={completed.stderr_sha256}; "
+            f"stderr-bytes={completed.stderr_bytes}"
+        )
     try:
-        payload = json.loads(completed.stdout)
+        payload = json.loads(completed.stdout.decode("utf-8"))
         report = payload["report"]
         response = report["response"]
         output_tokens = response["output_tokens"]

@@ -286,7 +286,14 @@ Küçük smoke corpus ve dengeli Türkçe-ASCII fixture için
 manifest digest'i, checksum-bit corruption rejection ve gerçek `train → inspect → resume`
 CLI testiyle doğrulanır; çalıştırılan counter, schedule ve checkpoint ayrıntıları
 [EXAMPLE_PRETRAINING_RUN.md](EXAMPLE_PRETRAINING_RUN.md)'dedir. Hiçbiri
-semantic kalite benchmarkı değildir.
+semantic kalite benchmarkı değildir. Gerçek target-domain checkpoint quality
+kararı için repository fixture'ı yerine operator-owned held-out
+semantic-neighbour case manifest'i ve immutable policy ile
+`tools/pretraining_quality_evaluation.py` kullanın. Araç mevcut batch
+`inspect --query-file` ABI'sini strict parse eder, real checkpoint/binary/case/
+policy SHA'larını bağlar ve HMAC-redacted report ile threshold gate uygular;
+kapsamı yalnız bu retrieval ölçüsüdür. Tam schema/production integration ve
+non-claims: [PRETRAINING_QUALITY_GATE.md](PRETRAINING_QUALITY_GATE.md).
 
 ## 5. Kaynak-duyarlı çalışma ve çok çekirdek
 

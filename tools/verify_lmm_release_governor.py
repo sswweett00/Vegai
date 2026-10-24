@@ -85,6 +85,7 @@ def runtime_identity(model: Path, worker_config: Path) -> str:
         "tokenizer": None,
         "asset_registry": None,
         "worker_command_configuration": file_identity(worker_config, "worker config").to_mapping(),
+        "structured_response_contract": None,
         "model_artifacts": {},
     }
     return hashlib.sha256(canonical_json_bytes(stable)).hexdigest()

@@ -18,8 +18,11 @@ import sys
 import tempfile
 import time
 
+from lmm_process import BoundedProcessError, run_bounded_process
 from lmm_contract import (
+    EVIDENCE_SAFETY_MESSAGE_ID,
     AssetRegistry,
+    EvidenceBundle,
     GenerationRequest,
     LMMContractError,
     ModelManifest,
@@ -208,6 +211,19 @@ def main() -> int:
                 require(payload["items"] and payload["items"][0]["id"] == expected_document,
                         f"Unicode FTS did not retrieve {expected_document} for {query!r}: {payload}")
             run([sys.executable, str(KNOWLEDGE), "verify", "--index", str(index)])
+            evidence_messages = EvidenceBundle.from_file(evidence).to_pinned_messages()
+            require(
+                evidence_messages
+                and evidence_messages[0].message_id == EVIDENCE_SAFETY_MESSAGE_ID
+                and evidence_messages[0].role == "system"
+                and all(message.role == "user" and message.pinned for message in evidence_messages[1:]),
+                "retrieved evidence was not isolated from operator system-message authority",
+            )
+            require(
+                "<vegai-grounded-evidence" not in evidence_messages[0].content[0].text
+                and EvidenceBundle.from_file(evidence).items[0].source not in evidence_messages[0].content[0].text,
+                "untrusted evidence metadata leaked into the trusted safety instruction",
+            )
             duplicate_knowledge = workspace / "duplicate-knowledge.jsonl"
             first_document = KNOWLEDGE_FIXTURE.read_bytes().splitlines()[0]
             duplicate_knowledge.write_bytes(first_document + b"\n" + first_document + b"\n")
@@ -269,7 +285,10 @@ def main() -> int:
                 """import json, sys
 payload = json.load(sys.stdin)
 assert payload['schema_version'] == 'vegai-lmm-worker-request/v1'
-assert any(message['id'].startswith('evidence:turkish') for message in payload['messages'])
+ids = [message['id'] for message in payload['messages']]
+assert any(message['id'] == 'vegai-evidence-safety-policy' and message['role'] == 'system' for message in payload['messages'])
+assert any(message['id'].startswith('evidence:turkish') and message['role'] == 'user' for message in payload['messages'])
+assert ids.index('policy') < ids.index('vegai-evidence-safety-policy') < ids.index('evidence:turkish')
 assets = [part for message in payload['messages'] for part in message['content'] if part['type'] == 'asset']
 assert {part['modality'] for part in assets} == {'image', 'audio', 'video'}
 assert all(part['path'] and part['sha256'] for part in assets)
@@ -308,6 +327,169 @@ print(json.dumps({
                     and report_payload["backend"]["worker_snapshot_bytes"] > 0,
                     "gateway did not report bounded hash-checked worker media snapshot delivery")
 
+            # Tool/agent consumers need a checked data boundary, not merely a
+            # best-effort instruction to emit JSON. The contract is supplied by
+            # the operator and applies identically to every gateway backend.
+            structured_contract = workspace / "structured-response-contract.json"
+            write_json(
+                structured_contract,
+                {
+                    "schema_version": "vegai-lmm-structured-response-contract/v1",
+                    "id": "support-decision-v1",
+                    "root": {
+                        "type": "object",
+                        "properties": {
+                            "answer": {"type": "string", "minimum_bytes": 1, "maximum_bytes": 256},
+                            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                            "needs_human": {"type": "boolean"},
+                        },
+                        "required": ["answer", "confidence", "needs_human"],
+                        "additional_properties": False,
+                    },
+                },
+            )
+            structured_worker = workspace / "structured-worker.py"
+            structured_worker.write_text(
+                """import json, sys
+json.load(sys.stdin)
+print(json.dumps({
+  'schema_version': 'vegai-lmm-worker-response/v1',
+  'text': json.dumps({'answer': 'Doğrulanmış yapılandırılmış yanıt.', 'confidence': 0.75, 'needs_human': False}, ensure_ascii=False),
+  'finish_reason': 'stop', 'input_tokens': 4, 'output_tokens': 8,
+  'backend': 'synthetic-structured-worker', 'device': None
+}, ensure_ascii=False))
+""",
+                encoding="utf-8", newline="\n",
+            )
+            structured_command = workspace / "structured-worker-command.json"
+            write_json(structured_command, [sys.executable, str(structured_worker)])
+            structured_report = workspace / "structured-report.json"
+            run(
+                [
+                    sys.executable, str(GATEWAY), "--model", str(MODEL_FIXTURE), "--request", str(compiled),
+                    "--worker-command-json", str(structured_command), "--response-contract", str(structured_contract),
+                    "--output", str(structured_report),
+                ]
+            )
+            structured_payload = json.loads(structured_report.read_text(encoding="utf-8"))
+            require(
+                structured_payload["structured_output"]["validated"] is True
+                and structured_payload["structured_output"]["contract_id"] == "support-decision-v1"
+                and structured_payload["identities"]["structured_response_contract"]["sha256"]
+                == file_identity(structured_contract, "structured contract").sha256,
+                "gateway did not bind and validate the structured response contract",
+            )
+            malformed_structured_worker = workspace / "malformed-structured-worker.py"
+            malformed_structured_worker.write_text(
+                """import json, sys
+json.load(sys.stdin)
+print(json.dumps({
+  'schema_version': 'vegai-lmm-worker-response/v1',
+  'text': '{\\"answer\\":\\"wrong extra field\\",\\"confidence\\":0.5,\\"needs_human\\":false,\\"extra\\":true}',
+  'finish_reason': 'stop', 'input_tokens': 4, 'output_tokens': 8,
+  'backend': 'synthetic-malformed-structured-worker', 'device': None
+}))
+""",
+                encoding="utf-8", newline="\n",
+            )
+            malformed_structured_command = workspace / "malformed-structured-worker-command.json"
+            write_json(malformed_structured_command, [sys.executable, str(malformed_structured_worker)])
+            malformed_structured_report = workspace / "must-not-exist-structured-report.json"
+            malformed_structured = run(
+                [
+                    sys.executable, str(GATEWAY), "--model", str(MODEL_FIXTURE), "--request", str(compiled),
+                    "--worker-command-json", str(malformed_structured_command), "--response-contract", str(structured_contract),
+                    "--output", str(malformed_structured_report),
+                ],
+                expected=2,
+            )
+            require("undeclared property" in malformed_structured.stdout and not malformed_structured_report.exists(),
+                    "gateway accepted malformed structured model output or published a report")
+            nested_structured_worker = workspace / "nested-structured-worker.py"
+            nested_structured_worker.write_text(
+                """import json, sys
+json.load(sys.stdin)
+nested = 0
+for _ in range(32):
+    nested = {'nested': nested}
+text = json.dumps({'answer': 'depth test', 'confidence': 0.5, 'needs_human': False, 'extra': nested})
+print(json.dumps({
+  'schema_version': 'vegai-lmm-worker-response/v1', 'text': text,
+  'finish_reason': 'stop', 'input_tokens': 4, 'output_tokens': 8,
+  'backend': 'synthetic-nested-structured-worker', 'device': None
+}))
+""",
+                encoding="utf-8", newline="\n",
+            )
+            nested_structured_command = workspace / "nested-structured-worker-command.json"
+            write_json(nested_structured_command, [sys.executable, str(nested_structured_worker)])
+            nested_structured_report = workspace / "must-not-exist-nested-structured-report.json"
+            nested_structured = run(
+                [
+                    sys.executable, str(GATEWAY), "--model", str(MODEL_FIXTURE), "--request", str(compiled),
+                    "--worker-command-json", str(nested_structured_command), "--response-contract", str(structured_contract),
+                    "--output", str(nested_structured_report),
+                ],
+                expected=2,
+            )
+            require("maximum nesting depth" in nested_structured.stdout and not nested_structured_report.exists(),
+                    "gateway accepted an over-nested structured response or published a report")
+
+            overflow_worker = workspace / "overflow-worker.py"
+            overflow_worker.write_text(
+                "import sys\njson_bytes = sys.stdin.buffer.read()\nsys.stdout.buffer.write(b'x' * (9 * 1024 * 1024))\nsys.stdout.buffer.flush()\n",
+                encoding="utf-8", newline="\n",
+            )
+            overflow_command = workspace / "overflow-worker-command.json"
+            write_json(overflow_command, [sys.executable, str(overflow_worker)])
+            overflow_report = workspace / "must-not-exist-overflow-report.json"
+            overflow = run(
+                [
+                    sys.executable, str(GATEWAY), "--model", str(MODEL_FIXTURE), "--request", str(compiled),
+                    "--worker-command-json", str(overflow_command), "--output", str(overflow_report),
+                ],
+                expected=2,
+            )
+            require("stdout exceeds" in overflow.stdout and not overflow_report.exists(),
+                    "gateway did not bound oversized multimodal-worker stdout fail-closed")
+            try:
+                run_bounded_process(
+                    [sys.executable, str(overflow_worker)],
+                    cwd=ROOT, timeout_seconds=5.0, stdout_limit_bytes=1024,
+                    stderr_limit_bytes=1024, label="outer LMM control-plane fixture", stdin_bytes=b"{}",
+                )
+            except BoundedProcessError as error:
+                require("stdout exceeds" in str(error), "shared LMM child runner returned the wrong overflow category")
+            else:
+                raise AssertionError("shared LMM child runner accepted oversized stdout")
+            stderr_overflow_worker = workspace / "stderr-overflow-worker.py"
+            stderr_overflow_worker.write_text(
+                "import sys\nsys.stderr.buffer.write(b'e' * 2048)\nsys.stderr.buffer.flush()\n",
+                encoding="utf-8", newline="\n",
+            )
+            try:
+                run_bounded_process(
+                    [sys.executable, str(stderr_overflow_worker)],
+                    cwd=ROOT, timeout_seconds=5.0, stdout_limit_bytes=1024,
+                    stderr_limit_bytes=1024, label="outer LMM stderr fixture",
+                )
+            except BoundedProcessError as error:
+                require("stderr exceeds" in str(error), "shared LMM child runner returned the wrong stderr-overflow category")
+            else:
+                raise AssertionError("shared LMM child runner accepted oversized stderr")
+            sleeping_child = workspace / "sleeping-lmm-child.py"
+            sleeping_child.write_text("import time\ntime.sleep(2)\n", encoding="utf-8", newline="\n")
+            try:
+                run_bounded_process(
+                    [sys.executable, str(sleeping_child)],
+                    cwd=ROOT, timeout_seconds=0.1, stdout_limit_bytes=1024,
+                    stderr_limit_bytes=1024, label="outer LMM timeout fixture",
+                )
+            except BoundedProcessError as error:
+                require("exceeded" in str(error), "shared LMM child runner returned the wrong timeout category")
+            else:
+                raise AssertionError("shared LMM child runner accepted a timed-out child")
+
             # A held-out quality gate runs a real configured gateway command;
             # it accepts only backend-emitted evidence/abstention markers and
             # retains output hashes rather than raw held-out text in its report.
@@ -316,7 +498,9 @@ print(json.dumps({
                 """import json, sys
 payload = json.load(sys.stdin)
 request_id = payload['request']['id']
+assert any(message['id'] == 'vegai-evidence-safety-policy' and message['role'] == 'system' for message in payload['messages']) or not any(message['id'].startswith('evidence:') for message in payload['messages'])
 evidence = [message for message in payload['messages'] if message['id'].startswith('evidence:')]
+assert all(message['role'] == 'user' for message in evidence)
 if request_id == 'eval-bad-citation':
     assert any(message['id'] == 'evidence:turkish' for message in evidence)
     text = 'Yanlis kaynak. [[vegai-source:unknown]]'
@@ -598,6 +782,95 @@ server.handle_request()
                         "endpoint response usage/backend provenance was not preserved")
                 endpoint_process.wait(timeout=10)
                 require(endpoint_process.returncode == 0, "OpenAI-compatible fixture server failed")
+
+                # A live local target is stronger than a closed-port redirect
+                # fixture: it proves no follow-up request (and thus no bearer
+                # credential) reached the redirect target.
+                redirect_target_server = workspace / "redirect-target-server.py"
+                redirect_target_port = workspace / "redirect-target-port.txt"
+                redirect_target_hit = workspace / "redirect-target-hit.txt"
+                redirect_target_server.write_text(
+                    """from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+import sys
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        Path(sys.argv[2]).write_text('redirect target contacted', encoding='ascii')
+        self.send_response(200)
+        self.end_headers()
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get('Content-Length', '0')))
+        self.do_GET()
+    def log_message(self, *args):
+        pass
+server = HTTPServer(('127.0.0.1', 0), Handler)
+Path(sys.argv[1]).write_text(str(server.server_port), encoding='ascii')
+server.serve_forever()
+""",
+                    encoding="utf-8", newline="\n",
+                )
+                redirect_target_process = subprocess.Popen(
+                    [sys.executable, str(redirect_target_server), str(redirect_target_port), str(redirect_target_hit)], cwd=ROOT
+                )
+                try:
+                    deadline = time.monotonic() + 10.0
+                    while not redirect_target_port.exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    require(redirect_target_port.exists(), "redirect target fixture server did not publish a port")
+                    redirect_server = workspace / "redirect-endpoint-server.py"
+                    redirect_port = workspace / "redirect-endpoint-port.txt"
+                    redirect_server.write_text(
+                        """from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+import sys
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers['Content-Length']))
+        self.send_response(302)
+        self.send_header('Location', sys.argv[2])
+        self.end_headers()
+    def log_message(self, *args):
+        pass
+server = HTTPServer(('127.0.0.1', 0), Handler)
+Path(sys.argv[1]).write_text(str(server.server_port), encoding='ascii')
+server.handle_request()
+""",
+                        encoding="utf-8", newline="\n",
+                    )
+                    redirect_url = (
+                        f"http://127.0.0.1:{redirect_target_port.read_text(encoding='ascii')}"
+                        "/credential-bearing-target"
+                    )
+                    redirect_process = subprocess.Popen(
+                        [sys.executable, str(redirect_server), str(redirect_port), redirect_url], cwd=ROOT
+                    )
+                    try:
+                        deadline = time.monotonic() + 10.0
+                        while not redirect_port.exists() and time.monotonic() < deadline:
+                            time.sleep(0.02)
+                        require(redirect_port.exists(), "redirect fixture server did not publish a port")
+                        redirect_report = workspace / "must-not-exist-redirect-report.json"
+                        run(
+                            [
+                                sys.executable, str(GATEWAY), "--model", str(endpoint_model), "--request", str(endpoint_request_path),
+                                "--asset-registry", str(registry), "--asset-root", str(store), "--endpoint",
+                                f"http://127.0.0.1:{redirect_port.read_text(encoding='ascii')}/v1/chat/completions",
+                                "--allow-insecure-http", "--output", str(redirect_report),
+                            ],
+                            expected=2,
+                        )
+                        require(not redirect_report.exists() and not redirect_target_hit.exists(),
+                                "gateway followed an endpoint redirect or published an untrusted response report")
+                        redirect_process.wait(timeout=10)
+                        require(redirect_process.returncode == 0, "redirect fixture server failed")
+                    finally:
+                        if redirect_process.poll() is None:
+                            redirect_process.terminate()
+                            redirect_process.wait(timeout=10)
+                finally:
+                    if redirect_target_process.poll() is None:
+                        redirect_target_process.terminate()
+                        redirect_target_process.wait(timeout=10)
             finally:
                 if endpoint_process.poll() is None:
                     endpoint_process.terminate()
@@ -643,7 +916,7 @@ server.handle_request()
         print(f"lmm runtime verification: FAIL: {error}", file=sys.stderr)
         return 1
 
-    print("lmm runtime verification: PASS (Unicode, subword-ready contract, model manifest, long context, assets, knowledge, session, worker snapshot, endpoint provenance, held-out quality gate, capability gate)")
+    print("lmm runtime verification: PASS (Unicode, subword-ready contract, model manifest, long context, trust-role evidence isolation, structured output, bounded worker I/O, redirect-safe endpoint, assets, held-out quality gate, capability gate)")
     return 0
 
 

@@ -198,8 +198,10 @@ yerine geçmez.
 1. **Retrieval:** lexical FTS yanında gerçek embedding index + cross-encoder
    reranker; her source için ACL, temporal validity, license ve freshness.
 2. **Evidence packing:** source budget, diversity, contradiction detector ve
-   prompt-injection isolation. Mevcut FTS evidence/marker gate başlangıç
-   sözleşmesidir; semantic relevance ölçülmelidir.
+   prompt-injection isolation. Gateway artık retrieved text'i trusted system
+   role'dan ayırıp source-free safety boundary ardından pinned user-data olarak
+   taşır; ancak model-level injection resistance, semantic relevance ve source
+   trust hâlâ target-domain ölçülmelidir.
 3. **Memory:** hash-chained raw dialogue, user-consented durable facts, scoped
    summaries, memory expiry ve deletion audit. Model summary'si source history
    yerine geçmemelidir.

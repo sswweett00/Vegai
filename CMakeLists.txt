@@ -210,6 +210,12 @@ if(VEGAI_BUILD_TESTS)
                     --pretrain-bin $<TARGET_FILE:vegai_pretrain>
         )
         add_test(
+            NAME vegai_pretraining_quality_evaluation
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_pretraining_quality_evaluation.py
+                    --pretrain-bin $<TARGET_FILE:vegai_pretrain>
+        )
+        set_tests_properties(vegai_pretraining_quality_evaluation PROPERTIES TIMEOUT 180)
+        add_test(
             NAME vegai_capability_curriculum
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_capability_curriculum.py
         )

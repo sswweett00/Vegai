@@ -32,9 +32,9 @@ anlamına gelmez.
 |---|---|---|---|
 | Bit cebiri | Fortran 2023 fixed-size HDC, SplitMix64 oracle, XOR/unbinding, deterministic ties | Model kapasitesi HDC cardinality ve vocabulary ile sınırlı | Native property tests, bağımsız Python oracle |
 | Symbolic memory / Resonator | Exact cleanup ve multi-factor certificate | Heuristic resonator aşaması tek başına certificate değildir | Exact verification, ambiguity telemetry |
-| Pretraining | İki-pass streaming vocabulary ve deterministic source-ordered Hebbian update | Transformer loss/perplexity yok; semantic quality corpus'a bağımlı | Strict ingest, checkpoint/resume, mode comparison diagnostics |
+| Pretraining | İki-pass streaming vocabulary ve deterministic source-ordered Hebbian update | Transformer loss/perplexity yok; semantic quality corpus'a bağımlı | Strict ingest, checkpoint/resume, controlled mode diagnostics ve operator-owned held-out semantic-neighbour checkpoint gate |
 | Data quality | JSONL/JSON/TXT/Parquet/Arrow schema boundary, exact dedupe, split audit | Exact dedupe semantic duplicate, PII/license veya contamination çözmez | `training_dataset.py`, provenance ve upstream governed pipeline |
-| Production transaction | Immutable shard, SHA-256 ledger, exact leakage audit, exactly-once state | Source/domain quality kendi başına garanti edilmez | `production_dataset.py`, `production_pretrain.py`, health audit |
+| Production transaction | Immutable shard, SHA-256 ledger, exact leakage audit, exactly-once state | Source/domain quality kendi başına garanti edilmez; raw-record split isolation semantic annotation independence kanıtı değildir | `production_dataset.py`, `production_pretrain.py`, health audit ve optional HMAC-redacted held-out checkpoint quality gate |
 | Grounded chat | Her response operator TSV'den gelir; exact Hamming scan, margin/similarity abstention | Held-out task accuracy ve threshold calibration yoksa güvenilirlik bilinmez | **Yeni:** versioned held-out evaluator + release gates |
 | Optional LMM integration | Gerçek external model backend'i için Unicode/subword manifest, long-context packer, knowledge evidence, multimodal asset boundary, held-out citation/abstention release gate ve measured domain-expert routing/panel | Model weights/quality/provider güvenliği Vegai tarafından sağlanmaz; scorecard broad quality kanıtı değildir, multimodal capability model-specific'tir | **Yeni:** `lmm_gateway.py`, `lmm_quality_evaluation.py`, `lmm_portfolio.py`, session/knowledge/assets contracts, artifact hash ve fail-closed capability/quality/routing gate |
 | Verified tool use | Real LMM/operator action planını request+registry SHA ile bağlar; typed predecessor dataflow, no-shell executor, separate verifier ve gateway evidence üretir | Declared independence gerçek audit/sandbox/factual truth değildir; side-effect tool bilinçli olarak yoktur | **Yeni:** `lmm_tool_orchestrator.py`, strict schema/reference/verifier/privacy/no-replace negative gates |
@@ -187,6 +187,27 @@ belirlemelidir.
 Bu ayrım, "test çalıştı fakat kalite yetersiz" ile "test güvenilir şekilde
 çalışmadı" durumunu operasyonel olarak ayırır.
 
+### 4.1 Pretraining checkpoint semantic-neighbour release gate
+
+Grounded chat gate'i knowledge-base response retrieval'ını ölçer; HDC training
+checkpoint'in semantic prototype quality'si için ayrı
+`tools/pretraining_quality_evaluation.py` kullanılır. Operator'ın strict JSON
+held-out token/neighbour annotation manifest'i, immutable threshold policy ve
+repository dışı HMAC key'i gerçek `vegai_pretrain inspect --query-file`
+çağrısına bağlanır. Report raw token/prompt taşımaz; binary/checkpoint/case/
+policy/evaluator SHA'ları ile Top-1 accuracy, sabit %95 Wilson lower bound ve
+bipolar similarity eşiklerini
+taşır. Technical failure exit `2`, published threshold failure exit `3` tür.
+
+Production run'a üç `--quality-*` input ve `--require-quality-gate` eklendiğinde
+completed final checkpoint geçmeyen gate ile release-eligible olmaz; exactly-once
+state korunur ama latest result/failure manifest fail-closed olur. `--max-shards`
+ile partial state yalnız `deferred`tır. Case annotations'ın training/threshold
+tuning/model-selection'dan gerçekten bağımsız olması upstream governance
+sorumluluğudur; raw-record split audit bunu kanıtlamaz. Tam schema, privacy,
+provenance ve command contract'i için
+[PRETRAINING_QUALITY_GATE.md](PRETRAINING_QUALITY_GATE.md)'ye bakın.
+
 ## 5. Kaliteyi gerçekten artıran çalışma sırası
 
 1. **Domain tanımı:** Allowed intent/knowledge scope, source authority, update
@@ -201,8 +222,10 @@ Bu ayrım, "test çalıştı fakat kalite yetersiz" ile "test güvenilir şekild
    sorumluluğundadır.
 5. **Threshold calibration:** Ayrı validation setinde false-grounding ile
    abstention trade-off'u ölçülür. Eşik seçim log'u saklanır.
-6. **Frozen held-out gate:** Bu araçla release report ve minimum metrikler
-   üretilir. Gate geçmezse checkpoint/KB/threshold publish edilmez.
+6. **Frozen held-out gates:** Pretraining checkpoint için semantic-neighbour
+   evaluator; response retrieval için dialogue evaluator ile ayrı release report
+   ve minimum metrikler üretilir. İlgili gate geçmezse checkpoint/KB/threshold
+   publish edilmez.
 7. **Post-release monitoring:** OOV oranı, abstention oranı, source revision,
    operator feedback ve policy violation'lar privacy-preserving telemetri ile
    izlenir. Yeni data eski held-out testte sızıntı üretmeyecek şekilde versioned

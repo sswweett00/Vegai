@@ -9,7 +9,9 @@ aracı vardır:
   yayınlar.
 - `tools/production_pretrain.py`: paketlenmiş veriyi, binary'yi ve immutable
   eğitim politikasını kimliklendirir; exact leakage audit/resource preflight
-  yapar ve gerçek `continuous_pretrain.py` exactly-once controller'ını çağırır.
+  yapar, gerçek `continuous_pretrain.py` exactly-once controller'ını çağırır ve
+  operator sağlarsa completed checkpoint üzerinde held-out semantic-neighbour
+  kalite release gate'ini fail-closed uygular.
 
 Rich-record metadata'sından ordered domain/capability stage ledger üretmek için
 ayrı `tools/capability_curriculum.py` katmanı vardır. Bu layer doğrudan
@@ -115,7 +117,33 @@ sonucu için kullanılmamalıdır. Bu gate yalnız exact same-record leakage'i
 engeller; semantic near-duplicate, source-level overlap veya benchmark leakage
 için ek bir upstream policy gerekir.
 
-### 4. Exactly-once eğitim ve run provenance
+### 4. Opsiyonel held-out semantic-neighbour quality release gate
+
+Record-level leakage kontrolü doğru dataset transaction'ını kanıtlar; final HDC
+checkpoint'in target domain semantic ilişkilerini yeterli öğrendiğini ölçmez.
+Operatör `--quality-cases`, `--quality-policy` ve
+`--quality-redaction-key-file` üçlüsünü birlikte verdiğinde wrapper, tüm train
+shard'ları committed final checkpoint için gerçek
+`vegai_pretrain inspect --query-file` evaluator'ını çağırır. Case/policy ve
+evaluator source SHA'ları run fingerprint'ine girer; report evaluator/binary/
+checkpoint/case/policy bağlarını yeniden doğrulayan wrapper tarafından ancak
+geçerli sayılır.
+
+Geçen gate `result.json.quality_gate.release_eligible=true` üretir. Intentional
+threshold failure, recoverable exactly-once state'i silmez ama atomik
+`failure.json` + latest `result.json` ile `status=failed` yayınlar ve command'i
+non-zero bitirir. `--max-shards` ile incomplete candidate `deferred`/non-release
+kalır; quality inspect yalnız final complete state'te çalışır. Quality evidence
+verilmezse compatibility için training yapılabilir fakat result
+`not-configured`/non-release olarak kalır; `--require-quality-gate` ungated
+başlatmayı reddeder.
+
+Bu dar semantic retrieval ölçüsünün schema'sı, HMAC privacy report'u, exit
+kodları, threshold yorumu, upstream held-out annotation sınırı ve production
+komutları için [PRETRAINING_QUALITY_GATE.md](PRETRAINING_QUALITY_GATE.md)'ye
+bakın. Bu bir LLM/LMM benchmarkı veya genel zeka iddiası değildir.
+
+### 5. Exactly-once eğitim ve run provenance
 
 Production wrapper, zaten doğrulanmış `continuous_pretrain.py` mekanizmasını
 duplikasyon yapmadan kullanır:
@@ -129,10 +157,13 @@ duplikasyon yapmadan kullanır:
 Ara kesinti candidate/final orphan bırakabilir fakat state journal'a girmediği
 için sonraki invocation ilgili shard'ı önceki committed modelden yeniden dener;
 double-apply yapmaz. `run.json`, dataset/ledger SHA'ları, binary SHA-256, resolved
-policy, selected state directory, resource plan, donanım inventory ve repository
-revision taşır. `result.json` ya da `failure.json` da atomik yazılır; failure
-anında `result.json` da latest-attempt `status=failed` ile overwrite edilir,
-böylece eski başarılı resume sonucu yeni hata sanılmaz.
+policy (varsa immutable quality-evidence binding'i), selected state directory,
+resource plan, donanım inventory ve repository revision taşır. `result.json`
+ya da `failure.json` da atomik yazılır; failure anında `result.json` da
+latest-attempt `status=failed` ile overwrite edilir, böylece eski başarılı
+resume sonucu yeni hata sanılmaz. Quality evaluation varsa report'un raw
+case/token içermeyen digest binding'i result'e girer; ayrı
+`quality-report.json` HMAC-redacted audit artifact'idir.
 
 `--resume-run`, dataset/binary/policy/state-directory fingerprint'i bit-bit
 aynı değilse reddeder. `--max-shards` ile immutable package içindeki kontrollü
@@ -177,8 +208,9 @@ python3 tools/production_dataset.py \
 CI `tools/verify_production_pretraining.py` daha küçük bir generated fixture
 ile iki bağımsız foundry run'ın byte-identical output'unu, exact dedupe'i,
 tampered shard rejection'ını, intentional train/validation overlap rejection'ını,
-gerçek compiled HDC binary ile checkpoint generation'larını, read-only completed
-state/payload health audit'ini ve idempotent resume'ı doğrular.
+gerçek compiled HDC binary ile checkpoint generation'larını, HMAC-redacted
+held-out quality pass/fail release manifest'ini, read-only completed state/payload
+health audit'ini ve idempotent resume'ı doğrular.
 
 ## Kendi production dataset'inizi yayınlama
 
@@ -230,6 +262,28 @@ python3 tools/production_pretrain.py \
   --initial-plasticity 25 --minimum-plasticity 1 --decay-events 32 \
   --omp-threads 8
 ```
+
+Bir checkpoint'i release-eligible yapmak için aynı komuta operator-owned
+held-out evidence ekleyin (case/policy artifact'lerini ve key'i repository
+dışında tutun):
+
+```bash
+python3 tools/production_pretrain.py \
+  --pretrain-bin ./build/vegai_pretrain \
+  --dataset production-datasets/news-v2026-10/dataset.json \
+  --run-dir production-runs/news-v2026-10-hdc-quality \
+  --max-vocab 20000 --min-frequency 1 --context-mode hierarchical --epochs 1 \
+  --quality-cases /secure/evaluations/news-r2026-10-cases.json \
+  --quality-policy /secure/evaluations/news-r2026-10-policy.json \
+  --quality-redaction-key-file /secure/secrets/news-quality-hmac.key \
+  --quality-scratch-dir /fast-local-ssd/vegai-quality-scratch \
+  --require-quality-gate
+```
+
+Bu ek evaluate/report safhası `elapsed_train_controller_seconds` içine girmez;
+quality gate geçmezse checkpoint transaction state'i korunur, fakat release
+başarısızdır. Schema/eşik/held-out isolation ayrıntıları
+[PRETRAINING_QUALITY_GATE.md](PRETRAINING_QUALITY_GATE.md)'dedir.
 
 Başlatmadan önce yalnız validation/data/resource kontrollerini görmek için:
 
@@ -285,7 +339,12 @@ LLM/LMM sağlığı ölçümü değildir. Ayrıntılı flags/race davranışı
 ## Kaynaklar, dual RAM, CPU/GPU/NPU ve ölçüm sınırı
 
 Wrapper başlangıçtan önce `training_resource_plan.py` üzerinden model/checkpoint
-alanı, RAM reserve ve OpenMP yerleşim önerisini manifest'e kaydeder. Bu mevcut
+alanı, RAM reserve ve OpenMP yerleşim önerisini manifest'e kaydeder. Quality
+gate configured ise ayrıca `--quality-scratch-dir` (yoksa OS temp directory)
+üzerinde estimated maximum checkpoint + binary + bounded query metadata için
+free-space gate uygular; actual final checkpoint ile evaluator öncesi yeniden
+kontrol eder. Private snapshot temporary olduğu için bu alan report'a yazılmaz,
+ama selected scratch directory immutable run policy'de kayıtlıdır. Bu mevcut
 Vegai'nin bounded RAM/corpus-streaming sözleşmesidir; RAM channel topology
 software ile güvenilir saptanamadığından dual-channel/NUMA yalnız OS/firmware
 ve matched DIMM'lerle ayrıca doğrulanmalıdır.
@@ -303,9 +362,10 @@ sınırları için [PRETRAINING.md](PRETRAINING.md) ve
 
 `result.json` içindeki `elapsed_train_controller_seconds`, yalnız bu wrapper'ın
 **continuous training controller** child çağrısının wall time'ıdır; derleme, CI
-setup, dataset construction, exact leakage audit ve resource preflight buna
-dahil değildir. Ancak birden çok shard process başlatma/transaction overhead'ini
-içerdiği için saf model throughput metriği değildir. Throughput karşılaştırması
+setup, dataset construction, exact leakage audit, resource preflight ve optional
+held-out quality inspect/report buna dahil değildir. Ancak birden çok shard
+process başlatma/transaction overhead'ini içerdiği için saf model throughput
+metriği değildir. Throughput karşılaştırması
 sunulacaksa derleme/CI/fixture/harness hariç tutularak yalnız aynı
 `vegai_pretrain train` komutlarının ölçülmüş süreleri kullanılmalıdır; mevcut
 kontrollü yöntem [PRETRAINING_MODE_COMPARISON.md](PRETRAINING_MODE_COMPARISON.md)
