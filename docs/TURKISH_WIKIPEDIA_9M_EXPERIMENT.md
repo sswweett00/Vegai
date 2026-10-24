@@ -38,15 +38,18 @@ uygulanır:
    kalan combining/non-ASCII karakterler atılır ve ASCII harfler lowercase
    edilir.
 3. 48 byte'tan uzun token'lar truncate edilmez, atılır.
-4. Tüm raw train split üzerinde frekans sayılır; en sık 32,768 native-uyumlu
-   token (frekans azalan, lexical tie-break) seçilir.
+4. Tüm raw train split üzerinde frekans sayılır; en sık 8,192 native-uyumlu
+   token (frekans azalan, lexical tie-break) seçilir. Bu açık vocabulary
+   sınırı, her yazılmış token'ın actual update olmasını doğrularken checkpoint
+   working setini hosted CPU run'ında bounded tutar; corpus'un kaynak/provenance
+   niteliğini değiştirmez.
 5. Kaynak sırası korunur. Seçili olmayan her token record boundary'dir;
    dolayısıyla filtrelenmiş kelimelerin iki tarafı yapay biçimde komşu olmaz.
    Tek seçili token içeren segmentler de atılır: context'i olmayan bir token
    native okuyucuda active görünse bile prototype update alamaz. Her çıktı
    record'u 2 ile 128 token ve en çok 8,192 byte'tır.
 6. Seçilmiş gerçek kaynak token'larından 9,000,000 tane yazılır. `--max-vocab
-   32768 --min-frequency 1` ile her yazılmış token checkpoint'in active
+   8192 --min-frequency 1` ile her yazılmış token checkpoint'in active
    vocabulary'sine sığar. Native eğitim metrikleri hem `raw tokens` hem
    `active tokens` için `9,000,000 × epoch` ve `out-of-vocabulary tokens = 0`
    doğrulamasını geçmek zorundadır.
@@ -62,7 +65,7 @@ Native Fortran komutu şuna eşdeğerdir:
 
 ```bash
 OMP_NUM_THREADS=2 ./vegai_pretrain train TURKISH_WIKIPEDIA_9M_ASCII.txt checkpoint.vgai \
-  --max-vocab 32768 --min-frequency 1 --window 2 --position-shift 41 \
+  --max-vocab 8192 --min-frequency 1 --window 2 --position-shift 41 \
   --context-mode resonant --epochs 2 --strict \
   --parallel-context-build --parallel-min-contexts 32
 ```

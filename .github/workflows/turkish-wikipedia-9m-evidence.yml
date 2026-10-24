@@ -28,7 +28,7 @@ jobs:
   real-turkish-corpus:
     name: Native 9M Turkish Wikipedia RESONANT run
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -70,8 +70,8 @@ jobs:
             --source-archive "${VEGAI_TURKISH_9M_DIR}/trwiki-67.tar.bz2" \
             --faq-repo "${VEGAI_TURKISH_9M_DIR}/turkish-faq" \
             --run-dir "${VEGAI_TURKISH_9M_DIR}/experiment" \
-            --target-tokens 9000000 --vocabulary-size 32768 --epochs 2 --omp-threads 2 \
-            --train-timeout-seconds 3600 --inspect-timeout-seconds 300
+            --target-tokens 9000000 --vocabulary-size 8192 --epochs 2 --omp-threads 2 \
+            --train-timeout-seconds 5400 --inspect-timeout-seconds 300
 
       - name: Surface bounded experiment failure reason
         if: failure()

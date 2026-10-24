@@ -34,7 +34,7 @@ from typing import Any, Iterable, Mapping, Sequence
 SCHEMA = "vegai-turkish-wikipedia-9m-experiment/v1"
 CORPUS_SCHEMA = "vegai-turkish-wikipedia-ascii-corpus/v1"
 TARGET_TOKENS_DEFAULT = 9_000_000
-VOCABULARY_SIZE_DEFAULT = 32_768
+VOCABULARY_SIZE_DEFAULT = 8_192
 EPOCHS_DEFAULT = 2
 TOKENS_PER_RECORD = 128
 MAX_NATIVE_RECORD_BYTES = 8_192
