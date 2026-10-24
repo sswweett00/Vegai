@@ -66,6 +66,8 @@ def main() -> int:
                 fail("planner reservation omitted vocabulary/staging/headroom")
             if memory.get("line_update_scratch_bytes") != 128 * 4:
                 fail("planner omitted the capacity-indexed repeated-center scratch allocation")
+            if memory.get("lookup_cache_workspace_bytes") != 4_096 * (48 + 8 + 4 + 8):
+                fail("planner omitted the bounded exact-token lookup-cache workspace")
             checkpoint_plan = plan.get("checkpoint", {})
             if checkpoint_plan.get("path") != str(checkpoint.resolve()):
                 fail("planner did not preserve checkpoint path")

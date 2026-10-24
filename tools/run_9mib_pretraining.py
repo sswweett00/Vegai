@@ -387,7 +387,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--position-shift", type=int, default=41, help="position shift supplied to train (default: 41)")
     parser.add_argument(
         "--context-mode",
-        choices=("legacy", "positional", "hybrid", "hierarchical", "coherent"),
+        choices=("legacy", "positional", "hybrid", "hierarchical", "coherent", "debiased"),
         default="hierarchical",
         help="HDC context mode supplied to train (default: hierarchical)",
     )

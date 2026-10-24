@@ -34,7 +34,7 @@ module vocabulary
    end type vocabulary_t
 
    public :: vocab_init, vocab_destroy, vocab_is_initialized
-   public :: vocab_observe, vocab_finalize, vocab_lookup, vocab_rebuild_index
+   public :: vocab_observe, vocab_finalize, vocab_lookup, vocab_lookup_fingerprint, vocab_rebuild_index
    public :: vocab_token_fingerprint, vocab_seed_for_slot, vocab_footprint_bytes
 
 contains
@@ -265,6 +265,27 @@ contains
       integer(int32), intent(out) :: status
       logical, intent(in), optional :: active_only
       integer(int64) :: fingerprint
+
+      fingerprint = vocab_token_fingerprint(token)
+      if (present(active_only)) then
+         call vocab_lookup_fingerprint(vocab, token, fingerprint, slot, found, status, active_only)
+      else
+         call vocab_lookup_fingerprint(vocab, token, fingerprint, slot, found, status)
+      end if
+   end subroutine vocab_lookup
+
+   ! Lets a bounded caller cache the token fingerprint while retaining the
+   ! vocabulary's collision-safe full-token equality check. Supplying a stale
+   ! or forged fingerprint cannot merge symbols: vocab_hash_lookup still checks
+   ! the padded token text before it returns a slot.
+   subroutine vocab_lookup_fingerprint(vocab, token, fingerprint, slot, found, status, active_only)
+      type(vocabulary_t), intent(in) :: vocab
+      character(len=*), intent(in) :: token
+      integer(int64), intent(in) :: fingerprint
+      integer(int32), intent(out) :: slot
+      logical, intent(out) :: found
+      integer(int32), intent(out) :: status
+      logical, intent(in), optional :: active_only
       integer(int32) :: table_index
       logical :: require_active
 
@@ -282,7 +303,6 @@ contains
 
       require_active = .false.
       if (present(active_only)) require_active = active_only
-      fingerprint = vocab_token_fingerprint(token)
       call vocab_hash_lookup(vocab, token, fingerprint, slot, found, table_index)
       if (.not. found) then
          status = VOCAB_ERR_NOT_FOUND
@@ -292,7 +312,7 @@ contains
          found = .false.
          status = VOCAB_ERR_NOT_FOUND
       end if
-   end subroutine vocab_lookup
+   end subroutine vocab_lookup_fingerprint
 
    ! Reconstructs the transient hash index after a checkpoint restore.  Stored
    ! token strings and counts are preserved exactly; active_count is recomputed.

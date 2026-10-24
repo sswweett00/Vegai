@@ -42,7 +42,7 @@ def main() -> int:
     parser.add_argument("--epochs", type=int, default=2, help="complete fixture epochs to train (default: 2)")
     parser.add_argument(
         "--context-mode",
-        choices=("legacy", "positional", "hybrid", "hierarchical", "coherent"),
+        choices=("legacy", "positional", "hybrid", "hierarchical", "coherent", "debiased"),
         default="hierarchical",
         help="context encoder used by the timed train command (default: hierarchical)",
     )

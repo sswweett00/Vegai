@@ -489,3 +489,71 @@ jobs:
               print("```", file=summary)
           print(f"::notice title=Deterministic multicore pretraining::{message}")
           PY
+
+      - name: Compare exact vocabulary lookup-cache execution paths
+        run: |
+          set -euo pipefail
+          cache_report="${RUNNER_TEMP}/pretraining-lookup-cache-comparison.json"
+          python3 tools/compare_pretraining_lookup_cache.py \
+            --pretrain-bin ./build/vegai_pretrain --repetitions 3 --output "$cache_report" > /dev/null
+          python3 - "$cache_report" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as source:
+              report = json.load(source)
+          hardware = report["hardware"]
+          without_cache = report["without_cache"]
+          with_cache = report["with_cache"]
+          workload = report["workload"]
+          message = (
+              f"cpu={hardware['cpu']['model']}; "
+              f"without_cache_seconds={without_cache['median_seconds']:.6f}; "
+              f"with_cache_seconds={with_cache['median_seconds']:.6f}; "
+              f"cache_speedup_vs_no_cache={report['cache_speedup_vs_no_cache']:.4f}x; "
+              f"cache_hits={with_cache['cache_hits_per_run']}; "
+              f"cache_misses={with_cache['cache_misses_per_run']}; "
+              f"checkpoint_bytes_identical={report['checkpoint_byte_identical']}"
+          )
+          with open(sys.argv[2], "a", encoding="utf-8") as summary:
+              print("## Exact vocabulary lookup-cache comparison", file=summary)
+              print(file=summary)
+              print(
+                  "Each measurement is one complete `vegai_pretrain train` child process only; compilation, fixture "
+                  "creation, checkpoint comparison, and harness work are excluded. The controlled fixture repeats one "
+                  "active fixed-width token, so this is an execution hot-path observation, not a natural-corpus claim.",
+                  file=summary,
+              )
+              print(file=summary)
+              print(
+                  f"Host: `{hardware['cpu']['model']}`; records={workload['records']}; "
+                  f"tokens/record={workload['tokens_per_record']}; epochs={workload['epochs']}; "
+                  f"training tokens/run={workload['training_tokens_per_run']}.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("| Lookup path | Median seconds | Training token/s | Checkpoint bytes |", file=summary)
+              print("|---|---:|---:|---:|", file=summary)
+              print(
+                  f"| canonical hash lookup | {without_cache['median_seconds']:.6f} | "
+                  f"{without_cache['training_tokens_per_second']:.3f} | identical to cache |",
+                  file=summary,
+              )
+              print(
+                  f"| exact-token direct-map cache | {with_cache['median_seconds']:.6f} | "
+                  f"{with_cache['training_tokens_per_second']:.3f} | {report['checkpoint_byte_identical']} |",
+                  file=summary,
+              )
+              print(file=summary)
+              print(
+                  f"Same-host cache/no-cache ratio: **{report['cache_speedup_vs_no_cache']:.4f}×**. "
+                  "No minimum speedup is enforced; byte-identical checkpoints and exact-token cache telemetry are the "
+                  "correctness gates.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("```text", file=summary)
+              print(message, file=summary)
+              print("```", file=summary)
+          print(f"::notice title=Exact vocabulary lookup cache::{message}")
+          PY

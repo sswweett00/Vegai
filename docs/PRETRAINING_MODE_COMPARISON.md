@@ -121,6 +121,51 @@ self-echo'yu azaltmak ve measurable non-regression sağlamaktır. Süre, yalnız
 `train` child-process'i için workflow summary'de raporlanır; herhangi bir
 CPU/OS'a veya doğal corpus'a genellenmez.
 
+### DEBIASED structural invariant protocol
+
+`debiased`, `compare_pretraining_modes.py` içindeki cohesion score'a yeni bir
+universal-quality arm olarak eklenmez: duplicate handling'in daha iyi olduğu
+hedef domain'e bağlıdır ve repository'nin sentetik cluster fixture'ı bunu
+kanıtlayamaz. Bunun yerine native property test iki fail-closed structural oracle
+uygular:
+
+1. 12 unique active slotlu long record için global item sırası aynı olduğundan
+   `debiased` checkpoint-relevant base/semantic/experience planes'i
+   `hierarchical` ile byte-tam eşit olmalıdır.
+2. 12 raw occurrence fakat yalnız dört distinct active slotlu repeat-heavy
+   long record için global channel kapalıdır; aynı planes `hybrid` ile byte-tam
+   eşit olmalıdır.
+
+Test ayrıca distinct/suppressed execution telemetry'yi, v7 checkpoint round-
+trip'ini, legacy sampler lineage rejection'ını ve unsupported OpenVINO ABI
+rejection'ını kontrol eder. Bu, controlled semantic quality gain değil;
+repetition politikasının tanımlı ve denetlenebilir olduğu kanıtıdır. Deployment
+kalitesi için operator-owned held-out cases/policy ile
+`tools/pretraining_quality_evaluation.py` veya `tools/evidential_optimizer.py`
+gate'i gerekir.
+
+## Exact vocabulary lookup-cache child-process comparison
+
+`tools/compare_pretraining_lookup_cache.py`, cache açık ve kapalı armı gerçek
+`vegai_pretrain train` process'leriyle çalıştırır. Timer yalnız child-process
+başlatma/bitiş aralığını kapsar; compilation, fixture generation, checkpoint
+comparison ve JSON/harness dışarıdadır. Arm sırası her repetition'da değişir.
+
+```bash
+python3 tools/compare_pretraining_lookup_cache.py \
+  --pretrain-bin ./build/vegai_pretrain --repetitions 3 \
+  --output lookup-cache-comparison.json
+```
+
+Fixture 64 kayıt × 64 aynı fixed-width active token × iki epoch kullanır. Bu
+bilerek lookup hot-path'i görünür kılar; natural-corpus throughput, full model
+training speed veya semantic quality için benchmark değildir. Cache armında
+`hits + misses = raw_tokens`, iki değerin de pozitif olması; cache-off armında
+ikisi de sıfır olması ve iki checkpoint byte/SHA'sının eşit olması zorunludur.
+Raporlanan `cache_speedup_vs_no_cache` minimum eşik değildir: CPU topology,
+compiler, filesystem, process startup ve thermal durum etkileyebilir. İlk gerçek
+CI sonucu aşağıdaki attestation bölümüne run URL'siyle eklenmelidir.
+
 ## Aynı-run baseline → hot-path mimarisi karşılaştırması
 
 `tools/compare_pretraining_revisions.py`, sabit pre-optimization commit

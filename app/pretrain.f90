@@ -143,6 +143,12 @@ contains
          case ('--reference-context-kernel')
             parsed_config%reference_context_kernel = .true.
             index = index + 1
+         case ('--lookup-cache')
+            parsed_config%vocabulary_lookup_cache = .true.
+            index = index + 1
+         case ('--no-lookup-cache')
+            parsed_config%vocabulary_lookup_cache = .false.
+            index = index + 1
          case ('--openvino-required')
             parsed_config%context_provider = PT_CONTEXT_PROVIDER_OPENVINO
             parsed_config%openvino_fallback_cpu = .false.
@@ -191,6 +197,9 @@ contains
                   io_status = 0
                case ('coherent')
                   parsed_config%context_mode = PT_CONTEXT_COHERENT
+                  io_status = 0
+               case ('debiased')
+                  parsed_config%context_mode = PT_CONTEXT_DEBIASED
                   io_status = 0
                case default
                   io_status = 1
@@ -273,6 +282,12 @@ contains
             index = index + 1
          case ('--reference-context-kernel')
             parsed_config%reference_context_kernel = .true.
+            index = index + 1
+         case ('--lookup-cache')
+            parsed_config%vocabulary_lookup_cache = .true.
+            index = index + 1
+         case ('--no-lookup-cache')
+            parsed_config%vocabulary_lookup_cache = .false.
             index = index + 1
          case ('--openvino-required')
             parsed_config%context_provider = PT_CONTEXT_PROVIDER_OPENVINO
@@ -419,6 +434,14 @@ contains
       write(output_unit, '(A,I0)') '  non-ASCII input bytes: ', metrics%non_ascii_bytes
       write(output_unit, '(A,I0)') '  dropped overlong records: ', metrics%overlong_records
       write(output_unit, '(A,I0)') '  adaptive parallel minimum contexts: ', active_config%parallel_min_contexts
+      write(output_unit, '(A,L1)') '  vocabulary lookup cache enabled: ', active_config%vocabulary_lookup_cache
+      write(output_unit, '(A,I0)') '  vocabulary lookup cache hits: ', execution%vocabulary_lookup_cache_hits
+      write(output_unit, '(A,I0)') '  vocabulary lookup cache misses: ', execution%vocabulary_lookup_cache_misses
+      if (active_config%context_mode == PT_CONTEXT_DEBIASED) then
+         write(output_unit, '(A,I0)') '  de-biased global-topic records: ', execution%debiased_topic_records
+         write(output_unit, '(A,I0)') '  de-biased suppressed records: ', execution%debiased_topic_suppressed_records
+         write(output_unit, '(A,I0)') '  de-biased distinct topic tokens: ', execution%debiased_topic_distinct_tokens
+      end if
       write(output_unit, '(A,I0)') '  CPU serial context batches: ', execution%cpu_serial_batches
       write(output_unit, '(A,I0)') '  CPU parallel context batches: ', execution%cpu_parallel_batches
       write(output_unit, '(A,I0)') '  CPU serial-built contexts: ', execution%cpu_serial_contexts
@@ -535,21 +558,23 @@ contains
       write(output_unit, '(A)') 'Usage:'
       write(output_unit, '(A)') '  vegai_pretrain train CORPUS CHECKPOINT [options]'
       write(output_unit, '(A)') '  vegai_pretrain resume CORPUS CHECKPOINT [--epochs N] [--strict] [--query TOKEN]'
-      write(output_unit, '(A)') '    [--reference-context-kernel]'
+      write(output_unit, '(A)') '    [--reference-context-kernel] [--lookup-cache|--no-lookup-cache]'
       write(output_unit, '(A)') '  vegai_pretrain continue SHARD CHECKPOINT [--epochs N] [--strict] [--query TOKEN]'
-      write(output_unit, '(A)') '    [--reference-context-kernel]'
+      write(output_unit, '(A)') '    [--reference-context-kernel] [--lookup-cache|--no-lookup-cache]'
       write(output_unit, '(A)') '  vegai_pretrain inspect CHECKPOINT [--query TOKEN | --query-file PATH]'
       write(output_unit, '(A)') 'Train options:'
       write(output_unit, '(A)') '  --max-vocab N --min-frequency N --window N --position-shift N --context-mode MODE --epochs N'
-      write(output_unit, '(A)') '  MODE is legacy, positional, hybrid, hierarchical, or coherent (default hierarchical)'
+      write(output_unit, '(A)') '  MODE is legacy, positional, hybrid, hierarchical, coherent, or debiased (default hierarchical)'
       write(output_unit, '(A)') '  hierarchical adds bounded whole-record topical evidence for long records'
       write(output_unit, '(A)') '  coherent is CPU-only: cross-fold topical context reduces global self-identity echo'
+      write(output_unit, '(A)') '  debiased is CPU/OpenMP-only: global topic uses each distinct active slot once; <12 distinct slots falls back to hybrid'
       write(output_unit, '(A)') '  continue first extends vocabulary from one immutable shard, then trains it'
       write(output_unit, '(A)') '  --initial-plasticity N --minimum-plasticity N --decay-events N --strict --query TOKEN'
       write(output_unit, '(A)') '  --parallel-context-build (default) builds immutable per-record contexts with OpenMP when worthwhile'
       write(output_unit, '(A)') '  --parallel-min-contexts N launches OpenMP only at N record updates (default 32; execution-only)'
       write(output_unit, '(A)') '  --serial-context-build disables that execution-only parallel stage for diagnosis'
       write(output_unit, '(A)') '  --reference-context-kernel is an exact benchmark/regression implementation switch'
+      write(output_unit, '(A)') '  --lookup-cache (default) or --no-lookup-cache controls an exact-token execution-only vocabulary cache'
       write(output_unit, '(A)') '  --context-provider cpu|openvino --openvino-worker PATH --openvino-python CMD --openvino-device DEVICE'
       write(output_unit, '(A)') '  --openvino-work-dir DIR --openvino-min-contexts N --openvino-timeout-ms N [--openvino-fallback-cpu|--openvino-required]'
       write(output_unit, '(A)') '  --openvino-require-accelerator rejects OpenVINO CPU fallback; immutable contexts only, commits stay ordered on CPU'

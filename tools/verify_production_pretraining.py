@@ -69,7 +69,7 @@ def run_command(
     command = [
         sys.executable, str(RUN_TOOL), "--pretrain-bin", str(binary), "--dataset", str(dataset),
         "--run-dir", str(run_directory), "--max-vocab", str(max_vocabulary), "--min-frequency", "1",
-        "--window", "2", "--position-shift", "37", "--context-mode", "hierarchical",
+        "--window", "2", "--position-shift", "37", "--context-mode", "debiased",
         "--epochs", "1", "--initial-plasticity", "25", "--minimum-plasticity", "1",
         "--decay-events", "8", "--omp-threads", "1",
     ]

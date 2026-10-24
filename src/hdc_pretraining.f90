@@ -52,6 +52,11 @@ module hdc_pretraining
    ! only once in the full-record contribution rather than in every global
    ! contribution, reducing self-identity echo without mutable model reads.
    integer(int32), parameter, public :: PT_CONTEXT_COHERENT = 5_int32
+   ! DEBIASED keeps HYBRID local evidence but admits the long-record global
+   ! channel only when a record has enough *distinct* active token slots. Its
+   ! global majority sees each slot at most once, so boilerplate/repetition
+   ! cannot win the whole-record vote solely by occurrence count.
+   integer(int32), parameter, public :: PT_CONTEXT_DEBIASED = 6_int32
 
    ! Execution-only context providers.  CPU is the portable authoritative
    ! backend.  OPENVINO can offload only immutable, pre-positioned context
@@ -62,6 +67,13 @@ module hdc_pretraining
 
    integer(int32), parameter :: HIERARCHICAL_MIN_ACTIVE_TOKENS = 12_int32
    integer(int32), parameter :: HIERARCHICAL_GLOBAL_CONTEXT_WEIGHT = 3_int32
+   ! The de-biased global channel uses the same cardinality threshold, applied
+   ! to distinct active vocabulary slots rather than raw occurrences.
+   integer(int32), parameter :: DEBIASED_MIN_DISTINCT_ACTIVE_TOKENS = HIERARCHICAL_MIN_ACTIVE_TOKENS
+   ! Direct-mapped, exact-token-checked execution cache. It is intentionally
+   ! bounded and transient: no cache data can affect checkpoint bytes.
+   integer(int32), parameter :: PRETRAIN_LOOKUP_CACHE_SLOTS = 4096_int32
+   integer(int64), parameter :: PRETRAIN_LOOKUP_CACHE_MASK = int(PRETRAIN_LOOKUP_CACHE_SLOTS - 1_int32, int64)
    integer(int64), parameter :: OPENVINO_LOW32_MASK = int(z'00000000FFFFFFFF', int64)
    ! Persistent worker control protocol.  These paths and reports are strictly
    ! transient execution infrastructure, never checkpoint/model state.
@@ -104,6 +116,11 @@ module hdc_pretraining
       ! on the same line.  A compiler without OpenMP ignores the directives and
       ! remains serial; this flag is intentionally not checkpoint state.
       logical :: parallel_context_build = .true.
+      ! A bounded direct-mapped cache avoids repeated collision-safe vocabulary
+      ! probes after the first occurrence of an exact token. Cache collisions
+      ! always miss and fall back to the canonical lookup, so this affects only
+      ! execution cost and is intentionally excluded from checkpoint state.
+      logical :: vocabulary_lookup_cache = .true.
       ! Do not launch an OpenMP team for a tiny record: scheduling and staging
       ! overhead can exceed the immutable HDC arithmetic.  This is an
       ! execution-only adaptive threshold, not checkpoint/model semantics.
@@ -137,6 +154,17 @@ module hdc_pretraining
       integer(int64) :: cpu_parallel_contexts = 0_int64
       integer(int64) :: cpu_serial_batches = 0_int64
       integer(int64) :: cpu_parallel_batches = 0_int64
+      ! Bounded-cache telemetry is execution-only. A miss includes a safe
+      ! direct-map collision and always falls back to the canonical vocabulary
+      ! lookup, so hit/miss counters cannot alter model semantics.
+      integer(int64) :: vocabulary_lookup_cache_hits = 0_int64
+      integer(int64) :: vocabulary_lookup_cache_misses = 0_int64
+      ! DEBIASED context telemetry distinguishes records that contributed a
+      ! distinct-token global topic from repeated/boilerplate-heavy records
+      ! whose global channel was intentionally suppressed.
+      integer(int64) :: debiased_topic_records = 0_int64
+      integer(int64) :: debiased_topic_suppressed_records = 0_int64
+      integer(int64) :: debiased_topic_distinct_tokens = 0_int64
       integer(int64) :: openvino_contexts = 0_int64
       ! A resident worker session can process many record requests.  Keep the
       ! historic invocation counter as a request counter and report sessions
@@ -244,6 +272,8 @@ contains
          name = 'hierarchical'
       case (PT_CONTEXT_COHERENT)
          name = 'coherent'
+      case (PT_CONTEXT_DEBIASED)
+         name = 'debiased'
       case default
          name = 'invalid'
       end select
@@ -287,6 +317,11 @@ contains
       report%cpu_parallel_contexts = 0_int64
       report%cpu_serial_batches = 0_int64
       report%cpu_parallel_batches = 0_int64
+      report%vocabulary_lookup_cache_hits = 0_int64
+      report%vocabulary_lookup_cache_misses = 0_int64
+      report%debiased_topic_records = 0_int64
+      report%debiased_topic_suppressed_records = 0_int64
+      report%debiased_topic_distinct_tokens = 0_int64
       report%openvino_contexts = 0_int64
       report%openvino_worker_invocations = 0_int64
       report%openvino_worker_sessions = 0_int64
@@ -360,7 +395,8 @@ contains
           config%context_mode /= PT_CONTEXT_POSITIONAL .and. &
           config%context_mode /= PT_CONTEXT_HYBRID .and. &
           config%context_mode /= PT_CONTEXT_HIERARCHICAL .and. &
-          config%context_mode /= PT_CONTEXT_COHERENT) then
+          config%context_mode /= PT_CONTEXT_COHERENT .and. &
+          config%context_mode /= PT_CONTEXT_DEBIASED) then
          status = PT_ERR_INVALID_ARGUMENT
          return
       end if
@@ -371,10 +407,12 @@ contains
       end if
       if (config%context_provider == PT_CONTEXT_PROVIDER_OPENVINO) then
          ! The lane worker has an exact ABI for positional/hybrid/hierarchical
-         ! immutable items.  COHERENT's center-dependent cross-fold item view
-         ! remains CPU-only until a separately verified worker ABI exists.
+         ! immutable items. COHERENT's center-dependent cross-fold view and
+         ! DEBIASED's distinct-slot global view remain CPU-only until separately
+         ! verified worker ABIs exist.
          if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL .or. &
              config%context_mode == PT_CONTEXT_COHERENT .or. &
+             config%context_mode == PT_CONTEXT_DEBIASED .or. &
              len_trim(config%openvino_worker) == 0 .or. len_trim(config%openvino_python) == 0 .or. &
              len_trim(config%openvino_work_dir) == 0 .or. len_trim(config%openvino_device) == 0 .or. &
              config%openvino_min_contexts <= 0_int32 .or. config%openvino_timeout_milliseconds <= 0_int32 .or. &
@@ -414,6 +452,76 @@ contains
       end if
       counter = counter + delta
    end subroutine add_nonnegative
+
+   ! Direct-map index for the transient vocabulary cache. The cache key itself
+   ! remains the fingerprint plus the full fixed-width token text, so this
+   ! inexpensive mix can only create a miss/eviction, never a false symbol hit.
+   pure function pretrain_lookup_cache_index(fingerprint) result(cache_index)
+      integer(int64), intent(in) :: fingerprint
+      integer(int32) :: cache_index
+      integer(int64) :: mixed
+
+      mixed = ieor(fingerprint, ishft(fingerprint, -29))
+      mixed = ieor(mixed, ishftc(mixed, 17))
+      cache_index = int(iand(mixed, PRETRAIN_LOOKUP_CACHE_MASK), int32) + 1_int32
+   end function pretrain_lookup_cache_index
+
+   ! Fast-path an active-vocabulary lookup without weakening collision safety.
+   ! Every direct-map hit compares the full padded token; every miss calls the
+   ! canonical vocabulary hash table with the already-computed fingerprint.
+   subroutine pretrain_lookup_active_cached(model, token, cache_tokens, cache_fingerprints, cache_slots, &
+                                            cache_used, slot, found, cache_hit, status)
+      type(hdc_pretrain_model_t), intent(in) :: model
+      character(len=*), intent(in) :: token
+      character(len=TOKEN_LEN), intent(inout) :: cache_tokens(:)
+      integer(int64), intent(inout) :: cache_fingerprints(:)
+      integer(int32), intent(inout) :: cache_slots(:)
+      logical, intent(inout) :: cache_used(:)
+      integer(int32), intent(out) :: slot
+      logical, intent(out) :: found, cache_hit
+      integer(int32), intent(out) :: status
+      integer(int64) :: fingerprint
+      integer(int32) :: cache_index
+
+      slot = 0_int32
+      found = .false.
+      cache_hit = .false.
+      status = PT_OK
+      if (size(cache_tokens, kind=int32) < PRETRAIN_LOOKUP_CACHE_SLOTS .or. &
+          size(cache_fingerprints, kind=int32) < PRETRAIN_LOOKUP_CACHE_SLOTS .or. &
+          size(cache_slots, kind=int32) < PRETRAIN_LOOKUP_CACHE_SLOTS .or. &
+          size(cache_used, kind=int32) < PRETRAIN_LOOKUP_CACHE_SLOTS) then
+         status = PT_ERR_INVALID_ARGUMENT
+         return
+      end if
+
+      fingerprint = vocab_token_fingerprint(token)
+      cache_index = pretrain_lookup_cache_index(fingerprint)
+      if (cache_used(cache_index) .and. cache_fingerprints(cache_index) == fingerprint .and. &
+          cache_tokens(cache_index) == token) then
+         cache_hit = .true.
+         slot = cache_slots(cache_index)
+         found = slot > 0_int32
+         if (found) then
+            status = VOCAB_OK
+         else
+            status = VOCAB_ERR_NOT_FOUND
+         end if
+         return
+      end if
+
+      call vocab_lookup_fingerprint(model%vocabulary, token, fingerprint, slot, found, status, .true.)
+      if (status == VOCAB_OK .or. status == VOCAB_ERR_NOT_FOUND) then
+         cache_used(cache_index) = .true.
+         cache_fingerprints(cache_index) = fingerprint
+         cache_tokens(cache_index) = token
+         if (found) then
+            cache_slots(cache_index) = slot
+         else
+            cache_slots(cache_index) = 0_int32
+         end if
+      end if
+   end subroutine pretrain_lookup_active_cached
 
    subroutine add_metrics(destination, source, status)
       type(pretrain_metrics_t), intent(inout) :: destination
@@ -874,6 +982,86 @@ contains
       line_context = hv_bitacc_finalize(line_accumulator, model%tie_seed)
    end subroutine pretrain_build_line_topic_context
 
+   ! DEBIASED builds the global long-record signal from unique active slots.
+   ! Local positional/topic neighbours remain occurrence-sensitive exactly as
+   ! HYBRID does; this routine changes only the bounded whole-record channel.
+   ! Reusing the capacity-indexed planner scratch avoids an O(record_length^2)
+   ! duplicate scan and clears only slots touched by this record.
+   subroutine pretrain_build_debiased_line_topic_context(model, token_slots, n_tokens, active_count, &
+                                                         line_context, distinct_active_count, seen_counts, &
+                                                         touched_slots, status)
+      type(hdc_pretrain_model_t), intent(in) :: model
+      integer(int32), intent(in) :: token_slots(:)
+      integer(int32), intent(in) :: n_tokens, active_count
+      type(hv_t), intent(out) :: line_context
+      integer(int32), intent(out) :: distinct_active_count
+      integer(int32), intent(inout) :: seen_counts(:)
+      integer(int32), intent(out) :: touched_slots(:)
+      integer(int32), intent(out) :: status
+      type(hv_bitacc_t) :: line_accumulator
+      integer(int32) :: token_index, slot, touched_count, observed_active_count, add_status
+
+      line_context = hv_zero()
+      distinct_active_count = 0_int32
+      status = PT_OK
+      if (active_count < 0_int32 .or. active_count > n_tokens .or. n_tokens < 0_int32 .or. &
+          n_tokens > size(token_slots, kind=int32) .or. size(seen_counts, kind=int32) < model%vocabulary%capacity .or. &
+          size(touched_slots, kind=int32) < n_tokens) then
+         status = PT_ERR_INVALID_ARGUMENT
+         return
+      end if
+      ! A short record can never activate the global channel. Leaving the
+      ! scratch untouched is safe because the planner cleared it after the
+      ! previous record and no current record has written it yet.
+      if (active_count < DEBIASED_MIN_DISTINCT_ACTIVE_TOKENS) return
+
+      touched_count = 0_int32
+      observed_active_count = 0_int32
+      do token_index = 1, n_tokens
+         slot = token_slots(token_index)
+         if (slot == 0_int32) cycle
+         if (slot < 1_int32 .or. slot > model%vocabulary%capacity) then
+            status = PT_ERR_INVALID_ARGUMENT
+            goto 700
+         end if
+         observed_active_count = observed_active_count + 1_int32
+         if (seen_counts(slot) == 0_int32) then
+            touched_count = touched_count + 1_int32
+            touched_slots(touched_count) = slot
+            seen_counts(slot) = 1_int32
+         else if (seen_counts(slot) < huge(0_int32)) then
+            ! The value itself is not semantically used; retaining a bounded
+            ! occurrence count makes accidental stale scratch state detectable.
+            seen_counts(slot) = seen_counts(slot) + 1_int32
+         else
+            status = PT_ERR_COUNTER_OVERFLOW
+            goto 700
+         end if
+      end do
+      if (observed_active_count /= active_count) then
+         status = PT_ERR_INVALID_ARGUMENT
+         goto 700
+      end if
+      distinct_active_count = touched_count
+      if (distinct_active_count < DEBIASED_MIN_DISTINCT_ACTIVE_TOKENS) goto 700
+
+      call hv_bitacc_reset(line_accumulator, distinct_active_count)
+      do token_index = 1, touched_count
+         slot = touched_slots(token_index)
+         call hv_bitacc_add_words(line_accumulator, model%base_bits(:, slot), add_status)
+         if (add_status /= HV_OK) then
+            status = PT_ERR_HYPERVECTOR
+            goto 700
+         end if
+      end do
+      line_context = hv_bitacc_finalize(line_accumulator, model%tie_seed)
+
+700   continue
+      do token_index = 1, touched_count
+         seen_counts(touched_slots(token_index)) = 0_int32
+      end do
+   end subroutine pretrain_build_debiased_line_topic_context
+
    ! COHERENT uses three immutable record summaries while preserving the
    ! HIERARCHICAL channel's fixed three-item context budget:
    !   1 x full-record topic + 2 x opposite parity-fold topic.
@@ -1082,7 +1270,8 @@ contains
       reference_kernel = config%reference_context_kernel
       topic_mode = config%context_mode == PT_CONTEXT_HYBRID .or. &
                    config%context_mode == PT_CONTEXT_HIERARCHICAL .or. &
-                   config%context_mode == PT_CONTEXT_COHERENT
+                   config%context_mode == PT_CONTEXT_COHERENT .or. &
+                   config%context_mode == PT_CONTEXT_DEBIASED
       use_global_topic = .false.
       use_coherent_cross_topic = .false.
       center_fold = modulo(center_index - 1_int32, 2_int32) + 1_int32
@@ -1101,6 +1290,8 @@ contains
             use_global_topic = .true.
             use_coherent_cross_topic = line_topic_fold_active_counts(opposite_fold) > 0_int32
          end if
+      case (PT_CONTEXT_DEBIASED)
+         use_global_topic = line_active_tokens >= DEBIASED_MIN_DISTINCT_ACTIVE_TOKENS
       end select
       if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL) then
          call hv_acc_reset(legacy_accumulator)
@@ -1303,7 +1494,8 @@ contains
          return
       end if
       if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL .or. &
-          config%context_mode == PT_CONTEXT_COHERENT .or. token_slots(center_index) == 0_int32) then
+          config%context_mode == PT_CONTEXT_COHERENT .or. &
+          config%context_mode == PT_CONTEXT_DEBIASED .or. token_slots(center_index) == 0_int32) then
          status = PT_ERR_CONTEXT_PROVIDER
          return
       end if
@@ -1686,7 +1878,8 @@ contains
       center_groups = 0_int32
       if (config%context_provider /= PT_CONTEXT_PROVIDER_OPENVINO) return
       if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL .or. &
-          config%context_mode == PT_CONTEXT_COHERENT) then
+          config%context_mode == PT_CONTEXT_COHERENT .or. &
+          config%context_mode == PT_CONTEXT_DEBIASED) then
          status = PT_ERR_CONTEXT_PROVIDER
          return
       end if
@@ -1959,30 +2152,40 @@ contains
       character(len=TOKEN_LEN) :: tokens(MAX_TOKENS_PER_LINE)
       integer(int32) :: token_slots(MAX_TOKENS_PER_LINE)
       integer :: unit, io_status, allocation_status
-      integer(int32) :: token_index, n_tokens, slot, vocab_status, line_active_tokens, update_count
+      integer(int32) :: token_index, n_tokens, slot, vocab_status, line_active_tokens, line_topic_active_tokens
+      integer(int32) :: debiased_distinct_tokens, update_count
       integer(int64) :: non_ascii_count
       integer(int64), allocatable :: prepared_context_bits(:, :), experiences_before(:)
-      integer(int32), allocatable :: neighbor_counts(:), prepared_status(:), line_update_counts(:)
+      integer(int64), allocatable :: lookup_cache_fingerprints(:)
+      integer(int32), allocatable :: neighbor_counts(:), prepared_status(:), line_update_counts(:), lookup_cache_slots(:)
       integer(int32) :: touched_slots(MAX_TOKENS_PER_LINE), line_topic_fold_active_counts(2)
-      logical, allocatable :: update_required(:)
+      character(len=TOKEN_LEN), allocatable :: lookup_cache_tokens(:)
+      logical, allocatable :: update_required(:), lookup_cache_used(:)
       type(hv_t) :: line_topic_context, line_topic_fold_contexts(2)
-      logical :: eof, found, overlong, truncated, provider_used, construct_in_parallel
+      logical :: eof, found, lookup_cache_hit, overlong, truncated, provider_used, construct_in_parallel
 
       status = PT_OK
       allocate(prepared_context_bits(HV_WORDS, MAX_TOKENS_PER_LINE), &
                experiences_before(MAX_TOKENS_PER_LINE), neighbor_counts(MAX_TOKENS_PER_LINE), &
                prepared_status(MAX_TOKENS_PER_LINE), update_required(MAX_TOKENS_PER_LINE), &
-               line_update_counts(model%vocabulary%capacity), stat=allocation_status)
+               line_update_counts(model%vocabulary%capacity), lookup_cache_tokens(PRETRAIN_LOOKUP_CACHE_SLOTS), &
+               lookup_cache_fingerprints(PRETRAIN_LOOKUP_CACHE_SLOTS), lookup_cache_slots(PRETRAIN_LOOKUP_CACHE_SLOTS), &
+               lookup_cache_used(PRETRAIN_LOOKUP_CACHE_SLOTS), stat=allocation_status)
       if (allocation_status /= 0) then
          status = PT_ERR_ALLOCATION
          return
       end if
       line_update_counts = 0_int32
+      lookup_cache_tokens = ''
+      lookup_cache_fingerprints = 0_int64
+      lookup_cache_slots = 0_int32
+      lookup_cache_used = .false.
       open(newunit=unit, file=trim(corpus_path), status='old', action='read', &
            form='formatted', iostat=io_status)
       if (io_status /= 0) then
          deallocate(prepared_context_bits, experiences_before, neighbor_counts, prepared_status, update_required, &
-                    line_update_counts)
+                    line_update_counts, lookup_cache_tokens, lookup_cache_fingerprints, lookup_cache_slots, &
+                    lookup_cache_used)
          status = PT_ERR_IO
          return
       end if
@@ -2026,7 +2229,22 @@ contains
          do token_index = 1, n_tokens
             call add_nonnegative(metrics%raw_tokens, 1_int64, status)
             if (status /= PT_OK) exit
-            call vocab_lookup(model%vocabulary, tokens(token_index), slot, found, vocab_status, .true.)
+            lookup_cache_hit = .false.
+            if (config%vocabulary_lookup_cache) then
+               call pretrain_lookup_active_cached(model, tokens(token_index), lookup_cache_tokens, &
+                                                  lookup_cache_fingerprints, lookup_cache_slots, lookup_cache_used, &
+                                                  slot, found, lookup_cache_hit, vocab_status)
+               if (present(execution)) then
+                  if (lookup_cache_hit) then
+                     call add_nonnegative(execution%vocabulary_lookup_cache_hits, 1_int64, status)
+                  else
+                     call add_nonnegative(execution%vocabulary_lookup_cache_misses, 1_int64, status)
+                  end if
+                  if (status /= PT_OK) exit
+               end if
+            else
+               call vocab_lookup(model%vocabulary, tokens(token_index), slot, found, vocab_status, .true.)
+            end if
             if (found) then
                token_slots(token_index) = slot
                line_active_tokens = line_active_tokens + 1_int32
@@ -2044,6 +2262,8 @@ contains
          line_topic_fold_contexts(1) = hv_zero()
          line_topic_fold_contexts(2) = hv_zero()
          line_topic_fold_active_counts = 0_int32
+         line_topic_active_tokens = line_active_tokens
+         debiased_distinct_tokens = 0_int32
          if (config%context_mode == PT_CONTEXT_HIERARCHICAL .and. &
              line_active_tokens >= HIERARCHICAL_MIN_ACTIVE_TOKENS) then
             call pretrain_build_line_topic_context(model, token_slots, n_tokens, line_active_tokens, &
@@ -2055,6 +2275,24 @@ contains
                                                              line_topic_context, line_topic_fold_contexts, &
                                                              line_topic_fold_active_counts, status)
             if (status /= PT_OK) exit
+         else if (config%context_mode == PT_CONTEXT_DEBIASED .and. &
+                  line_active_tokens >= DEBIASED_MIN_DISTINCT_ACTIVE_TOKENS) then
+            call pretrain_build_debiased_line_topic_context(model, token_slots, n_tokens, line_active_tokens, &
+                                                            line_topic_context, debiased_distinct_tokens, &
+                                                            line_update_counts, touched_slots, status)
+            if (status /= PT_OK) exit
+            line_topic_active_tokens = debiased_distinct_tokens
+            if (present(execution)) then
+               call add_nonnegative(execution%debiased_topic_distinct_tokens, &
+                                    int(debiased_distinct_tokens, int64), status)
+               if (status /= PT_OK) exit
+               if (debiased_distinct_tokens >= DEBIASED_MIN_DISTINCT_ACTIVE_TOKENS) then
+                  call add_nonnegative(execution%debiased_topic_records, 1_int64, status)
+               else
+                  call add_nonnegative(execution%debiased_topic_suppressed_records, 1_int64, status)
+               end if
+               if (status /= PT_OK) exit
+            end if
          end if
 
          call pretrain_plan_line_updates(model, config, token_slots, n_tokens, update_required, &
@@ -2106,7 +2344,7 @@ contains
                   if (.not. update_required(token_index)) cycle
                   call pretrain_construct_center_context(model, config, token_slots, n_tokens, token_index, &
                                                          neighbor_counts(token_index), line_topic_context, &
-                                                         line_topic_fold_contexts, line_active_tokens, &
+                                                         line_topic_fold_contexts, line_topic_active_tokens, &
                                                          line_topic_fold_active_counts, experiences_before(token_index), &
                                                          prepared_context_bits(:, token_index), &
                                                          prepared_status(token_index))
@@ -2117,7 +2355,7 @@ contains
                   if (.not. update_required(token_index)) cycle
                   call pretrain_construct_center_context(model, config, token_slots, n_tokens, token_index, &
                                                          neighbor_counts(token_index), line_topic_context, &
-                                                         line_topic_fold_contexts, line_active_tokens, &
+                                                         line_topic_fold_contexts, line_topic_active_tokens, &
                                                          line_topic_fold_active_counts, experiences_before(token_index), &
                                                          prepared_context_bits(:, token_index), &
                                                          prepared_status(token_index))
@@ -2156,7 +2394,7 @@ contains
       end do
       close(unit)
       deallocate(prepared_context_bits, experiences_before, neighbor_counts, prepared_status, update_required, &
-                 line_update_counts)
+                 line_update_counts, lookup_cache_tokens, lookup_cache_fingerprints, lookup_cache_slots, lookup_cache_used)
    end subroutine train_one_epoch
 
    subroutine pretrain_train_file(model, corpus_path, config, metrics, status, execution)
@@ -2459,6 +2697,15 @@ contains
          status = PT_ERR_INVALID_ARGUMENT
          return
       end if
+      ! A de-biased semantic context is only defined for the current v7
+      ! Floyd/complement lineage. Public construction always satisfies this;
+      ! reject an in-memory forged combination rather than serializing a file
+      ! that an older sampler contract could misrepresent.
+      if (model%context_mode == PT_CONTEXT_DEBIASED .and. &
+          model%plasticity_sampler /= PT_PLASTICITY_SAMPLER_FLOYD_COMPLEMENT) then
+         status = PT_ERR_CHECKPOINT
+         return
+      end if
 
       checkpoint_version = pretrain_checkpoint_write_version(model)
       open(newunit=unit, file=trim(checkpoint_path), status='replace', action='write', &
@@ -2583,8 +2830,12 @@ contains
       checkpoint_config%minimum_plasticity_percent = model%minimum_plasticity_percent
       checkpoint_config%plasticity_decay_events = model%plasticity_decay_events
       checkpoint_config%tie_seed = model%tie_seed
-      if (model%context_mode == PT_CONTEXT_COHERENT .and. &
-          version < CHECKPOINT_COHERENT_LEGACY_VERSION) then
+      if ((model%context_mode == PT_CONTEXT_COHERENT .and. &
+           version < CHECKPOINT_COHERENT_LEGACY_VERSION) .or. &
+          (model%context_mode == PT_CONTEXT_DEBIASED .and. version < CHECKPOINT_VERSION)) then
+         ! DEBIASED was introduced under the current v7 sampler lineage. A
+         ! forged older checkpoint must not be interpreted as a valid distinct-
+         ! topic continuation simply because its wire layout happens to fit.
          close(unit)
          status = PT_ERR_CHECKPOINT
          call pretrain_model_destroy(model)

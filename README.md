@@ -107,7 +107,11 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 > aynıdır. Opt-in `coherent`, aynı bounded global bütçeyi full-record anchor ve
 > opposite-parity cross-fold evidence arasında dağıtarak long-record occurrence
 > self-echo'yu azaltır; mevcut worker ABI'si bunu taşımadığından CPU/OpenMP-only
-> seçenektir. `vegai_chat` da free-form cevap üreten bir LLM değildir; yalnız
+> seçenektir. Opt-in `debiased`, global summary'de aynı active slotu bir kez
+> sayar ve <12 distinct slotta bit-tam `hybrid`e düşer; repeat-heavy boilerplate
+> için structural policy'dir, genel quality superiority iddiası değildir. Eğitim
+> lookup'ları bounded full-token cache ile hızlanabilir; cache açık/kapalı
+> checkpoint semantiğini değiştirmez. `vegai_chat` da free-form cevap üreten bir LLM değildir; yalnız
 > versioned TSV bilgi bankasindan grounded response retrieval yapar veya
 > abstain eder. Unicode corpus'lar ön-tokenization
 > ister; veri yönetişimi, checkpoint ve sınırlar [PRETRAINING.md](docs/PRETRAINING.md)'de, immutable
@@ -200,10 +204,11 @@ adapter inventory'si tek başına compute iddiası değildir. Intel Core Ultra i
 opt-in OpenVINO/oneAPI context provider vardır: immutable packed-HDC context
 bundle işlemini gerçek worker device'ına dispatch eder, source-ordered
 prototype commit'i CPU'da tutar ve checkpoint byte equality ile doğrulanır.
-`coherent`in center-dependent cross-fold context'i mevcut OpenVINO ABI'sinde
-bulunmaz; `--context-provider openvino --context-mode coherent` fail-closed
-reddedilir, başka bir mode'a sessizce yönlendirilmez. Bir `train` çağrısında
-worker resident kalır ve dynamic-batch graph cache'i tekrar kullanılır. Açık
+`coherent`in center-dependent cross-fold context'i ve `debiased`in distinct-slot
+global context'i mevcut OpenVINO ABI'sinde bulunmaz; `--context-provider openvino
+--context-mode coherent` veya `--context-provider openvino --context-mode debiased`
+fail-closed reddedilir, başka bir mode'a sessizce yönlendirilmez. Bir `train`
+çağrısında worker resident kalır ve dynamic-batch graph cache'i tekrar kullanılır. Açık
 CPU fallback policy'si ise OpenVINO CPU graph'ını
 başlatmak yerine native fused/OpenMP context kernel'ine gider; bu, dürüstçe
 CPU execution olarak raporlanır. `--openvino-require-accelerator` gerçek
@@ -256,6 +261,12 @@ python3 tools/dialogue_evaluation.py \
 python3 tools/verify_example_corpus.py --pretrain-bin ./build/vegai_pretrain
 python3 tools/compare_pretraining_modes.py --pretrain-bin ./build/vegai_pretrain \
   --repetitions 3 --omp-threads 1
+
+# Exact vocabulary lookup-cache child-process comparator: cache on/off must
+# produce identical checkpoints; this repeated-token fixture is not a natural
+# corpus performance or semantic-quality claim.
+python3 tools/compare_pretraining_lookup_cache.py \
+  --pretrain-bin ./build/vegai_pretrain --repetitions 3
 
 # Optional LMM integration boundary: Rust Unicode/BPE tokenizer, long-context,
 # knowledge evidence, media asset provenance, real-model worker protocol and
@@ -359,7 +370,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Rich training data I/O | `tools/training_data_io.py`, `tools/training_dataset.py` | JSONL/JSON/TXT/Parquet/Arrow schema boundary, streaming/batching, exact text dedupe, split/imbalance audit ve explicit strict-HDC projection |
 | Capability curriculum | `tools/capability_curriculum.py` | operator-defined metadata paths/tag/difficulty stage policy'si, SQLite exact-dedupe + split/annotation conflict gate'i, held-out/source coverage, strict text-only projection, immutable continuous ledger ve source+policy replay verification; hardcoded task data veya capability claim'i degil |
 | Evidential Pareto Optimizer | `tools/evidential_optimizer.py` | gerçek algorithm/optimizer config ve artifact hash'lerini repeated held-out bounded metric'lerle Bonferroni-Hoeffding confidence + robust Pareto gate üzerinden seçer; neural optimizer/runtime veya universal-best claim'i değil |
-| HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, hierarchical default + CPU-only coherent cross-fold option, deterministic OpenMP / optional OpenVINO immutable-context preparation + source-ordered CPU commit, v7 Floyd/complement sampler checkpoint lineage with v4–v6 deterministic-resume compatibility |
+| HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, hierarchical default + CPU-only coherent cross-fold and distinct-slot debiased options, exact-token bounded lookup cache, deterministic OpenMP / optional OpenVINO immutable-context preparation + source-ordered CPU commit, v7 Floyd/complement sampler checkpoint lineage with v4–v6 deterministic-resume compatibility |
 | Exact 9 MiB train attestation | `tools/synthetic_pretraining_fixture.py`, `tools/run_9mib_pretraining.py` | strict-ASCII deterministic topology fixture, streaming manifest/digest verification, resource preflight, bounded one-child train timing, checkpoint/inspect SHA lineage; structural fixture only, domain-quality evidence değil |
 | Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect`, CPU/OpenVINO context-provider execution switch ve nearest semantic diagnostic |
 | Pretraining checkpoint quality gate | `tools/pretraining_quality_evaluation.py`, `tools/production_pretrain.py` | operator-held-out semantic-neighbour annotation/policy ile real inspect batch'i, immutable evaluator/binary/checkpoint/case/policy binding, HMAC-redacted report ve fail-closed optional production release; genel LLM/LMM quality benchmarkı değil |

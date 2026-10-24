@@ -160,6 +160,15 @@ if(VEGAI_BUILD_TESTS)
                     --pretrain-bin $<TARGET_FILE:vegai_pretrain>
         )
         set_tests_properties(vegai_9mib_pretraining_real_binary PROPERTIES TIMEOUT 240)
+        # Both cache arms execute real compiled train processes and must produce
+        # byte-identical checkpoints. The report's timer excludes compilation,
+        # fixture construction, and comparator/report work.
+        add_test(
+            NAME vegai_pretraining_lookup_cache
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/compare_pretraining_lookup_cache.py
+                    --pretrain-bin $<TARGET_FILE:vegai_pretrain> --repetitions 2
+        )
+        set_tests_properties(vegai_pretraining_lookup_cache PROPERTIES TIMEOUT 240)
         add_test(
             NAME vegai_openvino_provider_contract
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_openvino_provider.py

@@ -51,6 +51,22 @@ record'u insan gibi anlamak veya aynı token'ın bütün tekrarlarını dışlam
 long-record self-identity echo'yu bounded ve deterministik biçimde azaltma
 amaçlı yapısal bir HDC encoder seçeneğidir.
 
+Opt-in **`debiased`** modunda local evidence yine bit-tam `hybrid`tir. Long-
+record global channel ise raw occurrence listesiyle değil, source-order'da ilk
+kez görülen **distinct active vocabulary slot** listesiyle kurulur:
+
+```text
+D = unique_source_order({ slot(wⱼ) | wⱼ active })
+Ldistinct = majority_tie_seeded({ B(slot) | slot ∈ D })
+Cᵢ = majority_tie_seeded(Vpos ∪ Vtopic ∪ { Ldistinct, Ldistinct, Ldistinct })
+```
+
+`|D| < 12` ise global üç katkı hiç eklenmez; sonuç local `hybrid` ile bit-
+tam aynıdır. Bu nedenle çok tekrar eden boilerplate bir satırın yalnız occurrence
+sayısıyla whole-record majority'yi ele geçirmesi engellenir. Bu bir data-quality
+ve bounded aggregation seçeneğidir; tekrarın her domain'de yanlış olduğu veya
+semantic quality'nin evrensel olarak arttığı iddiası değildir.
+
 - `W`, context window; `P`, `position_shift_bits` değeridir.
 - `hierarchical` varsayılandır: `hybrid`in left/right role bilgisini `Vpos`
   içinde ve topical neighbourhood sinyalini `Vtopic` içinde korur; yalnız ≥12
@@ -74,6 +90,14 @@ amaçlı yapısal bir HDC encoder seçeneğidir.
   semantic-prototype okuması yoktur. Kısa record'larda bit-tam `hybrid` ile
   aynıdır. Mevcut OpenVINO worker ABI'si cross-fold items taşımadığından bu mod
   bilinçli olarak CPU/OpenMP ile sınırlıdır.
+- `debiased`, local `hybrid` bundle'ını aynen korur; global majority'ye her
+  active slotu en fazla bir kez verir ve yalnız ≥12 **distinct** active slotta
+  üç `Ldistinct` katkısı ekler. Scratch tablosu capacity-indexed/touched-slot
+  resetlidir; center başına duplicate scan, mutable prototype okuması veya
+  corpus-size'a bağlı memory yoktur. Duplicate olmayan long record'larda
+  `hierarchical` ile bit-tam eşdeğerdir; <12 distinct slotta `hybrid`e düşer.
+  Distinct-slot item dizisi mevcut immutable OpenVINO ABI'sinde olmadığı için
+  mod fail-closed olarak yalnız CPU/OpenMP'dir.
 - `legacy`, önceki positional signed-counter yolu için regression/benchmark
   referansıdır; yeni eğitimler için önerilmez.
 - `majority_tie_seeded`, yeni modlarda word-parallel `hv_bitacc_t` binary
@@ -114,6 +138,16 @@ Hash lookup fingerprint kullanır, fakat fingerprint eşitliğini token eşitli�
 saymaz: her hit'te tam padded-string karşılaştırması yapılır. Böylece 64-bit
 fingerprint collision yanlış token merge'ine neden olmaz. Checkpoint load
 sonrasında transient hash table tokenlardan yeniden kurulur.
+
+Eğitim geçişinde varsayılan açık olan `--lookup-cache`, 4.096-entry bounded
+direct-map execution cache'idir. Key; **fingerprint + tam 48-byte padded token**
+şeklindedir: aynı cache index veya aynı fingerprint tek başına hit olamaz;
+çakışma yalnız güvenli miss/overwrite üretir ve canonical vocabulary lookup'a
+düşer. Active olmayan/OOV sonucu da exact token ile cache'lenebilir, ancak cache
+checkpoint'e yazılmaz ve `--lookup-cache` / `--no-lookup-cache` seçimleri
+semantic plane, experience counter veya resume sonucu değiştirmemelidir. CLI
+`vocabulary lookup cache hits/misses` sayaçlarını yalnız execution telemetrisi
+olarak raporlar.
 
 ### Geçiş 2 — online context learning
 
@@ -160,18 +194,26 @@ ile azaltılır. Bunların hiçbiri checkpoint payload'una girmez veya source-or
   kaldırılır.
 - `hierarchical` whole-record accumulator yalnız ≥12 active token olduğunda
   kurulur. `coherent` aynı eşikte bir full-record ve en çok iki parity-fold
-  accumulator'ını record başına bir kez kurar; center başına yeniden tarama
-  yapmaz. Kısa record'lar zaten bit-tam local `hybrid` semantiğine sahip olduğu
-  için bu modlarda allocator/reset/bundle işi yapılmaz.
+  accumulator'ını record başına bir kez kurar; `debiased` ise aynı touched-slot
+  scratch ile distinct active slots'u bir kez toplar ve ancak ≥12 distinct slot
+  varsa bir accumulator kurar. Hiçbiri center başına yeniden tarama yapmaz.
+  Kısa/suppressed record'lar bit-tam local `hybrid` semantiğine sahip olduğu
+  için bu modlarda global allocator/reset/bundle işi yapılmaz.
+- 4.096-entry exact-token lookup cache, aynı fixed-width token'ın tekrar eden
+  active/OOV probe'larını canonical hash-table walk olmadan karşılar. Full token
+  equality veya fingerprint uyuşmazlığı miss'tir; cache state epoch sonunda
+  bırakılır. `--no-lookup-cache` reference execution yolu için aynı bounded
+  workspace ayrılır ama lookup shortcut'ı çalışmaz.
 - Adaptive scheduler, varsayılan olarak bir record'da en az 32 eligible center
   varsa OpenMP worksharing seçer; daha küçük record'lar serial immutable path'e
   gider. CLI çıktıdaki `CPU serial/parallel context batches` ve `...contexts`
   sayaçları seçilen execution path'i raporlar. Bu telemetry throughput veya
   hardware utilisation iddiası değildir.
 
-Bit-sliced bounded reset, planner scratch ve staging allocation sabit capacity
-ile sınırlıdır. Resource preflight bu planner scratch'ı (`4 × --max-vocab`
-byte) ayrıca RAM estimate'ine dahil eder. En önemlisi, context'ler immutable
+Bit-sliced bounded reset, planner scratch, fixed 4.096-entry lookup-cache
+workspace ve staging allocation sabit capacity ile sınırlıdır. Resource preflight
+planner scratch'ı (`4 × --max-vocab` byte) ve yaklaşık 272 KiB conservative
+lookup-cache workspace'ini ayrıca RAM estimate'ine dahil eder. En önemlisi, context'ler immutable
 `B(w)` üzerinden hazırlanır fakat `S(w)` ve experience sayaçları sonra aynı
 orijinal token sırası ile commit edilir; serial/parallel veya threshold seçimi
 checkpoint byte'larını değiştirmemelidir.
@@ -227,6 +269,12 @@ cmake --build build --parallel
   --max-vocab 50000 --min-frequency 3 --window 4 --position-shift 73 \
   --context-mode coherent --epochs 3 --strict
 
+# Tekrarlı boilerplate'in global majority'yi occurrence ile domine etmesini
+# önleyen CPU/OpenMP-only encoder; <12 distinct active slotta hybrid'e düşer.
+./build/vegai_pretrain train REPEATED_LONG_RECORDS.txt debiased.vgai \
+  --max-vocab 50000 --min-frequency 3 --window 4 --position-shift 73 \
+  --context-mode debiased --epochs 3 --strict
+
 # Checkpoint semantic configuration ile uyumlu ek epoch (vocabulary değiştirmez)
 ./build/vegai_pretrain resume CORPUS.txt model.vgai --epochs 1 --query token
 
@@ -248,7 +296,8 @@ cmake --build build --parallel
 | `--min-frequency N` | 2 | active vocabulary threshold |
 | `--window N` | 4 | her yönde context yarıçapı |
 | `--position-shift N` | 73 | relative position başına bit shift |
-| `--context-mode MODE` | `hierarchical` | `legacy`, bit-tam hızlı `positional`, local positional+topical `hybrid`, ≥12 active-token kayıtta `full-record × 3` global evidence ekleyen `hierarchical`, ya da aynı bütçeyi `full-record × 1 + opposite-parity fold × 2` olarak kullanan CPU-only `coherent` |
+| `--context-mode MODE` | `hierarchical` | `legacy`, bit-tam hızlı `positional`, local positional+topical `hybrid`, ≥12 active-token kayıtta `full-record × 3` global evidence ekleyen `hierarchical`, aynı bütçeyi `full-record × 1 + opposite-parity fold × 2` kullanan CPU-only `coherent`, veya ≥12 **distinct** active slotta unique-slot `full-record × 3` kullanan CPU/OpenMP-only `debiased` |
+| `--lookup-cache` / `--no-lookup-cache` | açık / kapalı | execution-only 4.096-entry fingerprint + full padded-token direct-map cache'i aç/kapat; collision miss'tir, checkpoint state değildir |
 | `--parallel-context-build` | açık | immutable per-record context construction için OpenMP; yalnız record update sayısı eşikteyse team açılır, source-ordered prototype commit sayesinde thread count checkpoint semantiğini değiştirmez |
 | `--parallel-min-contexts N` | 32 | execution-only adaptive scheduler eşiği; N'den az eligible center içeren kısa record'lar team-launch/staging maliyetinden kaçınmak için serial hazırlanır |
 | `--serial-context-build` | kapalı | yalnız debug/regression için parallel context hazırlığını kapatır; checkpoint state değildir |
@@ -264,8 +313,9 @@ cmake --build build --parallel
 `resume`, checkpoint'ten vocabulary threshold/capacity, `window`, shift,
 context encoder, plasticity ve tie seed'ini geri alır; yalnız `--epochs`,
 `--strict`, `--query` ve execution-only `--reference-context-kernel`,
-`--parallel-context-build` / `--serial-context-build` /
-`--parallel-min-contexts` seçeneklerini kabul eder ve vocabulary'yi değiştirmez.
+`--lookup-cache` / `--no-lookup-cache`, `--parallel-context-build` /
+`--serial-context-build` / `--parallel-min-contexts` seçeneklerini kabul eder
+ve vocabulary'yi değiştirmez.
 Bu implementation/execution switches checkpoint
 semantiği veya payload değildir; reference switch `continue` için de yalnız
 benchmark/regression amacıyla kullanılabilir. `continue` aynı
@@ -308,8 +358,9 @@ python3 tools/training_resource_plan.py --corpus CORPUS.txt \
 
 Araç RAM/storage lower-bound estimate'i, CPU topology, NUMA/RAM-channel
 best-effort telemetry ve OpenMP placement önerisi üretir; ayrıca capacity başına
-4-byte source-order planner scratch'ını da dahil eder. SSD/HDD ve dual-RAM
-channel seçimi OS/firmware tarafından yönetilir; Vegai bunları zorlamaz.
+4-byte source-order/de-biased planner scratch'ını ve sabit exact-token lookup-
+cache workspace'ini de dahil eder. SSD/HDD ve dual-RAM channel seçimi
+OS/firmware tarafından yönetilir; Vegai bunları zorlamaz.
 Deterministic OpenMP context construction, immutable base vectors üzerinde
 paralel çalışır; adaptive scheduler küçük record'larda serial kalabilir, model
 update'leri ise her durumda kaynak sırası ile commit edilir. Bu yüzden
@@ -322,7 +373,17 @@ python3 tools/compare_pretraining_threads.py --pretrain-bin ./build/vegai_pretra
 ```
 
 Bu benchmark'ta compile/fixture/harness süresi hariçtir ve hız oranı yalnız
-ölçülen host/workload için geçerlidir. Sabit `e34fd22` baseline ile aynı-run
+ölçülen host/workload için geçerlidir. Exact vocabulary-cache yolu için ayrıca:
+
+```bash
+python3 tools/compare_pretraining_lookup_cache.py \
+  --pretrain-bin ./build/vegai_pretrain --repetitions 3
+```
+
+Bu comparator cache açık/kapalı gerçek `train` child process wall-clock
+örneklerini ayrı ölçer; checkpoint SHA/byte eşitliği ve full-token hit/miss
+telemetrisi zorunludur. Repeated-one-token fixture yalnız lookup hot-path
+kanıtıdır, doğal corpus veya genel eğitim hız iddiası değildir. Sabit `e34fd22` baseline ile aynı-run
 mimari önce/sonra ölçümü için `tools/compare_pretraining_revisions.py` kullanın;
 araç real `train` process'lerini timing eder, warm-up/order alternation uygular
 ve varsayılan olarak checkpoint byte equality zorunlu kılar. Yalnız açıkça
@@ -337,9 +398,10 @@ değildir. Intel Core Ultra için opt-in OpenVINO context
 provider, immutable packed-HDC bundle/finalize aşamasını dispatch ederken
 source-order update'i CPU'da tutar; worker bir train çağrısı boyunca resident
 kalır ve item-cardinality graph'larını dynamic batch ile cache'ler. `coherent`
-mode'un center-dependent cross-fold item dizisi bu worker ABI'sinde yoktur:
-`--context-provider openvino --context-mode coherent` validation aşamasında
-reddedilir; sessiz CPU/OpenVINO route değişimi yapılmaz. Explicit CPU fallback,
+mode'un center-dependent cross-fold item dizisi ve `debiased` mode'un distinct-
+slot global item dizisi bu worker ABI'sinde yoktur: `--context-provider openvino --context-mode coherent` veya
+`--context-provider openvino --context-mode debiased` validation aşamasında reddedilir;
+sessiz CPU/OpenVINO route değişimi yapılmaz. Explicit CPU fallback,
 CPU plugin'i hızlandırma diye sunmak yerine native fused/OpenMP kernel'ine bypass eder. Device mask'i runtime output'ta doğrulanır ve strict
 CPU-reference checkpoint byte equality zorunludur. Ayrıntılı kaynak ve
 accelerator sınırları için [RESOURCE_AWARE_TRAINING.md](RESOURCE_AWARE_TRAINING.md)'ye
@@ -360,6 +422,9 @@ CLI ve `pretrain_metrics_t` aşağıdaki sayıları verir:
 | `tokenizer_truncations` | düşürülen long-token / excess-token kaydı |
 | `non_ascii_bytes` | in-contract kayıtlarda gözlenen `>127` byte sayısı; non-strict telemetry'dir, `--strict` altında hatadır |
 | `overlong_records` | tamamı düşürülen >8.192-byte fiziksel kayıt |
+| `vocabulary lookup cache hits/misses` | checkpoint dışı execution telemetry; cache açıkken raw lookup partition'ı, kapalıyken ikisi de sıfır |
+| `de-biased global-topic/suppressed records` | yalnız `debiased` modda ≥12 distinct slotla global summary alan veya repetition nedeniyle local-hybrid'e düşen long record sayısı |
+| `de-biased distinct topic tokens` | global-channel eligibility kontrolü yapılan long record'lardaki distinct active slot toplamı |
 
 `active_tokens + oov_tokens = raw_tokens` ikinci geçiş için beklenen temel
 invariant'tır. `center_updates` active token sayısından küçük olabilir; örneğin
@@ -377,13 +442,19 @@ continuation contract'i**dir:
 
 - Yeni oluşturulan tüm context mode'ları **v7** header/checksum'ı ile yazar.
   v7, exact-rate plasticity için unbiased Floyd/complement subset sampler'ını
-  bağlar. Bu nedenle fresh `legacy` context mode'u bile (isim benzerliğine
-  rağmen) v7'dir; context encoder ile sampler lineage ayrı kavramlardır.
+  bağlar ve `debiased` distinct-slot global-context semantiğinin ilk kabul edilen
+  continuation lineage'idir. Bu nedenle fresh `legacy` context mode'u bile
+  (isim benzerliğine rağmen) v7'dir; context encoder ile sampler lineage ayrı
+  kavramlardır.
 - Reader v4, v5 ve v6'yı historical bounded-retry sampler lineage'i olarak
   yükler. Böyle bir model tekrar kaydedildiğinde non-coherent ise v5, coherent
   ise v6 yazar ve sonraki update'lerde historical stream'i sürdürür.
 - v7 reader/writer Floyd/complement lineage'ini sürdürür. Coherent payload v4
   veya v5 ise fail-closed reddedilir; v6 ve v7 coherent için geçerlidir.
+  `debiased` payload yalnız v7/Floyd lineage'inde kabul edilir; synthetic veya
+  forged legacy-sampler combination save/load aşamasında fail-closed reddedilir.
+  Böylece eski checkpoint yeni duplicate-handling trajectory'sine sessizce
+  taşınmaz.
 
 `vegai_pretrain inspect`, `plasticity sampler` alanında `floyd-complement` veya
 `legacy-bounded-retry` yazar; operatör checkpoint lineage'ini context mode'dan
@@ -505,6 +576,14 @@ Native testler şunları kontrol eder:
   fused/reference local-kernel eşitliği, kısa-record `hybrid` eşitliği ve v7
   checkpoint round-trip'i; synthetic v5 ve coherent-v6 lineage'lerinin
   historical sampler ile uninterrupted run'a bit-tam resume edilmesi;
+- duplicate olmayan long record'da `debiased = hierarchical` bit eşitliği;
+  raw uzun ama <12 distinct slotlu repeat record'da `debiased = hybrid` bit
+  eşitliği, distinct/suppressed telemetry, v7 checkpoint round-trip'i ve
+  legacy sampler save rejection; ayrıca OpenVINO immutable ABI'sinin explicit
+  `debiased` rejection'ı;
+- cache açık/kapalı run'larının base/semantic/experience planes ve checkpoint
+  continuation bakımından bit-tam eşitliği; hit/miss partition telemetry ve
+  fingerprint'e rağmen full padded-token equality;
 - windowed context count ve active/OOV telemetry;
 - checkpoint round-trip ve uninterrupted run ile checkpoint-resume run'ın
   bit-tam eşitliği;
@@ -522,7 +601,11 @@ fixture üzerinde `hybrid → hierarchical → coherent` Top-1 cohesion
 diagnostic'ini raporlar. Coherent arm için kabul koşulu hybrid same-cluster
 Top-1 sonucunu geriletmemektir; pozitif similarity gain zorunlu bir doğal-dil
 iddiası değildir. Bunlar kontrollü tanılardır; doğal dil yeteneği veya production
-throughput garantisi değildir.
+throughput garantisi değildir. CI ayrıca `tools/compare_pretraining_lookup_cache.py`
+ile cache açık/kapalı, checkpoint-byte-identical real child-process comparator'ı
+çalıştırır. Bu fixture tek bir tekrar eden token ile lookup overhead'ini izole
+eder; hız oranı host/workload gözlemidir ve minimum speedup acceptance gate'i
+değildir.
 
 ```bash
 python3 tools/compare_pretraining_modes.py \

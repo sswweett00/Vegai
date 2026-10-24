@@ -47,7 +47,7 @@ FIXTURE_9MIB_MANIFEST ?= corpora/synthetic_hdc_9mib.manifest.json
 FIXTURE_9MIB_CHECKPOINT ?= checkpoints/synthetic_hdc_9mib.vgai
 FIXTURE_9MIB_REPORT ?= pretraining-runs/synthetic_hdc_9mib.json
 
-.PHONY: all engine pretrain field chat test run run-pretrain run-field run-chat check field-check optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check quality-check fixture-9mib verify-fixture-9mib pretrain-9mib clean clean-all debug portable native portable-test native-test
+.PHONY: all engine pretrain field chat test run run-pretrain run-field run-chat check field-check optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check quality-check lookup-cache-compare fixture-9mib verify-fixture-9mib pretrain-9mib clean clean-all debug portable native portable-test native-test
 
 # Default target: portable optimized GNU binaries without host-only ISA flags.
 all: engine pretrain field chat
@@ -170,6 +170,12 @@ dialogue-check: $(PRETRAIN) $(CHAT)
 # measures a narrow semantic-neighbour contract, not general model intelligence.
 quality-check: $(PRETRAIN)
 	python3 tools/verify_pretraining_quality_evaluation.py --pretrain-bin $(PRETRAIN)
+
+# Real train child-process cache on/off comparator. Fixture/report/checkpoint
+# comparison are outside the timed interval; checkpoint byte equality is the
+# semantic-preservation gate, not a minimum host-specific speedup threshold.
+lookup-cache-compare: $(PRETRAIN)
+	python3 tools/compare_pretraining_lookup_cache.py --pretrain-bin $(PRETRAIN) --repetitions 3
 
 # A deterministic, provenance-labelled 9 MiB structural fixture. It carries no
 # third-party text and must not be interpreted as domain or language knowledge.

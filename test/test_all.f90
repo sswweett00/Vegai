@@ -546,6 +546,7 @@ contains
       type(vocabulary_t) :: vocab
       character(len=TOKEN_LEN) :: tokens(MAX_TOKENS_PER_LINE)
       integer(int32) :: n_tokens, status, slot
+      integer(int64) :: fingerprint
       logical :: found, truncated
 
       call tokenize_ascii_line("HELLO, can't; _id42!", tokens, n_tokens, truncated)
@@ -578,6 +579,11 @@ contains
       call assert_i32_equal(status, VOCAB_OK, 'vocabulary hash index rebuild succeeds')
       call vocab_lookup(vocab, 'alpha', slot, found, status, .true.)
       call assert_i32_equal(status, VOCAB_OK, 'rebuilt vocabulary index preserves lookup')
+      fingerprint = vocab_token_fingerprint('alpha')
+      call vocab_lookup_fingerprint(vocab, 'not-present', fingerprint, slot, found, status, .true.)
+      call assert_i32_equal(status, VOCAB_ERR_NOT_FOUND, &
+                            'precomputed fingerprint still requires exact padded-token equality')
+      call assert_true(.not. found, 'fingerprint lookup cannot merge an unrelated token')
       call vocab_destroy(vocab)
    end subroutine test_text_ingest
 
@@ -587,17 +593,21 @@ contains
       character(len=*), parameter :: CONTINUATION_A_PATH = 'vegai_continuation_a.txt'
       character(len=*), parameter :: CONTINUATION_B_PATH = 'vegai_continuation_b.txt'
       character(len=*), parameter :: HIERARCHICAL_PATH = 'vegai_hierarchical_context.txt'
+      character(len=*), parameter :: DEBIASED_REPEAT_PATH = 'vegai_debiased_repetition.txt'
       character(len=*), parameter :: PARALLEL_CONTEXT_PATH = 'vegai_parallel_context.txt'
       type(hdc_pretrain_model_t) :: model_a, model_b, restored, legacy_model, positional_model, continuation_model
       type(hdc_pretrain_model_t) :: sampler_legacy_model, sampler_legacy_restored
       type(hdc_pretrain_model_t) :: hierarchical_model, local_only_model, hierarchical_replay, short_hierarchical_model
       type(hdc_pretrain_model_t) :: coherent_model, coherent_replay, short_coherent_model
+      type(hdc_pretrain_model_t) :: debiased_unique_model, debiased_repeat_model, debiased_repeat_hybrid_model
+      type(hdc_pretrain_model_t) :: cache_disabled_model
       type(hdc_pretrain_model_t) :: context_serial_model, context_parallel_model
       type(hdc_pretrain_config_t) :: config, resumed_config, strict_config, legacy_config, positional_config, continuation_config
-      type(hdc_pretrain_config_t) :: reference_config, hierarchical_config, local_only_config, coherent_config
-      type(hdc_pretrain_config_t) :: openvino_rejected_config, context_serial_config, context_parallel_config
+      type(hdc_pretrain_config_t) :: reference_config, hierarchical_config, local_only_config, coherent_config, debiased_config
+      type(hdc_pretrain_config_t) :: openvino_rejected_config, context_serial_config, context_parallel_config, cache_disabled_config
       type(pretrain_metrics_t) :: vocabulary_metrics, train_metrics, extension_metrics
-      type(pretrain_execution_report_t) :: default_execution, serial_execution, parallel_execution
+      type(pretrain_execution_report_t) :: default_execution, serial_execution, parallel_execution, cache_disabled_execution
+      type(pretrain_execution_report_t) :: debiased_unique_execution, debiased_repeat_execution
       type(hv_t) :: semantic_hv, semantic_before_extension, semantic_after_extension
       character(len=TOKEN_LEN) :: nearest_token
       integer :: unit, io_status
@@ -658,7 +668,31 @@ contains
                        'adaptive scheduler avoids OpenMP teams for short records by default')
       call assert_true(default_execution%cpu_parallel_batches == 0_int64, &
                        'short-record fixture does not select the parallel scheduler')
+      call assert_true(default_execution%vocabulary_lookup_cache_hits > 0_int64 .and. &
+                       default_execution%vocabulary_lookup_cache_misses > 0_int64 .and. &
+                       default_execution%vocabulary_lookup_cache_hits + &
+                       default_execution%vocabulary_lookup_cache_misses == train_metrics%raw_tokens, &
+                       'exact-token lookup cache reports a complete hit/miss execution partition')
       call assert_true(model_a%training_epochs_completed == 1_int64, 'one completed epoch is recorded')
+
+      ! The vocabulary cache is strictly execution-only. Disable it from the
+      ! first lookup and require every checkpoint-relevant plane to match the
+      ! cached trajectory byte-for-byte, including repeated input tokens.
+      cache_disabled_config = config
+      cache_disabled_config%vocabulary_lookup_cache = .false.
+      call pretrain_build_vocabulary(cache_disabled_model, CORPUS_PATH, cache_disabled_config, &
+                                     vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'cache-disabled vocabulary pass succeeds')
+      call pretrain_train_file(cache_disabled_model, CORPUS_PATH, cache_disabled_config, train_metrics, status, &
+                               cache_disabled_execution)
+      call assert_i32_equal(status, PT_OK, 'cache-disabled training pass succeeds')
+      call assert_true(cache_disabled_execution%vocabulary_lookup_cache_hits == 0_int64 .and. &
+                       cache_disabled_execution%vocabulary_lookup_cache_misses == 0_int64, &
+                       'disabled lookup cache has no cache telemetry')
+      call assert_true(all(cache_disabled_model%base_bits == model_a%base_bits) .and. &
+                       all(cache_disabled_model%semantic_bits == model_a%semantic_bits) .and. &
+                       all(cache_disabled_model%experience_count == model_a%experience_count), &
+                       'lookup-cache toggle preserves every checkpoint-relevant plane')
 
       call pretrain_lookup_token(model_a, 'king', slot, found, status)
       call assert_i32_equal(status, PT_OK, 'active token lookup succeeds')
@@ -757,6 +791,18 @@ contains
       call assert_i32_equal(status, PT_OK, 'short-record coherent training succeeds')
       call assert_true(all(short_coherent_model%semantic_bits == model_a%semantic_bits), &
                        'coherent threshold leaves short-record hybrid semantics unchanged')
+      debiased_config = hierarchical_config
+      debiased_config%context_mode = PT_CONTEXT_DEBIASED
+      call assert_true(trim(pretrain_context_mode_name(debiased_config%context_mode)) == 'debiased', &
+                       'de-biased context encoder exposes a stable human-readable name')
+      call pretrain_build_vocabulary(debiased_repeat_model, CORPUS_PATH, debiased_config, &
+                                     vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'short-record de-biased vocabulary succeeds')
+      call pretrain_train_file(debiased_repeat_model, CORPUS_PATH, debiased_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'short-record de-biased training succeeds')
+      call assert_true(all(debiased_repeat_model%semantic_bits == model_a%semantic_bits), &
+                       'de-biased threshold leaves short-record hybrid semantics unchanged')
+      call pretrain_model_destroy(debiased_repeat_model)
 
       ! Coherent cross-fold inputs have no representation in the immutable
       ! OpenVINO lane ABI. Reject the configuration before any worker/process
@@ -771,6 +817,10 @@ contains
       call pretrain_build_vocabulary(model_b, CORPUS_PATH, openvino_rejected_config, vocabulary_metrics, status)
       call assert_i32_equal(status, PT_ERR_INVALID_ARGUMENT, &
                             'coherent mode rejects the unsupported OpenVINO worker ABI')
+      openvino_rejected_config%context_mode = PT_CONTEXT_DEBIASED
+      call pretrain_build_vocabulary(model_b, CORPUS_PATH, openvino_rejected_config, vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_ERR_INVALID_ARGUMENT, &
+                            'de-biased mode rejects the unsupported OpenVINO worker ABI')
 
       ! The fast positional encoder is an implementation-only optimization: it
       ! must preserve the legacy semantic plane exactly.  Hybrid adds a second,
@@ -854,6 +904,61 @@ contains
       call assert_i32_equal(status, PT_OK, 'coherent reference training succeeds')
       call assert_true(all(coherent_model%semantic_bits == coherent_replay%semantic_bits), &
                        'coherent fused local context remains bit-identical to reference learning')
+
+      ! With no duplicate active slots, DEBIASED has the same whole-record
+      ! majority input and must therefore be byte-identical to HIERARCHICAL.
+      debiased_config = hierarchical_config
+      debiased_config%context_mode = PT_CONTEXT_DEBIASED
+      call pretrain_build_vocabulary(debiased_unique_model, HIERARCHICAL_PATH, debiased_config, &
+                                     vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'unique-record de-biased vocabulary pass succeeds')
+      call pretrain_train_file(debiased_unique_model, HIERARCHICAL_PATH, debiased_config, train_metrics, status, &
+                               debiased_unique_execution)
+      call assert_i32_equal(status, PT_OK, 'unique-record de-biased training succeeds')
+      call assert_true(debiased_unique_execution%debiased_topic_records == 2_int64 .and. &
+                       debiased_unique_execution%debiased_topic_suppressed_records == 0_int64 .and. &
+                       debiased_unique_execution%debiased_topic_distinct_tokens == 24_int64, &
+                       'de-biased telemetry records distinct long-record topical evidence')
+      call assert_true(all(debiased_unique_model%base_bits == hierarchical_model%base_bits) .and. &
+                       all(debiased_unique_model%semantic_bits == hierarchical_model%semantic_bits) .and. &
+                       all(debiased_unique_model%experience_count == hierarchical_model%experience_count), &
+                       'de-biased mode is bit-identical to hierarchy on duplicate-free long records')
+
+      ! A record can be long in occurrences yet narrow in distinct vocabulary.
+      ! In that case DEBIASED explicitly withholds its global channel and
+      ! becomes local HYBRID without changing the ordered update schedule.
+      open(newunit=unit, file=DEBIASED_REPEAT_PATH, status='replace', action='write', &
+           form='formatted', iostat=io_status)
+      call assert_true(io_status == 0, 'de-biased repetition fixture opens')
+      if (io_status == 0) then
+         write(unit, '(A)') 'amber birch cedar dahlia amber birch cedar dahlia amber birch cedar dahlia'
+         write(unit, '(A)') 'dahlia cedar birch amber dahlia cedar birch amber dahlia cedar birch amber'
+         close(unit)
+      end if
+      debiased_config = hierarchical_config
+      debiased_config%context_mode = PT_CONTEXT_DEBIASED
+      local_only_config = debiased_config
+      local_only_config%context_mode = PT_CONTEXT_HYBRID
+      call pretrain_build_vocabulary(debiased_repeat_model, DEBIASED_REPEAT_PATH, debiased_config, &
+                                     vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'repetitive de-biased vocabulary pass succeeds')
+      call pretrain_train_file(debiased_repeat_model, DEBIASED_REPEAT_PATH, debiased_config, train_metrics, status, &
+                               debiased_repeat_execution)
+      call assert_i32_equal(status, PT_OK, 'repetitive de-biased training succeeds')
+      call assert_true(debiased_repeat_execution%debiased_topic_records == 0_int64 .and. &
+                       debiased_repeat_execution%debiased_topic_suppressed_records == 2_int64 .and. &
+                       debiased_repeat_execution%debiased_topic_distinct_tokens == 8_int64, &
+                       'de-biased telemetry suppresses repetition-dominated global evidence')
+      call pretrain_build_vocabulary(debiased_repeat_hybrid_model, DEBIASED_REPEAT_PATH, local_only_config, &
+                                     vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'repetitive hybrid vocabulary pass succeeds')
+      call pretrain_train_file(debiased_repeat_hybrid_model, DEBIASED_REPEAT_PATH, local_only_config, &
+                               train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'repetitive hybrid training succeeds')
+      call assert_true(all(debiased_repeat_model%base_bits == debiased_repeat_hybrid_model%base_bits) .and. &
+                       all(debiased_repeat_model%semantic_bits == debiased_repeat_hybrid_model%semantic_bits) .and. &
+                       all(debiased_repeat_model%experience_count == debiased_repeat_hybrid_model%experience_count), &
+                       'de-biased repetition suppression is bit-identical to local hybrid')
       ! v7 binds the new unbiased exact-mask sampler to every newly-trained
       ! encoder lineage. Reading the raw header prevents a future broad writer
       ! version change from silently weakening this continuation contract.
@@ -886,6 +991,22 @@ contains
                             'checkpoint preserves coherent encoder semantics')
       call assert_true(all(restored%semantic_bits == coherent_model%semantic_bits), &
                        'coherent checkpoint restores semantic prototypes')
+      call assert_i32_equal(debiased_unique_model%context_mode, PT_CONTEXT_DEBIASED, &
+                            'de-biased model retains its context-mode identity before checkpointing')
+      call pretrain_checkpoint_save(debiased_unique_model, CHECKPOINT_PATH, status)
+      call assert_i32_equal(status, PT_OK, 'de-biased checkpoint save succeeds')
+      call assert_checkpoint_header_version(CHECKPOINT_PATH, 7_int32, 'de-biased')
+      call pretrain_checkpoint_load(CHECKPOINT_PATH, restored, status)
+      call assert_i32_equal(status, PT_OK, 'de-biased checkpoint load succeeds')
+      call assert_i32_equal(restored%context_mode, PT_CONTEXT_DEBIASED, &
+                            'checkpoint preserves de-biased encoder semantics')
+      call assert_true(all(restored%semantic_bits == debiased_unique_model%semantic_bits), &
+                       'de-biased checkpoint restores semantic prototypes')
+      debiased_unique_model%plasticity_sampler = PT_PLASTICITY_SAMPLER_LEGACY
+      call pretrain_checkpoint_save(debiased_unique_model, CHECKPOINT_PATH, status)
+      call assert_i32_equal(status, PT_ERR_CHECKPOINT, &
+                            'de-biased semantic mode refuses a legacy sampler checkpoint lineage')
+      debiased_unique_model%plasticity_sampler = PT_PLASTICITY_SAMPLER_FLOYD_COMPLEMENT
 
       ! Exercise a synthetic historical coherent v6 lineage rather than only a
       ! parser branch. Its continuation must keep the old mask stream while
@@ -935,6 +1056,25 @@ contains
                        'checkpoint resume remains bit-identical to uninterrupted training')
       call assert_true(all(restored%experience_count == model_a%experience_count), &
                        'checkpoint resume preserves deterministic learning schedule')
+
+      ! Cache state itself is never serialized. A checkpoint produced with the
+      ! cache disabled must resume identically when the default cache is on.
+      call pretrain_checkpoint_save(cache_disabled_model, CHECKPOINT_PATH, status)
+      call assert_i32_equal(status, PT_OK, 'cache-disabled checkpoint save succeeds')
+      call pretrain_checkpoint_load(CHECKPOINT_PATH, restored, status)
+      call assert_i32_equal(status, PT_OK, 'cache-disabled checkpoint load succeeds')
+      call pretrain_config_from_model(restored, resumed_config, status)
+      call assert_i32_equal(status, PT_OK, 'cache-disabled checkpoint exposes resume configuration')
+      call assert_true(resumed_config%vocabulary_lookup_cache, &
+                       'resume defaults to the transient lookup cache without changing semantic state')
+      resumed_config%epochs = 1_int32
+      call pretrain_train_file(cache_disabled_model, CORPUS_PATH, cache_disabled_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'cache-disabled uninterrupted second epoch succeeds')
+      call pretrain_train_file(restored, CORPUS_PATH, resumed_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'cache-enabled resume from cache-disabled checkpoint succeeds')
+      call assert_true(all(restored%semantic_bits == cache_disabled_model%semantic_bits) .and. &
+                       all(restored%experience_count == cache_disabled_model%experience_count), &
+                       'lookup-cache choice preserves deterministic checkpoint continuation')
 
       resumed_config%context_window = resumed_config%context_window + 1_int32
       call pretrain_train_file(restored, CORPUS_PATH, resumed_config, train_metrics, status)
@@ -1088,11 +1228,17 @@ contains
       call pretrain_model_destroy(local_only_model)
       call pretrain_model_destroy(hierarchical_replay)
       call pretrain_model_destroy(short_hierarchical_model)
+      call pretrain_model_destroy(debiased_unique_model)
+      call pretrain_model_destroy(debiased_repeat_model)
+      call pretrain_model_destroy(debiased_repeat_hybrid_model)
+      call pretrain_model_destroy(cache_disabled_model)
       call pretrain_model_destroy(context_serial_model)
       call pretrain_model_destroy(context_parallel_model)
       open(newunit=unit, file=PARALLEL_CONTEXT_PATH, status='old', iostat=io_status)
       if (io_status == 0) close(unit, status='delete')
       open(newunit=unit, file=HIERARCHICAL_PATH, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+      open(newunit=unit, file=DEBIASED_REPEAT_PATH, status='old', iostat=io_status)
       if (io_status == 0) close(unit, status='delete')
       open(newunit=unit, file=CONTINUATION_A_PATH, status='old', iostat=io_status)
       if (io_status == 0) close(unit, status='delete')

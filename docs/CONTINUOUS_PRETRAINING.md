@@ -113,14 +113,17 @@ python3 tools/continuous_pretrain.py \
 
 State var olduktan sonra policy option'ları verilirse mevcut immutable değerle
 aynı olmak zorundadır; aksi halde çağrı başarısız olur. `context_mode` policy
-allowlist'i `legacy`, `positional`, `hybrid`, `hierarchical` ve `coherent`
-değerlerini kabul eder; hierarchical mode yalnız ≥12 active-token içeren shard
-kayıtlarında bounded whole-record signal ekler. CPU-only `coherent`, aynı
-uzun-record eşiğinde full-record anchor ile opposite-parity fold evidence'i
-kullanır. Yeni continual run'lar v7 checkpoint üretir; v7 exact-mask sampler
-lineage'ini bağlar ve policy/mode sonradan değiştirilemez. Historical v6
-coherent checkpoint'ler okunur, ancak historical sampler lineage'iyle devam
-eder; bir generation zincirinde checkpoint lineage'ini karıştırmayın.
+allowlist'i `legacy`, `positional`, `hybrid`, `hierarchical`, `coherent` ve
+`debiased` değerlerini kabul eder; hierarchical mode yalnız ≥12 active-token
+kayıtta bounded whole-record signal ekler. CPU-only `coherent`, aynı uzun-record
+eşiğinde full-record anchor ile opposite-parity fold evidence'i kullanır.
+CPU/OpenMP-only `debiased`, global channel için ≥12 **distinct** active slot
+ister; threshold altındaki repeat-heavy record'lar bit-tam local `hybrid`e
+düşer. Yeni continual run'lar v7 checkpoint üretir; v7 exact-mask sampler
+lineage'ini ve debiased continuation contract'ini bağlar, policy/mode sonradan
+değiştirilemez. Historical v6 coherent checkpoint'ler okunur, ancak historical
+sampler lineage'iyle devam eder; bir generation zincirinde checkpoint lineage'ini
+karıştırmayın.
 Sıradan restart için aynı üç temel argüman
 yeterlidir:
 

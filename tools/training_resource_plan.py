@@ -41,9 +41,15 @@ VOCABULARY_ALLOWANCE_BYTES_PER_SLOT = 256
 # for deterministic OpenMP construction.  It does not grow with corpus bytes.
 CONTEXT_STAGING_BYTES = 256 * 1024 * 8
 # The source-order planner keeps one int32 repeated-center occurrence counter
-# per configured vocabulary slot.  It is sparse-reset between records but
-# resident for the epoch, so account for its full bounded capacity.
+# per configured vocabulary slot. It is sparse-reset between records and is
+# also reused by the DEBIASED distinct-slot topic builder, so account for its
+# full bounded capacity once rather than double-counting mode scratch.
 LINE_UPDATE_SCRATCH_BYTES_PER_SLOT = 4
+# The execution-only direct-mapped vocabulary cache is fixed-size: 4,096
+# padded 48-byte tokens, int64 fingerprints, int32 slots, and a conservative
+# eight-byte per-entry logical allowance. It is allocated per training epoch,
+# never serialized, and bounded independently of corpus bytes/vocabulary size.
+LOOKUP_CACHE_BYTES = 4_096 * (48 + 8 + 4 + 8)
 CHECKPOINT_BYTES_PER_SLOT = 48 + 8 + 8 + 2 * 16_384 // 8 + 8
 CHECKPOINT_FIXED_BYTES = 64 * 1024
 
@@ -65,13 +71,16 @@ def estimate_memory(max_vocabulary: int, reserve_fraction: float) -> dict[str, i
     model_payload = max_vocabulary * MODEL_BYTES_PER_SLOT
     vocabulary_allowance = max_vocabulary * VOCABULARY_ALLOWANCE_BYTES_PER_SLOT
     line_update_scratch = max_vocabulary * LINE_UPDATE_SCRATCH_BYTES_PER_SLOT
-    resident_before_reserve = model_payload + vocabulary_allowance + CONTEXT_STAGING_BYTES + line_update_scratch
+    resident_before_reserve = (
+        model_payload + vocabulary_allowance + CONTEXT_STAGING_BYTES + line_update_scratch + LOOKUP_CACHE_BYTES
+    )
     reserve = int(resident_before_reserve * reserve_fraction)
     return {
         "model_payload_bytes": model_payload,
         "vocabulary_allowance_bytes": vocabulary_allowance,
         "context_staging_bytes": CONTEXT_STAGING_BYTES,
         "line_update_scratch_bytes": line_update_scratch,
+        "lookup_cache_workspace_bytes": LOOKUP_CACHE_BYTES,
         "reserve_bytes": reserve,
         "required_available_bytes": resident_before_reserve + reserve,
     }
@@ -247,7 +256,8 @@ def render_text(plan: dict[str, Any]) -> str:
         f"Estimated model payload: {memory['model_payload_bytes']} bytes ({bytes_to_mib(memory['model_payload_bytes'])} MiB)",
         f"Estimated vocabulary allowance: {memory['vocabulary_allowance_bytes']} bytes",
         f"OpenMP context staging: {memory['context_staging_bytes']} bytes",
-        f"Source-order planner scratch: {memory['line_update_scratch_bytes']} bytes",
+        f"Source-order planner / de-biased scratch: {memory['line_update_scratch_bytes']} bytes",
+        f"Exact-token lookup-cache workspace: {memory['lookup_cache_workspace_bytes']} bytes",
         f"Conservative required available RAM: {memory['required_available_bytes']} bytes "
         f"({bytes_to_mib(memory['required_available_bytes'])} MiB)",
         f"Host-reported available RAM: {memory['host_available_bytes']} bytes",

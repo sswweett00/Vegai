@@ -30,8 +30,9 @@ Aşağıdaki hesapları raporlar:
 - iki 16.384-bit HDC plane + `int64` experience counter için slot başına kesin
   packed model payload'u: `4,104 byte`;
 - vocabulary/hash ABI allowance, 2 MiB bounded OpenMP context staging, capacity
-  başına 4-byte repeated-center planner scratch ve varsayılan `%25` headroom
-  ile conservative available-RAM reservation;
+  başına 4-byte repeated-center/**debiased** planner scratch, sabit yaklaşık
+  272 KiB exact-token lookup-cache workspace ve varsayılan `%25` headroom ile
+  conservative available-RAM reservation;
 - checkpoint için conservative disk boyutu ve seçilen checkpoint path'inin
   filesystem free-space değeri;
 - CPU physical-core bilgisi bulunabiliyorsa onu tercih eden `OMP_NUM_THREADS`,
@@ -88,6 +89,14 @@ execution path'i görünür kılar. `--serial-context-build`, yalnız
 debug/regression amacıyla parallel hazırlığı kapatır; `--parallel-min-contexts`
 de checkpoint formatı veya öğrenme semantiği değildir.
 
+Vocabulary lookup tarafında varsayılan `--lookup-cache`, 4.096-entry bounded
+direct-map workspace kullanır. Hit ancak fingerprint **ve** full 48-byte padded
+token eşitse geçerlidir; index/fingerprint collision canonical hash lookup'a
+miss olarak döner. `--no-lookup-cache` aynı training semantiğinin reference
+execution yoludur. Cache state'i checkpoint'e girmez: cache açık/kapalı ve
+cache-disabled checkpoint'ten cache-enabled resume, base/semantic plane ve
+experience counter bakımından bit-tam eşit kalmalıdır.
+
 Önerilen başlangıç:
 
 ```bash
@@ -113,7 +122,18 @@ python3 tools/compare_pretraining_threads.py \
 
 Timing yalnız `vegai_pretrain train` child process'ini kapsar; compile, fixture
 üretimi, checkpoint compare ve harness dışarıdadır. Hız oranı host/workload'a
-özgüdür; core sayısıyla lineer ölçeklenme vaadi değildir. Sabit source baseline
+özgüdür; core sayısıyla lineer ölçeklenme vaadi değildir. Exact lookup cache için
+aynı timing sınırına sahip comparator:
+
+```bash
+python3 tools/compare_pretraining_lookup_cache.py \
+  --pretrain-bin ./build/vegai_pretrain --repetitions 3
+```
+
+Bu araç cache açık/kapalı gerçek child process'leri alternation ile çalıştırır,
+checkpoint byte equality ve hit/miss partition'ı zorunlu kılar. Fixture tek bir
+tekrar eden token kullanır; sonuç yalnız lookup hot-path observation'dır, genel
+corpus throughput veya semantic quality iddiası değildir. Sabit source baseline
 ile hot-path önce/sonra ölçümü gerektiğinde
 `tools/compare_pretraining_revisions.py` iki compiled binary'yi warm-up ve
 alternating order ile çalıştırır; varsayılan byte-identical checkpoint koşulu
@@ -152,6 +172,18 @@ per-center quadratic work veya mutable semantic read yoktur. Bu structural HDC
 seçeneği doğal dil anlama/logic doğruluğu vaat etmez. Repository diagnostic'i
 coherent için yalnız hybrid same-cluster Top-1 gerilememesini zorunlu tutar;
 positive similarity farkı raporlanır ama garanti edilmez.
+
+`--context-mode debiased` başka bir opt-in CPU/OpenMP-only long-record
+politikasıdır. Local positional+topic context tam `hybrid`tir; global summary
+için aynı active vocabulary slotu bir record'da yalnız ilk occurrence'ta sayılır.
+≥12 raw active token yeterli değildir: ≥12 **distinct** active slot gerekir;
+daha azı global contribution'ı kapatır ve model bit-tam `hybrid` davranışına
+düşer. Bu, repetition/boilerplate'in global majority'yi occurrence sayısıyla
+baskılamasını engelleyen yapısal bir invariant'tır; repository bunu duplicate-
+free long record'da `debiased = hierarchical`, repeat-heavy long record'da
+`debiased = hybrid` byte-equality testleriyle doğrular. Bu testler general
+semantic superiority veya automatic domain quality gain kanıtı değildir; gerçek
+değişiklik yalnız operator-held-out protocol ile gate edilmelidir.
 
 Kaliteyi artırmanın en güvenli yolları şunlardır:
 
@@ -204,10 +236,10 @@ source-order prototype/Hebbian commit, experience schedule ve checkpoint yazım�
 Fortran CPU tarafında kalır. Böylece GPU/NPU yalnız uygun immutable context
 işinde kullanılır; semantiği sıralı olan update aşaması zorla offload edilmez.
 `coherent` mode'un center-dependent `full + opposite-parity fold` item dizisi
-bu immutable lane ABI'de temsil edilmez. Bu nedenle
-`--context-provider openvino --context-mode coherent` configuration validation
-ile fail-closed reddedilir; GPU/NPU selection CPU fallback'e veya başka bir
-encoder'a sessizce dönüştürülmez.
+ve `debiased` mode'un distinct-slot global item dizisi bu immutable lane ABI'de
+henüz temsil edilmez. Bu nedenle `--context-provider openvino --context-mode coherent` ve
+`--context-provider openvino --context-mode debiased` configuration validation ile fail-closed reddedilir; GPU/NPU selection CPU
+fallback'e veya başka bir encoder'a sessizce dönüştürülmez.
 
 Worker yalnız adapter listesi değildir; selected device üzerinde gerçek HDC
 shape'larını çalıştırır. Bir `vegai_pretrain train` çağrısında Python process,
