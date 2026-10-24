@@ -1,0 +1,158 @@
+name: Publish verified 900 MB continuation evidence
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/publish-900mb-evidence.yml
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Completed large-continuation workflow run ID (empty selects the newest successful PR run on this branch)
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  publish:
+    # Do not grant a write-capable token to untrusted fork pull requests. The
+    # job never checks out PR code; it only reads a completed artifact from
+    # this repository and emits a bounded, non-secret evidence summary.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    name: Extract immutable continuation evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Locate latest successful exact-byte experiment
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_run="${SOURCE_RUN_ID}"
+          if [ -z "$source_run" ]; then
+            source_run=$(gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/pretraining-900mb-continuous.yml/runs" \
+              -f event=pull_request -f branch="${HEAD_REF}" -f status=success -f per_page=20 \
+              --jq '.workflow_runs[0].id')
+          fi
+          [[ "$source_run" =~ ^[0-9]+$ ]] || {
+            echo "No successful exact 900MB -> 90MB workflow run was found for ${HEAD_REF}." >&2
+            exit 1
+          }
+          artifact_name=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${source_run}/artifacts" \
+            --jq '.artifacts[] | select(.expired == false) | .name' | head -n 1)
+          [ -n "$artifact_name" ] || {
+            echo "The source workflow has no downloadable, non-expired evidence artifact." >&2
+            exit 1
+          }
+          echo "run_id=$source_run" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+
+      - name: Download redacted evidence artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/vegai-900mb-evidence"
+          mkdir -p "$evidence_dir"
+          gh run download "${{ steps.source.outputs.run_id }}" --repo "$GITHUB_REPOSITORY" \
+            --name "${{ steps.source.outputs.artifact_name }}" --dir "$evidence_dir"
+          report=$(find "$evidence_dir" -type f -name experiment-report.json -print -quit)
+          [ -n "$report" ] && [ -f "$report" ] || {
+            echo "The evidence artifact omitted experiment-report.json." >&2
+            exit 1
+          }
+          echo "report=$report" >> "$GITHUB_ENV"
+
+      - name: Verify report invariants and format bounded public evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$report" "${{ steps.source.outputs.run_id }}" "$GITHUB_REPOSITORY" > "$RUNNER_TEMP/comment.md" <<'PY'
+          import json
+          import math
+          from pathlib import Path
+          import sys
+
+          report = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          run_id, repository = sys.argv[2:]
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(f"Evidence invariant failed: {message}")
+
+          require(report.get("status") == "succeeded", "experiment status is not succeeded")
+          fixtures = report.get("fixtures")
+          require(isinstance(fixtures, dict), "fixtures are missing")
+          initial = fixtures.get("initial_900MB")
+          continuation = fixtures.get("continuous_90MB")
+          require(isinstance(initial, dict) and initial.get("bytes") == 900_000_000,
+                  "initial fixture is not exactly 900,000,000 bytes")
+          require(isinstance(continuation, dict) and continuation.get("bytes") == 90_000_000,
+                  "continuation fixture is not exactly 90,000,000 bytes")
+          state = report.get("continuous_state")
+          require(isinstance(state, dict) and state.get("generation") == 2,
+                  "controller did not commit generation 2")
+          regression = report.get("quality_regression")
+          require(isinstance(regression, dict) and regression.get("status") == "passed",
+                  "frozen quality regression decision is not passed")
+
+          def measurement(phase_name):
+              phase = report.get(phase_name)
+              require(isinstance(phase, dict), f"{phase_name} is missing")
+              value = phase.get("training_measurement")
+              require(isinstance(value, dict), f"{phase_name} measurement is missing")
+              fields = (
+                  "train_process_wall_seconds",
+                  "raw_training_tokens_per_second",
+                  "active_training_tokens_per_second",
+              )
+              for field in fields:
+                  numeric = value.get(field)
+                  require(isinstance(numeric, (int, float)) and not isinstance(numeric, bool)
+                          and math.isfinite(numeric) and numeric > 0,
+                          f"{phase_name}.{field} is not a positive finite number")
+              return value
+
+          anchor = measurement("initial_pretraining")
+          continual = measurement("continuous_pretraining")
+          print(f"<!-- vegai-controlled-900mb-evidence:{run_id} -->")
+          print("## Verified controlled 900 MB → 90 MB continuation evidence")
+          print()
+          print(f"Source workflow: [{run_id}](https://github.com/{repository}/actions/runs/{run_id})")
+          print()
+          print("| phase | exact physical bytes | train-child seconds | raw tokens/s | active tokens/s |")
+          print("|---|---:|---:|---:|---:|")
+          print("| initial native pretraining | 900,000,000 | "
+                f"{anchor['train_process_wall_seconds']} | {anchor['raw_training_tokens_per_second']} | "
+                f"{anchor['active_training_tokens_per_second']} |")
+          print("| native continuous pretraining | 90,000,000 | "
+                f"{continual['train_process_wall_seconds']} | {continual['raw_training_tokens_per_second']} | "
+                f"{continual['active_training_tokens_per_second']} |")
+          print()
+          print("Validated invariants: controller state generation `2`; accepted frozen held-out regression decision `passed`; ")
+          print("both decimal byte budgets exact. Timing is limited to the native train/continue child process, excluding corpus ")
+          print("generation, compilation, controller/evaluator work, publishing, and CI orchestration.")
+          print()
+          print("> This is a deterministic synthetic topology fixture. It is not evidence of general language, domain, LLM, or LMM quality.")
+          PY
+
+      - name: Publish verified evidence to this pull request
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/comment.md"
+
+      - name: Write evidence to workflow summary
+        shell: bash
+        run: cat "$RUNNER_TEMP/comment.md" >> "$GITHUB_STEP_SUMMARY"
