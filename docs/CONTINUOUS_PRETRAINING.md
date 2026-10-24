@@ -113,17 +113,21 @@ python3 tools/continuous_pretrain.py \
 
 State var olduktan sonra policy option'ları verilirse mevcut immutable değerle
 aynı olmak zorundadır; aksi halde çağrı başarısız olur. `context_mode` policy
-allowlist'i `legacy`, `positional`, `hybrid`, `hierarchical`, `coherent` ve
-`debiased` değerlerini kabul eder; hierarchical mode yalnız ≥12 active-token
-kayıtta bounded whole-record signal ekler. CPU-only `coherent`, aynı uzun-record
-eşiğinde full-record anchor ile opposite-parity fold evidence'i kullanır.
-CPU/OpenMP-only `debiased`, global channel için ≥12 **distinct** active slot
-ister; threshold altındaki repeat-heavy record'lar bit-tam local `hybrid`e
-düşer. Yeni continual run'lar v7 checkpoint üretir; v7 exact-mask sampler
-lineage'ini ve debiased continuation contract'ini bağlar, policy/mode sonradan
-değiştirilemez. Historical v6 coherent checkpoint'ler okunur, ancak historical
-sampler lineage'iyle devam eder; bir generation zincirinde checkpoint lineage'ini
-karıştırmayın.
+allowlist'i `legacy`, `positional`, `hybrid`, `hierarchical`, `coherent`,
+`debiased` ve `resonant` değerlerini kabul eder; hierarchical mode yalnız ≥12
+active-token kayıtta bounded whole-record signal ekler. CPU-only `coherent`,
+aynı uzun-record eşiğinde full-record anchor ile opposite-parity fold evidence'i
+kullanır. CPU/OpenMP-only `debiased`, global channel için ≥12 **distinct** active
+slot ister; threshold altındaki repeat-heavy record'lar bit-tam local `hybrid`e
+düşer. CPU/OpenMP-only `resonant`, her shard-epoch başlamadan önce committed
+semantic plane'i dondurur; first epoch hybrid ile bit-tam aynıdır ve sonraki
+shard/epoch'larda learned feedback kullanır. Bu mode için capacity başına 2,048
+byte transient snapshot RAM'i planlanmalıdır. Yeni ordinary continual run'lar
+v7 checkpoint üretir; `resonant` run v8 üretir. v7 exact-mask sampler lineage'ini
+ve debiased continuation contract'ini, v8 ise resonant feedback continuation
+contract'ini bağlar; policy/mode sonradan değiştirilemez. Historical v6 coherent
+checkpoint'ler okunur, ancak historical sampler lineage'iyle devam eder; bir
+generation zincirinde checkpoint lineage'ini karıştırmayın.
 Quality gate **olmayan** sıradan restart için aynı üç temel argüman
 yeterlidir:
 

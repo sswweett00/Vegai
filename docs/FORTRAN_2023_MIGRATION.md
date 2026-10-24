@@ -48,7 +48,7 @@ ctest --test-dir build/portable-serial --output-on-failure
 # Auditable capacity preflight.  Values below are operator-supplied facts.
 ./build/portable-serial/vegai_control resource-plan \
   examples/corpus/toy_hdc_corpus.txt \
-  --checkpoint /safe/runtime/toy.vgai --max-vocab 128 \
+  --checkpoint /safe/runtime/toy.vgai --max-vocab 128 --context-mode resonant \
   --available-memory-bytes 8589934592 \
   --available-storage-bytes 17179869184 --require-ready --format json
 
@@ -74,8 +74,10 @@ make fortran-check
 
 The resource plan is a deterministic reservation estimate, not a prediction of
 an OS allocator, page cache, NUMA policy, memory pressure, thermal throttle, or
-GPU/NPU residency.  It reports its formula and never turns an unknown host
-value into a successful capacity assertion.
+GPU/NPU residency. `--context-mode resonant` adds exactly one 2,048-byte
+semantic snapshot per vocabulary-capacity slot before reserve fraction; other
+modes report zero snapshot bytes. It reports its formula and never turns an
+unknown host value into a successful capacity assertion.
 
 `attest` computes streaming SHA-256 identities in Fortran and refuses a
 checkpoint that the native reader cannot load. `--quality-report PATH` can bind

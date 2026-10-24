@@ -56,7 +56,7 @@ from training_resource_plan import ResourcePlanError, build_plan
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA = "vegai-attested-pretraining-run/v1"
 MANIFEST_SCHEMA = "vegai-corpus-manifest/v1"
-_CONTEXT_MODES = ("legacy", "positional", "hybrid", "hierarchical", "coherent", "debiased")
+_CONTEXT_MODES = ("legacy", "positional", "hybrid", "hierarchical", "coherent", "debiased", "resonant")
 _CONTEXT_PROVIDERS = ("cpu", "openvino")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _TRAIN_METRICS = (
@@ -495,6 +495,7 @@ def preflight(arguments: argparse.Namespace, corpus: Path, checkpoint: Path) -> 
         corpus=corpus,
         checkpoint=checkpoint,
         max_vocab=arguments.max_vocab,
+        context_mode=arguments.context_mode,
         omp_threads=arguments.omp_threads,
         reserve_fraction=arguments.reserve_fraction,
         require_accelerator=False,

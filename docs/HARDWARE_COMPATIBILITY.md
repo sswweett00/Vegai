@@ -171,9 +171,11 @@ CPU'da kalır. Sonuç olarak:
   summary gerçek execution mask'ini raporlar ve `--openvino-require-accelerator`
   CPU fallback'i reddeder. Explicit fallback `--openvino-device CPU` ise CPU
   plugin'i başlatmak yerine native fused/OpenMP kernel'ini kullanır;
-- `coherent`in center-dependent cross-fold item dizisi lane ABI'de yoktur;
-  `--context-provider openvino --context-mode coherent` validation aşamasında
-  fail-closed reddedilir, başka bir mode'a sessizce yönlendirilmez;
+- `coherent`in center-dependent cross-fold item dizisi, `debiased`in
+  distinct-slot global item dizisi ve `resonant`in epoch-frozen semantic
+  snapshot item dizisi lane ABI'de yoktur; OpenVINO provider altında bu mode'lar
+  validation aşamasında fail-closed reddedilir, başka bir mode'a sessizce
+  yönlendirilmez;
 - provider için lane ABI, driver, transfer, fallback ve CPU-reference
   checkpoint-byte-equality sözleşmesi ayrı doğrulanır; adapter varlığı bu
   sözleşmenin yerine geçmez.

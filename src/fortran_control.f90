@@ -14,7 +14,10 @@ module fortran_control
    use, intrinsic :: iso_fortran_env, only: int32, int64, real64, output_unit, error_unit, &
                                           compiler_version, compiler_options
    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
-   use hdc_pretraining, only: PT_OK, hdc_pretrain_model_t, hdc_pretrain_config_t, &
+   use hdc_pretraining, only: PT_OK, PT_CONTEXT_LEGACY_POSITIONAL, PT_CONTEXT_POSITIONAL, &
+                              PT_CONTEXT_HYBRID, PT_CONTEXT_HIERARCHICAL, PT_CONTEXT_COHERENT, &
+                              PT_CONTEXT_DEBIASED, PT_CONTEXT_RESONANT, hdc_pretrain_model_t, &
+                              hdc_pretrain_config_t, pretrain_context_mode_name, &
                               pretrain_metrics_t, pretrain_execution_report_t, &
                               pretrain_build_vocabulary, pretrain_train_file, &
                               pretrain_checkpoint_save, pretrain_checkpoint_load, &
@@ -42,13 +45,18 @@ module fortran_control
    integer(int64), parameter, public :: FC_CONTEXT_STAGING_BYTES = 2097152_int64
    integer(int64), parameter, public :: FC_LINE_UPDATE_SCRATCH_PER_SLOT = 4_int64
    integer(int64), parameter, public :: FC_LOOKUP_CACHE_BYTES = 278528_int64
+   ! RESONANT holds one frozen copy of the 16,384-bit semantic prototype plane
+   ! for the duration of each epoch: 256 int64 words = 2,048 bytes per slot.
+   integer(int64), parameter, public :: FC_RESONANT_SNAPSHOT_BYTES_PER_SLOT = 2048_int64
    integer(int64), parameter, public :: FC_CHECKPOINT_BYTES_PER_SLOT = 4168_int64
    integer(int64), parameter, public :: FC_CHECKPOINT_FIXED_BYTES = 65536_int64
 
    type, public :: fortran_resource_plan_t
       integer(int64) :: max_vocabulary = 0_int64
+      integer(int32) :: context_mode = PT_CONTEXT_HIERARCHICAL
       real(real64) :: reserve_fraction = 0.25_real64
       integer(int64) :: model_payload_bytes = 0_int64
+      integer(int64) :: resonant_snapshot_bytes = 0_int64
       integer(int64) :: vocabulary_allowance_bytes = 0_int64
       integer(int64) :: context_staging_bytes = 0_int64
       integer(int64) :: line_update_scratch_bytes = 0_int64
@@ -68,13 +76,16 @@ module fortran_control
 
 contains
 
-   subroutine fortran_resource_plan_estimate(max_vocabulary, reserve_fraction, requested_threads, plan, status)
+   subroutine fortran_resource_plan_estimate(max_vocabulary, reserve_fraction, requested_threads, plan, status, &
+                                             context_mode)
       integer(int64), intent(in) :: max_vocabulary
       real(real64), intent(in) :: reserve_fraction
       integer(int32), intent(in) :: requested_threads
       type(fortran_resource_plan_t), intent(out) :: plan
       integer(int32), intent(out) :: status
+      integer(int32), intent(in), optional :: context_mode
       integer(int64) :: resident_before_reserve
+      integer(int32) :: effective_context_mode
 
       plan = fortran_resource_plan_t()
       status = FC_ERR_INVALID_ARGUMENT
@@ -86,17 +97,30 @@ contains
       ! practice and must be rejected before it silently wraps.
       if (max_vocabulary > 100000000_int64) return
       if (requested_threads < 0_int32) return
+      effective_context_mode = PT_CONTEXT_HIERARCHICAL
+      if (present(context_mode)) effective_context_mode = context_mode
+      select case (effective_context_mode)
+      case (PT_CONTEXT_LEGACY_POSITIONAL, PT_CONTEXT_POSITIONAL, PT_CONTEXT_HYBRID, &
+            PT_CONTEXT_HIERARCHICAL, PT_CONTEXT_COHERENT, PT_CONTEXT_DEBIASED, PT_CONTEXT_RESONANT)
+         continue
+      case default
+         return
+      end select
 
       plan%max_vocabulary = max_vocabulary
+      plan%context_mode = effective_context_mode
       plan%reserve_fraction = reserve_fraction
       plan%model_payload_bytes = max_vocabulary * FC_MODEL_BYTES_PER_SLOT
+      if (effective_context_mode == PT_CONTEXT_RESONANT) then
+         plan%resonant_snapshot_bytes = max_vocabulary * FC_RESONANT_SNAPSHOT_BYTES_PER_SLOT
+      end if
       plan%vocabulary_allowance_bytes = max_vocabulary * FC_VOCABULARY_ALLOWANCE_PER_SLOT
       plan%context_staging_bytes = FC_CONTEXT_STAGING_BYTES
       plan%line_update_scratch_bytes = max_vocabulary * FC_LINE_UPDATE_SCRATCH_PER_SLOT
       plan%lookup_cache_workspace_bytes = FC_LOOKUP_CACHE_BYTES
-      resident_before_reserve = plan%model_payload_bytes + plan%vocabulary_allowance_bytes + &
-                                 plan%context_staging_bytes + plan%line_update_scratch_bytes + &
-                                 plan%lookup_cache_workspace_bytes
+      resident_before_reserve = plan%model_payload_bytes + plan%resonant_snapshot_bytes + &
+                                 plan%vocabulary_allowance_bytes + plan%context_staging_bytes + &
+                                 plan%line_update_scratch_bytes + plan%lookup_cache_workspace_bytes
       plan%reserve_bytes = int(real(resident_before_reserve, real64) * reserve_fraction, int64)
       plan%required_available_bytes = resident_before_reserve + plan%reserve_bytes
       plan%estimated_checkpoint_bytes = FC_CHECKPOINT_FIXED_BYTES + &
@@ -195,7 +219,7 @@ contains
       character(len=512) :: option, value
       integer(int64) :: corpus_bytes, maximum_vocabulary
       integer(int64) :: available_memory, available_storage
-      integer(int32) :: requested_threads
+      integer(int32) :: requested_threads, context_mode
       integer :: io_status
       real(real64) :: reserve_fraction
       logical :: exists, require_ready, memory_supplied, storage_supplied
@@ -213,6 +237,7 @@ contains
       maximum_vocabulary = 20000_int64
       reserve_fraction = 0.25_real64
       requested_threads = 0_int32
+      context_mode = PT_CONTEXT_HIERARCHICAL
       available_memory = 0_int64
       available_storage = 0_int64
       memory_supplied = .false.
@@ -229,6 +254,28 @@ contains
             if (status == FC_OK) then
                read(value, *, iostat=io_status) maximum_vocabulary
                if (io_status /= 0) status = FC_ERR_INVALID_ARGUMENT
+            end if
+         case ('--context-mode')
+            call option_value(argument_count, index, value, status)
+            if (status == FC_OK) then
+               select case (trim(value))
+               case ('legacy')
+                  context_mode = PT_CONTEXT_LEGACY_POSITIONAL
+               case ('positional')
+                  context_mode = PT_CONTEXT_POSITIONAL
+               case ('hybrid')
+                  context_mode = PT_CONTEXT_HYBRID
+               case ('hierarchical')
+                  context_mode = PT_CONTEXT_HIERARCHICAL
+               case ('coherent')
+                  context_mode = PT_CONTEXT_COHERENT
+               case ('debiased')
+                  context_mode = PT_CONTEXT_DEBIASED
+               case ('resonant')
+                  context_mode = PT_CONTEXT_RESONANT
+               case default
+                  status = FC_ERR_INVALID_ARGUMENT
+               end select
             end if
          case ('--reserve-fraction')
             call option_value(argument_count, index, value, status)
@@ -283,7 +330,8 @@ contains
          status = FC_ERR_IO
          return
       end if
-      call fortran_resource_plan_estimate(maximum_vocabulary, reserve_fraction, requested_threads, plan, status)
+      call fortran_resource_plan_estimate(maximum_vocabulary, reserve_fraction, requested_threads, plan, status, &
+                                          context_mode=context_mode)
       if (status /= FC_OK) then
          write(error_unit, '(A)') 'vegai_control resource-plan: invalid resource bounds'
          return
@@ -713,6 +761,8 @@ contains
          write(unit, '(A)') '  "corpus_bytes": ' // integer_text(corpus_bytes) // ','
          write(unit, '(A)') '  "checkpoint_path": ' // checkpoint_rendered // ','
          write(unit, '(A)') '  "max_vocabulary": ' // integer_text(plan%max_vocabulary) // ','
+         write(unit, '(A)') '  "context_mode": ' // json_quote(trim(pretrain_context_mode_name(plan%context_mode))) // ','
+         write(unit, '(A)') '  "resonant_snapshot_bytes": ' // integer_text(plan%resonant_snapshot_bytes) // ','
          write(unit, '(A)') '  "required_available_bytes": ' // integer_text(plan%required_available_bytes) // ','
          write(unit, '(A)') '  "estimated_checkpoint_bytes": ' // integer_text(plan%estimated_checkpoint_bytes) // ','
          write(unit, '(A)') '  "reserve_bytes": ' // integer_text(plan%reserve_bytes) // ','
@@ -731,7 +781,9 @@ contains
          write(unit, '(A,I0)') 'Corpus bytes: ', corpus_bytes
          if (len_trim(checkpoint_path) > 0) write(unit, '(A,A)') 'Checkpoint: ', trim(checkpoint_path)
          write(unit, '(A,I0)') 'Max vocabulary: ', plan%max_vocabulary
+         write(unit, '(A,A)') 'Context mode: ', trim(pretrain_context_mode_name(plan%context_mode))
          write(unit, '(A,I0)') 'Model payload bytes: ', plan%model_payload_bytes
+         write(unit, '(A,I0)') 'Resonant snapshot bytes: ', plan%resonant_snapshot_bytes
          write(unit, '(A,I0)') 'Vocabulary allowance bytes: ', plan%vocabulary_allowance_bytes
          write(unit, '(A,I0)') 'Context staging bytes: ', plan%context_staging_bytes
          write(unit, '(A,I0)') 'Line-update scratch bytes: ', plan%line_update_scratch_bytes
@@ -1002,8 +1054,8 @@ contains
       write(unit, '(A)') 'Vegai native Fortran control plane'
       write(unit, '(A)') 'Usage:'
       write(unit, '(A)') '  vegai_control profile [--format text|json] [--output PATH]'
-      write(unit, '(A)') '  vegai_control resource-plan CORPUS [--checkpoint PATH] [--max-vocab N]'
-      write(unit, '(A)') '      [--reserve-fraction R] [--omp-threads N]'
+      write(unit, '(A)') '  vegai_control resource-plan CORPUS [--checkpoint PATH] [--max-vocab N] [--context-mode MODE]'
+      write(unit, '(A)') '      [--reserve-fraction R] [--omp-threads N]; resonant reserves an epoch semantic snapshot'
       write(unit, '(A)') '      [--available-memory-bytes N] [--available-storage-bytes N]'
       write(unit, '(A)') '      [--require-ready] [--format text|json] [--output PATH]'
       write(unit, '(A)') '  vegai_control smoke CORPUS CHECKPOINT'

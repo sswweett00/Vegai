@@ -145,6 +145,23 @@ contains
                        'fused pair add preserves every population-counter plane')
       call assert_i32_equal(fused_accumulator%sample_count, bit_accumulator%sample_count, &
                             'fused pair add preserves sample count')
+
+      ! Learned semantic feedback uses a different topical source than the
+      ! immutable position identity.  Its mixed fused kernel must be identical
+      ! to the two explicit adds before it can be used in an epoch snapshot.
+      call hv_bitacc_reset(bit_accumulator)
+      call hv_bitacc_reset(fused_accumulator)
+      call hv_bitacc_add(bit_accumulator, hv_permute(bundle_inputs(3), -191_int32), status)
+      call assert_i32_equal(status, HV_OK, 'reference mixed pair position add succeeds')
+      call hv_bitacc_add(bit_accumulator, bundle_inputs(4), status)
+      call assert_i32_equal(status, HV_OK, 'reference mixed pair semantic add succeeds')
+      call hv_bitacc_add_permuted_mixed_pair_words(fused_accumulator, bundle_inputs(3)%bits, &
+                                                   bundle_inputs(4)%bits, -191_int32, status)
+      call assert_i32_equal(status, HV_OK, 'fused mixed positional-semantic pair add succeeds')
+      call assert_true(all(fused_accumulator%planes == bit_accumulator%planes), &
+                       'fused mixed pair add preserves every population-counter plane')
+      call assert_i32_equal(fused_accumulator%sample_count, bit_accumulator%sample_count, &
+                            'fused mixed pair add preserves sample count')
       fused_accumulator%sample_count = HV_BITACC_MAX_ITEMS - 1_int32
       fused_before = fused_accumulator
       call hv_bitacc_add_permuted_pair_words(fused_accumulator, bundle_inputs(2)%bits, 1_int32, status)
@@ -615,6 +632,14 @@ contains
       call assert_i32_equal(plan%recommended_omp_threads, 2_int32, &
                             'native Fortran resource planner preserves explicit thread cap')
 
+      call fortran_resource_plan_estimate(128_int64, 0.25_real64, 2_int32, plan, status, &
+                                          context_mode=PT_CONTEXT_RESONANT)
+      call assert_i32_equal(status, FC_OK, 'resource planner accepts the resonant feedback mode')
+      call assert_true(plan%resonant_snapshot_bytes == 128_int64 * 2048_int64, &
+                       'resource planner reserves one frozen semantic snapshot per resonant slot')
+      call assert_true(plan%required_available_bytes > 128_int64 * 4104_int64, &
+                       'resonant preflight includes snapshot, staging, and reserve rather than model state alone')
+
       call fortran_resource_plan_estimate(0_int64, 0.25_real64, 1_int32, plan, status)
       call assert_i32_equal(status, FC_ERR_INVALID_ARGUMENT, &
                             'native Fortran resource planner rejects zero vocabulary capacity')
@@ -770,14 +795,16 @@ contains
       type(hdc_pretrain_model_t) :: hierarchical_model, local_only_model, hierarchical_replay, short_hierarchical_model
       type(hdc_pretrain_model_t) :: coherent_model, coherent_replay, short_coherent_model
       type(hdc_pretrain_model_t) :: debiased_unique_model, debiased_repeat_model, debiased_repeat_hybrid_model
+      type(hdc_pretrain_model_t) :: resonant_model, resonant_replay, resonant_hybrid_model, resonant_restored
       type(hdc_pretrain_model_t) :: cache_disabled_model
       type(hdc_pretrain_model_t) :: context_serial_model, context_parallel_model
       type(hdc_pretrain_config_t) :: config, resumed_config, strict_config, legacy_config, positional_config, continuation_config
       type(hdc_pretrain_config_t) :: reference_config, hierarchical_config, local_only_config, coherent_config, debiased_config
+      type(hdc_pretrain_config_t) :: resonant_config
       type(hdc_pretrain_config_t) :: openvino_rejected_config, context_serial_config, context_parallel_config, cache_disabled_config
       type(pretrain_metrics_t) :: vocabulary_metrics, train_metrics, extension_metrics
       type(pretrain_execution_report_t) :: default_execution, serial_execution, parallel_execution, cache_disabled_execution
-      type(pretrain_execution_report_t) :: debiased_unique_execution, debiased_repeat_execution
+      type(pretrain_execution_report_t) :: debiased_unique_execution, debiased_repeat_execution, resonant_execution
       type(hv_t) :: semantic_hv, semantic_before_extension, semantic_after_extension
       character(len=TOKEN_LEN) :: nearest_token
       integer :: unit, io_status
@@ -937,6 +964,33 @@ contains
       call assert_true(all(context_serial_model%experience_count == context_parallel_model%experience_count), &
                        'parallel context construction preserves source-ordered experiences')
 
+      ! Feedback contexts are also immutable for an entire epoch. Exercise two
+      ! epochs so the second pass actually reads learned snapshot prototypes,
+      ! then require serial/OpenMP checkpoint-relevant state to remain exact.
+      context_serial_config%context_mode = PT_CONTEXT_RESONANT
+      context_serial_config%epochs = 2_int32
+      context_parallel_config = context_serial_config
+      context_parallel_config%parallel_context_build = .true.
+      context_parallel_config%parallel_min_contexts = 1_int32
+      call pretrain_build_vocabulary(context_serial_model, PARALLEL_CONTEXT_PATH, context_serial_config, &
+                                     vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'serial resonant context vocabulary succeeds')
+      call pretrain_train_file(context_serial_model, PARALLEL_CONTEXT_PATH, context_serial_config, &
+                               train_metrics, status, serial_execution)
+      call assert_i32_equal(status, PT_OK, 'serial resonant context training succeeds')
+      call pretrain_build_vocabulary(context_parallel_model, PARALLEL_CONTEXT_PATH, context_parallel_config, &
+                                     vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'parallel resonant context vocabulary succeeds')
+      call pretrain_train_file(context_parallel_model, PARALLEL_CONTEXT_PATH, context_parallel_config, &
+                               train_metrics, status, parallel_execution)
+      call assert_i32_equal(status, PT_OK, 'parallel resonant context training succeeds')
+      call assert_true(serial_execution%resonant_snapshot_contexts > 0_int64 .and. &
+                       parallel_execution%resonant_snapshot_contexts > 0_int64, &
+                       'resonant serial and OpenMP paths both consume frozen snapshots after epoch one')
+      call assert_true(all(context_serial_model%semantic_bits == context_parallel_model%semantic_bits) .and. &
+                       all(context_serial_model%experience_count == context_parallel_model%experience_count), &
+                       'resonant serial/OpenMP construction remains byte-identical across learned feedback')
+
       ! The ordinary eight-token fixture is intentionally below the hierarchy
       ! threshold, so hierarchical mode must reduce exactly to local hybrid.
       hierarchical_config = config
@@ -974,6 +1028,79 @@ contains
                        'de-biased threshold leaves short-record hybrid semantics unchanged')
       call pretrain_model_destroy(debiased_repeat_model)
 
+      ! RESONANT feeds an epoch-frozen learned topical plane back into local
+      ! contexts while retaining immutable base identities for positional
+      ! evidence. A fresh model starts with semantic=base, so epoch one must be
+      ! exactly HYBRID; epoch two must use distinct learned input. The frozen
+      ! source keeps fused/reference, OpenMP, and checkpoint replay contracts
+      ! deterministic instead of introducing within-epoch update-order effects.
+      resonant_config = config
+      resonant_config%context_mode = PT_CONTEXT_RESONANT
+      call assert_true(trim(pretrain_context_mode_name(resonant_config%context_mode)) == 'resonant', &
+                       'resonant semantic-feedback encoder exposes a stable human-readable name')
+      call pretrain_build_vocabulary(resonant_model, CORPUS_PATH, resonant_config, vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'resonant vocabulary pass succeeds')
+      call assert_true(pretrain_epoch_snapshot_bytes(resonant_model, resonant_config) == 32_int64 * 2048_int64, &
+                       'resonant model exposes its one-per-epoch semantic snapshot reservation')
+      call pretrain_train_file(resonant_model, CORPUS_PATH, resonant_config, train_metrics, status, resonant_execution)
+      call assert_i32_equal(status, PT_OK, 'resonant first epoch succeeds')
+      call assert_true(resonant_execution%resonant_snapshot_contexts == 24_int64, &
+                       'resonant execution reports every frozen-snapshot context')
+      call assert_true(all(resonant_model%base_bits == model_a%base_bits) .and. &
+                       all(resonant_model%semantic_bits == model_a%semantic_bits) .and. &
+                       all(resonant_model%experience_count == model_a%experience_count), &
+                       'resonant first epoch is byte-identical to local hybrid initialization')
+
+      reference_config = resonant_config
+      reference_config%reference_context_kernel = .true.
+      call pretrain_build_vocabulary(resonant_replay, CORPUS_PATH, reference_config, vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'resonant reference vocabulary pass succeeds')
+      call pretrain_train_file(resonant_replay, CORPUS_PATH, reference_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'resonant reference first epoch succeeds')
+      call assert_true(all(resonant_replay%semantic_bits == resonant_model%semantic_bits), &
+                       'resonant mixed fused kernel is bit-identical to its reference path')
+
+      local_only_config = config
+      local_only_config%context_mode = PT_CONTEXT_HYBRID
+      local_only_config%epochs = 2_int32
+      call pretrain_build_vocabulary(resonant_hybrid_model, CORPUS_PATH, local_only_config, vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'two-epoch hybrid comparison vocabulary rebuild succeeds')
+      call pretrain_train_file(resonant_hybrid_model, CORPUS_PATH, local_only_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'two-epoch hybrid comparison training succeeds')
+
+      call pretrain_train_file(resonant_model, CORPUS_PATH, resonant_config, train_metrics, status, resonant_execution)
+      call assert_i32_equal(status, PT_OK, 'resonant second epoch succeeds')
+      call pretrain_train_file(resonant_replay, CORPUS_PATH, reference_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'resonant reference second epoch succeeds')
+      call assert_true(all(resonant_replay%semantic_bits == resonant_model%semantic_bits) .and. &
+                       all(resonant_replay%experience_count == resonant_model%experience_count), &
+                       'resonant fused/reference path remains bit-identical after feedback begins')
+      call assert_true(all(resonant_model%base_bits == resonant_hybrid_model%base_bits) .and. &
+                       all(resonant_model%experience_count == resonant_hybrid_model%experience_count), &
+                       'resonant feedback changes context evidence without changing identities or update schedule')
+      call assert_true(any(resonant_model%semantic_bits /= resonant_hybrid_model%semantic_bits), &
+                       'second resonant epoch consumes learned semantic neighbours rather than static identities')
+
+      call pretrain_checkpoint_save(resonant_model, CHECKPOINT_PATH, status)
+      call assert_i32_equal(status, PT_OK, 'resonant checkpoint save succeeds')
+      call assert_checkpoint_header_version(CHECKPOINT_PATH, 8_int32, 'resonant')
+      call pretrain_checkpoint_load(CHECKPOINT_PATH, resonant_restored, status)
+      call assert_i32_equal(status, PT_OK, 'resonant checkpoint load succeeds')
+      call assert_i32_equal(resonant_restored%context_mode, PT_CONTEXT_RESONANT, &
+                            'resonant checkpoint preserves semantic-feedback identity')
+      call assert_true(all(resonant_restored%semantic_bits == resonant_model%semantic_bits), &
+                       'resonant checkpoint restores learned prototypes before its next frozen snapshot')
+      call pretrain_config_from_model(resonant_restored, resumed_config, status)
+      call assert_i32_equal(status, PT_OK, 'resonant checkpoint exposes a compatible resume configuration')
+      resumed_config%epochs = 1_int32
+      call pretrain_train_file(resonant_model, CORPUS_PATH, resonant_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'uninterrupted resonant third epoch succeeds')
+      call pretrain_train_file(resonant_restored, CORPUS_PATH, resumed_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'resonant checkpoint-resumed third epoch succeeds')
+      call assert_true(all(resonant_restored%semantic_bits == resonant_model%semantic_bits) .and. &
+                       all(resonant_restored%experience_count == resonant_model%experience_count), &
+                       'resonant continuation remains byte-identical after a checkpoint boundary')
+
       ! Coherent cross-fold inputs have no representation in the immutable
       ! OpenVINO lane ABI. Reject the configuration before any worker/process
       ! can be started rather than silently changing encoder semantics.
@@ -991,6 +1118,10 @@ contains
       call pretrain_build_vocabulary(model_b, CORPUS_PATH, openvino_rejected_config, vocabulary_metrics, status)
       call assert_i32_equal(status, PT_ERR_INVALID_ARGUMENT, &
                             'de-biased mode rejects the unsupported OpenVINO worker ABI')
+      openvino_rejected_config%context_mode = PT_CONTEXT_RESONANT
+      call pretrain_build_vocabulary(model_b, CORPUS_PATH, openvino_rejected_config, vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_ERR_INVALID_ARGUMENT, &
+                            'resonant frozen-snapshot mode rejects the unsupported OpenVINO worker ABI')
 
       ! The fast positional encoder is an implementation-only optimization: it
       ! must preserve the legacy semantic plane exactly.  Hybrid adds a second,
@@ -1401,6 +1532,10 @@ contains
       call pretrain_model_destroy(debiased_unique_model)
       call pretrain_model_destroy(debiased_repeat_model)
       call pretrain_model_destroy(debiased_repeat_hybrid_model)
+      call pretrain_model_destroy(resonant_model)
+      call pretrain_model_destroy(resonant_replay)
+      call pretrain_model_destroy(resonant_hybrid_model)
+      call pretrain_model_destroy(resonant_restored)
       call pretrain_model_destroy(cache_disabled_model)
       call pretrain_model_destroy(context_serial_model)
       call pretrain_model_destroy(context_parallel_model)

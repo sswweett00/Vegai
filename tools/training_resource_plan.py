@@ -32,6 +32,10 @@ SCHEMA = "vegai-training-resource-plan/v1"
 # Exact packed-HDC model planes: two 16,384-bit vectors plus one int64
 # experience counter per vocabulary capacity slot.
 MODEL_BYTES_PER_SLOT = 2 * 16_384 // 8 + 8
+# RESONANT copies the semantic plane once at the beginning of each epoch so
+# topical feedback remains immutable while source-order commits proceed.
+RESONANT_SNAPSHOT_BYTES_PER_SLOT = 16_384 // 8
+CONTEXT_MODES = ("legacy", "positional", "hybrid", "hierarchical", "coherent", "debiased", "resonant")
 # Current vocabulary arrays on common Fortran ABIs are approximately: 48-byte
 # token, int64 frequency, logical active, plus a 2N+1 hash table containing a
 # logical, int64 key and int32 slot.  A deliberately larger allowance covers
@@ -68,16 +72,23 @@ def bytes_to_mib(value: int | None) -> float | None:
     return None if value is None else round(value / (1024 * 1024), 3)
 
 
-def estimate_memory(max_vocabulary: int, reserve_fraction: float) -> dict[str, int]:
+def estimate_memory(max_vocabulary: int, reserve_fraction: float, context_mode: str = "hierarchical") -> dict[str, int]:
     model_payload = max_vocabulary * MODEL_BYTES_PER_SLOT
+    resonant_snapshot = max_vocabulary * RESONANT_SNAPSHOT_BYTES_PER_SLOT if context_mode == "resonant" else 0
     vocabulary_allowance = max_vocabulary * VOCABULARY_ALLOWANCE_BYTES_PER_SLOT
     line_update_scratch = max_vocabulary * LINE_UPDATE_SCRATCH_BYTES_PER_SLOT
     resident_before_reserve = (
-        model_payload + vocabulary_allowance + CONTEXT_STAGING_BYTES + line_update_scratch + LOOKUP_CACHE_BYTES
+        model_payload
+        + resonant_snapshot
+        + vocabulary_allowance
+        + CONTEXT_STAGING_BYTES
+        + line_update_scratch
+        + LOOKUP_CACHE_BYTES
     )
     reserve = int(resident_before_reserve * reserve_fraction)
     return {
         "model_payload_bytes": model_payload,
+        "resonant_snapshot_bytes": resonant_snapshot,
         "vocabulary_allowance_bytes": vocabulary_allowance,
         "context_staging_bytes": CONTEXT_STAGING_BYTES,
         "line_update_scratch_bytes": line_update_scratch,
@@ -147,12 +158,13 @@ def build_plan(arguments: argparse.Namespace) -> dict[str, Any]:
     corpus = arguments.corpus.resolve()
     require(corpus.is_file(), f"corpus does not exist or is not a regular file: {corpus}")
     require(arguments.max_vocab > 0, "--max-vocab must be positive")
+    require(arguments.context_mode in CONTEXT_MODES, "invalid --context-mode")
     require(0.0 <= arguments.reserve_fraction <= 4.0, "--reserve-fraction must be between 0 and 4")
     require(arguments.omp_threads is None or arguments.omp_threads > 0, "--omp-threads must be positive")
     checkpoint = arguments.checkpoint.resolve() if arguments.checkpoint else corpus.with_suffix(".vgai")
 
     profile = collect_hardware_profile()
-    memory_estimate = estimate_memory(arguments.max_vocab, arguments.reserve_fraction)
+    memory_estimate = estimate_memory(arguments.max_vocab, arguments.reserve_fraction, arguments.context_mode)
     checkpoint_estimate = estimate_checkpoint(arguments.max_vocab)
     storage = storage_probe(checkpoint)
     available_memory = profile["memory"].get("available_bytes")
@@ -211,6 +223,7 @@ def build_plan(arguments: argparse.Namespace) -> dict[str, Any]:
         },
         "memory": {
             "max_vocabulary": arguments.max_vocab,
+            "context_mode": arguments.context_mode,
             "reserve_fraction": arguments.reserve_fraction,
             **memory_estimate,
             "host_available_bytes": available_memory,
@@ -260,7 +273,9 @@ def render_text(plan: dict[str, Any]) -> str:
         "Hardware: " + compact_hardware_summary(plan["hardware"]),
         f"Corpus: {plan['corpus']['path']} ({plan['corpus']['bytes']} bytes, streaming)",
         f"Max vocabulary: {memory['max_vocabulary']}",
+        f"Context mode: {memory['context_mode']}",
         f"Estimated model payload: {memory['model_payload_bytes']} bytes ({bytes_to_mib(memory['model_payload_bytes'])} MiB)",
+        f"Resonant epoch snapshot: {memory['resonant_snapshot_bytes']} bytes",
         f"Estimated vocabulary allowance: {memory['vocabulary_allowance_bytes']} bytes",
         f"OpenMP context staging: {memory['context_staging_bytes']} bytes",
         f"Source-order planner / de-biased scratch: {memory['line_update_scratch_bytes']} bytes",
@@ -288,6 +303,7 @@ def main() -> int:
     parser.add_argument("--corpus", required=True, type=Path, help="input corpus to be streamed")
     parser.add_argument("--checkpoint", type=Path, help="planned output checkpoint path (default: corpus with .vgai suffix)")
     parser.add_argument("--max-vocab", type=int, default=20_000, help="same capacity passed to vegai_pretrain (default: 20000)")
+    parser.add_argument("--context-mode", choices=CONTEXT_MODES, default="hierarchical", help="pretraining context mode; resonant reserves its epoch snapshot")
     parser.add_argument("--omp-threads", type=int, help="cap recommendation to this many CPU threads")
     parser.add_argument(
         "--reserve-fraction",

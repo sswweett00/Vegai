@@ -235,6 +235,9 @@ jobs:
               f"fused_speedup={comparison['fused_hybrid_speedup_vs_reference']:.4f}x; "
               f"checkpoint_bytes_identical={fused['checkpoint_byte_identical']}; "
               f"base_hybrid_similarity={quality['hybrid']['mean_top1_similarity']:.6f}; "
+              f"base_resonant_similarity={quality['resonant']['mean_top1_similarity']:.6f}; "
+              f"resonant_similarity_gain="
+              f"{comparison['resonant_mean_top1_similarity_gain_vs_hybrid']:.6f}; "
               f"long_hybrid_similarity={long_quality['hybrid']['mean_top1_similarity']:.6f}; "
               f"long_hierarchical_similarity={long_quality['hierarchical']['mean_top1_similarity']:.6f}; "
               f"hierarchical_similarity_gain="
@@ -286,7 +289,7 @@ jobs:
               print(file=summary)
               print("| Mode | Median seconds | Training token/s | Controlled Top-1 cluster | Mean Top-1 similarity |", file=summary)
               print("|---|---:|---:|---:|---:|", file=summary)
-              for mode in ("legacy", "positional", "hybrid"):
+              for mode in ("legacy", "positional", "hybrid", "resonant"):
                   print(
                       f"| {mode} | {speed[mode]['median_seconds']:.6f} | "
                       f"{speed[mode]['training_tokens_per_second']:.3f} | "
@@ -294,6 +297,13 @@ jobs:
                       f"{quality[mode]['mean_top1_similarity']:.6f} |",
                       file=summary,
                   )
+              print(file=summary)
+              print(
+                  f"Resonant mean-similarity delta vs hybrid: "
+                  f"**{comparison['resonant_mean_top1_similarity_gain_vs_hybrid']:+.6f}**; "
+                  "this is a controlled semantic-retrieval diagnostic, not a general-intelligence claim.",
+                  file=summary,
+              )
               print(file=summary)
               print("### Bit-exact hybrid kernel comparison", file=summary)
               print(file=summary)

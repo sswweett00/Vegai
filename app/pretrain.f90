@@ -201,6 +201,9 @@ contains
                case ('debiased')
                   parsed_config%context_mode = PT_CONTEXT_DEBIASED
                   io_status = 0
+               case ('resonant')
+                  parsed_config%context_mode = PT_CONTEXT_RESONANT
+                  io_status = 0
                case default
                   io_status = 1
                end select
@@ -442,6 +445,11 @@ contains
          write(output_unit, '(A,I0)') '  de-biased suppressed records: ', execution%debiased_topic_suppressed_records
          write(output_unit, '(A,I0)') '  de-biased distinct topic tokens: ', execution%debiased_topic_distinct_tokens
       end if
+      if (active_config%context_mode == PT_CONTEXT_RESONANT) then
+         write(output_unit, '(A,I0)') '  resonant frozen-snapshot contexts: ', execution%resonant_snapshot_contexts
+         write(output_unit, '(A,I0)') '  resonant epoch snapshot bytes: ', &
+                                     pretrain_epoch_snapshot_bytes(trained_model, active_config)
+      end if
       write(output_unit, '(A,I0)') '  CPU serial context batches: ', execution%cpu_serial_batches
       write(output_unit, '(A,I0)') '  CPU parallel context batches: ', execution%cpu_parallel_batches
       write(output_unit, '(A,I0)') '  CPU serial-built contexts: ', execution%cpu_serial_contexts
@@ -564,10 +572,12 @@ contains
       write(output_unit, '(A)') '  vegai_pretrain inspect CHECKPOINT [--query TOKEN | --query-file PATH]'
       write(output_unit, '(A)') 'Train options:'
       write(output_unit, '(A)') '  --max-vocab N --min-frequency N --window N --position-shift N --context-mode MODE --epochs N'
-      write(output_unit, '(A)') '  MODE is legacy, positional, hybrid, hierarchical, coherent, or debiased (default hierarchical)'
+      write(output_unit, '(A)') '  MODE: legacy, positional, hybrid, hierarchical, coherent, debiased, or resonant'
+      write(output_unit, '(A)') '  Default MODE: hierarchical'
       write(output_unit, '(A)') '  hierarchical adds bounded whole-record topical evidence for long records'
       write(output_unit, '(A)') '  coherent is CPU-only: cross-fold topical context reduces global self-identity echo'
-      write(output_unit, '(A)') '  debiased is CPU/OpenMP-only: global topic uses each distinct active slot once; <12 distinct slots falls back to hybrid'
+      write(output_unit, '(A)') '  debiased is CPU/OpenMP-only: unique-slot global topic; <12 distinct slots uses hybrid'
+      write(output_unit, '(A)') '  resonant is CPU/OpenMP-only: frozen semantic neighbours per epoch; epoch one equals hybrid'
       write(output_unit, '(A)') '  continue first extends vocabulary from one immutable shard, then trains it'
       write(output_unit, '(A)') '  --initial-plasticity N --minimum-plasticity N --decay-events N --strict --query TOKEN'
       write(output_unit, '(A)') '  --parallel-context-build (default) builds immutable per-record contexts with OpenMP when worthwhile'

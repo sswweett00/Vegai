@@ -125,10 +125,13 @@ saturate ederek ambiguity'yi doğrular.
 - `hierarchical` ve `coherent` long-record encoder'larının ayrı semantic
   plane üretmesi; coherent fused/reference local-kernel eşitliği ve short-record
   `hybrid` eşitliği;
+- `resonant` encoder'ın ilk epoch'ta hybrid ile bit-tam eşitliği, ikinci epoch'ta
+  frozen learned semantic input kullanarak ayrışması, fused/reference ve
+  checkpoint-resume byte equality'si;
 - binary checkpoint save/load, rebuilt hash index ve payload plane round-trip;
-  raw header regression'ı ile fresh model writer'ın v7 yazdığının ve synthetic
-  v5/coherent-v6 lineage'lerinin historical exact-mask sampler identity'sini
-  koruduğunun doğrulanması;
+  raw header regression'ı ile ordinary fresh model writer'ın v7, resonant'ın v8
+  yazdığının ve synthetic v5/coherent-v6 lineage'lerinin historical exact-mask
+  sampler identity'sini koruduğunun doğrulanması;
 - kesintisiz ikinci epoch ile checkpoint'ten resume edilen ikinci epoch'un
   bit-tam eşitliği;
 - resume semantic config mismatch, strict long-token, strict non-ASCII byte ve
@@ -196,7 +199,8 @@ olmaksızın accelerator talebini fail-closed reddeder. Ayrı OpenVINO bridge
 adımı optional runtime'ı kurar; önce explicit CPU fallback'ın native fused
 kernel'e worker başlatmadan bypass ettiğini, ardından strict resident CPU
 OpenVINO context graph ile Fortran CPU reference checkpoint byte equality'yi
-test eder. `coherent` cross-fold encoder bu ABI tarafından desteklenmez ve
+test eder. `coherent` cross-fold, `debiased` distinct-slot ve `resonant`
+epoch-frozen semantic-snapshot encoder'ları bu ABI tarafından desteklenmez ve
 OpenVINO provider seçildiğinde validation aşamasında fail-closed reddedilir;
 worker'a sessiz bir farklı context semantics gönderilmez. Worker verifier ayrıca
 dynamic-batch compiled-model cache ve neutral tie/complement padding exactness'ini
@@ -206,19 +210,21 @@ varsayılan Make binary ile aynı host için opt-in `native` binary'yi
 ölçer. İki profile'ın checkpoint byte eşitliği zorunludur; süre oranı yalnız o
 host için anlamlıdır.
 
-Native testler fused raw-word/permuted/pair accumulator plane bit-eşitliğini,
-fused/reference hybrid, hierarchical ve coherent replay eşitliğini,
-repeated-center serial/OpenMP context-build eşitliğini; tüm fresh context
-mode'ları için v7 checkpoint round-trip'ini ve v5 legacy sampler resume'ini
-denetler. `tools/compare_pretraining_modes.py`
-portable binary üzerinde yalnız her bir gerçek `vegai_pretrain train`
-child-process wall-clock'ını raporlar: compiler, CI setup, fixture construction,
+Native testler fused raw-word/permuted/pair ve mixed semantic-pair accumulator
+plane bit-eşitliğini, fused/reference hybrid, hierarchical, coherent ve resonant
+replay eşitliğini, repeated-center serial/OpenMP context-build eşitliğini;
+ordinary fresh mode'lar için v7, resonant için v8 checkpoint round-trip'ini ve
+v5 legacy sampler resume'ini denetler. `tools/compare_pretraining_modes.py`
+portable binary üzerinde yalnız her bir gerçek `vegai_pretrain train` child-
+process wall-clock'ını raporlar: compiler, CI setup, fixture construction,
 inspect ve harness süresi ölçüye girmez. Workflow summary; portable/native
-profil oranını, `legacy → positional → fused hybrid` temel karşılaştırmasını,
-fused/reference hybrid checkpoint byte eşitliği + hız oranını ve ayrı
-16-token-record controlled `hybrid → hierarchical → coherent` topical-cohesion
-diagnostic'ini yazar. Coherent guard yalnız hybrid same-cluster Top-1 sonucunun
-gerilememesidir; bu HDC diagnostic'i doğal-dil kalite iddiası değildir.
+profil oranını, `legacy → positional → fused hybrid → resonant` temel
+karşılaştırmasını, resonant controlled similarity delta'sını, fused/reference
+hybrid checkpoint byte eşitliği + hız oranını ve ayrı 16-token-record controlled
+`hybrid → hierarchical → coherent` topical-cohesion diagnostic'ini yazar.
+Coherent guard yalnız hybrid same-cluster Top-1 sonucunun gerilememesidir;
+resonant delta da fixture-bound HDC diagnostic'idir, doğal-dil kalite iddiası
+değildir.
 
 `tools/compare_pretraining_revisions.py`, CI'da sabit `e34fd22` baseline
 binary'sini aynı portable Make profile ile build eder ve short-record ile

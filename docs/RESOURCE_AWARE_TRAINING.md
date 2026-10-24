@@ -16,6 +16,22 @@ used=false`, `NPU compute used=false` durumları geçerlidir; opt-in provider
 
 ## 1. Eğitimden önce RAM / storage planı üretin
 
+Portable primary preflight standard Fortran control-plane'dir; OS shell veya
+Python inventory çağırmaz ve RAM/storage değerlerini operatörün açık input'u
+olarak fail-closed kullanır. `resonant` için one-epoch semantic snapshot dahil
+edilir:
+
+```bash
+./build/vegai_control resource-plan /data/corpus.txt \
+  --checkpoint /fast-ssd/checkpoints/model.vgai \
+  --max-vocab 50000 --context-mode resonant \
+  --available-memory-bytes 17179869184 --available-storage-bytes 2147483648 \
+  --require-ready --format json --output native-resource-plan.json
+```
+
+Daha geniş, advisory host inventory gerekiyorsa migration-era adapter ayrıca
+kullanılabilir:
+
 ```bash
 python3 tools/training_resource_plan.py \
   --corpus /data/corpus.txt \
@@ -28,7 +44,9 @@ Araç corpus'u RAM'e yüklemez; sadece corpus path'ini ve byte boyutunu doğrula
 Aşağıdaki hesapları raporlar:
 
 - iki 16.384-bit HDC plane + `int64` experience counter için slot başına kesin
-  packed model payload'u: `4,104 byte`;
+  packed model payload'u: `4,104 byte`; `--context-mode resonant` seçildiğinde
+  buna ek olarak epoch boyunca yaşayan bir semantic snapshot için tam `2,048
+  byte/slot` reservation;
 - vocabulary/hash ABI allowance, 2 MiB bounded OpenMP context staging, capacity
   başına 4-byte repeated-center/**debiased** planner scratch, sabit yaklaşık
   272 KiB exact-token lookup-cache workspace ve varsayılan `%25` headroom ile
@@ -72,7 +90,8 @@ olmalıdır; network/distributed filesystem atomicity semantiğini deployment
 `hdc_pretraining` artık her input record için iki aşama kullanır:
 
 1. immutable `base_bits` üzerinden tüm eligible center context'leri bağımsız
-   biçimde hazırlanır; adaptive scheduler record'da en az
+   biçimde hazırlanır; `resonant` modda topical input ayrıca epoch-başında
+   dondurulmuş immutable semantic snapshot'tan gelir; adaptive scheduler record'da en az
    `--parallel-min-contexts` (varsayılan 32) update varsa OpenMP `parallel do`
    seçer, küçük record'larda team-launch maliyeti olmadan serial kalır;
 2. prototype ve experience updates corpus kaynak sırasıyla commit edilir.
@@ -186,6 +205,16 @@ free long record'da `debiased = hierarchical`, repeat-heavy long record'da
 semantic superiority veya automatic domain quality gain kanıtı değildir; gerçek
 değişiklik yalnız operator-held-out protocol ile gate edilmelidir.
 
+`--context-mode resonant`, local positional channel'ı immutable `base_bits`
+olarak korur; topical neighbour channel'ı ise her epoch başında committed
+semantic plane'den alınan frozen snapshot'tır. İlk epoch local `hybrid`le
+bit-tam aynıdır, sonraki epoch'larda learned neighbourhood structure context'e
+katılır. Bu yüzden resource plan'a exactly `2,048 byte × max-vocab` geçici RAM
+eklenir; snapshot model/checkpoint payload'u değildir. Serial/OpenMP ve
+checkpoint-resume eşitliği native property testle doğrulanır. Controlled
+same-cluster retrieval delta'sı CI'da raporlanır, fakat doğal corpus veya genel
+zeka/kalite üstünlüğü olarak yorumlanmaz.
+
 Kaliteyi artırmanın en güvenli yolları şunlardır:
 
 1. lisanslı corpus'u normalize edin, deduplicate edin ve tokenizer contract'ına
@@ -236,11 +265,12 @@ bit-sliced bundle/finalize işlemi) OpenVINO worker'a batch olarak gönderilir;
 source-order prototype/Hebbian commit, experience schedule ve checkpoint yazımı
 Fortran CPU tarafında kalır. Böylece GPU/NPU yalnız uygun immutable context
 işinde kullanılır; semantiği sıralı olan update aşaması zorla offload edilmez.
-`coherent` mode'un center-dependent `full + opposite-parity fold` item dizisi
-ve `debiased` mode'un distinct-slot global item dizisi bu immutable lane ABI'de
-henüz temsil edilmez. Bu nedenle `--context-provider openvino --context-mode coherent` ve
-`--context-provider openvino --context-mode debiased` configuration validation ile fail-closed reddedilir; GPU/NPU selection CPU
-fallback'e veya başka bir encoder'a sessizce dönüştürülmez.
+`coherent` mode'un center-dependent `full + opposite-parity fold` item dizisi,
+`debiased` mode'un distinct-slot global item dizisi ve `resonant` mode'un
+frozen semantic-snapshot item dizisi bu immutable lane ABI'de henüz temsil
+edilmez. Bu mode'lar `--context-provider openvino` altında configuration
+validation ile fail-closed reddedilir; GPU/NPU selection CPU fallback'e veya
+başka bir encoder'a sessizce dönüştürülmez.
 
 Worker yalnız adapter listesi değildir; selected device üzerinde gerçek HDC
 shape'larını çalıştırır. Bir `vegai_pretrain train` çağrısında Python process,

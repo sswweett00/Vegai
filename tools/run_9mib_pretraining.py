@@ -335,6 +335,7 @@ def preflight_plan(arguments: argparse.Namespace, corpus: Path, checkpoint: Path
         corpus=corpus,
         checkpoint=checkpoint,
         max_vocab=arguments.max_vocab,
+        context_mode=arguments.context_mode,
         omp_threads=arguments.omp_threads,
         reserve_fraction=arguments.reserve_fraction,
         require_accelerator=False,
@@ -387,7 +388,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--position-shift", type=int, default=41, help="position shift supplied to train (default: 41)")
     parser.add_argument(
         "--context-mode",
-        choices=("legacy", "positional", "hybrid", "hierarchical", "coherent", "debiased"),
+        choices=("legacy", "positional", "hybrid", "hierarchical", "coherent", "debiased", "resonant"),
         default="hierarchical",
         help="HDC context mode supplied to train (default: hierarchical)",
     )

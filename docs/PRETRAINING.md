@@ -67,6 +67,35 @@ sayısıyla whole-record majority'yi ele geçirmesi engellenir. Bu bir data-qual
 ve bounded aggregation seçeneğidir; tekrarın her domain'de yanlış olduğu veya
 semantic quality'nin evrensel olarak arttığı iddiası değildir.
 
+Opt-in **`resonant`** modunda position channel değişmez; epoch `e` başlamadan
+önceki committed semantic plane bir kez kopyalanır ve bütün epoch boyunca salt-
+okunur kalır:
+
+```text
+Ŝ_e(w) = S(w)  at the start of epoch e
+Vpos      = { Π^(r × P)(B(wᵢ₊ᵣ)) }
+Vfeedback = { Ŝ_e(wᵢ₊ᵣ) }
+Cᵢ        = majority_tie_seeded(Vpos ∪ Vfeedback)
+S(wᵢ)     ← replace_exact_fraction(S(wᵢ), Cᵢ, learning_rate(experience(wᵢ)))
+```
+
+Yeni modelde `Ŝ₁ = B` olduğundan ilk `resonant` epoch'u local `hybrid` ile
+bit-tam aynıdır. İkinci ve sonraki epoch'lar yalnız önceki epoch'ta öğrenilmiş
+neighbour prototype'larını topical channel'a taşır. Aynı epoch içinde yapılan
+source-order commit'ler snapshot'a geri yazılmaz: serial/OpenMP scheduler,
+record sırası veya checkpoint boundary'si context input'unu değiştiremez. Bu,
+önceki learned structure'ın eğitim context'ine ölçülebilir biçimde katıldığı
+bir semantic-retrieval iyileştirme mekanizmasıdır; doğal dil anlayışı, genel
+zeka veya her corpus'ta kalite artışı garantisi değildir.
+
+Snapshot checkpoint payload'u değildir; resume sonrası committed `S` plane'den
+tekrar oluşturulur. Capacity başına tam `256 × 8 = 2,048` byte ek geçici RAM
+kullanır (`max-vocab=20,000` için 40,960,000 byte) ve epoch sonunda serbest
+bırakılır. `vegai_control resource-plan --context-mode resonant` bu reservation'ı
+ve reserve fraction'ını fail-closed readiness hesabına ekler. Mevcut OpenVINO
+immutable-item ABI'si semantic snapshot item'ı taşımadığından `resonant`
+bilinçli olarak CPU/OpenMP-only'dir; OpenVINO'ya sessiz fallback yoktur.
+
 - `W`, context window; `P`, `position_shift_bits` değeridir.
 - `hierarchical` varsayılandır: `hybrid`in left/right role bilgisini `Vpos`
   içinde ve topical neighbourhood sinyalini `Vtopic` içinde korur; yalnız ≥12
@@ -98,6 +127,13 @@ semantic quality'nin evrensel olarak arttığı iddiası değildir.
   `hierarchical` ile bit-tam eşdeğerdir; <12 distinct slotta `hybrid`e düşer.
   Distinct-slot item dizisi mevcut immutable OpenVINO ABI'sinde olmadığı için
   mod fail-closed olarak yalnız CPU/OpenMP'dir.
+- `resonant`, local positional channel'ı `B` olarak sabit tutar ve topical
+  neighbour channel'ında yalnız epoch-başında dondurulmuş `Ŝ` kullanır. İlk
+  epoch `hybrid`le bit-tam aynıdır; sonraki epoch'larda semantic feedback başlar.
+  2,048 byte/slot transient snapshot planlanmalıdır; snapshot checkpoint'e
+  yazılmaz. Fused mixed-pair kernel ve rotate-then-add reference path her
+  population-counter plane'inde eşit test edilir. Snapshot worker ABI'sinde
+  olmadığı için mod fail-closed CPU/OpenMP-only'dir.
 - `legacy`, önceki positional signed-counter yolu için regression/benchmark
   referansıdır; yeni eğitimler için önerilmez.
 - `majority_tie_seeded`, yeni modlarda word-parallel `hv_bitacc_t` binary
@@ -275,6 +311,16 @@ cmake --build build --parallel
   --max-vocab 50000 --min-frequency 3 --window 4 --position-shift 73 \
   --context-mode debiased --epochs 3 --strict
 
+# Epochlar arasında learned semantic neighbourhood feedback'i kullanan
+# CPU/OpenMP-only encoder. Resource preflight'ta 2,048 byte × max-vocab
+# snapshot reservation'ını ayrıca bildirin.
+./build/vegai_pretrain train CORPUS.txt resonant.vgai \
+  --max-vocab 50000 --min-frequency 3 --window 4 --position-shift 73 \
+  --context-mode resonant --epochs 3 --strict
+./build/vegai_control resource-plan CORPUS.txt --max-vocab 50000 \
+  --context-mode resonant --available-memory-bytes 17179869184 \
+  --available-storage-bytes 2147483648 --require-ready
+
 # Checkpoint semantic configuration ile uyumlu ek epoch (vocabulary değiştirmez)
 ./build/vegai_pretrain resume CORPUS.txt model.vgai --epochs 1 --query token
 
@@ -296,7 +342,7 @@ cmake --build build --parallel
 | `--min-frequency N` | 2 | active vocabulary threshold |
 | `--window N` | 4 | her yönde context yarıçapı |
 | `--position-shift N` | 73 | relative position başına bit shift |
-| `--context-mode MODE` | `hierarchical` | `legacy`, bit-tam hızlı `positional`, local positional+topical `hybrid`, ≥12 active-token kayıtta `full-record × 3` global evidence ekleyen `hierarchical`, aynı bütçeyi `full-record × 1 + opposite-parity fold × 2` kullanan CPU-only `coherent`, veya ≥12 **distinct** active slotta unique-slot `full-record × 3` kullanan CPU/OpenMP-only `debiased` |
+| `--context-mode MODE` | `hierarchical` | `legacy`, bit-tam hızlı `positional`, local positional+topical `hybrid`, ≥12 active-token kayıtta `full-record × 3` global evidence ekleyen `hierarchical`, `full-record × 1 + opposite-parity fold × 2` kullanan CPU-only `coherent`, ≥12 **distinct** active slotta unique-slot `full-record × 3` kullanan CPU/OpenMP-only `debiased`, veya epoch-başı frozen `Ŝ` topical feedback kullanan CPU/OpenMP-only `resonant` |
 | `--lookup-cache` / `--no-lookup-cache` | açık / kapalı | execution-only 4.096-entry fingerprint + full padded-token direct-map cache'i aç/kapat; collision miss'tir, checkpoint state değildir |
 | `--parallel-context-build` | açık | immutable per-record context construction için OpenMP; yalnız record update sayısı eşikteyse team açılır, source-ordered prototype commit sayesinde thread count checkpoint semantiğini değiştirmez |
 | `--parallel-min-contexts N` | 32 | execution-only adaptive scheduler eşiği; N'den az eligible center içeren kısa record'lar team-launch/staging maliyetinden kaçınmak için serial hazırlanır |
@@ -487,10 +533,11 @@ değildir. Intel Core Ultra için opt-in OpenVINO context
 provider, immutable packed-HDC bundle/finalize aşamasını dispatch ederken
 source-order update'i CPU'da tutar; worker bir train çağrısı boyunca resident
 kalır ve item-cardinality graph'larını dynamic batch ile cache'ler. `coherent`
-mode'un center-dependent cross-fold item dizisi ve `debiased` mode'un distinct-
-slot global item dizisi bu worker ABI'sinde yoktur: `--context-provider openvino --context-mode coherent` veya
-`--context-provider openvino --context-mode debiased` validation aşamasında reddedilir;
-sessiz CPU/OpenVINO route değişimi yapılmaz. Explicit CPU fallback,
+mode'un center-dependent cross-fold item dizisi, `debiased` mode'un distinct-
+slot global item dizisi ve `resonant` mode'un epoch-frozen semantic snapshot
+item dizisi bu worker ABI'sinde yoktur: `--context-provider openvino` ile bu
+üç mode validation aşamasında reddedilir; sessiz CPU/OpenVINO route değişimi
+veya mutable snapshot substitution yapılmaz. Explicit CPU fallback,
 CPU plugin'i hızlandırma diye sunmak yerine native fused/OpenMP kernel'ine bypass eder. Device mask'i runtime output'ta doğrulanır ve strict
 CPU-reference checkpoint byte equality zorunludur. Ayrıntılı kaynak ve
 accelerator sınırları için [RESOURCE_AWARE_TRAINING.md](RESOURCE_AWARE_TRAINING.md)'ye
@@ -514,6 +561,8 @@ CLI ve `pretrain_metrics_t` aşağıdaki sayıları verir:
 | `vocabulary lookup cache hits/misses` | checkpoint dışı execution telemetry; cache açıkken raw lookup partition'ı, kapalıyken ikisi de sıfır |
 | `de-biased global-topic/suppressed records` | yalnız `debiased` modda ≥12 distinct slotla global summary alan veya repetition nedeniyle local-hybrid'e düşen long record sayısı |
 | `de-biased distinct topic tokens` | global-channel eligibility kontrolü yapılan long record'lardaki distinct active slot toplamı |
+| `resonant frozen-snapshot contexts` | yalnız `resonant` modda epoch-başında frozen `Ŝ` topical channel'ını gerçekten tüketen prepared center context sayısı |
+| `resonant epoch snapshot bytes` | yalnız `resonant` modda geçici snapshot'ın gerçek capacity için byte reservation'ı; checkpoint payload'una dahil değildir |
 
 `active_tokens + oov_tokens = raw_tokens` ikinci geçiş için beklenen temel
 invariant'tır. `center_updates` active token sayısından küçük olabilir; örneğin
@@ -529,21 +578,26 @@ frequency/active invariantları, rebuilt hash index ve payload checksum kontrol�
 yapar. Sürüm, sadece wire parser değil **gelecek Hebbian seçim algoritmasının
 continuation contract'i**dir:
 
-- Yeni oluşturulan tüm context mode'ları **v7** header/checksum'ı ile yazar.
-  v7, exact-rate plasticity için unbiased Floyd/complement subset sampler'ını
-  bağlar ve `debiased` distinct-slot global-context semantiğinin ilk kabul edilen
+- Yeni `legacy`/`positional`/`hybrid`/`hierarchical`/`coherent`/`debiased`
+  context mode'ları **v7** header/checksum'ı ile yazmaya devam eder. v7,
+  exact-rate plasticity için unbiased Floyd/complement subset sampler'ını bağlar
+  ve `debiased` distinct-slot global-context semantiğinin ilk kabul edilen
   continuation lineage'idir. Bu nedenle fresh `legacy` context mode'u bile
   (isim benzerliğine rağmen) v7'dir; context encoder ile sampler lineage ayrı
   kavramlardır.
+- `resonant` yalnız **v8** header/checksum'ı ile yazılır. v8 wire layout'u
+  değiştirmez fakat epoch-başı frozen semantic-context continuation contract'ini
+  bağlar; v7 writer'ın bu mode'u anlamadığı bir checkpoint'i sessizce üretmesi
+  önlenir. v8 reader v7 Floyd/complement sampler'ını da aynen sürdürür.
 - Reader v4, v5 ve v6'yı historical bounded-retry sampler lineage'i olarak
   yükler. Böyle bir model tekrar kaydedildiğinde non-coherent ise v5, coherent
   ise v6 yazar ve sonraki update'lerde historical stream'i sürdürür.
-- v7 reader/writer Floyd/complement lineage'ini sürdürür. Coherent payload v4
-  veya v5 ise fail-closed reddedilir; v6 ve v7 coherent için geçerlidir.
-  `debiased` payload yalnız v7/Floyd lineage'inde kabul edilir; synthetic veya
-  forged legacy-sampler combination save/load aşamasında fail-closed reddedilir.
-  Böylece eski checkpoint yeni duplicate-handling trajectory'sine sessizce
-  taşınmaz.
+- v7/v8 reader Floyd/complement lineage'ini sürdürür. Coherent payload v4 veya
+  v5 ise fail-closed reddedilir; v6+ coherent için geçerlidir. `debiased`
+  payload yalnız v7+ Floyd lineage'inde, `resonant` payload yalnız v8+ içinde
+  kabul edilir; synthetic veya forged legacy-sampler combination save/load
+  aşamasında fail-closed reddedilir. Böylece eski checkpoint yeni duplicate-
+  handling veya semantic-feedback trajectory'sine sessizce taşınmaz.
 
 `vegai_pretrain inspect`, `plasticity sampler` alanında `floyd-complement` veya
 `legacy-bounded-retry` yazar; operatör checkpoint lineage'ini context mode'dan
@@ -654,7 +708,9 @@ Native testler şunları kontrol eder:
 - bit-sliced `positional` bundle'ın legacy signed-counter bundle ile her
   cardinality'de bit eşitliği ve aynı corpus run'ında semantic plane eşitliği;
 - fused raw-SoA/permuted/pair accumulator'ın reference eklemeyle her counter
-  plane ve sample count için bit eşitliği; pair overflow'unda atomic state;
+  plane ve sample count için bit eşitliği; mixed base-position/semantic-topic
+  pair kernelinin de iki explicit add ile eşitliği ve pair overflow'unda atomic
+  state;
 - fused `hybrid` corpus run'ının rotate-then-add reference kernel ile semantic
   plane, base plane ve learning schedule bakımından bit-tam eşitliği;
 - repeated center token'lı record üzerinde serial ve OpenMP context construction
@@ -670,6 +726,11 @@ Native testler şunları kontrol eder:
   eşitliği, distinct/suppressed telemetry, v7 checkpoint round-trip'i ve
   legacy sampler save rejection; ayrıca OpenVINO immutable ABI'sinin explicit
   `debiased` rejection'ı;
+- `resonant` ilk epoch'unun local `hybrid`le base/semantic/experience düzleminde
+  bit-tam eşitliği, ikinci epoch'ta learned snapshot ile hybrid'den semantic
+  olarak ayrışması, fused/reference eşitliği, v8 checkpoint round-trip +
+  uninterrupted/resumed third epoch byte eşitliği, snapshot telemetry/reservation
+  ve OpenVINO ABI'sinin explicit rejection'ı;
 - cache açık/kapalı run'larının base/semantic/experience planes ve checkpoint
   continuation bakımından bit-tam eşitliği; hit/miss partition telemetry ve
   fingerprint'e rağmen full padded-token equality;
@@ -689,14 +750,15 @@ CI ayrıca küçük corpus ile `train → inspect → resume` CLI smoke testini 
 optimized Make binary üzerinde `tools/compare_pretraining_modes.py` çalıştırır.
 Araç, yalnız gerçek `vegai_pretrain train` child-process wall-clock'ını ölçer:
 compiler/CI setup, fixture construction, inspect ve Python harness süreleri
-hariçtir. Base 64-token fixture üzerinde `legacy → positional → fused hybrid`
-oranlarını; aynı hybrid config için reference rotate-then-add ile fused kernel
-checkpoint byte eşitliği + süre oranını; ayrıca 16-token-record kontrollü
-fixture üzerinde `hybrid → hierarchical → coherent` Top-1 cohesion
-diagnostic'ini raporlar. Coherent arm için kabul koşulu hybrid same-cluster
-Top-1 sonucunu geriletmemektir; pozitif similarity gain zorunlu bir doğal-dil
-iddiası değildir. Bunlar kontrollü tanılardır; doğal dil yeteneği veya production
-throughput garantisi değildir. CI ayrıca `tools/compare_pretraining_lookup_cache.py`
+hariçtir. Base 64-token fixture üzerinde `legacy → positional → fused hybrid →
+resonant` oranlarını ve resonant'ın hybrid'e göre controlled Top-1 similarity
+farkını; aynı hybrid config için reference rotate-then-add ile fused kernel
+checkpoint byte eşitliği + süre oranını; ayrıca 16-token-record kontrollü fixture
+üzerinde `hybrid → hierarchical → coherent` Top-1 cohesion diagnostic'ini
+raporlar. Coherent arm için kabul koşulu hybrid same-cluster Top-1 sonucunu
+geriletmemektir; resonant ölçümü de fixture-bound semantic-retrieval evidence'tır,
+pozitif farkın her doğal-dil corpus'una genellenmesi değildir. Bunlar kontrollü
+tanılardır; doğal dil yeteneği veya production throughput garantisi değildir. CI ayrıca `tools/compare_pretraining_lookup_cache.py`
 ile cache açık/kapalı, checkpoint-byte-identical real child-process comparator'ı
 çalıştırır. Bu fixture canonical vocabulary hash start indexi aynı, direct-cache
 indexleri farklı fixed-width token setiyle lookup probe overhead'ini izole eder;

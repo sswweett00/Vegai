@@ -168,7 +168,7 @@ def policy_from_arguments(arguments: argparse.Namespace, quality_gate: dict[str,
     require(policy["min_frequency"] == 1, "production continual path requires --min-frequency 1")
     require(policy["context_window"] > 0, "--window must be positive")
     require(policy["position_shift_bits"] != 0, "--position-shift must be nonzero")
-    require(policy["context_mode"] in {"legacy", "positional", "hybrid", "hierarchical", "coherent", "debiased"}, "invalid --context-mode")
+    require(policy["context_mode"] in {"legacy", "positional", "hybrid", "hierarchical", "coherent", "debiased", "resonant"}, "invalid --context-mode")
     require(policy["epochs_per_shard"] > 0, "--epochs must be positive")
     require(0 < policy["minimum_plasticity_percent"] <= policy["initial_plasticity_percent"] <= 100,
             "plasticity policy is invalid")
@@ -500,6 +500,7 @@ def plan_resources(contract: DatasetContract, arguments: argparse.Namespace, che
         corpus=first_shard,
         checkpoint=checkpoint,
         max_vocab=arguments.max_vocab,
+        context_mode=arguments.context_mode,
         omp_threads=arguments.omp_threads,
         reserve_fraction=arguments.reserve_fraction,
         require_accelerator=False,
@@ -1005,7 +1006,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--min-frequency", type=int, default=1)
     parser.add_argument("--window", type=int, default=4)
     parser.add_argument("--position-shift", type=int, default=73)
-    parser.add_argument("--context-mode", choices=("legacy", "positional", "hybrid", "hierarchical", "coherent", "debiased"), default="hierarchical")
+    parser.add_argument("--context-mode", choices=("legacy", "positional", "hybrid", "hierarchical", "coherent", "debiased", "resonant"), default="hierarchical")
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--initial-plasticity", type=int, default=25)
     parser.add_argument("--minimum-plasticity", type=int, default=1)

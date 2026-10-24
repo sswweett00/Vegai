@@ -37,7 +37,7 @@ CORPUS = ROOT / "examples" / "corpus" / "mini_turkish_ascii_pretrain.txt"
 BASE_EPOCHS = 2
 BASE_TRAINING_TOKENS = 2_048
 BASE_CONTEXT_PAIRS = 6_656
-BASE_MODES = ("legacy", "positional", "hybrid")
+BASE_MODES = ("legacy", "positional", "hybrid", "resonant")
 LONG_CONTEXT_MODES = ("hybrid", "hierarchical", "coherent")
 LONG_RECORDS_PER_CLUSTER = 16
 LONG_EPOCHS = 2
@@ -324,6 +324,15 @@ def main() -> int:
                 hybrid_semantic_gain > 0.01,
                 f"hybrid semantic cohesion gain was unexpectedly small: {hybrid_semantic_gain:.6f}",
             )
+            # RESONANT's first epoch is exactly HYBRID; its second epoch uses
+            # only an immutable semantic snapshot captured before streaming
+            # updates begin. Report the controlled retrieval delta separately
+            # from speed so the evidence remains a narrow fixture diagnostic,
+            # not a general-intelligence claim.
+            resonant_semantic_gain = (
+                quality["resonant"]["mean_top1_similarity"]
+                - quality["hybrid"]["mean_top1_similarity"]
+            )
 
             # A true before/after optimization comparison: only the hidden
             # implementation switch differs.  The emitted checkpoints must be
@@ -399,7 +408,7 @@ def main() -> int:
             )
 
             report: dict[str, Any] = {
-                "schema": "vegai-pretraining-mode-comparison/v4",
+                "schema": "vegai-pretraining-mode-comparison/v5",
                 "hardware": collect_hardware_profile(),
                 "timing_scope": (
                     "one vegai_pretrain train process per sample; compilation, CI setup, fixture construction, "
@@ -459,6 +468,11 @@ def main() -> int:
                         speed["legacy"]["median_seconds"] / speed["hybrid"]["median_seconds"], 4
                     ),
                     "hybrid_mean_top1_similarity_gain_vs_positional": round(hybrid_semantic_gain, 6),
+                    "resonant_mean_top1_similarity_gain_vs_hybrid": round(resonant_semantic_gain, 6),
+                    "resonant_same_cluster_top1_hit_delta_vs_hybrid": (
+                        quality["resonant"]["same_cluster_top1_hits"]
+                        - quality["hybrid"]["same_cluster_top1_hits"]
+                    ),
                     "hybrid_mean_top1_similarity_relative_gain_percent": round(
                         100.0 * hybrid_semantic_gain / quality["positional"]["mean_top1_similarity"], 3
                     ),

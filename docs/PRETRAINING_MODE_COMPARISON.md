@@ -12,7 +12,7 @@ ve Python harness süresi **ölçüye dahil değildir**. Vocabulary pass, stream
 > veya production throughput garantisi değildir. Gerçek corpus için ayrı
 > held-out/de-duplicated evaluation manifesti gerekir.
 
-## V3 protokolü: portable CPU provenance + gerçek train timing
+## V5 protokolü: portable CPU provenance + gerçek train timing
 
 ```bash
 make clean-all
@@ -56,12 +56,21 @@ Ordered context pair/run  6,656
 Vocabulary                64 active token
 ```
 
-Burada `legacy`, bit-tam hızlı `positional` ve explicit local fused `hybrid`
-çalıştırılır. Genel `train` varsayılanı artık `hierarchical`tir; bu 8-token
-fixture hierarchy eşiğinin altında olduğundan local hybrid ile bit-tam aynıdır. Her checkpoint gerçek CLI üzerinden 64 self-excluded Top-1 query
-ile okunur. `positional` nearest-neighbour çıktısının `legacy` ile tam eşit
-olması gerekir; `hybrid` aynı-küme hit'i geriletmemeli ve mean Top-1 similarity
-artışı `> 0.01` olmalıdır.
+Burada `legacy`, bit-tam hızlı `positional`, explicit local fused `hybrid` ve
+iki-epoch **`resonant`** çalıştırılır. Genel `train` varsayılanı artık
+`hierarchical`tir; bu 8-token fixture hierarchy eşiğinin altında olduğundan
+local hybrid ile bit-tam aynıdır. Her checkpoint gerçek CLI üzerinden 64
+self-excluded Top-1 query ile okunur. `positional` nearest-neighbour çıktısının
+`legacy` ile tam eşit olması gerekir; `hybrid` aynı-küme hit'i geriletmemeli ve
+mean Top-1 similarity artışı `> 0.01` olmalıdır.
+
+`resonant`in birinci epoch'u `hybrid` ile bit-tam aynıdır; ikinci epoch'ta yalnız
+başlangıçta frozen learned semantic plane topical input olur. Comparator,
+`resonant_mean_top1_similarity_gain_vs_hybrid` ile same-cluster hit delta'sını
+raporlar. Bu delta controlled fixture için gerçek semantic-retrieval evidence'ı
+olsa da genel corpus/LLM yeteneği veya her veri dağılımında pozitif gain garantisi
+olmaz. Native testte fused/reference equality, checkpoint-resume equality ve
+v8 lineage ayrı zorunlu invariant'lardır.
 
 ### C. Fused/reference semantic-preservation hız karşılaştırması
 
@@ -440,20 +449,23 @@ throughput iddiası olarak karşılaştırılmamalıdır.
 
 ## Uygulama notları
 
-- `hv_bitacc_add_words`, `hv_bitacc_add_permuted_words` ve
-  `hv_bitacc_add_permuted_pair_words`, geçici `hv_t` kopyasını kaldırarak aynı
-  bit-sliced population-counter arithmetic'ini doğrudan vocabulary'nin SoA
-  column'unda uygular.
+- `hv_bitacc_add_words`, `hv_bitacc_add_permuted_words`,
+  `hv_bitacc_add_permuted_pair_words` ve mixed
+  `hv_bitacc_add_permuted_mixed_pair_words`, geçici `hv_t` kopyasını kaldırarak
+  aynı bit-sliced population-counter arithmetic'ini doğrudan vocabulary'nin
+  SoA column'unda uygular.
 - Native property testleri negatif/pozitif shift, bütün counter plane'leri,
   sample count ve pair-overflow atomicity'sini kontrol eder.
 - `--reference-context-kernel` checkpoint formatına yazılmaz; yalnız benchmark
   ve regression oracle'dır. Aynı semantic config ile fused/reference checkpoint
   byte eşitliği bu nedenle zorunludur.
-- Checkpoint version sampler lineage'ini de bağlar: yeni tüm mode'lar v7
-  header+checksum ile Floyd/complement exact-mask sampler'ını yazar. Reader
-  v4/v5/v6'yı historical bounded-retry sampler olarak kabul eder ve bu lineage
-  yeniden kaydedildiğinde v5 (non-coherent) veya v6 (coherent) sürdürülür.
-  Coherent semantic mode taşıyan v4/v5 payload fail-closed reddedilir.
+- Checkpoint version sampler ve feedback lineage'ini de bağlar: ordinary fresh
+  mode'lar v7 header+checksum ile Floyd/complement exact-mask sampler'ını yazar;
+  `resonant` frozen-semantic feedback contract'i için v8 yazar. Reader v4/v5/v6'yı
+  historical bounded-retry sampler olarak kabul eder ve bu lineage yeniden
+  kaydedildiğinde v5 (non-coherent) veya v6 (coherent) sürdürülür. Coherent
+  semantic mode taşıyan v4/v5 ve resonant taşıyan pre-v8 payload fail-closed
+  reddedilir.
 - Hierarchical global signal satırda bir kez üretilir, yalnız ≥12 active token
   için etkinleşir ve local context accumulator kapasitesiyle bounded kalır;
   eşik altındaki record için topic accumulator kurulmaz. Coherent aynı eşikte

@@ -53,8 +53,9 @@ python3 tools/measure_example_pretraining.py \
 ```
 
 CI derlemeden sonra bu timing kapsamını `tools/compare_pretraining_modes.py`
-içinde `legacy`, bit-tam hızlı `positional` ve explicit local fused `hybrid`
-için üçer tekrar ile çalıştırır. Genel CLI varsayılanı `hierarchical`tir; bu
+içinde `legacy`, bit-tam hızlı `positional`, explicit local fused `hybrid` ve
+iki-epoch frozen-semantic-feedback `resonant` için üçer tekrar ile çalıştırır.
+Genel CLI varsayılanı `hierarchical`tir; bu
 sekiz-token fixture eşiğin altında kaldığı için aynı local semantic path'i
 kullanır. Aynı config/corpus ile `--reference-context-kernel`
 rotate-then-add yolu da ayrıca ölçülür ve fused checkpoint ile **byte-tam eşit**

@@ -59,7 +59,8 @@ module hyper_types
    public :: hv_hamming, hv_similarity, hv_similarity_from_distance, hv_hamming_zscore, hv_equal
    public :: hv_acc_reset, hv_acc_add, hv_acc_finalize
    public :: hv_bitacc_reset, hv_bitacc_add, hv_bitacc_add_words
-   public :: hv_bitacc_add_permuted_words, hv_bitacc_add_permuted_pair_words, hv_bitacc_finalize
+   public :: hv_bitacc_add_permuted_words, hv_bitacc_add_permuted_pair_words
+   public :: hv_bitacc_add_permuted_mixed_pair_words, hv_bitacc_finalize
    public :: hv_hebbian_update, hv_hebbian_update_percent
    public :: hv_inject_noise_exact, hv_inject_noise_percent
 
@@ -580,6 +581,58 @@ contains
       end do
       acc%sample_count = acc%sample_count + 2_int32
    end subroutine hv_bitacc_add_permuted_pair_words
+
+   ! Adds a position-permuted immutable identity vector and a separately
+   ! supplied unpermuted semantic vector in one bit-sliced counter pass.  This
+   ! is exactly equivalent to `add(permuted(position_words)); add(topic_words)`
+   ! but avoids a temporary and second carry traversal.  Pretraining uses it
+   ! for epoch-frozen semantic feedback: position remains an immutable token
+   ! identity, while the topical channel can carry a learned snapshot without
+   ! introducing a read-after-write dependency between source-ordered updates.
+   pure subroutine hv_bitacc_add_permuted_mixed_pair_words(acc, position_words, topic_words, shift_bits, status)
+      type(hv_bitacc_t), intent(inout) :: acc
+      integer(int64), intent(in) :: position_words(HV_WORDS), topic_words(HV_WORDS)
+      integer(int32), intent(in) :: shift_bits
+      integer(int32), intent(out) :: status
+      integer(int64) :: carry, previous, permuted_word, topical_word
+      integer(int32) :: total_shift, word_shift, bit_shift, word, plane, source_hi, source_lo, required_planes
+
+      status = HV_OK
+      if (acc%sample_count > HV_BITACC_MAX_ITEMS - 2_int32) then
+         status = HV_ERR_ACCUMULATOR_OVERFLOW
+         return
+      end if
+      required_planes = hv_bitacc_required_planes(acc%sample_count + 2_int32)
+      call hv_bitacc_ensure_planes(acc, required_planes)
+
+      total_shift = modulo(shift_bits, HV_BITS)
+      word_shift = total_shift / WORD_BITS
+      bit_shift = modulo(total_shift, WORD_BITS)
+      do word = 1, HV_WORDS
+         source_hi = word - word_shift
+         if (source_hi <= 0_int32) source_hi = source_hi + HV_WORDS
+         if (bit_shift == 0_int32) then
+            permuted_word = position_words(source_hi)
+         else
+            source_lo = source_hi - 1_int32
+            if (source_lo <= 0_int32) source_lo = source_lo + HV_WORDS
+            permuted_word = ior(ishft(position_words(source_hi), bit_shift), &
+                                ishft(position_words(source_lo), bit_shift - WORD_BITS))
+         end if
+         topical_word = topic_words(word)
+         previous = acc%planes(1, word)
+         acc%planes(1, word) = ieor(ieor(previous, permuted_word), topical_word)
+         carry = ior(iand(previous, permuted_word), &
+                     ior(iand(previous, topical_word), iand(permuted_word, topical_word)))
+         do plane = 2, required_planes
+            previous = acc%planes(plane, word)
+            acc%planes(plane, word) = ieor(previous, carry)
+            carry = iand(previous, carry)
+            if (carry == 0_int64) exit
+         end do
+      end do
+      acc%sample_count = acc%sample_count + 2_int32
+   end subroutine hv_bitacc_add_permuted_mixed_pair_words
 
    ! Thresholds bit-sliced binary population counters without unpacking any of
    ! the 16,384 dimensions.  For even cardinalities equality with N/2 gets the

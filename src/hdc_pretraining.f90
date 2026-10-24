@@ -57,6 +57,13 @@ module hdc_pretraining
    ! global majority sees each slot at most once, so boilerplate/repetition
    ! cannot win the whole-record vote solely by occurrence count.
    integer(int32), parameter, public :: PT_CONTEXT_DEBIASED = 6_int32
+   ! RESONANT preserves HYBRID's immutable positional identity channel while
+   ! replacing its topical neighbour input with a semantic prototype frozen at
+   ! the start of each epoch.  The snapshot lets later epochs propagate learned
+   ! distributional structure without order-dependent read-after-write effects.
+   ! A fresh model's snapshot equals its base vectors, so its first epoch is
+   ! exactly HYBRID; feedback begins only from the second completed epoch.
+   integer(int32), parameter, public :: PT_CONTEXT_RESONANT = 7_int32
 
    ! Execution-only context providers.  CPU is the portable authoritative
    ! backend.  OPENVINO can offload only immutable, pre-positioned context
@@ -83,11 +90,14 @@ module hdc_pretraining
 
    character(len=8), parameter :: CHECKPOINT_MAGIC = 'VGHDC001'
    ! v7 binds the unbiased Floyd/complement exact-mask sampler to a checkpoint
-   ! lineage. v4-v6 remain readable and explicitly retain their historical
-   ! bounded-retry sampler on resume, so an old checkpoint never silently
-   ! changes its future deterministic trajectory. The wire layout is stable;
-   ! the version is an algorithm/continuation contract as well as a parser key.
-   integer(int32), parameter :: CHECKPOINT_VERSION = 7_int32
+   ! lineage. v8 adds the RESONANT epoch-frozen semantic-context contract.
+   ! v4-v7 remain readable and explicitly retain their historical continuation
+   ! behavior, so an old checkpoint never silently changes its future
+   ! deterministic trajectory. The wire layout is stable; the version is an
+   ! algorithm/continuation contract as well as a parser key.
+   integer(int32), parameter :: CHECKPOINT_FLOYD_VERSION = 7_int32
+   integer(int32), parameter :: CHECKPOINT_RESONANT_VERSION = 8_int32
+   integer(int32), parameter :: CHECKPOINT_VERSION = CHECKPOINT_RESONANT_VERSION
    integer(int32), parameter :: CHECKPOINT_PRE_COHERENT_VERSION = 5_int32
    integer(int32), parameter :: CHECKPOINT_COHERENT_LEGACY_VERSION = 6_int32
    integer(int32), parameter :: CHECKPOINT_MIN_VERSION = 4_int32
@@ -165,6 +175,10 @@ module hdc_pretraining
       integer(int64) :: debiased_topic_records = 0_int64
       integer(int64) :: debiased_topic_suppressed_records = 0_int64
       integer(int64) :: debiased_topic_distinct_tokens = 0_int64
+      ! RESONANT contexts consume only an immutable copy captured before each
+      ! epoch. This count exposes actual feedback use without storing transient
+      ! snapshot memory in a checkpoint or changing semantic metrics.
+      integer(int64) :: resonant_snapshot_contexts = 0_int64
       integer(int64) :: openvino_contexts = 0_int64
       ! A resident worker session can process many record requests.  Keep the
       ! historic invocation counter as a request counter and report sessions
@@ -237,7 +251,7 @@ module hdc_pretraining
 
    public :: pretrain_build_vocabulary, pretrain_extend_vocabulary, pretrain_train_file
    public :: pretrain_model_destroy, pretrain_model_is_ready
-   public :: pretrain_metrics_reset, pretrain_model_footprint_bytes
+   public :: pretrain_metrics_reset, pretrain_model_footprint_bytes, pretrain_epoch_snapshot_bytes
    public :: pretrain_checkpoint_save, pretrain_checkpoint_load
    public :: pretrain_lookup_token, pretrain_get_semantic_hv, pretrain_nearest_semantic
    public :: pretrain_config_from_model, pretrain_context_mode_name, pretrain_context_provider_name
@@ -274,6 +288,8 @@ contains
          name = 'coherent'
       case (PT_CONTEXT_DEBIASED)
          name = 'debiased'
+      case (PT_CONTEXT_RESONANT)
+         name = 'resonant'
       case default
          name = 'invalid'
       end select
@@ -322,6 +338,7 @@ contains
       report%debiased_topic_records = 0_int64
       report%debiased_topic_suppressed_records = 0_int64
       report%debiased_topic_distinct_tokens = 0_int64
+      report%resonant_snapshot_contexts = 0_int64
       report%openvino_contexts = 0_int64
       report%openvino_worker_invocations = 0_int64
       report%openvino_worker_sessions = 0_int64
@@ -396,7 +413,8 @@ contains
           config%context_mode /= PT_CONTEXT_HYBRID .and. &
           config%context_mode /= PT_CONTEXT_HIERARCHICAL .and. &
           config%context_mode /= PT_CONTEXT_COHERENT .and. &
-          config%context_mode /= PT_CONTEXT_DEBIASED) then
+          config%context_mode /= PT_CONTEXT_DEBIASED .and. &
+          config%context_mode /= PT_CONTEXT_RESONANT) then
          status = PT_ERR_INVALID_ARGUMENT
          return
       end if
@@ -407,12 +425,14 @@ contains
       end if
       if (config%context_provider == PT_CONTEXT_PROVIDER_OPENVINO) then
          ! The lane worker has an exact ABI for positional/hybrid/hierarchical
-         ! immutable items. COHERENT's center-dependent cross-fold view and
-         ! DEBIASED's distinct-slot global view remain CPU-only until separately
-         ! verified worker ABIs exist.
+         ! immutable items. COHERENT's center-dependent cross-fold view,
+         ! DEBIASED's distinct-slot global view, and RESONANT's epoch-frozen
+         ! semantic snapshot remain CPU-only until separately verified worker
+         ! ABIs exist.
          if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL .or. &
              config%context_mode == PT_CONTEXT_COHERENT .or. &
              config%context_mode == PT_CONTEXT_DEBIASED .or. &
+             config%context_mode == PT_CONTEXT_RESONANT .or. &
              len_trim(config%openvino_worker) == 0 .or. len_trim(config%openvino_python) == 0 .or. &
              len_trim(config%openvino_work_dir) == 0 .or. len_trim(config%openvino_device) == 0 .or. &
              config%openvino_min_contexts <= 0_int32 .or. config%openvino_timeout_milliseconds <= 0_int32 .or. &
@@ -1174,12 +1194,16 @@ contains
    ! Build one center's immutable HDC context only.  It has no writes to model
    ! state and is therefore OpenMP-safe.  Its output is committed separately in
    ! source order by pretrain_apply_center_update.
-   subroutine pretrain_construct_center_context(model, config, token_slots, n_tokens, center_index, &
-                                                expected_neighbor_count, line_topic_context, line_topic_fold_contexts, &
-                                                line_active_tokens, line_topic_fold_active_counts, experience_before, &
-                                                context_bits, status)
+   subroutine pretrain_construct_center_context(model, config, semantic_context_bits, token_slots, n_tokens, &
+                                                center_index, expected_neighbor_count, line_topic_context, &
+                                                line_topic_fold_contexts, line_active_tokens, &
+                                                line_topic_fold_active_counts, experience_before, context_bits, status)
       type(hdc_pretrain_model_t), intent(in) :: model
       type(hdc_pretrain_config_t), intent(in) :: config
+      ! An immutable start-of-epoch semantic copy for RESONANT; ordinary modes
+      ! pass a tiny unused placeholder. The positional channel always remains
+      ! model%base_bits, so learned feedback cannot erase token identity.
+      integer(int64), intent(in) :: semantic_context_bits(:, :)
       integer(int32), intent(in) :: token_slots(:)
       integer(int32), intent(in) :: n_tokens, center_index, expected_neighbor_count
       type(hv_t), intent(in) :: line_topic_context, line_topic_fold_contexts(2)
@@ -1194,12 +1218,15 @@ contains
       integer(int32) :: add_status, shift_bits, neighbors, global_items, global_index, maximum_items
       integer(int32) :: center_fold, opposite_fold
       integer(int64) :: tie_seed
-      logical :: reference_kernel, topic_mode, use_global_topic, use_coherent_cross_topic
+      logical :: reference_kernel, topic_mode, use_global_topic, use_coherent_cross_topic, resonant_mode
 
       status = PT_OK
       context_bits = 0_int64
+      resonant_mode = config%context_mode == PT_CONTEXT_RESONANT
       if (center_index < 1_int32 .or. center_index > n_tokens .or. &
-          expected_neighbor_count <= 0_int32) then
+          expected_neighbor_count <= 0_int32 .or. &
+          (resonant_mode .and. (size(semantic_context_bits, 1, kind=int32) /= HV_WORDS .or. &
+                                 size(semantic_context_bits, 2, kind=int32) < model%vocabulary%capacity))) then
          status = PT_ERR_INVALID_ARGUMENT
          return
       end if
@@ -1214,7 +1241,7 @@ contains
       topic_mode = config%context_mode == PT_CONTEXT_HYBRID .or. &
                    config%context_mode == PT_CONTEXT_HIERARCHICAL .or. &
                    config%context_mode == PT_CONTEXT_COHERENT .or. &
-                   config%context_mode == PT_CONTEXT_DEBIASED
+                   config%context_mode == PT_CONTEXT_DEBIASED .or. resonant_mode
       use_global_topic = .false.
       use_coherent_cross_topic = .false.
       center_fold = modulo(center_index - 1_int32, 2_int32) + 1_int32
@@ -1273,6 +1300,7 @@ contains
                return
             end if
             if (topic_mode) then
+               if (resonant_mode) neighbor%bits = semantic_context_bits(:, neighbor_slot)
                call hv_bitacc_add(bit_accumulator, neighbor, add_status)
                if (add_status /= HV_OK) then
                   status = PT_ERR_HYPERVECTOR
@@ -1287,12 +1315,18 @@ contains
                return
             end if
          else
-            ! HYBRID, HIERARCHICAL, and COHERENT share the exact local
-            ! positional+topic representation.  The pair kernel is algebraically identical to
-            ! two adds but eliminates both a 2 KiB rotate temporary and a
-            ! second carry pass.
-            call hv_bitacc_add_permuted_pair_words(bit_accumulator, model%base_bits(:, neighbor_slot), &
-                                                    shift_bits, add_status)
+            ! HYBRID/HIERARCHICAL/COHERENT/DEBIASED share a local immutable
+            ! identity pair. RESONANT keeps that positional identity but uses
+            ! the frozen semantic topical input from the preceding epoch. Both
+            ! fused paths are algebraically identical to two ordered adds.
+            if (resonant_mode) then
+               call hv_bitacc_add_permuted_mixed_pair_words(bit_accumulator, &
+                                                            model%base_bits(:, neighbor_slot), &
+                                                            semantic_context_bits(:, neighbor_slot), shift_bits, add_status)
+            else
+               call hv_bitacc_add_permuted_pair_words(bit_accumulator, model%base_bits(:, neighbor_slot), &
+                                                       shift_bits, add_status)
+            end if
             if (add_status /= HV_OK) then
                status = PT_ERR_HYPERVECTOR
                return
@@ -1438,7 +1472,8 @@ contains
       end if
       if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL .or. &
           config%context_mode == PT_CONTEXT_COHERENT .or. &
-          config%context_mode == PT_CONTEXT_DEBIASED .or. token_slots(center_index) == 0_int32) then
+          config%context_mode == PT_CONTEXT_DEBIASED .or. &
+          config%context_mode == PT_CONTEXT_RESONANT .or. token_slots(center_index) == 0_int32) then
          status = PT_ERR_CONTEXT_PROVIDER
          return
       end if
@@ -1822,7 +1857,8 @@ contains
       if (config%context_provider /= PT_CONTEXT_PROVIDER_OPENVINO) return
       if (config%context_mode == PT_CONTEXT_LEGACY_POSITIONAL .or. &
           config%context_mode == PT_CONTEXT_COHERENT .or. &
-          config%context_mode == PT_CONTEXT_DEBIASED) then
+          config%context_mode == PT_CONTEXT_DEBIASED .or. &
+          config%context_mode == PT_CONTEXT_RESONANT) then
          status = PT_ERR_CONTEXT_PROVIDER
          return
       end if
@@ -2083,13 +2119,16 @@ contains
       call add_nonnegative(metrics%center_updates, 1_int64, status)
    end subroutine pretrain_apply_center_update
 
-   subroutine train_one_epoch(model, corpus_path, config, metrics, status, session, execution)
+   subroutine train_one_epoch(model, corpus_path, config, metrics, status, session, semantic_context_bits, execution)
       type(hdc_pretrain_model_t), intent(inout) :: model
       character(len=*), intent(in) :: corpus_path
       type(hdc_pretrain_config_t), intent(in) :: config
       type(pretrain_metrics_t), intent(inout) :: metrics
       integer(int32), intent(out) :: status
       type(openvino_context_session_t), intent(inout) :: session
+      ! Per-epoch immutable topical source. RESONANT receives a frozen copy;
+      ! all other modes receive a tiny unused placeholder and never consume it.
+      integer(int64), intent(in) :: semantic_context_bits(:, :)
       type(pretrain_execution_report_t), intent(inout), optional :: execution
       character(len=MAX_LINE_CHARS) :: line
       character(len=TOKEN_LEN) :: tokens(MAX_TOKENS_PER_LINE)
@@ -2108,6 +2147,12 @@ contains
       logical :: eof, found, lookup_cache_hit, overlong, truncated, provider_used, construct_in_parallel
 
       status = PT_OK
+      if (config%context_mode == PT_CONTEXT_RESONANT .and. &
+          (size(semantic_context_bits, 1, kind=int32) /= HV_WORDS .or. &
+           size(semantic_context_bits, 2, kind=int32) < model%vocabulary%capacity)) then
+         status = PT_ERR_INVALID_ARGUMENT
+         return
+      end if
       allocate(prepared_context_bits(HV_WORDS, MAX_TOKENS_PER_LINE), &
                experiences_before(MAX_TOKENS_PER_LINE), neighbor_counts(MAX_TOKENS_PER_LINE), &
                prepared_status(MAX_TOKENS_PER_LINE), update_required(MAX_TOKENS_PER_LINE), &
@@ -2313,8 +2358,9 @@ contains
 !$omp parallel do schedule(static)
                do token_index = 1, n_tokens
                   if (.not. update_required(token_index)) cycle
-                  call pretrain_construct_center_context(model, config, token_slots, n_tokens, token_index, &
-                                                         neighbor_counts(token_index), line_topic_context, &
+                  call pretrain_construct_center_context(model, config, semantic_context_bits, token_slots, &
+                                                         n_tokens, token_index, neighbor_counts(token_index), &
+                                                         line_topic_context, &
                                                          line_topic_fold_contexts, line_topic_active_tokens, &
                                                          line_topic_fold_active_counts, experiences_before(token_index), &
                                                          prepared_context_bits(:, token_index), &
@@ -2324,8 +2370,9 @@ contains
             else
                do token_index = 1, n_tokens
                   if (.not. update_required(token_index)) cycle
-                  call pretrain_construct_center_context(model, config, token_slots, n_tokens, token_index, &
-                                                         neighbor_counts(token_index), line_topic_context, &
+                  call pretrain_construct_center_context(model, config, semantic_context_bits, token_slots, &
+                                                         n_tokens, token_index, neighbor_counts(token_index), &
+                                                         line_topic_context, &
                                                          line_topic_fold_contexts, line_topic_active_tokens, &
                                                          line_topic_fold_active_counts, experiences_before(token_index), &
                                                          prepared_context_bits(:, token_index), &
@@ -2334,6 +2381,10 @@ contains
             end if
             if (present(execution)) then
                execution%cpu_contexts = execution%cpu_contexts + int(update_count, int64)
+               if (config%context_mode == PT_CONTEXT_RESONANT) then
+                  execution%resonant_snapshot_contexts = execution%resonant_snapshot_contexts + &
+                                                        int(update_count, int64)
+               end if
                if (construct_in_parallel) then
                   execution%cpu_parallel_contexts = execution%cpu_parallel_contexts + int(update_count, int64)
                   execution%cpu_parallel_batches = execution%cpu_parallel_batches + 1_int64
@@ -2376,7 +2427,13 @@ contains
       integer(int32), intent(out) :: status
       type(pretrain_execution_report_t), intent(inout), optional :: execution
       type(openvino_context_session_t) :: openvino_session
+      ! The 2 KiB x vocabulary snapshot is allocated only for RESONANT.  A
+      ! tiny unused array avoids aliasing mutable model storage into the
+      ! ordinary-mode context constructor.
+      integer(int64), allocatable :: semantic_epoch_snapshot(:, :)
+      integer(int64) :: unused_semantic_context_bits(HV_WORDS, 1)
       integer(int32) :: epoch, tally_status, original_status, stop_status
+      integer :: allocation_status
 
       openvino_session = openvino_context_session_t()
       call pretrain_metrics_reset(metrics)
@@ -2405,11 +2462,36 @@ contains
          return
       end if
 
+      unused_semantic_context_bits = 0_int64
+      if (config%context_mode == PT_CONTEXT_RESONANT) then
+         allocate(semantic_epoch_snapshot(HV_WORDS, model%vocabulary%capacity), stat=allocation_status)
+         if (allocation_status /= 0) then
+            status = PT_ERR_ALLOCATION
+            return
+         end if
+      end if
+
       do epoch = 1, config%epochs
+         ! Capture only committed prototypes before any record in this epoch is
+         ! processed. Context construction can then run serially or in OpenMP
+         ! without observing another center's in-epoch semantic update.
+         if (allocated(semantic_epoch_snapshot)) semantic_epoch_snapshot = model%semantic_bits
          if (present(execution)) then
-            call train_one_epoch(model, corpus_path, config, metrics, status, openvino_session, execution)
+            if (allocated(semantic_epoch_snapshot)) then
+               call train_one_epoch(model, corpus_path, config, metrics, status, openvino_session, &
+                                    semantic_epoch_snapshot, execution)
+            else
+               call train_one_epoch(model, corpus_path, config, metrics, status, openvino_session, &
+                                    unused_semantic_context_bits, execution)
+            end if
          else
-            call train_one_epoch(model, corpus_path, config, metrics, status, openvino_session)
+            if (allocated(semantic_epoch_snapshot)) then
+               call train_one_epoch(model, corpus_path, config, metrics, status, openvino_session, &
+                                    semantic_epoch_snapshot)
+            else
+               call train_one_epoch(model, corpus_path, config, metrics, status, openvino_session, &
+                                    unused_semantic_context_bits)
+            end if
          end if
          if (status /= PT_OK) then
             original_status = status
@@ -2435,6 +2517,7 @@ contains
       call add_metrics(model%totals, metrics, status)
 
 800   continue
+      if (allocated(semantic_epoch_snapshot)) deallocate(semantic_epoch_snapshot)
       ! A resident worker is strictly execution infrastructure.  Always ask it
       ! to stop before returning, including after an HDC/training error, so a
       ! failed optional run cannot leak an OpenVINO process or SSD session dir.
@@ -2570,6 +2653,23 @@ contains
       end if
    end function pretrain_model_footprint_bytes
 
+   ! Transient working-set accounting for the epoch-frozen semantic feedback.
+   ! The snapshot is deliberately not model/checkpoint state: it is rebuilt
+   ! from the committed prototype plane before each epoch. Returning zero for
+   ! all other modes lets callers surface the actual incremental reservation
+   ! rather than charging ordinary HYBRID/HIERARCHICAL runs for unused memory.
+   pure function pretrain_epoch_snapshot_bytes(model, config) result(total_bytes)
+      type(hdc_pretrain_model_t), intent(in) :: model
+      type(hdc_pretrain_config_t), intent(in) :: config
+      integer(int64) :: total_bytes
+
+      total_bytes = 0_int64
+      if (config%context_mode /= PT_CONTEXT_RESONANT) return
+      if (.not. allocated(model%semantic_bits)) return
+      total_bytes = size(model%semantic_bits, kind=int64) * &
+                    int(storage_size(model%semantic_bits(1, 1)) / 8, int64)
+   end function pretrain_epoch_snapshot_bytes
+
    ! A deterministic accidental-corruption detector for a checkpoint payload.
    ! It is not a cryptographic signature and must not be used as an authenticity
    ! mechanism.  Stream binary layout remains compiler/ABI-local by contract.
@@ -2636,13 +2736,16 @@ contains
 
       ! Keep the result name distinct from CHECKPOINT_VERSION: Fortran names
       ! are case-insensitive, so a same-spelling result would shadow the module
-      ! constant. A v7 model is the new unbiased sampler lineage. A loaded
-      ! v4-v6 model writes its legacy version so future resumes continue with
-      ! its original deterministic selection stream.
+      ! constant. Ordinary Floyd/complement modes retain their v7 writer to
+      ! preserve established checkpoint bytes. RESONANT alone writes v8 because
+      ! its frozen semantic-feedback continuation contract is new. A loaded
+      ! v4-v6 model writes its legacy version so future resumes retain its
+      ! original deterministic selection stream.
       format_version = 0_int32
       select case (model%plasticity_sampler)
       case (PT_PLASTICITY_SAMPLER_FLOYD_COMPLEMENT)
-         format_version = CHECKPOINT_VERSION
+         format_version = CHECKPOINT_FLOYD_VERSION
+         if (model%context_mode == PT_CONTEXT_RESONANT) format_version = CHECKPOINT_RESONANT_VERSION
       case (PT_PLASTICITY_SAMPLER_LEGACY)
          format_version = CHECKPOINT_PRE_COHERENT_VERSION
          if (model%context_mode == PT_CONTEXT_COHERENT) then
@@ -2668,11 +2771,12 @@ contains
          status = PT_ERR_INVALID_ARGUMENT
          return
       end if
-      ! A de-biased semantic context is only defined for the current v7
-      ! Floyd/complement lineage. Public construction always satisfies this;
+      ! DEBIASED and RESONANT semantic contexts are defined only for modern
+      ! Floyd/complement lineages. Public construction always satisfies this;
       ! reject an in-memory forged combination rather than serializing a file
       ! that an older sampler contract could misrepresent.
-      if (model%context_mode == PT_CONTEXT_DEBIASED .and. &
+      if ((model%context_mode == PT_CONTEXT_DEBIASED .or. &
+           model%context_mode == PT_CONTEXT_RESONANT) .and. &
           model%plasticity_sampler /= PT_PLASTICITY_SAMPLER_FLOYD_COMPLEMENT) then
          status = PT_ERR_CHECKPOINT
          return
@@ -2746,7 +2850,7 @@ contains
          status = PT_ERR_CHECKPOINT
          return
       end if
-      if (version == CHECKPOINT_VERSION) then
+      if (version >= CHECKPOINT_FLOYD_VERSION) then
          model%plasticity_sampler = PT_PLASTICITY_SAMPLER_FLOYD_COMPLEMENT
       else
          model%plasticity_sampler = PT_PLASTICITY_SAMPLER_LEGACY
@@ -2803,10 +2907,12 @@ contains
       checkpoint_config%tie_seed = model%tie_seed
       if ((model%context_mode == PT_CONTEXT_COHERENT .and. &
            version < CHECKPOINT_COHERENT_LEGACY_VERSION) .or. &
-          (model%context_mode == PT_CONTEXT_DEBIASED .and. version < CHECKPOINT_VERSION)) then
-         ! DEBIASED was introduced under the current v7 sampler lineage. A
-         ! forged older checkpoint must not be interpreted as a valid distinct-
-         ! topic continuation simply because its wire layout happens to fit.
+          (model%context_mode == PT_CONTEXT_DEBIASED .and. version < CHECKPOINT_FLOYD_VERSION) .or. &
+          (model%context_mode == PT_CONTEXT_RESONANT .and. version < CHECKPOINT_RESONANT_VERSION)) then
+         ! DEBIASED was introduced under the v7 Floyd lineage and RESONANT
+         ! under v8. A forged older checkpoint must not be interpreted as one
+         ! of these contexts merely because its stable wire layout happens to
+         ! fit.
          close(unit)
          status = PT_ERR_CHECKPOINT
          call pretrain_model_destroy(model)

@@ -36,6 +36,8 @@ def main() -> int:
                     str(checkpoint),
                     "--max-vocab",
                     "128",
+                    "--context-mode",
+                    "resonant",
                     "--omp-threads",
                     "2",
                     "--format",
@@ -60,6 +62,8 @@ def main() -> int:
             memory = plan.get("memory")
             if not isinstance(memory, dict) or memory.get("max_vocabulary") != 128:
                 fail("planner omitted requested vocabulary capacity")
+            if memory.get("context_mode") != "resonant" or memory.get("resonant_snapshot_bytes") != 128 * 2_048:
+                fail("planner omitted the selected resonant epoch-snapshot reservation")
             if not isinstance(memory.get("required_available_bytes"), int) or memory["required_available_bytes"] <= 0:
                 fail("planner did not calculate a positive RAM reservation")
             if memory["required_available_bytes"] <= memory.get("model_payload_bytes", 0):
