@@ -160,6 +160,18 @@ if(VEGAI_BUILD_TESTS)
                     --pretrain-bin $<TARGET_FILE:vegai_pretrain>
         )
         set_tests_properties(vegai_9mib_pretraining_real_binary PROPERTIES TIMEOUT 240)
+        # Generic direct CLI users receive the same fail-closed corpus/binary/
+        # checkpoint provenance boundary as the fixture runner: this invokes a
+        # real compiled train, validates staged publication, and then verifies
+        # corpus/manifest/checkpoint/report tamper rejection without retraining.
+        # Its hermetic optional-provider subcase binds worker/interpreter files
+        # without claiming an OpenVINO device/runtime is available in CTest.
+        add_test(
+            NAME vegai_attested_pretraining_real_binary
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_attested_pretrain.py
+                    --pretrain-bin $<TARGET_FILE:vegai_pretrain>
+        )
+        set_tests_properties(vegai_attested_pretraining_real_binary PROPERTIES TIMEOUT 300)
         # Both cache arms execute real compiled train processes and must produce
         # byte-identical checkpoints. The report's timer excludes compilation,
         # fixture construction, and comparator/report work.

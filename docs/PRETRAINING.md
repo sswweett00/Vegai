@@ -325,6 +325,95 @@ semantiğini checkpoint'ten farklı bir config ile sürdürme
 `PT_ERR_INCOMPATIBLE_CONFIG` ile reddedilir. CLI query'si tokenizer üzerinden
 canonicalize edilir ve yalnız bir token kabul eder.
 
+### 4.1 Tek bir doğrudan train için manifest-bound attestation
+
+Çıplak `vegai_pretrain train` komutu checkpoint formatını ve deterministic
+öğrenme çekirdeğini denetler; ancak tek başına hangi corpus/manifest/binary ile
+çalıştığını, process sırasında input'un değişmediğini veya yarım checkpoint'in
+publication'a ulaşmadığını kaydetmez. Yeni bir **tek corpus** direct-run için
+`tools/attested_pretrain.py` bu operasyonel sınırı fail-closed olarak ekler.
+Bu araç `resume`/`continue` transaction controller'ı değildir: immutable shard
+ve exactly-once generation için hâlâ
+[CONTINUOUS_PRETRAINING.md](CONTINUOUS_PRETRAINING.md), packaged production
+release için [PRODUCTION_PRETRAINING.md](PRODUCTION_PRETRAINING.md) kullanılmalıdır.
+
+Önce operator corpus'un kaynağını, lisansını, retrieval zamanını ve canonical
+preprocessing'ini gözden geçirir; araç bu insan incelemesini otomatik olarak
+kanıtlayamaz. Ardından aynı strict LF/ASCII ingest contract'i ile manifest
+oluşturulur ve yeni checkpoint/report hedefleri seçilir:
+
+```bash
+python3 tools/corpus_manifest.py DOMAIN_CORPUS.txt \
+  --output runs/domain.manifest.json \
+  --source 'operator-recorded dataset identifier or URI' \
+  --license 'operator-verified usage terms' \
+  --retrieved-at '2026-10-24T00:00:00Z' \
+  --preprocessing 'documented ASCII-safe preprocessing/v1' \
+  --strict-contract
+
+python3 tools/attested_pretrain.py train \
+  --pretrain-bin ./build/vegai_pretrain \
+  --corpus DOMAIN_CORPUS.txt --manifest runs/domain.manifest.json \
+  --checkpoint checkpoints/domain.vgai --report runs/domain.attestation.json \
+  --max-vocab 50000 --min-frequency 3 --window 4 --position-shift 73 \
+  --context-mode hierarchical --epochs 3 --omp-threads 8
+
+# Retraining yapmadan corpus, manifest, binary ve published checkpoint'i yeniden bağlar.
+python3 tools/attested_pretrain.py verify --report runs/domain.attestation.json
+```
+
+`train` yalnız `vegai-corpus-manifest/v1` kabul eder, manifest telemetry'sini
+corpus'u stream ederek train öncesi ve sonrasında yeniden hesaplar ve native
+child'a zorunlu `--strict` geçirir. Manifest/binary/corpus değişirse, strict
+telemetry kaybı görülürse, output formatı/metric/inspect configuration binding'i
+bozulursa veya resource plan hazır değilse candidate yayınlanmaz. Native train
+çıktısındaki `active_tokens + oov_tokens = raw_tokens` partition'ı ve raw-token/
+record count'ları manifest'e bağlanır. `--min-frequency` bilinçli olarak
+inactive token üretebilir; dolayısıyla generic wrapper **OOV=0 vaat etmez**.
+OOV miktarı report'ta görünür ve operator kalite/vocabulary policy'sinin ayrı
+bir kararıdır. `--context-provider openvino` seçilirse wrapper worker script'i
+ve PATH'ten çözümlenmiş Python interpreter binary'sini de pre/post SHA-256 ile
+bağlar; report bunları `inputs.openvino_worker` ve `inputs.openvino_python`
+altında taşır. Bu, Python package seti, OpenVINO/runtime driver, firmware veya
+device state için tam environment snapshot değildir; accelerator release'i için
+container/image digest'i ya da operator-owned immutable environment manifest'i
+ayrıca saklanmalıdır.
+
+Varsayılan RAM/storage preflight zorunludur; yalnız izole contract testleri için
+`--skip-resource-preflight` report'a açık bypass olarak yazılır. Stopwatch tam
+olarak bir native `vegai_pretrain train` child process'i çevreler; manifest
+scan, preflight, binary hash, inspect, publication, compile ve CI orchestration
+süreleri `measurement.excluded` içindedir. Report semantic-quality, dünya
+bilgisi, güvenlik veya genel yetenek kanıtı değildir.
+
+Checkpoint önce **aynı checkpoint directory/filesystem** içinde private
+`.partial` candidate'a yazılır, inspect edilir, sonra `os.replace` ile final
+checkpoint'e alınır. JSON report kendi directory'sinde staged edilir ve
+checkpoint'ten **sonra** publish edilir; böylece yeni bir report normal akışta
+mevcut bir checkpoint olmadan görünmez. Checkpoint **ve** report final path'i
+ayrı ayrı conservative `O_EXCL` lock alır; böylece yalnız bir path'i yeniden
+kullanan iki invocation da interleave edemez. Crash sonrası lock kalırsa owner'ı
+inceleyin; yalnız writer'ın çalışmadığından eminseniz yeni publish için
+`train --recover-lock`, yalnız mevcut pair'i okumak için `verify --recover-lock`
+kullanın. Araç iki ayrı dosyayı tek filesystem transaction'ında atomik değiştiremez: özellikle
+`--overwrite` sırasında checkpoint replace ile report replace arasındaki host
+crash'i eski report/yeni checkpoint mismatch'i bırakabilir. Bu durumda
+`verify` fail-closed reddeder; report'u veya checkpoint'i elle "başarılı" kabul
+etmek yerine tekrar train/publish edin. Başarısız train, validation veya inspect
+eski published çifti değiştirmez ve private candidate'lar temizlenir.
+
+`verify` report schema/configuration/metric arithmetic/staged-command contract'ini
+kontrol eder; aktif veya stale output lock varken olası in-progress publication'ı
+okumayı reddeder, güncel manifest, corpus, binary ve checkpoint SHA-256
+identity'lerini tekrar hesaplar ve gerçek `inspect` alanlarını recorded inspection
+ile eşitler. SHA-256 accidental corruption/substitution tespitidir, saldırgana karşı imzalı
+attestation değildir; araç pre/post scan yapar ama hostile bir filesystem writer'a
+karşı immutable snapshot/isolation primitive'i değildir. Corpus, manifest ve
+binary'yi run boyunca erişim kontrollü/read-only storage'da tutun; report/manifest/checkpoint
+digest'ini güvenilir dış release registry veya imza mekanizmasında saklayın. Bu doğrulama yeniden train
+etmez ve o anki RAM/CPU availability'sini yeniden quality/release kararı olarak
+ölçmez.
+
 Crash-safe append-only shard ledger, SHA-256, strict LF/ASCII contract ve
 exactly-once durable generation semantics için
 [CONTINUOUS_PRETRAINING.md](CONTINUOUS_PRETRAINING.md)'yi kullanın. Tek başına
@@ -588,7 +677,13 @@ Native testler şunları kontrol eder:
 - checkpoint round-trip ve uninterrupted run ile checkpoint-resume run'ın
   bit-tam eşitliği;
 - incompatible resume config, strict long token ve strict overlong record hata
-  yolları.
+  yolları;
+- `vegai_attested_pretraining_real_binary` CTest'i: gerçek compiled binary ile
+  generic manifest-bound strict train, same-filesystem candidate inspect/publish,
+  report verify, corpus/manifest/checkpoint/stored-inspection tamper rejection ve
+  failed `--overwrite` altında önceki published pair'in byte korunumu; ayrıca
+  hermetic fake CLI ile OpenVINO worker/interpreter identity branch'i (bu ikinci
+  subcase gerçek device/runtime dispatch iddiası değildir).
 
 CI ayrıca küçük corpus ile `train → inspect → resume` CLI smoke testini ve
 optimized Make binary üzerinde `tools/compare_pretraining_modes.py` çalıştırır.

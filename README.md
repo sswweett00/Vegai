@@ -114,7 +114,9 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 > checkpoint semantiğini değiştirmez. `vegai_chat` da free-form cevap üreten bir LLM değildir; yalnız
 > versioned TSV bilgi bankasindan grounded response retrieval yapar veya
 > abstain eder. Unicode corpus'lar ön-tokenization
-> ister; veri yönetişimi, checkpoint ve sınırlar [PRETRAINING.md](docs/PRETRAINING.md)'de, immutable
+> ister; generic tek-corpus direct `train` için manifest-bound staged checkpoint/report
+> attestation ve bağımsız `verify` sözleşmesi de [PRETRAINING.md](docs/PRETRAINING.md)'dedir.
+> Veri yönetişimi, checkpoint ve diğer sınırlar aynı belgede; immutable
 > shard'larla crash-safe continual çalışma ise
 > [CONTINUOUS_PRETRAINING.md](docs/CONTINUOUS_PRETRAINING.md)'de açıkça tanımlıdır.
 > Tam 9 MiB sentetik structural fixture ile real binary/checkpoint/throughput
@@ -158,6 +160,10 @@ make chat
 # Bu bir natural-language/domain-quality dataset'i değildir; runtime artifacts
 # Git'e eklenmez. Ayrıntılı lineage ve ölçüm scope'u docs/PRETRAINING_9MIB.md'de.
 make pretrain-9mib
+
+# Generic direct-train manifest/provenance/staged-publication verifier.
+# Gerçek native binary kullanır; tiny fixture yalnız control-contract testidir.
+make attested-pretrain-check
 
 # Raw byte-event field: independent Python oracle + compiled CLI contract
 make field-check
@@ -372,6 +378,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Evidential Pareto Optimizer | `tools/evidential_optimizer.py` | gerçek algorithm/optimizer config ve artifact hash'lerini repeated held-out bounded metric'lerle Bonferroni-Hoeffding confidence + robust Pareto gate üzerinden seçer; neural optimizer/runtime veya universal-best claim'i değil |
 | HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, hierarchical default + CPU-only coherent cross-fold and distinct-slot debiased options, exact-token bounded lookup cache, deterministic OpenMP / optional OpenVINO immutable-context preparation + source-ordered CPU commit, v7 Floyd/complement sampler checkpoint lineage with v4–v6 deterministic-resume compatibility |
 | Exact 9 MiB train attestation | `tools/synthetic_pretraining_fixture.py`, `tools/run_9mib_pretraining.py` | strict-ASCII deterministic topology fixture, streaming manifest/digest verification, resource preflight, bounded one-child train timing, checkpoint/inspect SHA lineage; structural fixture only, domain-quality evidence değil |
+| Direct-train attestation | `tools/attested_pretrain.py`, `tools/verify_attested_pretrain.py` | reviewed generic corpus-manifest/v1 binding, strict native ingest, exclusive output lock, checkpoint/report'un kendi final directory'sinde staged publication, train-only timing ve retraining yapmadan corpus/manifest/binary/checkpoint/inspect re-verification; signed adversarial attestation veya semantic-quality evidence değil |
 | Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect`, CPU/OpenVINO context-provider execution switch ve nearest semantic diagnostic |
 | Pretraining checkpoint quality gate | `tools/pretraining_quality_evaluation.py`, `tools/production_pretrain.py` | operator-held-out semantic-neighbour annotation/policy ile real inspect batch'i, immutable evaluator/binary/checkpoint/case/policy binding, HMAC-redacted report ve fail-closed optional production release; genel LLM/LMM quality benchmarkı değil |
 | Grounded dialogue retrieval | `src/dialogue_retrieval.f90`, `app/chat.f90` | operator TSV response index'i, strict ASCII/OOV gate, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; free-form LLM generation degil |

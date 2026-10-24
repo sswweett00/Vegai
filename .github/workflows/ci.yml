@@ -44,7 +44,7 @@ jobs:
           fi
           exit "$exit_code"
 
-      - name: Run native Fortran property and integration tests
+      - name: Run native Fortran property and integration tests (including direct attested-pretraining verification)
         run: ctest --test-dir build-ci --output-on-failure
 
       - name: Surface native test diagnostics on failure
