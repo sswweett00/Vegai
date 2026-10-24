@@ -1,0 +1,83 @@
+{
+  "declared_provenance": {
+    "license": "MIT",
+    "preprocessing": "ASCII-safe Turkish transliteration; deterministic cluster rotations",
+    "retrieved_at": "source-controlled fixture",
+    "source": "Vegai repository-authored synthetic fixture"
+  },
+  "schema": "vegai-continuous-shard-manifest/v1",
+  "shards": [
+    {
+      "bytes": 1624,
+      "id": "f53026f70885fbe6a54e357dc4bfb9a6bcc553238a6972edf9e8e0725ec60e58",
+      "path": "shards/f53026f70885fbe6a54e357dc4bfb9a6bcc553238a6972edf9e8e0725ec60e58.txt",
+      "physical_lf_records": 32,
+      "preflight": {
+        "accepted_tokens": 256,
+        "crlf_records": 0,
+        "dropped_tokens": 0,
+        "maximum_record_bytes": 53,
+        "non_ascii_bytes": 0,
+        "overlong_records": 0,
+        "records_with_tokenizer_truncation": 0
+      },
+      "sha256": "f53026f70885fbe6a54e357dc4bfb9a6bcc553238a6972edf9e8e0725ec60e58"
+    },
+    {
+      "bytes": 1604,
+      "id": "3dfef96f8ae5f9b066b39c7771e4d974253744cf50e7b2cae24ff892e2effd65",
+      "path": "shards/3dfef96f8ae5f9b066b39c7771e4d974253744cf50e7b2cae24ff892e2effd65.txt",
+      "physical_lf_records": 32,
+      "preflight": {
+        "accepted_tokens": 256,
+        "crlf_records": 0,
+        "dropped_tokens": 0,
+        "maximum_record_bytes": 54,
+        "non_ascii_bytes": 0,
+        "overlong_records": 0,
+        "records_with_tokenizer_truncation": 0
+      },
+      "sha256": "3dfef96f8ae5f9b066b39c7771e4d974253744cf50e7b2cae24ff892e2effd65"
+    },
+    {
+      "bytes": 1563,
+      "id": "027a3d3d226cb309e030a06d6f8944c23d893840b7dcb15128febf7fa02106b5",
+      "path": "shards/027a3d3d226cb309e030a06d6f8944c23d893840b7dcb15128febf7fa02106b5.txt",
+      "physical_lf_records": 32,
+      "preflight": {
+        "accepted_tokens": 256,
+        "crlf_records": 0,
+        "dropped_tokens": 0,
+        "maximum_record_bytes": 50,
+        "non_ascii_bytes": 0,
+        "overlong_records": 0,
+        "records_with_tokenizer_truncation": 0
+      },
+      "sha256": "027a3d3d226cb309e030a06d6f8944c23d893840b7dcb15128febf7fa02106b5"
+    },
+    {
+      "bytes": 1022,
+      "id": "aacdc91a5bd519f2664d274f34c297373f23b9ed3f6aaa88c15285748a69cb8b",
+      "path": "shards/aacdc91a5bd519f2664d274f34c297373f23b9ed3f6aaa88c15285748a69cb8b.txt",
+      "physical_lf_records": 18,
+      "preflight": {
+        "accepted_tokens": 144,
+        "crlf_records": 0,
+        "dropped_tokens": 0,
+        "maximum_record_bytes": 58,
+        "non_ascii_bytes": 0,
+        "overlong_records": 0,
+        "records_with_tokenizer_truncation": 0
+      },
+      "sha256": "aacdc91a5bd519f2664d274f34c297373f23b9ed3f6aaa88c15285748a69cb8b"
+    }
+  ],
+  "vegai_ascii_ingest_contract": {
+    "max_line_bytes": 8192,
+    "max_tokens_per_line": 1024,
+    "require_ascii_only": true,
+    "require_lf_only": true,
+    "require_no_dropped_tokens": true,
+    "token_length_bytes": 48
+  }
+}

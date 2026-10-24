@@ -1,0 +1,3 @@
+# Optional Intel OpenVINO/oneAPI probe dependency.
+# The portable Fortran CPU backend does not import this package.
+openvino>=2025.0,<2027.0

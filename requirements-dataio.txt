@@ -1,0 +1,4 @@
+# Optional rich training-data formats for tools/training_data_io.py.
+# JSONL, JSON and text-only TXT remain standard-library paths.
+# Parquet and Arrow IPC round trips require the Arrow schema/runtime below.
+pyarrow>=17.0.0,<24.0.0

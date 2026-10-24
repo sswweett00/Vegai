@@ -1,0 +1,86 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "portable",
+      "displayName": "Portable CPU/OpenMP",
+      "description": "Architecture-baseline CPU build; OpenMP is enabled when the selected Fortran toolchain supports it.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/portable",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "VEGAI_CPU_TARGET": "portable",
+        "VEGAI_ENABLE_OPENMP": "ON",
+        "VEGAI_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "portable-serial",
+      "displayName": "Portable serial CPU",
+      "description": "Architecture-baseline CPU build with no OpenMP runtime dependency.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/portable-serial",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "VEGAI_CPU_TARGET": "portable",
+        "VEGAI_ENABLE_OPENMP": "OFF",
+        "VEGAI_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "native",
+      "displayName": "Host-tuned CPU",
+      "description": "Opt-in host-tuned build. Do not redistribute its binaries to different CPU families.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/native",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "VEGAI_CPU_TARGET": "native",
+        "VEGAI_ENABLE_OPENMP": "ON",
+        "VEGAI_BUILD_TESTS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "portable",
+      "configurePreset": "portable"
+    },
+    {
+      "name": "portable-serial",
+      "configurePreset": "portable-serial"
+    },
+    {
+      "name": "native",
+      "configurePreset": "native"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "portable",
+      "configurePreset": "portable",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "portable-serial",
+      "configurePreset": "portable-serial",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "native",
+      "configurePreset": "native",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

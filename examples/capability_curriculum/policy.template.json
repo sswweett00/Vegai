@@ -1,0 +1,36 @@
+{
+  "schema_version": "vegai-capability-curriculum-policy/v1",
+  "id": "replace-with-approved-policy-id",
+  "provenance": {
+    "source": "replace-with-governed-source-registry-or-release-id",
+    "license": "replace-with-approved-license-and-usage-policy-id",
+    "retrieved_at": "replace-with-immutable-retrieval-or-release-event",
+    "preprocessing": "replace-with-versioned-reversible-preprocessing-description"
+  },
+  "annotations": {
+    "capabilities_path": ["replace", "with", "metadata", "path", "to", "capability", "tags"],
+    "difficulty_path": ["replace", "with", "metadata", "path", "to", "difficulty"],
+    "require_record_source": true
+  },
+  "splits": {
+    "validation_basis_points": 1000,
+    "test_basis_points": 1000
+  },
+  "assignment": {
+    "mode": "first-match",
+    "reject_multiple_matches": true,
+    "require_every_annotated_record": true
+  },
+  "stages": [
+    {
+      "id": "replace-with-first-stage-id",
+      "required_capabilities": ["replace-with-approved-capability-tag"],
+      "minimum_difficulty": 0.0,
+      "maximum_difficulty": 1.0,
+      "minimum_train_records": 1,
+      "minimum_heldout_records": 1,
+      "minimum_distinct_train_sources": 1,
+      "minimum_distinct_heldout_sources": 1
+    }
+  ]
+}

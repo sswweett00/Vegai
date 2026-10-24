@@ -1,0 +1,53 @@
+{
+  "schema_version": "vegai-lmm-request/v1",
+  "id": "multilingual-demo",
+  "messages": [
+    {
+      "id": "system-policy",
+      "role": "system",
+      "content": [
+        {
+          "type": "text",
+          "text": "Kaynakli kanit yoksa belirsizligi acikla; medya varliklarini modelin ilan edilmis yetenegi olmadan yorumlama."
+        }
+      ],
+      "pinned": true
+    },
+    {
+      "id": "user-turn-1",
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Merhaba! Istanbul, 東京 ve العربية icin ayni oturumda baglam tutabilir misin?"
+        }
+      ],
+      "pinned": false
+    },
+    {
+      "id": "assistant-turn-1",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Bu fixture yalniz Unicode ve context contract'ini test eder; gerçek cevap secilen modele aittir."
+        }
+      ],
+      "pinned": false
+    },
+    {
+      "id": "user-turn-2",
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Lutfen onceki baglami ve kaynaklari kullanarak devam et."
+        }
+      ],
+      "pinned": false
+    }
+  ],
+  "max_new_tokens": 128,
+  "temperature": 0,
+  "top_p": 1
+}

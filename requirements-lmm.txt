@@ -1,0 +1,3 @@
+# Optional high-performance Unicode/subword tokenizer for tools/lmm_contract.py.
+# The portable HDC runtime and schema/worker contract remain stdlib-only.
+tokenizers>=0.22,<0.24

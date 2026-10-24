@@ -1,0 +1,148 @@
+name: Portable platform verification
+
+on:
+  push:
+    paths:
+      - 'app/**'
+      - 'src/**'
+      - 'test/**'
+      - 'examples/corpus/toy_hdc_corpus.txt'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'tools/hardware_compatibility.py'
+      - 'tools/verify_hardware_compatibility.py'
+      - 'tools/training_resource_plan.py'
+      - 'tools/verify_training_resource_plan.py'
+      - 'tools/verify_portable_runtime.py'
+      - '.github/workflows/portable-platforms.yml'
+  pull_request:
+    paths:
+      - 'app/**'
+      - 'src/**'
+      - 'test/**'
+      - 'examples/corpus/toy_hdc_corpus.txt'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'tools/hardware_compatibility.py'
+      - 'tools/verify_hardware_compatibility.py'
+      - 'tools/training_resource_plan.py'
+      - 'tools/verify_training_resource_plan.py'
+      - 'tools/verify_portable_runtime.py'
+      - '.github/workflows/portable-platforms.yml'
+
+permissions:
+  contents: read
+
+# This workflow deliberately builds the serial portable preset.  It proves that
+# the project has no mandatory OpenMP, vendor GPU/NPU, POSIX-shell, or host-ISA
+# runtime dependency. Linux CI separately exercises the OpenMP/full test suite.
+jobs:
+  linux-portable:
+    name: Linux portable (${{ matrix.architecture }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            architecture: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install portable Fortran toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gfortran cmake ninja-build
+
+      - name: Configure and build serial portable preset
+        run: |
+          cmake --preset portable-serial -DVEGAI_BUILD_TESTS=OFF
+          cmake --build --preset portable-serial --parallel
+
+      - name: Run same-host portable engine/train/inspect contract
+        run: |
+          python3 tools/hardware_compatibility.py --format json --require-recognized-os \
+            --output "${RUNNER_TEMP}/hardware-profile.json" > /dev/null
+          python3 tools/verify_hardware_compatibility.py
+          python3 tools/verify_portable_runtime.py \
+            --engine-bin ./build/portable-serial/hds_engine \
+            --pretrain-bin ./build/portable-serial/vegai_pretrain \
+            --output "${RUNNER_TEMP}/portable-runtime.json"
+
+  macos-arm64-portable:
+    name: macOS ARM64 portable
+    runs-on: macos-14
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install GNU Fortran and Ninja
+        shell: bash
+        run: |
+          brew install gcc ninja
+          compiler=""
+          for candidate in "$(brew --prefix gcc)"/bin/gfortran-*; do
+            if [ -x "$candidate" ]; then
+              compiler="$candidate"
+            fi
+          done
+          test -n "$compiler"
+          echo "FC=$compiler" >> "$GITHUB_ENV"
+
+      - name: Configure and build serial portable preset
+        shell: bash
+        run: |
+          cmake --preset portable-serial -DVEGAI_BUILD_TESTS=OFF -DCMAKE_Fortran_COMPILER="$FC"
+          cmake --build --preset portable-serial --parallel
+
+      - name: Run same-host portable engine/train/inspect contract
+        shell: bash
+        run: |
+          python3 tools/hardware_compatibility.py --format json --require-recognized-os \
+            --output "${RUNNER_TEMP}/hardware-profile.json" > /dev/null
+          python3 tools/verify_hardware_compatibility.py
+          python3 tools/verify_portable_runtime.py \
+            --engine-bin ./build/portable-serial/hds_engine \
+            --pretrain-bin ./build/portable-serial/vegai_pretrain \
+            --output "${RUNNER_TEMP}/portable-runtime.json"
+
+  windows-x86_64-portable:
+    name: Windows x86_64 portable
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install MinGW-w64 GNU Fortran toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc-fortran
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-python
+
+      - name: Configure and build serial portable preset
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          cmake --preset portable-serial -DVEGAI_BUILD_TESTS=OFF
+          cmake --build --preset portable-serial --parallel
+
+      - name: Run same-host portable engine/train/inspect contract
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          python tools/hardware_compatibility.py --format json --require-recognized-os \
+            --output "${RUNNER_TEMP}/hardware-profile.json" > /dev/null
+          python tools/verify_hardware_compatibility.py
+          python tools/verify_portable_runtime.py \
+            --engine-bin ./build/portable-serial/hds_engine.exe \
+            --pretrain-bin ./build/portable-serial/vegai_pretrain.exe \
+            --output "${RUNNER_TEMP}/portable-runtime.json"

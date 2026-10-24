@@ -1,0 +1,163 @@
+name: Exact 900 MB and 90 MB continuous pretraining quality gate
+
+on:
+  workflow_dispatch:
+  # The large native evidence run is intentionally narrow rather than a
+  # blanket PR cost: trigger only when its training/gating implementation or
+  # own contract changes. Manual dispatch remains available after merge.
+  pull_request:
+    paths:
+      - '.github/workflows/pretraining-900mb-continuous.yml'
+      - 'app/pretrain.f90'
+      - 'src/**'
+      - 'tools/continuous_pretrain.py'
+      - 'tools/continuous_quality_gate.py'
+      - 'tools/pretraining_quality_evaluation.py'
+      - 'tools/run_900mb_continuous_pretraining.py'
+      - 'tools/synthetic_pretraining_fixture.py'
+      - 'tools/training_resource_plan.py'
+      - 'tools/verify_900mb_continuous_pretraining.py'
+      - 'tools/verify_continuous_quality_regression.py'
+      - 'CMakeLists.txt'
+      - 'Makefile'
+
+permissions:
+  contents: read
+
+# Preserve a real evidence-producing continuation attempt. A later manual
+# dispatch must not cancel an earlier run whose artifact may show regression.
+concurrency:
+  group: exact-900mb-continuous-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native-continuation:
+    name: Native 900 MB train then 90 MB continuation
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install GNU Fortran toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gfortran
+
+      - name: Compile portable Fortran 2023 pretraining binary
+        run: make pretrain BUILD_DIR=build-900mb
+
+      - name: Allocate ignored runtime directory
+        run: |
+          run_dir="${RUNNER_TEMP}/vegai-900mb-continuous"
+          mkdir -p "$run_dir"
+          echo "VEGAI_900MB_RUN_DIR=$run_dir" >> "$GITHUB_ENV"
+
+      - name: Run exact 900MB train, exact 90MB continuation, and quality regression gate
+        run: |
+          set -uo pipefail
+          set +e
+          # The experiment controller requires RUN_DIR to be empty at entry;
+          # keep command output outside its immutable lineage boundary.
+          python3 tools/run_900mb_continuous_pretraining.py \
+            --pretrain-bin "${GITHUB_WORKSPACE}/build-900mb/vegai_pretrain" \
+            --run-dir "${VEGAI_900MB_RUN_DIR}" \
+            --omp-threads 2 --train-timeout-seconds 2400 --quality-timeout-seconds 180 \
+            | tee "${RUNNER_TEMP}/vegai-900mb-continuous-runner-stdout.json"
+          runner_status=${PIPESTATUS[0]}
+          set -e
+          if [ "$runner_status" -ne 0 ] && [ -f "${VEGAI_900MB_RUN_DIR}/experiment-report.json" ]; then
+            # Keep the check annotation bounded and free of raw held-out data;
+            # the artifact carries the full redacted report for diagnosis.
+            failure=$(python3 - "${VEGAI_900MB_RUN_DIR}/experiment-report.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          report = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          text = str(report.get("failure", report.get("status", "unknown failure"))).replace("\n", " ")
+          print(text[:900])
+          PY
+            )
+            echo "::error title=900MB continuation experiment failed::$failure"
+          fi
+          exit "$runner_status"
+
+      - name: Publish train-only timing and regression decision
+        if: always()
+        run: |
+          python3 - "${VEGAI_900MB_RUN_DIR}/experiment-report.json" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          report_path = Path(sys.argv[1])
+          summary_path = Path(sys.argv[2])
+          with summary_path.open("a", encoding="utf-8") as summary:
+              print("## Exact decimal 900 MB → 90 MB continual pretraining", file=summary)
+              print(file=summary)
+              if not report_path.is_file():
+                  print("No experiment report was published; inspect the failed workflow log.", file=summary)
+                  raise SystemExit(0)
+              report = json.loads(report_path.read_text(encoding="utf-8"))
+              print(f"Status: `{report.get('status', 'unknown')}`", file=summary)
+              fixtures = report.get("fixtures", {})
+              for label in ("initial_900MB", "continuous_90MB"):
+                  fixture = fixtures.get(label)
+                  if isinstance(fixture, dict):
+                      print(
+                          f"- `{label}`: `{fixture.get('bytes')}` bytes, "
+                          f"SHA-256 `{fixture.get('sha256')}`, raw tokens `{fixture.get('raw_tokens')}`",
+                          file=summary,
+                      )
+              for label, title in (("initial_pretraining", "900 MB initial native train"),
+                                   ("continuous_pretraining", "90 MB native continuation")):
+                  phase = report.get(label)
+                  measurement = phase.get("training_measurement") if isinstance(phase, dict) else None
+                  if isinstance(measurement, dict):
+                      print(f"### {title}", file=summary)
+                      print(file=summary)
+                      print("| train-only seconds | raw token/s | active token/s | checkpoint SHA-256 |", file=summary)
+                      print("|---:|---:|---:|---|", file=summary)
+                      print(
+                          f"| {measurement.get('train_process_wall_seconds')} | "
+                          f"{measurement.get('raw_training_tokens_per_second')} | "
+                          f"{measurement.get('active_training_tokens_per_second')} | "
+                          f"`{phase.get('checkpoint_sha256')}` |",
+                          file=summary,
+                      )
+              regression = report.get("quality_regression")
+              if isinstance(regression, dict):
+                  print("### Frozen held-out continuation regression decision", file=summary)
+                  print(file=summary)
+                  print(f"Decision: `{regression.get('status')}`", file=summary)
+                  comparison = regression.get("comparison", {})
+                  observed = comparison.get("observed", {}) if isinstance(comparison, dict) else {}
+                  if observed:
+                      print("```json", file=summary)
+                      print(json.dumps(observed, sort_keys=True), file=summary)
+                      print("```", file=summary)
+                  failures = regression.get("failures")
+                  if failures:
+                      print("Failures:", file=summary)
+                      for failure in failures:
+                          print(f"- {failure}", file=summary)
+              print(file=summary)
+              print(
+                  "Timing excludes fixture generation, verification, compilation, controller preflight, checkpoint "
+                  "publication, held-out inspection, report generation, and CI orchestration. The corpus and topology "
+                  "annotations are synthetic structural fixtures, not evidence of general or domain model quality.",
+                  file=summary,
+              )
+          PY
+
+      - name: Upload corpus/checkpoint/report lineage without secret key material
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exact-900mb-90mb-continuation-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/vegai-900mb-continuous/
+            ${{ runner.temp }}/vegai-900mb-continuous-runner-stdout.json
+            !${{ runner.temp }}/vegai-900mb-continuous/.quality-redaction.key
+          if-no-files-found: warn
+          retention-days: 14
