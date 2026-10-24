@@ -131,9 +131,10 @@ python3 tools/compare_pretraining_lookup_cache.py \
 ```
 
 Bu araç cache açık/kapalı gerçek child process'leri alternation ile çalıştırır,
-checkpoint byte equality ve hit/miss partition'ı zorunlu kılar. Fixture tek bir
-tekrar eden token kullanır; sonuç yalnız lookup hot-path observation'dır, genel
-corpus throughput veya semantic quality iddiası değildir. Sabit source baseline
+checkpoint byte equality ve hit/miss partition'ı zorunlu kılar. Fixture aynı
+canonical vocabulary hash start indexine sahip fakat distinct direct-cache indexli
+fixed-width token seti kullanır; sonuç yalnız collision-sensitive lookup hot-path
+observation'dır, genel corpus throughput veya semantic quality iddiası değildir. Sabit source baseline
 ile hot-path önce/sonra ölçümü gerektiğinde
 `tools/compare_pretraining_revisions.py` iki compiled binary'yi warm-up ve
 alternating order ile çalıştırır; varsayılan byte-identical checkpoint koşulu

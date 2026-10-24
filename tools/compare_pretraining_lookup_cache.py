@@ -5,9 +5,10 @@
 Every sample starts immediately before one ``vegai_pretrain train`` subprocess
 and stops immediately after that child exits. Fixture creation, compilation,
 checkpoint hashing/comparison, report generation, and Python harness work are
-outside the timed interval. The workload intentionally reuses one fixed-width
-active token many times so it measures the bounded lookup-cache hot path rather
-than claiming a universal natural-corpus speedup.
+outside the timed interval. The workload repeatedly revisits a deterministic set of fixed-width active
+tokens whose canonical vocabulary hash starts deliberately collide while their
+direct-cache indices remain distinct. That exposes the bounded lookup-cache hot
+path without claiming a universal natural-corpus speedup.
 
 The cache-on and cache-off arms must write byte-identical checkpoints. Cache
 hits additionally require the complete padded token text as well as its
@@ -35,10 +36,15 @@ from hardware_compatibility import collect_hardware_profile, compact_hardware_su
 
 ROOT = Path(__file__).resolve().parents[1]
 RECORDS = 64
-TOKENS_PER_RECORD = 64
+TOKEN_COUNT = 64
+TOKENS_PER_RECORD = TOKEN_COUNT
 EPOCHS = 2
 WINDOW = 2
-TOKEN = "lookuphot"
+MAX_VOCABULARY = 128
+VOCABULARY_HASH_SIZE = 2 * MAX_VOCABULARY + 1
+LOOKUP_CACHE_SLOTS = 4_096
+_MASK64 = (1 << 64) - 1
+_NONNEGATIVE64_MASK = (1 << 63) - 1
 
 
 class ComparisonError(RuntimeError):
@@ -70,12 +76,63 @@ def expected_context_pairs() -> int:
     return per_record * RECORDS * EPOCHS
 
 
-def write_fixture(path: Path) -> tuple[int, int]:
-    line = " ".join([TOKEN] * TOKENS_PER_RECORD)
+def rotate_u64(value: int, shift: int) -> int:
+    """Mirror Fortran ISHFTC over one int64 bit pattern."""
+    normalized = shift % 64
+    if normalized == 0:
+        return value & _MASK64
+    return ((value << normalized) | (value >> (64 - normalized))) & _MASK64
+
+
+def vocabulary_fingerprint(token: str) -> int:
+    """Portable mirror of vocabulary.f90's bit-only token fingerprint."""
+    fingerprint = 0xCBF29CE484222325
+    for position, byte in enumerate(token.encode("ascii"), start=1):
+        fingerprint ^= byte
+        fingerprint = rotate_u64(fingerprint, 11) ^ rotate_u64(fingerprint, -7)
+        fingerprint ^= rotate_u64(position, position % 63)
+        fingerprint &= _MASK64
+    return fingerprint
+
+
+def vocabulary_lookup_mix(fingerprint: int) -> int:
+    """Mirror vocab_hash_start/pretrain_lookup_cache_index mixing."""
+    mixed = fingerprint ^ (fingerprint >> 29)
+    mixed &= _MASK64
+    mixed ^= rotate_u64(mixed, 17)
+    return mixed & _MASK64
+
+
+def collision_fixture_tokens() -> tuple[list[str], int]:
+    """Find distinct cache keys sharing one canonical hash-table start.
+
+    `vocabulary.f90` uses a 257-entry table for max-vocab 128. Choosing tokens
+    with one start index exercises real linear probes in the no-cache arm while
+    rejecting any candidate that would collide in the 4,096-entry direct map.
+    The algorithm is deterministic, ASCII-only, and independent of the binary.
+    """
+    buckets: dict[int, list[tuple[str, int]]] = {}
+    for candidate in range(1_000_000):
+        token = f"lookup{candidate:06d}"
+        mixed = vocabulary_lookup_mix(vocabulary_fingerprint(token))
+        hash_start = (mixed & _NONNEGATIVE64_MASK) % VOCABULARY_HASH_SIZE
+        cache_index = mixed & (LOOKUP_CACHE_SLOTS - 1)
+        bucket = buckets.setdefault(hash_start, [])
+        if any(existing_index == cache_index for _, existing_index in bucket):
+            continue
+        bucket.append((token, cache_index))
+        if len(bucket) == TOKEN_COUNT:
+            return [name for name, _ in bucket], hash_start
+    raise ComparisonError("could not construct the deterministic collision fixture")
+
+
+def write_fixture(path: Path) -> tuple[int, int, int]:
+    tokens, hash_start = collision_fixture_tokens()
     with path.open("w", encoding="ascii", newline="\n") as destination:
-        for _ in range(RECORDS):
-            destination.write(line + "\n")
-    return RECORDS * TOKENS_PER_RECORD * EPOCHS, expected_context_pairs()
+        for record in range(RECORDS):
+            shift = record % TOKEN_COUNT
+            destination.write(" ".join(tokens[shift:] + tokens[:shift]) + "\n")
+    return RECORDS * TOKENS_PER_RECORD * EPOCHS, expected_context_pairs(), hash_start
 
 
 def run_train(binary: Path, corpus: Path, checkpoint: Path, cache_enabled: bool) -> tuple[str, float]:
@@ -85,7 +142,7 @@ def run_train(binary: Path, corpus: Path, checkpoint: Path, cache_enabled: bool)
         str(corpus),
         str(checkpoint),
         "--max-vocab",
-        "8",
+        str(MAX_VOCABULARY),
         "--min-frequency",
         "1",
         "--window",
@@ -142,8 +199,11 @@ def validate(output: str, cache_enabled: bool, training_tokens: int, context_pai
     hits = metric(training, "vocabulary lookup cache hits")
     misses = metric(training, "vocabulary lookup cache misses")
     if cache_enabled:
+        expected_misses = TOKEN_COUNT * EPOCHS
         require(hits > 0 and misses > 0, "cached arm did not exercise both lookup cache miss and hit paths")
         require(hits + misses == training_tokens, "cached lookup telemetry does not partition raw token lookups")
+        require(misses == expected_misses and hits == training_tokens - expected_misses,
+                "unique direct-map keys did not produce the expected one miss per token per epoch")
     else:
         require(hits == 0 and misses == 0, "uncached arm reported cache activity")
     return hits, misses
@@ -186,7 +246,7 @@ def main() -> int:
         with tempfile.TemporaryDirectory(prefix="vegai-lookup-cache-comparison-") as temporary:
             workdir = Path(temporary)
             corpus = workdir / "repeated-lookup-fixture.txt"
-            training_tokens, context_pairs = write_fixture(corpus)
+            training_tokens, context_pairs, hash_start = write_fixture(corpus)
             uncached: dict[str, Any] = {
                 "cache_enabled": False,
                 "samples_seconds": [],
@@ -227,7 +287,10 @@ def main() -> int:
                 "workload": {
                     "records": RECORDS,
                     "tokens_per_record": TOKENS_PER_RECORD,
-                    "unique_active_tokens": 1,
+                    "unique_active_tokens": TOKEN_COUNT,
+                    "vocabulary_hash_start_collision_tokens": TOKEN_COUNT,
+                    "vocabulary_hash_start_index": hash_start,
+                    "direct_cache_indices_unique": True,
                     "epochs": EPOCHS,
                     "window": WINDOW,
                     "training_tokens_per_run": training_tokens,

@@ -157,9 +157,11 @@ python3 tools/compare_pretraining_lookup_cache.py \
   --output lookup-cache-comparison.json
 ```
 
-Fixture 64 kayıt × 64 aynı fixed-width active token × iki epoch kullanır. Bu
-bilerek lookup hot-path'i görünür kılar; natural-corpus throughput, full model
-training speed veya semantic quality için benchmark değildir. Cache armında
+Fixture 64 kayıt × 64 fixed-width active token × iki epoch kullanır. Tokenlar
+bilerek aynı canonical vocabulary hash start indexini paylaşır, fakat direct-cache
+indexleri distincttir; böylece collision-sensitive lookup hot-path görünür olur.
+Bu natural-corpus throughput, full model training speed veya semantic quality
+için benchmark değildir. Cache armında
 `hits + misses = raw_tokens`, iki değerin de pozitif olması; cache-off armında
 ikisi de sıfır olması ve iki checkpoint byte/SHA'sının eşit olması zorunludur.
 Raporlanan `cache_speedup_vs_no_cache` minimum eşik değildir: CPU topology,

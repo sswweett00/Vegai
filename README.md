@@ -263,8 +263,8 @@ python3 tools/compare_pretraining_modes.py --pretrain-bin ./build/vegai_pretrain
   --repetitions 3 --omp-threads 1
 
 # Exact vocabulary lookup-cache child-process comparator: cache on/off must
-# produce identical checkpoints; this repeated-token fixture is not a natural
-# corpus performance or semantic-quality claim.
+# produce identical checkpoints; this collision-sensitive fixed-token fixture is
+# not a natural corpus performance or semantic-quality claim.
 python3 tools/compare_pretraining_lookup_cache.py \
   --pretrain-bin ./build/vegai_pretrain --repetitions 3
 

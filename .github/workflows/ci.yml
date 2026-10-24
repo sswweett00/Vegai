@@ -520,8 +520,8 @@ jobs:
               print(file=summary)
               print(
                   "Each measurement is one complete `vegai_pretrain train` child process only; compilation, fixture "
-                  "creation, checkpoint comparison, and harness work are excluded. The controlled fixture repeats one "
-                  "active fixed-width token, so this is an execution hot-path observation, not a natural-corpus claim.",
+                  "creation, checkpoint comparison, and harness work are excluded. The controlled fixture repeats a "
+                  "fixed-width token set with one canonical hash-table start and distinct cache indices; it is not a natural-corpus claim.",
                   file=summary,
               )
               print(file=summary)

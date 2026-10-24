@@ -486,15 +486,11 @@ contains
       slot = 0_int32
       found = .false.
       cache_hit = .false.
+      ! This private helper is called only with train_one_epoch's fixed-size
+      ! PRETRAIN_LOOKUP_CACHE_SLOTS scratch arrays. Avoid per-token descriptor
+      ! size checks on the hot path; allocation is validated once before the
+      ! corpus stream begins.
       status = PT_OK
-      if (size(cache_tokens, kind=int32) < PRETRAIN_LOOKUP_CACHE_SLOTS .or. &
-          size(cache_fingerprints, kind=int32) < PRETRAIN_LOOKUP_CACHE_SLOTS .or. &
-          size(cache_slots, kind=int32) < PRETRAIN_LOOKUP_CACHE_SLOTS .or. &
-          size(cache_used, kind=int32) < PRETRAIN_LOOKUP_CACHE_SLOTS) then
-         status = PT_ERR_INVALID_ARGUMENT
-         return
-      end if
-
       fingerprint = vocab_token_fingerprint(token)
       cache_index = pretrain_lookup_cache_index(fingerprint)
       if (cache_used(cache_index) .and. cache_fingerprints(cache_index) == fingerprint .and. &

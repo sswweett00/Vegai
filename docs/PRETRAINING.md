@@ -382,7 +382,7 @@ python3 tools/compare_pretraining_lookup_cache.py \
 
 Bu comparator cache açık/kapalı gerçek `train` child process wall-clock
 örneklerini ayrı ölçer; checkpoint SHA/byte eşitliği ve full-token hit/miss
-telemetrisi zorunludur. Repeated-one-token fixture yalnız lookup hot-path
+telemetrisi zorunludur. Collision-heavy fixed-width token-set fixture yalnız lookup hot-path
 kanıtıdır, doğal corpus veya genel eğitim hız iddiası değildir. Sabit `e34fd22` baseline ile aynı-run
 mimari önce/sonra ölçümü için `tools/compare_pretraining_revisions.py` kullanın;
 araç real `train` process'lerini timing eder, warm-up/order alternation uygular
@@ -603,9 +603,9 @@ Top-1 sonucunu geriletmemektir; pozitif similarity gain zorunlu bir doğal-dil
 iddiası değildir. Bunlar kontrollü tanılardır; doğal dil yeteneği veya production
 throughput garantisi değildir. CI ayrıca `tools/compare_pretraining_lookup_cache.py`
 ile cache açık/kapalı, checkpoint-byte-identical real child-process comparator'ı
-çalıştırır. Bu fixture tek bir tekrar eden token ile lookup overhead'ini izole
-eder; hız oranı host/workload gözlemidir ve minimum speedup acceptance gate'i
-değildir.
+çalıştırır. Bu fixture canonical vocabulary hash start indexi aynı, direct-cache
+indexleri farklı fixed-width token setiyle lookup probe overhead'ini izole eder;
+hız oranı host/workload gözlemidir ve minimum speedup acceptance gate'i değildir.
 
 ```bash
 python3 tools/compare_pretraining_modes.py \
