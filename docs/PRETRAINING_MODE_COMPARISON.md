@@ -130,8 +130,13 @@ sonra sıra her repetition'da ters çevrilir. Böylece cache/termal durumun yaln
 sonra çalışan binary'ye avantaj vermesi azaltılır. Her timed sample tam bir
 `vegai_pretrain train` child process'idir; compilation, fixture üretimi,
 checkpoint compare, JSON ve harness süresi hariçtir. Her workload için
-baseline/optimized checkpoint byte dizisinin ve her binary'nin kendi tekrar
-çalışmalarının tam eşit olması zorunludur.
+varsayılan modda baseline/optimized checkpoint byte dizisinin ve her binary'nin
+kendi tekrar çalışmalarının tam eşit olması zorunludur. Sadece versioned bir
+algoritma/checkpoint lineage migration'ı ayrıca review edilmişse,
+`--checkpoint-contract versioned-algorithm-transition` açıkça seçilir: iki
+binary'nin kendi tekrarları byte-tam eşit kalır, cross-lineage checkpoint'ler
+bilerek farklı olmalıdır ve candidate gerçek baseline checkpoint'ini byte-tam
+resume etmelidir. Timing ratio semantic-equivalence speedup olarak sunulmaz.
 
 CI'nın kullandığı iki bilinçli bottleneck fixture şunlardır:
 
@@ -165,6 +170,18 @@ python3 tools/compare_pretraining_revisions.py \
   --before-pretrain-bin /tmp/vegai-e34-build/vegai_pretrain \
   --after-pretrain-bin ./build/vegai_pretrain --repetitions 3
 ```
+
+v5/v6 → v7 exact-mask sampler migration'ını ölçerken contract açık olmalıdır:
+
+```bash
+python3 tools/compare_pretraining_revisions.py \
+  --before-pretrain-bin /tmp/vegai-e34-build/vegai_pretrain \
+  --after-pretrain-bin ./build/vegai_pretrain --repetitions 3 \
+  --checkpoint-contract versioned-algorithm-transition
+```
+
+Bu ikinci komut cross-lineage checkpoint farklılığını bekler; ortaya çıkan
+runtime ratio ancak bu spesifik version transition için descriptive telemetry'dir.
 
 ## V4: deterministic single-core / multi-core context construction
 

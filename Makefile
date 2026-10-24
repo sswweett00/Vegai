@@ -119,6 +119,7 @@ check:
 	python3 tools/verify_training_resource_plan.py
 	python3 tools/verify_openvino_provider.py
 	python3 tools/verify_openvino_context_worker.py
+	python3 tools/verify_pretraining_revision_comparison.py
 	python3 tools/verify_capability_curriculum.py
 
 # Independent Python oracle plus compiled CLI integration for the finite

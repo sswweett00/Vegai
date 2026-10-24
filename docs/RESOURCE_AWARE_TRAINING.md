@@ -116,7 +116,11 @@ Timing yalnız `vegai_pretrain train` child process'ini kapsar; compile, fixture
 özgüdür; core sayısıyla lineer ölçeklenme vaadi değildir. Sabit source baseline
 ile hot-path önce/sonra ölçümü gerektiğinde
 `tools/compare_pretraining_revisions.py` iki compiled binary'yi warm-up ve
-alternating order ile çalıştırır; byte-identical checkpoint koşulu zorunludur.
+alternating order ile çalıştırır; varsayılan byte-identical checkpoint koşulu
+zorunludur. Sadece açık `--checkpoint-contract versioned-algorithm-transition`
+ile review edilmiş sampler/algorithm lineage migration'ı ölçülebilir; candidate
+bu modda gerçek baseline checkpoint'ini byte-tam resume etmelidir ve runtime
+oranı semantic-equivalence speedup değildir.
 
 İlk doğrulanmış gerçek CI ölçümünde ([run 39839135866](https://github.com/sswweett00/Vegai/actions/runs/39839135866),
 AMD EPYC 7763 / Linux) long-record fixture için 1 thread `0.538901 s`, 2 thread

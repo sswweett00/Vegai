@@ -224,9 +224,13 @@ gerilememesidir; bu HDC diagnostic'i doğal-dil kalite iddiası değildir.
 binary'sini aynı portable Make profile ile build eder ve short-record ile
 dense repeated-center fixture'larında aday binary'yle gerçek `train` child
 process timing'i yapar. Warm-up/alternating order uygulanır; her binary'nin
-self-determinism'i ve baseline/candidate checkpoint byte equality zorunludur.
-Bu, hot-path mimari değişikliğinin ölçümüdür; genel corpus throughput vaadi
-değildir.
+self-determinism'i zorunludur ve varsayılan contract baseline/candidate
+checkpoint byte equality'dir. v5/v6 → v7 sampler migration'ı gibi review
+edilmiş bir algorithm lineage değişikliği yalnız açık
+`--checkpoint-contract versioned-algorithm-transition` ile kabul edilir ve
+candidate gerçek baseline checkpoint'ini byte-tam resume etmelidir; o
+cross-lineage runtime ratio hot-path semantic-equivalence ölçümü veya genel
+corpus throughput vaadi değildir.
 
 `tools/compare_pretraining_threads.py`, ayrıca uzun-record fixture'da
 `OMP_NUM_THREADS=1` ile 2 arasında gerçek train timing'i ölçer ve checkpoint

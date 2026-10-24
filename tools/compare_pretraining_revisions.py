@@ -10,9 +10,15 @@ starts immediately before one ``vegai_pretrain train`` subprocess and stops when
 that subprocess exits.  Fixture creation, both binary builds, checkpoint byte
 comparison, report serialization, and harness work are outside timed samples.
 
-Both supplied binaries must implement the same checkpoint semantics.  The tool
-requires byte-identical checkpoint output for each workload, so an apparent
-speedup cannot hide a source-order or tie-breaking change.
+By default both supplied binaries must implement the same checkpoint
+semantics, and the tool requires byte-identical checkpoint output for each
+workload so an apparent speedup cannot hide a source-order or tie-breaking
+change. An explicit versioned-algorithm-transition contract is available for a
+reviewed checkpoint-lineage migration: both binaries must still be internally
+deterministic, their fresh checkpoint bytes must differ, and the candidate must
+byte-exactly resume a real baseline checkpoint. The timing ratio is reported
+only as a descriptive cross-lineage measurement, not a semantic-equivalence
+performance claim.
 """
 
 from __future__ import annotations
@@ -46,12 +52,30 @@ REPEATED_WINDOW = 1
 
 
 class RevisionComparisonError(RuntimeError):
-    """Raised for an invalid binary, failed train process, or semantic drift."""
+    """Raised for an invalid binary, failed train process, or contract violation."""
+
+
+CHECKPOINT_CONTRACT_IDENTICAL = "byte-identical"
+CHECKPOINT_CONTRACT_VERSIONED_TRANSITION = "versioned-algorithm-transition"
+_CHECKPOINT_CONTRACTS = frozenset((CHECKPOINT_CONTRACT_IDENTICAL, CHECKPOINT_CONTRACT_VERSIONED_TRANSITION))
 
 
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise RevisionComparisonError(message)
+
+
+def validate_checkpoint_contract(name: str, before_checkpoint: bytes, after_checkpoint: bytes, contract: str) -> tuple[bool, str]:
+    """Validate the explicit relation required between two deterministic runs."""
+    require(contract in _CHECKPOINT_CONTRACTS, f"unsupported checkpoint contract: {contract}")
+    byte_identical = before_checkpoint == after_checkpoint
+    if contract == CHECKPOINT_CONTRACT_IDENTICAL:
+        require(byte_identical, f"{name}: before/after checkpoint bytes differ")
+        return True, "byte-identical"
+    # A caller must consciously opt in to this looser cross-version relation.
+    # Requiring a difference catches an accidental missing format/algorithm bump.
+    require(not byte_identical, f"{name}: versioned algorithm transition did not change checkpoint bytes")
+    return False, "intentional-versioned-algorithm-transition"
 
 
 def metric(output: str, label: str) -> int:
@@ -135,14 +159,77 @@ def run_train(
     return result.stdout, elapsed_seconds
 
 
-def validate(output: str, training_tokens: int) -> None:
-    require("phase: vocabulary" in output, "training output omitted vocabulary phase")
+def run_resume(binary: Path, corpus: Path, checkpoint: Path) -> str:
+    """Resume one epoch in-place outside timing, for legacy-lineage proof."""
+    environment = os.environ.copy()
+    environment["OMP_NUM_THREADS"] = "2"
+    environment["OMP_DYNAMIC"] = "FALSE"
+    command = [
+        str(binary),
+        "resume",
+        str(corpus),
+        str(checkpoint),
+        "--epochs",
+        "1",
+        "--strict",
+        "--parallel-context-build",
+    ]
+    result = subprocess.run(
+        command,
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RevisionComparisonError(f"resume failed ({result.returncode}): {' '.join(command)}\n{result.stdout}")
+    return result.stdout
+
+
+def validate_learning_phase(output: str, training_tokens: int) -> None:
     require("phase: streaming HDC context learning" in output, "training output omitted learning phase")
     _, training = output.split("phase: streaming HDC context learning", maxsplit=1)
     require(metric(training, "raw tokens") == training_tokens, "unexpected training-token count")
     require(metric(training, "active tokens") == training_tokens, "fixture produced inactive tokens")
     require(metric(training, "out-of-vocabulary tokens") == 0, "fixture produced OOV tokens")
     require(metric(training, "prototype updates") == training_tokens, "fixture unexpectedly skipped center updates")
+
+
+def validate(output: str, training_tokens: int) -> None:
+    require("phase: vocabulary" in output, "training output omitted vocabulary phase")
+    validate_learning_phase(output, training_tokens)
+
+
+def verify_legacy_resume_compatibility(
+    name: str,
+    corpus: Path,
+    before_binary: Path,
+    after_binary: Path,
+    initial_checkpoint: bytes,
+    workdir: Path,
+    one_epoch_tokens: int,
+) -> dict[str, object]:
+    """Prove that the v7 binary resumes a real pre-v7 checkpoint byte-exactly."""
+    baseline_checkpoint = workdir / f"{name}-baseline-legacy-resume.vgai"
+    candidate_checkpoint = workdir / f"{name}-candidate-legacy-resume.vgai"
+    baseline_checkpoint.write_bytes(initial_checkpoint)
+    candidate_checkpoint.write_bytes(initial_checkpoint)
+    baseline_output = run_resume(before_binary, corpus, baseline_checkpoint)
+    candidate_output = run_resume(after_binary, corpus, candidate_checkpoint)
+    validate_learning_phase(baseline_output, one_epoch_tokens)
+    validate_learning_phase(candidate_output, one_epoch_tokens)
+    baseline_resumed = baseline_checkpoint.read_bytes()
+    candidate_resumed = candidate_checkpoint.read_bytes()
+    require(baseline_resumed == candidate_resumed,
+            f"{name}: v7 candidate did not byte-exactly continue the real pre-v7 checkpoint")
+    return {
+        "initial_checkpoint_sha256": hashlib.sha256(initial_checkpoint).hexdigest(),
+        "resumed_checkpoint_sha256": hashlib.sha256(candidate_resumed).hexdigest(),
+        "resumed_checkpoint_byte_identical_to_baseline": True,
+        "resume_epochs": 1,
+    }
 
 
 def render_measurement(samples: list[float], checkpoint_bytes: bytes, training_tokens: int) -> dict[str, Any]:
@@ -164,6 +251,7 @@ def compare_workload(
     after_binary: Path,
     repetitions: int,
     workdir: Path,
+    checkpoint_contract: str,
 ) -> dict[str, Any]:
     workdir.mkdir(parents=True, exist_ok=True)
     corpus = workdir / f"{name}.txt"
@@ -196,7 +284,20 @@ def compare_workload(
 
     before_checkpoint = checkpoints["before"]
     after_checkpoint = checkpoints["after"]
-    require(before_checkpoint == after_checkpoint, f"{name}: before/after checkpoint bytes differ")
+    checkpoint_byte_identical, checkpoint_relation = validate_checkpoint_contract(
+        name, before_checkpoint, after_checkpoint, checkpoint_contract
+    )
+    legacy_resume_compatibility: dict[str, object] | None = None
+    if checkpoint_contract == CHECKPOINT_CONTRACT_VERSIONED_TRANSITION:
+        legacy_resume_compatibility = verify_legacy_resume_compatibility(
+            name,
+            corpus,
+            before_binary,
+            after_binary,
+            before_checkpoint,
+            workdir,
+            training_tokens // epochs,
+        )
     before = render_measurement(samples["before"], before_checkpoint, training_tokens)
     after = render_measurement(samples["after"], after_checkpoint, training_tokens)
     return {
@@ -216,8 +317,11 @@ def compare_workload(
         },
         "before": before,
         "after": after,
-        "checkpoint_byte_identical": True,
-        "after_speedup_vs_before": round(before["median_seconds"] / after["median_seconds"], 4),
+        "checkpoint_contract": checkpoint_contract,
+        "checkpoint_relation": checkpoint_relation,
+        "checkpoint_byte_identical": checkpoint_byte_identical,
+        "legacy_resume_compatibility": legacy_resume_compatibility,
+        "after_runtime_ratio_vs_before": round(before["median_seconds"] / after["median_seconds"], 4),
     }
 
 
@@ -226,6 +330,15 @@ def main() -> int:
     parser.add_argument("--before-pretrain-bin", required=True, type=Path, help="compiled baseline vegai_pretrain")
     parser.add_argument("--after-pretrain-bin", required=True, type=Path, help="compiled optimized vegai_pretrain")
     parser.add_argument("--repetitions", type=int, default=3, help="real train processes per binary/workload (default: 3)")
+    parser.add_argument(
+        "--checkpoint-contract",
+        choices=sorted(_CHECKPOINT_CONTRACTS),
+        default=CHECKPOINT_CONTRACT_IDENTICAL,
+        help=(
+            "required before/after checkpoint relation (default: byte-identical); "
+            "versioned-algorithm-transition is only for an explicitly reviewed lineage migration"
+        ),
+    )
     parser.add_argument("--output", type=Path, help="optional JSON output file; stdout remains the report")
     arguments = parser.parse_args()
     try:
@@ -244,6 +357,7 @@ def main() -> int:
                     after_binary,
                     arguments.repetitions,
                     workdir / "short",
+                    arguments.checkpoint_contract,
                 ),
                 compare_workload(
                     "repeated_centers",
@@ -252,6 +366,7 @@ def main() -> int:
                     after_binary,
                     arguments.repetitions,
                     workdir / "repeated",
+                    arguments.checkpoint_contract,
                 ),
             ]
     except (RevisionComparisonError, OSError, subprocess.SubprocessError) as error:
@@ -259,7 +374,7 @@ def main() -> int:
         return 1
 
     report: dict[str, Any] = {
-        "schema": "vegai-pretraining-revision-comparison/v1",
+        "schema": "vegai-pretraining-revision-comparison/v2",
         "hardware": collect_hardware_profile(),
         "timing_scope": (
             "one vegai_pretrain train process per sample; compilation, fixture generation, checkpoint comparison, "
@@ -268,7 +383,9 @@ def main() -> int:
         "omp": {"OMP_NUM_THREADS": 2, "OMP_DYNAMIC": "FALSE"},
         "before_binary": str(before_binary),
         "after_binary": str(after_binary),
+        "checkpoint_contract": arguments.checkpoint_contract,
         "workloads": workloads,
+        "all_checkpoint_contracts_satisfied": True,
         "all_checkpoints_byte_identical": all(workload["checkpoint_byte_identical"] for workload in workloads),
     }
     rendered = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True)

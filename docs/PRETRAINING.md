@@ -325,8 +325,13 @@ Bu benchmark'ta compile/fixture/harness süresi hariçtir ve hız oranı yalnız
 ölçülen host/workload için geçerlidir. Sabit `e34fd22` baseline ile aynı-run
 mimari önce/sonra ölçümü için `tools/compare_pretraining_revisions.py` kullanın;
 araç real `train` process'lerini timing eder, warm-up/order alternation uygular
-ve checkpoint byte equality zorunlu kılar. Controlled sonuçlar ve fixture
-sınırları [PRETRAINING_MODE_COMPARISON.md](PRETRAINING_MODE_COMPARISON.md)'de
+ve varsayılan olarak checkpoint byte equality zorunlu kılar. Yalnız açıkça
+incelenmiş checkpoint-algoritma migration'ında
+`--checkpoint-contract versioned-algorithm-transition` kullanılabilir; bu modda
+her binary'nin self-determinism'i zorunlu kalır ve candidate gerçek baseline
+checkpoint'ini byte-tam resume etmek zorundadır, fakat cross-lineage runtime
+oranı semantic-equivalence speedup iddiası değildir. Controlled sonuçlar ve
+fixture sınırları [PRETRAINING_MODE_COMPARISON.md](PRETRAINING_MODE_COMPARISON.md)'de
 aynı-run baseline bölümünde belgelenir. GPU/NPU adapter inventory'si tek başına compute kullanımı
 değildir. Intel Core Ultra için opt-in OpenVINO context
 provider, immutable packed-HDC bundle/finalize aşamasını dispatch ederken
