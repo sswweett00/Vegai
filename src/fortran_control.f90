@@ -11,7 +11,8 @@
 !  from an OS-specific command.
 !==============================================================================
 module fortran_control
-   use, intrinsic :: iso_fortran_env, only: int32, int64, real64, output_unit, error_unit
+   use, intrinsic :: iso_fortran_env, only: int32, int64, real64, output_unit, error_unit, &
+                                          compiler_version, compiler_options
    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
    use hdc_pretraining, only: PT_OK, hdc_pretrain_model_t, hdc_pretrain_config_t, &
                               pretrain_metrics_t, pretrain_execution_report_t, &
