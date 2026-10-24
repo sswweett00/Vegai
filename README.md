@@ -9,6 +9,13 @@ kayan nokta matrisleri yerine `256 × int64` paketli vektörler, XOR bağlama,
 çoğunluk süperpozisyonu, döngüsel permütasyon ve Hamming/`popcnt` rezonansı
 kullanır.
 
+> **Fortran-first migration durumu:** Varsayılan build/runtime/profile/resource
+> preflight ve native train/checkpoint smoke yolu Python gerektirmeyen Fortran
+> executable'larıdır (`vegai_control` dahil). Ancak depoda hâlâ migration-era
+> Python control-plane araçları vardır; bunlar henüz Fortran'a dönüştü diye
+> temsil edilmez. Native kapsam, adapter sınırları ve kanıt planı
+> [FORTRAN_2023_MIGRATION.md](docs/FORTRAN_2023_MIGRATION.md)'dedir.
+
 Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 
 - taşma-semantikleri tanımlı deterministik SplitMix64 tabanlı vektör üretimi;
@@ -159,6 +166,15 @@ make run
 make pretrain
 make field
 make chat
+
+# Varsayılan native control-plane doğrulaması: Python interpreter çağırmaz.
+# Fortran property testleri + profile + gerçek train/checkpoint/load smoke.
+make fortran-check
+./build/vegai_control profile --format json
+./build/vegai_control resource-plan examples/corpus/toy_hdc_corpus.txt \
+  --checkpoint /safe/runtime/toy.vgai --max-vocab 128 \
+  --available-memory-bytes 8589934592 --available-storage-bytes 17179869184 \
+  --require-ready --format json
 
 # Exact 9 MiB deterministic structural fixture + real train child attestation.
 # Bu bir natural-language/domain-quality dataset'i değildir; runtime artifacts
@@ -424,8 +440,9 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Kaynak preflight | `tools/training_resource_plan.py` | bounded RAM/checkpoint storage estimate, CPU/NUMA/OpenMP recommendation, static accelerator truth contract |
 | OpenVINO context worker | `tools/openvino_context_worker.py` | optional Intel uint32-lane immutable-context bridge; resident per-train service, dynamic-batch compiled-graph cache, execution mask / native-CPU bypass contract |
 | Çalıştırılabilir doğrulama | `app/main.f90` | %25 exact gürültü, analoji, causal chain ve 3-faktör Resonator demo |
-| Native testler | `test/test_all.f90` | cebirsel invariantlar, hata yolları, serial/OpenMP pretraining eşitliği ve uçtan uca test |
-| Donanım/OS profili | `tools/hardware_compatibility.py` | privacy-conscious CPU/RAM/GPU/NPU inventory, portable CPU backend sözleşmesi |
+| Native testler | `test/test_all.f90` | cebirsel invariantlar, hata yolları, native resource-plan sınırları, serial/OpenMP pretraining eşitliği ve uçtan uca test |
+| Native Fortran control plane | `src/fortran_control.f90`, `app/control.f90` | compiler/runtime profile, explicit RAM/SSD preflight and actual vocab/train/stream-checkpoint/load smoke; Python veya shell inventory çağırmaz |
+| Donanım/OS profili (legacy adapter) | `tools/hardware_compatibility.py` | privacy-conscious CPU/RAM/GPU/NPU inventory; native portable baseline bunu çağırmaz |
 | Bağımsız HDC oracle | `tools/verify_reference.py` | standart SplitMix64 ve demo sözleşmelerinin Python modeli |
 | Bağımsız tokenless-field oracle | `tools/verify_tokenless_field.py` | raw byte-event construction, Walsh/inverse/Parseval ve compiled CLI fail-closed contract'inin Python modeli |
 

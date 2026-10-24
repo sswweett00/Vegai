@@ -16,7 +16,8 @@
         "CMAKE_BUILD_TYPE": "Release",
         "VEGAI_CPU_TARGET": "portable",
         "VEGAI_ENABLE_OPENMP": "ON",
-        "VEGAI_BUILD_TESTS": "ON"
+        "VEGAI_BUILD_TESTS": "ON",
+        "VEGAI_ENABLE_LEGACY_PYTHON_TESTS": "OFF"
       }
     },
     {
@@ -29,7 +30,8 @@
         "CMAKE_BUILD_TYPE": "Release",
         "VEGAI_CPU_TARGET": "portable",
         "VEGAI_ENABLE_OPENMP": "OFF",
-        "VEGAI_BUILD_TESTS": "ON"
+        "VEGAI_BUILD_TESTS": "ON",
+        "VEGAI_ENABLE_LEGACY_PYTHON_TESTS": "OFF"
       }
     },
     {
@@ -42,7 +44,8 @@
         "CMAKE_BUILD_TYPE": "Release",
         "VEGAI_CPU_TARGET": "native",
         "VEGAI_ENABLE_OPENMP": "ON",
-        "VEGAI_BUILD_TESTS": "ON"
+        "VEGAI_BUILD_TESTS": "ON",
+        "VEGAI_ENABLE_LEGACY_PYTHON_TESTS": "OFF"
       }
     }
   ],

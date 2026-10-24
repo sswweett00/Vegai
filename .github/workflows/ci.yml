@@ -29,6 +29,7 @@ jobs:
             -DVEGAI_ENABLE_OPENMP=ON \
             -DVEGAI_CPU_TARGET=portable \
             -DVEGAI_BUILD_TESTS=ON \
+            -DVEGAI_ENABLE_LEGACY_PYTHON_TESTS=ON \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_Fortran_FLAGS='-std=f2023 -fcheck=all -fbacktrace -ffpe-trap=invalid,zero,overflow'
 
@@ -110,6 +111,15 @@ jobs:
 
       - name: Report portable host compatibility and resource plan
         run: |
+          # Native control plane performs no shell/Python inventory call. RAM
+          # and storage values here are explicit CI fixture inputs, not a host
+          # discovery claim.
+          ./build-ci/vegai_control profile --format json \
+            --output "${RUNNER_TEMP}/fortran-native-profile.json"
+          ./build-ci/vegai_control resource-plan examples/corpus/mini_turkish_ascii_pretrain.txt \
+            --checkpoint "${RUNNER_TEMP}/fortran-resource-plan.vgai" --max-vocab 128 \
+            --available-memory-bytes 8589934592 --available-storage-bytes 8589934592 \
+            --require-ready --format json --output "${RUNNER_TEMP}/fortran-resource-plan.json"
           python3 tools/hardware_compatibility.py --format json --require-recognized-os \
             --output "${RUNNER_TEMP}/hardware-profile.json" > /dev/null
           python3 tools/training_resource_plan.py \

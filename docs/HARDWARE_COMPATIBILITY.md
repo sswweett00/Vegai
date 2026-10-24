@@ -47,7 +47,35 @@ sunulmaz. `hardware_compatibility.py` architecture family, pointer width ve byte
 order'ı raporlar; `unknown` bir envanter sonucu derleme başarısızlığı değildir,
 ama doğrulanmış-platform rozeti de değildir.
 
-## 2. CPU profilleri
+## 2. Native Fortran profile ve resource preflight
+
+`vegai_control` standart Fortran 2023 control-plane executable'ıdır. Python,
+`/proc`, PowerShell, `sysctl`, WMIC veya başka OS shell inventory komutu çağırmaz.
+Bu nedenle portable olan compiler/environment gerçeklerini raporlar; RAM ve
+free-storage değerleri gerekiyorsa operatorün denetlenmiş input'u olarak kabul
+eder.
+
+```bash
+./build/portable-serial/vegai_control profile --format json
+./build/portable-serial/vegai_control resource-plan CORPUS.txt \
+  --checkpoint checkpoints/model.vgai --max-vocab 50000 \
+  --available-memory-bytes 17179869184 \
+  --available-storage-bytes 34359738368 --require-ready --format json
+./build/portable-serial/vegai_control smoke CORPUS.txt checkpoints/smoke.vgai
+```
+
+`resource-plan`, model/vocabulary/context/update/cache reservationını ve
+checkpoint üst sınırını `int64` aritmetiğiyle sabit formülden hesaplar.
+`--require-ready` ile RAM veya SSD değeri verilmemişse ya da hesaplanan sınırın
+altındaysa non-zero döner. Bu, allocator/page-cache/NUMA/GPU residency tahmini
+değildir; gözlenmemiş bir makine özelliğini başarı olarak raporlamaz.
+
+Python `hardware_compatibility.py` ve `training_resource_plan.py` daha zengin
+OS/vendor inventory için geçici legacy adapter'lardır. Default Fortran runtime
+bunları çağırmaz. Fortran'a taşınma envanteri ve `ISO_C_BINDING` gerektiren
+SDK sınırları [FORTRAN_2023_MIGRATION.md](FORTRAN_2023_MIGRATION.md)'dedir.
+
+## 3. CPU profilleri
 
 ### `portable` — varsayılan ve dağıtılabilir profil
 
@@ -107,7 +135,7 @@ python3 tools/compare_pretraining_build_profiles.py \
   --repetitions 3 --omp-threads 1
 ```
 
-## 3. Intel Core Ultra 5 125H
+## 4. Intel Core Ultra 5 125H
 
 Ultra 5 125H için güvenli seçim portable profildir. Bu repo CPU backend'i
 kullandığı için işlemciye özel AVX-512, CUDA, oneAPI GPU, NPU veya Arc API
@@ -124,7 +152,7 @@ nedeniyle 125H'nin core/thread sayısıyla doğrusal hızlanma varsayılmamalıd
 `tools/compare_pretraining_threads.py` ile aynı hostta byte equality + gerçek
 child-process sürelerini ölçün.
 
-## 4. Entegre grafik, discrete GPU ve NPU
+## 5. Entegre grafik, discrete GPU ve NPU
 
 Portable varsayılan Vegai binary'si zorunlu bir GPU/NPU compute backend'i
 veya vendor runtime yüklemez: CUDA, OpenCL, SYCL/oneAPI, Metal ve Vulkan
@@ -175,7 +203,7 @@ context_worker.py` aynı lane ABI'sini actual immutable-context dispatch'te
 kullanır. Train CLI runtime output'ı GPU/NPU execution'ı yalnız worker mask'i
 bunu doğruladığında true raporlar.
 
-## 5. İşletim sistemi ve compiler yolu
+## 6. İşletim sistemi ve compiler yolu
 
 ### Linux
 
@@ -241,7 +269,7 @@ checkpoint creation ve aynı binary ile inspect akışını doğrular; benchmark
 zamanı kaydetmez ve compiler/OS değişince checkpoint'in taşınacağını iddia
 etmez.
 
-## 6. Checkpoint sınırı
+## 7. Checkpoint sınırı
 
 Source/build portability, checkpoint binary interchange garantisi değildir.
 `.vgai` dosyası stream-unformatted formatta compiler/ABI/endianness ailesine
@@ -249,7 +277,7 @@ bağlıdır. Başka OS, CPU mimarisi veya compiler'a geçerken corpus manifesti,
 source commit, compiler bilgisi ve config'i saklayın; hedef hostta yeniden train
 etmek veya aynı ABI toolchain'i kullanmak güvenli yoldur.
 
-## 7. Gerçek ölçüm kaydı
+## 8. Gerçek ölçüm kaydı
 
 `tools/compare_pretraining_modes.py` ve build-profile comparison raporları
 CPU modeli, OS, mimari, logical CPU sayısı ve GPU adapter sayısını JSON

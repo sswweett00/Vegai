@@ -61,6 +61,15 @@ jobs:
           cmake --preset portable-serial -DVEGAI_BUILD_TESTS=OFF
           cmake --build --preset portable-serial --parallel
 
+      - name: Run native Fortran control/profile/resource/checkpoint contract
+        run: |
+          ./build/portable-serial/vegai_control profile --format json
+          ./build/portable-serial/vegai_control resource-plan examples/corpus/toy_hdc_corpus.txt \
+            --checkpoint build/portable-serial/fortran-control-plan.vgai --max-vocab 64 \
+            --available-memory-bytes 8589934592 --available-storage-bytes 8589934592 --require-ready
+          ./build/portable-serial/vegai_control smoke examples/corpus/toy_hdc_corpus.txt \
+            build/portable-serial/fortran-control-smoke.vgai
+
       - name: Run same-host portable engine/train/inspect contract
         run: |
           python3 tools/hardware_compatibility.py --format json --require-recognized-os \
@@ -98,6 +107,16 @@ jobs:
           cmake --preset portable-serial -DVEGAI_BUILD_TESTS=OFF -DCMAKE_Fortran_COMPILER="$FC"
           cmake --build --preset portable-serial --parallel
 
+      - name: Run native Fortran control/profile/resource/checkpoint contract
+        shell: bash
+        run: |
+          ./build/portable-serial/vegai_control profile --format json
+          ./build/portable-serial/vegai_control resource-plan examples/corpus/toy_hdc_corpus.txt \
+            --checkpoint build/portable-serial/fortran-control-plan.vgai --max-vocab 64 \
+            --available-memory-bytes 8589934592 --available-storage-bytes 8589934592 --require-ready
+          ./build/portable-serial/vegai_control smoke examples/corpus/toy_hdc_corpus.txt \
+            build/portable-serial/fortran-control-smoke.vgai
+
       - name: Run same-host portable engine/train/inspect contract
         shell: bash
         run: |
@@ -134,6 +153,17 @@ jobs:
           set -euo pipefail
           cmake --preset portable-serial -DVEGAI_BUILD_TESTS=OFF
           cmake --build --preset portable-serial --parallel
+
+      - name: Run native Fortran control/profile/resource/checkpoint contract
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          ./build/portable-serial/vegai_control.exe profile --format json
+          ./build/portable-serial/vegai_control.exe resource-plan examples/corpus/toy_hdc_corpus.txt \
+            --checkpoint build/portable-serial/fortran-control-plan.vgai --max-vocab 64 \
+            --available-memory-bytes 8589934592 --available-storage-bytes 8589934592 --require-ready
+          ./build/portable-serial/vegai_control.exe smoke examples/corpus/toy_hdc_corpus.txt \
+            build/portable-serial/fortran-control-smoke.vgai
 
       - name: Run same-host portable engine/train/inspect contract
         shell: msys2 {0}

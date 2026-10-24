@@ -30,16 +30,18 @@ LMM_PYTHON ?= $(LMM_VENV)/bin/python
 
 SOURCES := src/hyper_types.f90 src/tokenless_field.f90 src/text_tokenizer.f90 src/vocabulary.f90 \
            src/symbolic_memory.f90 src/resonator_network.f90 src/reasoning_core.f90 \
-           src/hdc_pretraining.f90 src/dialogue_retrieval.f90
+           src/hdc_pretraining.f90 src/dialogue_retrieval.f90 src/fortran_control.f90
 APP := app/main.f90
 PRETRAIN_APP := app/pretrain.f90
 FIELD_APP := app/field.f90
 CHAT_APP := app/chat.f90
+CONTROL_APP := app/control.f90
 TEST_SOURCES := test/test_support.f90 test/test_all.f90
 ENGINE := $(BUILD_DIR)/hds_engine
 PRETRAIN := $(BUILD_DIR)/vegai_pretrain
 FIELD := $(BUILD_DIR)/vegai_field
 CHAT := $(BUILD_DIR)/vegai_chat
+CONTROL := $(BUILD_DIR)/vegai_control
 TEST_BINARY := $(BUILD_DIR)/vegai_tests
 # Runtime-only exact-size benchmark artifacts are intentionally ignored by Git.
 FIXTURE_9MIB_CORPUS ?= corpora/synthetic_hdc_9mib.txt
@@ -50,10 +52,10 @@ FIXTURE_9MIB_REPORT ?= pretraining-runs/synthetic_hdc_9mib.json
 # remain ignored. Prefer the dedicated GitHub workflow for CI-hosted evidence.
 CONTINUOUS_900_RUN_DIR ?= pretraining-runs/synthetic_900mb_then_90mb
 
-.PHONY: all engine pretrain field chat test portable-runtime-check run run-pretrain run-field run-chat check field-check optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check quality-check continuous-quality-check attested-pretrain-check lookup-cache-compare fixture-9mib verify-fixture-9mib pretrain-9mib pretrain-900mb-continuous clean clean-all debug portable native portable-test native-test
+.PHONY: all engine pretrain field chat control test fortran-check portable-runtime-check run run-pretrain run-field run-chat run-control check field-check optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check quality-check continuous-quality-check attested-pretrain-check lookup-cache-compare fixture-9mib verify-fixture-9mib pretrain-9mib pretrain-900mb-continuous clean clean-all debug portable native portable-test native-test
 
 # Default target: portable optimized GNU binaries without host-only ISA flags.
-all: engine pretrain field chat
+all: engine pretrain field chat control
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)/mod
@@ -78,11 +80,24 @@ chat: $(CHAT)
 $(CHAT): $(SOURCES) $(CHAT_APP) | $(BUILD_DIR)
 	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(SOURCES) $(CHAT_APP) -o $@ $(LDFLAGS)
 
+control: $(CONTROL)
+
+$(CONTROL): $(SOURCES) $(CONTROL_APP) | $(BUILD_DIR)
+	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(SOURCES) $(CONTROL_APP) -o $@ $(LDFLAGS)
+
 $(TEST_BINARY): $(SOURCES) $(TEST_SOURCES) | $(BUILD_DIR)
 	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(SOURCES) $(TEST_SOURCES) -o $@ $(LDFLAGS)
 
 test: $(TEST_BINARY)
 	OMP_NUM_THREADS=$${OMP_NUM_THREADS:-2} $(TEST_BINARY)
+
+# Default Fortran-only verification: no Python interpreter, shell inventory,
+# or optional accelerator SDK is invoked by these executable paths.
+fortran-check: $(TEST_BINARY) $(CONTROL)
+	OMP_NUM_THREADS=$${OMP_NUM_THREADS:-2} $(TEST_BINARY)
+	$(CONTROL) profile --format json
+	OMP_NUM_THREADS=$${OMP_NUM_THREADS:-2} $(CONTROL) smoke examples/corpus/toy_hdc_corpus.txt \
+	  "$(BUILD_DIR)/fortran-control-smoke.vgai"
 
 # Same-host binary launch/train/inspect smoke contract. CMake is the preferred
 # cross-platform entry point; this GNU Make convenience target mirrors it on
@@ -101,6 +116,9 @@ run-field: $(FIELD)
 
 run-chat: $(CHAT)
 	$(CHAT) help
+
+run-control: $(CONTROL)
+	$(CONTROL) help
 
 # Explicit profiles keep portable and host-tuned binaries in distinct folders,
 # avoiding accidental reuse of incompatible module/object files.

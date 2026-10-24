@@ -4,6 +4,8 @@ project(VegaiHDS VERSION 0.1.0 LANGUAGES Fortran)
 
 option(VEGAI_ENABLE_OPENMP "Enable OpenMP parallel cleanup scans" ON)
 option(VEGAI_BUILD_TESTS "Build property and integration tests" ON)
+option(VEGAI_ENABLE_LEGACY_PYTHON_TESTS
+       "Enable migration-era Python integration/control-plane tests (not required by native Fortran runtime)" OFF)
 set(VEGAI_CPU_TARGET "portable" CACHE STRING
     "CPU code-generation profile: portable (no host ISA) or native (host-tuned)")
 set_property(CACHE VEGAI_CPU_TARGET PROPERTY STRINGS portable native)
@@ -29,6 +31,7 @@ add_library(vegai_hds STATIC
     src/reasoning_core.f90
     src/hdc_pretraining.f90
     src/dialogue_retrieval.f90
+    src/fortran_control.f90
 )
 
 set_target_properties(vegai_hds PROPERTIES
@@ -108,6 +111,12 @@ target_link_libraries(vegai_field PRIVATE vegai_hds)
 add_executable(vegai_chat app/chat.f90)
 target_link_libraries(vegai_chat PRIVATE vegai_hds)
 
+# Pure-Fortran control plane: portable compiler profile, explicit bounded
+# resource arithmetic, and a same-host native train/checkpoint smoke path.
+# It deliberately does not require Python or invoke OS-specific shell probes.
+add_executable(vegai_control app/control.f90)
+target_link_libraries(vegai_control PRIVATE vegai_hds)
+
 if(VEGAI_BUILD_TESTS)
     include(CTest)
     enable_testing()
@@ -123,9 +132,34 @@ if(VEGAI_BUILD_TESTS)
     endif()
 
     add_test(NAME vegai_fortran_properties COMMAND vegai_tests)
+    # The default native control-plane contract contains no Python process:
+    # profile/report rendering, bounded resource arithmetic, and a real
+    # same-host vocabulary/train/checkpoint/load smoke all run in Fortran.
+    add_test(
+        NAME vegai_fortran_control_profile
+        COMMAND $<TARGET_FILE:vegai_control> profile --format json
+    )
+    add_test(
+        NAME vegai_fortran_control_resource_plan
+        COMMAND $<TARGET_FILE:vegai_control> resource-plan
+                ${CMAKE_CURRENT_SOURCE_DIR}/examples/corpus/toy_hdc_corpus.txt
+                --checkpoint ${CMAKE_CURRENT_BINARY_DIR}/fortran-control-plan.vgai
+                --max-vocab 64 --available-memory-bytes 8589934592
+                --available-storage-bytes 8589934592 --require-ready --format json
+    )
+    add_test(
+        NAME vegai_fortran_control_smoke
+        COMMAND $<TARGET_FILE:vegai_control> smoke
+                ${CMAKE_CURRENT_SOURCE_DIR}/examples/corpus/toy_hdc_corpus.txt
+                ${CMAKE_CURRENT_BINARY_DIR}/fortran-control-smoke.vgai
+    )
+    set_tests_properties(vegai_fortran_control_smoke PROPERTIES TIMEOUT 120)
 
-    find_package(Python3 COMPONENTS Interpreter QUIET)
-    if(Python3_Interpreter_FOUND)
+    # Python remains available only as a migration-era verifier/control-plane
+    # adapter. The default CMake build/test path is self-contained Fortran.
+    if(VEGAI_ENABLE_LEGACY_PYTHON_TESTS)
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(Python3_Interpreter_FOUND)
         add_test(
             NAME vegai_tokenless_signal_field
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_tokenless_field.py
@@ -294,7 +328,10 @@ if(VEGAI_BUILD_TESTS)
                     --run-dir ${CMAKE_CURRENT_BINARY_DIR}/example-production-preflight
                     --max-vocab 128 --preflight-only
         )
+        else()
+            message(WARNING "Python3 was not found; requested legacy Python integration tests are not registered.")
+        endif()
     else()
-        message(WARNING "Python3 was not found; Python hardware/corpus integration tests are not registered.")
+        message(STATUS "Vegai legacy Python integration tests are disabled; native Fortran tests remain enabled.")
     endif()
 endif()

@@ -1,6 +1,6 @@
 ! SPDX-License-Identifier: MIT
 program test_all
-   use, intrinsic :: iso_fortran_env, only: int8, int16, int32, int64, real32
+   use, intrinsic :: iso_fortran_env, only: int8, int16, int32, int64, real32, real64
    use, intrinsic :: ieee_arithmetic, only: ieee_quiet_nan, ieee_positive_inf, ieee_value
    use hyper_types
    use symbolic_memory
@@ -9,6 +9,8 @@ program test_all
    use hdc_pretraining
    use dialogue_retrieval
    use tokenless_field
+   use fortran_control, only: FC_OK, FC_ERR_INVALID_ARGUMENT, fortran_resource_plan_t, &
+                              fortran_resource_plan_estimate
    use text_tokenizer, only: TOKEN_LEN, MAX_LINE_CHARS, MAX_TOKENS_PER_LINE, tokenize_ascii_line
    use vocabulary
    use test_support
@@ -20,6 +22,7 @@ program test_all
    call test_resonator_network()
    call test_tokenless_signal_field()
    call test_text_ingest()
+   call test_fortran_control()
    call test_hdc_pretraining()
    call test_dialogue_retrieval()
    call finish_tests()
@@ -586,6 +589,39 @@ contains
       call assert_true(.not. found, 'fingerprint lookup cannot merge an unrelated token')
       call vocab_destroy(vocab)
    end subroutine test_text_ingest
+
+   subroutine test_fortran_control()
+      type(fortran_resource_plan_t) :: plan
+      integer(int32) :: status
+
+      call fortran_resource_plan_estimate(128_int64, 0.25_real64, 2_int32, plan, status)
+      call assert_i32_equal(status, FC_OK, 'native Fortran resource planner accepts bounded request')
+      call assert_true(plan%model_payload_bytes == 128_int64 * 4104_int64, &
+                       'native Fortran resource planner keeps exact packed model payload')
+      call assert_true(plan%vocabulary_allowance_bytes == 128_int64 * 256_int64, &
+                       'native Fortran resource planner keeps vocabulary allowance')
+      call assert_true(plan%line_update_scratch_bytes == 128_int64 * 4_int64, &
+                       'native Fortran resource planner keeps source-order scratch estimate')
+      call assert_true(plan%lookup_cache_workspace_bytes == 278528_int64, &
+                       'native Fortran resource planner keeps bounded cache estimate')
+      call assert_true(plan%required_available_bytes > plan%model_payload_bytes, &
+                       'native Fortran resource planner includes staging and reserve')
+      call assert_i32_equal(plan%recommended_omp_threads, 2_int32, &
+                            'native Fortran resource planner preserves explicit thread cap')
+
+      call fortran_resource_plan_estimate(0_int64, 0.25_real64, 1_int32, plan, status)
+      call assert_i32_equal(status, FC_ERR_INVALID_ARGUMENT, &
+                            'native Fortran resource planner rejects zero vocabulary capacity')
+      call fortran_resource_plan_estimate(128_int64, -0.01_real64, 1_int32, plan, status)
+      call assert_i32_equal(status, FC_ERR_INVALID_ARGUMENT, &
+                            'native Fortran resource planner rejects negative reserve fraction')
+      call fortran_resource_plan_estimate(128_int64, ieee_value(0.0_real64, ieee_quiet_nan), 1_int32, plan, status)
+      call assert_i32_equal(status, FC_ERR_INVALID_ARGUMENT, &
+                            'native Fortran resource planner rejects nonfinite reserve fraction')
+      call fortran_resource_plan_estimate(100000001_int64, 0.25_real64, 1_int32, plan, status)
+      call assert_i32_equal(status, FC_ERR_INVALID_ARGUMENT, &
+                            'native Fortran resource planner rejects overflowing capacity request')
+   end subroutine test_fortran_control
 
    subroutine test_hdc_pretraining()
       character(len=*), parameter :: CORPUS_PATH = 'vegai_pretraining_test_corpus.txt'
