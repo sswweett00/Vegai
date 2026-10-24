@@ -74,8 +74,9 @@ Aynı base corpus/config ile iki `hybrid` varyant çalışır:
 İki checkpoint'in tüm byte dizisi ve SHA-256'sı **eşit** olmak zorundadır. Bu
 kural Top-1 diagnostic eşitliğinden daha güçlüdür: vocabulary, base plane,
 semantic plane, experience sayaçları, totals ve mode'un seçtiği checkpoint
-version checksum'ının tamamının aynı olduğunu doğrular. Bu `hybrid` armı v5
-writer kullanır. Hız oranı `reference_median / fused_median` olarak verilir.
+version checksum'ının tamamının aynı olduğunu doğrular. Yeni `hybrid` armı v7
+Floyd/complement sampler lineage'i kullanır. Hız oranı
+`reference_median / fused_median` olarak verilir.
 
 ### D. Long-record hierarchical / coherent controlled diagnostic
 
@@ -348,10 +349,11 @@ throughput iddiası olarak karşılaştırılmamalıdır.
 - `--reference-context-kernel` checkpoint formatına yazılmaz; yalnız benchmark
   ve regression oracle'dır. Aynı semantic config ile fused/reference checkpoint
   byte eşitliği bu nedenle zorunludur.
-- Checkpoint writer mode-seçimlidir: `legacy`/`positional`/`hybrid`/
-  `hierarchical` v5 header+checksum yazar; `coherent` v6 yazar. Reader v4/v5/v6
-  kabul eder ve checksum'ı dosyanın kendi version değeriyle doğrular; coherent
-  semantic mode taşıyan v4/v5 payload fail-closed reddedilir.
+- Checkpoint version sampler lineage'ini de bağlar: yeni tüm mode'lar v7
+  header+checksum ile Floyd/complement exact-mask sampler'ını yazar. Reader
+  v4/v5/v6'yı historical bounded-retry sampler olarak kabul eder ve bu lineage
+  yeniden kaydedildiğinde v5 (non-coherent) veya v6 (coherent) sürdürülür.
+  Coherent semantic mode taşıyan v4/v5 payload fail-closed reddedilir.
 - Hierarchical global signal satırda bir kez üretilir, yalnız ≥12 active token
   için etkinleşir ve local context accumulator kapasitesiyle bounded kalır;
   eşik altındaki record için topic accumulator kurulmaz. Coherent aynı eşikte

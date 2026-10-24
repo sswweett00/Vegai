@@ -367,30 +367,35 @@ telemetridir.
 `pretrain_checkpoint_save` stream-unformatted bir `.vgai` dosyası yazar;
 `pretrain_checkpoint_load` magic/version, shape, counter sign, vocabulary
 frequency/active invariantları, rebuilt hash index ve payload checksum kontrolü
-yapar. Writer **mode-seçimli** sürüm kullanır:
+yapar. Sürüm, sadece wire parser değil **gelecek Hebbian seçim algoritmasının
+continuation contract'i**dir:
 
-- `legacy`, `positional`, `hybrid` ve `hierarchical` checkpoint'leri **v5**
-  header/checksum'ı ile yazmaya devam eder. Bu, mevcut historical checkpoint
-  byte-equality regression ve `e34fd22` baseline karşılaştırmasını korur.
-- `coherent` checkpoint'leri **v6** header/checksum'ı ile yazılır. v6, yeni
-  center-dependent cross-fold semantic contract'ini v5 writer stream'inden
-  ayırır.
+- Yeni oluşturulan tüm context mode'ları **v7** header/checksum'ı ile yazar.
+  v7, exact-rate plasticity için unbiased Floyd/complement subset sampler'ını
+  bağlar. Bu nedenle fresh `legacy` context mode'u bile (isim benzerliğine
+  rağmen) v7'dir; context encoder ile sampler lineage ayrı kavramlardır.
+- Reader v4, v5 ve v6'yı historical bounded-retry sampler lineage'i olarak
+  yükler. Böyle bir model tekrar kaydedildiğinde non-coherent ise v5, coherent
+  ise v6 yazar ve sonraki update'lerde historical stream'i sürdürür.
+- v7 reader/writer Floyd/complement lineage'ini sürdürür. Coherent payload v4
+  veya v5 ise fail-closed reddedilir; v6 ve v7 coherent için geçerlidir.
 
-Reader v4, v5 ve v6'yı dosyanın kendi version değeriyle checksum hesaplayarak
-okur; ancak coherent context-mode taşıyan bir v5/v4 payload fail-closed
-reddedilir. Böylece eski mode'ların historical byte dizisi korunurken coherent
-resume için açık bir format sınırı vardır. v3 ve daha eski checkpoint'ler
-reddedilir ve corpus manifesti + source commit ile yeniden train edilmelidir.
-`--reference-context-kernel` bilerek checkpoint state olmadığından
-fused/reference run'ları aynı semantic model için byte-tam aynı checkpoint
-üretmelidir. Farklı encoder mode'larının checkpoint byte'larının eşit olması
-beklenmez. Checksum yalnız accidental corruption tespiti içindir; kriptografik
-bütünlük/imza değildir.
+`vegai_pretrain inspect`, `plasticity sampler` alanında `floyd-complement` veya
+`legacy-bounded-retry` yazar; operatör checkpoint lineage'ini context mode'dan
+ayrı görmelidir. Böylece eski checkpoint resume'i sessizce farklı bir mask
+sequence'ine geçmez;
+aynı eski lineage'de uninterrupted/resumed run bit-tam kalır. v3 ve daha eski
+checkpoint'ler reddedilir ve corpus manifesti + source commit ile yeniden train
+edilmelidir. `--reference-context-kernel` bilerek checkpoint state olmadığından
+fused/reference run'ları **aynı sampler lineage'inde** byte-tam aynı checkpoint
+üretmelidir. Farklı sampler lineage veya encoder mode checkpoint'lerinin
+byte'larının eşit olması beklenmez. Checksum yalnız accidental corruption
+tespiti içindir; kriptografik bütünlük/imza değildir.
 
 Checkpoint aşağıdakileri taşır:
 
 - capacity, token strings, frequencies, active mask ve min frequency;
-- context mode/position/plasticity/tie-seed semantiği;
+- context mode/position/plasticity/tie-seed ve version-selected sampler lineage semantiği;
 - completed epoch sayısı ve aggregate eğitim metrikleri;
 - base/semantic hypervector planes ve token experience sayaçları.
 
@@ -492,8 +497,9 @@ Native testler şunları kontrol eder:
 - ≥12 active-token controlled record üzerinde `hierarchical` replay
   determinismi, local-only hybrid'den ayrışması ve checkpoint round-trip'i;
 - aynı long-record fixture üzerinde `coherent`in hierarchy'den ayrışması,
-  fused/reference local-kernel eşitliği, kısa-record `hybrid` eşitliği ve v6
-  checkpoint round-trip'i; eski encoder'ların raw v5 header yazmayı sürdürmesi;
+  fused/reference local-kernel eşitliği, kısa-record `hybrid` eşitliği ve v7
+  checkpoint round-trip'i; synthetic v5 ve coherent-v6 lineage'lerinin
+  historical sampler ile uninterrupted run'a bit-tam resume edilmesi;
 - windowed context count ve active/OOV telemetry;
 - checkpoint round-trip ve uninterrupted run ile checkpoint-resume run'ın
   bit-tam eşitliği;

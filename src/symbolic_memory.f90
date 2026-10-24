@@ -28,6 +28,12 @@ module symbolic_memory
    integer(int32), parameter, public :: MEM_ERR_EMPTY = -105_int32
    integer(int32), parameter, public :: MEM_ERR_NO_LSH_CANDIDATE = -106_int32
    integer(int32), parameter, public :: MEM_ERR_COUNTER_OVERFLOW = -107_int32
+   integer(int32), parameter, public :: MEM_ERR_HYPERVECTOR = -108_int32
+
+   ! Symbolic association uses the same exact-cardinality plasticity primitive
+   ! as pretraining: 25 percent means exactly 4,096 selected dimensions, not a
+   ! binomially varying approximation.
+   integer(int32), parameter :: MEM_ASSOCIATION_PLASTICITY_PERCENT = 25_int32
 
    type, public :: hds_memory_t
       integer(int32) :: capacity = 0_int32
@@ -366,8 +372,7 @@ contains
       result%distance = distance
       result%candidates_examined = candidates_examined
       result%label = mem%labels(slot)
-      result%similarity = 1.0_real32 - 2.0_real32 * real(distance, real32) &
-                          / real(HV_BITS, real32)
+      result%similarity = hv_similarity_from_distance(distance)
    end subroutine assign_cleanup_result
 
    ! Exact nearest-neighbour cleanup.  A matching LSH entry (distance zero) is
@@ -380,6 +385,7 @@ contains
       integer(int32), intent(out) :: status
       type(hv_t) :: candidate
       integer(int32) :: bucket, k, slot, i, distance, min_distance
+      integer(int64) :: rank_stride, candidate_rank, best_rank
       logical :: lsh_seeded
 
       call reset_cleanup_result(result)
@@ -406,23 +412,24 @@ contains
          end if
       end do
 
-      min_distance = HV_BITS + 1_int32
-      !$omp parallel do default(shared) private(i, candidate, distance) reduction(min:min_distance)
+      ! Minimize one lexicographic rank rather than finding a distance in a
+      ! parallel pass and rescanning serially for the first tied slot.  The
+      ! stride makes (distance, slot) an injective ordered key, preserving the
+      ! public exact-cleanup rule: lowest Hamming distance, then lowest slot.
+      ! Its maximum is HV_BITS * (count + 1) + count, safely below int64.
+      rank_stride = int(mem%count, int64) + 1_int64
+      best_rank = huge(0_int64)
+      !$omp parallel do default(shared) private(i, candidate, distance, candidate_rank) reduction(min:best_rank)
       do i = 1, mem%count
          candidate%bits = mem%vector_bits(:, i)
          distance = hv_hamming(query_hv, candidate)
-         min_distance = min(min_distance, distance)
+         candidate_rank = int(distance, int64) * rank_stride + int(i, int64)
+         best_rank = min(best_rank, candidate_rank)
       end do
       !$omp end parallel do
 
-      slot = 1_int32
-      do i = 1, mem%count
-         candidate%bits = mem%vector_bits(:, i)
-         if (hv_hamming(query_hv, candidate) == min_distance) then
-            slot = i
-            exit
-         end if
-      end do
+      min_distance = int((best_rank - 1_int64) / rank_stride, int32)
+      slot = int(modulo(best_rank - 1_int64, rank_stride), int32) + 1_int32
       call assign_cleanup_result(mem, slot, min_distance, .true., lsh_seeded, &
                                  mem%count + mem%lsh_counts(bucket), result)
    end subroutine mem_cleanup
@@ -488,15 +495,15 @@ contains
       end do
    end subroutine mem_rebuild_lsh
 
-   ! Applies a deterministic sparse plasticity update to a registered symbol.
-   ! LSH is rebuilt so the approximate index can never retain stale signatures.
+   ! Applies a deterministic exact-rate sparse plasticity update to a registered
+   ! symbol. LSH is rebuilt so the approximate index can never retain stale signatures.
    subroutine mem_associate_hebbian(mem, target_id, context_hv, status)
       type(hds_memory_t), intent(inout) :: mem
       integer(int32), intent(in) :: target_id
       type(hv_t), intent(in) :: context_hv
       integer(int32), intent(out) :: status
       type(hv_t) :: previous, updated
-      integer(int32) :: slot, table_index
+      integer(int32) :: slot, table_index, update_status, next_experience
       integer(int64) :: seed
       logical :: found
 
@@ -516,11 +523,19 @@ contains
       end if
 
       previous%bits = mem%vector_bits(:, slot)
-      mem%experience_count(slot) = mem%experience_count(slot) + 1_int32
-      seed = ieor(hv_seed_from_id(target_id), &
-                  ishftc(int(mem%experience_count(slot), int64), 23))
-      updated = hv_hebbian_update(previous, context_hv, seed)
+      next_experience = mem%experience_count(slot) + 1_int32
+      seed = ieor(hv_seed_from_id(target_id), ishftc(int(next_experience, int64), 23))
+      call hv_hebbian_update_percent(previous, context_hv, MEM_ASSOCIATION_PLASTICITY_PERCENT, &
+                                     seed, updated, update_status)
+      if (update_status /= HV_OK) then
+         status = MEM_ERR_HYPERVECTOR
+         return
+      end if
+      ! Commit only after the exact-mask calculation succeeded; the mutable
+      ! prototype and its experience counter remain atomic on any future
+      ! hypervector-kernel error.
       mem%vector_bits(:, slot) = updated%bits
+      mem%experience_count(slot) = next_experience
       call mem_rebuild_lsh(mem, status)
    end subroutine mem_associate_hebbian
 

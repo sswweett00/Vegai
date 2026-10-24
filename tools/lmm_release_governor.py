@@ -693,8 +693,22 @@ def confidence_radius(policy: ReleasePolicy, metric: MetricPolicy, observations:
     # delta / (arms * metrics * n * (n + 1)).  The n(n+1) series sums to one,
     # so this is a conservative time-uniform two-sided Hoeffding confidence
     # sequence rather than a fixed-n interval reused under optional stopping.
-    multiplier = 2.0 * len(_ARM_NAMES) * len(policy.metrics) * observations * (observations + 1) / policy.confidence_delta
-    return (metric.upper_bound - metric.lower_bound) * math.sqrt(math.log(multiplier) / (2.0 * observations))
+    # Keep the equivalent union-bound multiplier in log space.  This preserves
+    # the confidence sequence for valid subnormal deltas and very long-lived
+    # telemetry streams instead of overflowing before math.log can be applied.
+    log_multiplier = (
+        math.log(2.0)
+        + math.log(float(len(_ARM_NAMES)))
+        + math.log(float(len(policy.metrics)))
+        + math.log(float(observations))
+        + math.log(float(observations + 1))
+        - math.log(policy.confidence_delta)
+    )
+    require(math.isfinite(log_multiplier) and log_multiplier > 0.0,
+            "release confidence log multiplier is invalid")
+    radius = (metric.upper_bound - metric.lower_bound) * math.sqrt(log_multiplier / (2.0 * observations))
+    require(math.isfinite(radius) and radius >= 0.0, "release confidence radius is not finite")
+    return radius
 
 
 def stage_minimum_observations(policy: ReleasePolicy, stage: str) -> int:

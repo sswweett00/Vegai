@@ -451,6 +451,8 @@ contains
       write(output_unit, '(A,I0)') '  context window: ', trained_model%context_window
       write(output_unit, '(A,I0)') '  positional shift: ', trained_model%position_shift_bits
       write(output_unit, '(A,A)') '  context mode: ', trim(pretrain_context_mode_name(trained_model%context_mode))
+      write(output_unit, '(A,A)') '  plasticity sampler: ', &
+           trim(pretrain_plasticity_sampler_name(trained_model%plasticity_sampler))
       write(output_unit, '(A,I0)') '  completed epochs: ', trained_model%training_epochs_completed
       write(output_unit, '(A,I0)') '  total prototype updates: ', trained_model%totals%center_updates
       write(output_unit, '(A,I0)') '  estimated resident bytes: ', pretrain_model_footprint_bytes(trained_model)

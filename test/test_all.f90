@@ -1,6 +1,7 @@
 ! SPDX-License-Identifier: MIT
 program test_all
-   use, intrinsic :: iso_fortran_env, only: int8, int16, int32, int64
+   use, intrinsic :: iso_fortran_env, only: int8, int16, int32, int64, real32
+   use, intrinsic :: ieee_arithmetic, only: ieee_quiet_nan, ieee_positive_inf, ieee_value
    use hyper_types
    use symbolic_memory
    use reasoning_core
@@ -53,6 +54,10 @@ contains
                        'random vectors are near Hamming-orthogonal')
       similarity = hv_similarity(a, a)
       call assert_true(abs(similarity - 1.0) < 1.0e-6, 'identity similarity is one')
+      call assert_true(abs(hv_similarity_from_distance(HV_BITS / 2_int32)) < 1.0e-6, &
+                       'central Hamming-to-bipolar mapping has exact orthogonal midpoint')
+      call assert_true(abs(hv_similarity_from_distance(HV_BITS) + 1.0_real32) < 1.0e-6, &
+                       'central Hamming-to-bipolar mapping has exact antipodal endpoint')
       call assert_hv_equal(hv_bind(a, zero), a, 'zero vector is XOR binding identity')
       call assert_hv_equal(hv_bind(a, hv_bind(a, b)), b, 'binding is self-inverse')
       call assert_hv_equal(hv_permute(hv_permute(a, 129_int32), -129_int32), a, &
@@ -160,6 +165,17 @@ contains
       call hv_inject_noise_percent(a, 25_int32, 99_int64, noisy_again, status)
       call assert_i32_equal(hv_hamming(a, noisy_again), 4096_int32, &
                             '25 percent maps to 4096 exact flips')
+      ! High rates exercise the complement sampler: it must retain exact
+      ! cardinality without the old deterministic low-index completion bias.
+      call hv_inject_noise_percent(a, 99_int32, 123_int64, noisy_again, status)
+      call assert_i32_equal(status, HV_OK, '99 percent complement noise selection succeeds')
+      call assert_i32_equal(hv_hamming(a, noisy_again), 16220_int32, &
+                            '99 percent complement sampler preserves exact rounded cardinality')
+      call hv_inject_noise_percent(a, 99_int32, 123_int64, noisy, status)
+      call assert_i32_equal(status, HV_OK, 'repeated 99 percent complement selection succeeds')
+      call assert_hv_equal(noisy, noisy_again, 'high-density complement sampler is seed-deterministic')
+      call hv_inject_noise_percent(a, 100_int32, 123_int64, noisy, status)
+      call assert_hv_equal(noisy, hv_bind(a, ones), '100 percent exact noise complements every dimension')
       call hv_inject_noise_exact(a, -1_int32, 1_int64, noisy_again, status)
       call assert_i32_equal(status, HV_ERR_INVALID_ARGUMENT, 'invalid noise count is rejected')
       call assert_hv_equal(noisy_again, a, 'invalid noise leaves output unchanged')
@@ -181,9 +197,9 @@ contains
    end subroutine test_hypervector_algebra
 
    subroutine test_symbolic_memory()
-      type(hds_memory_t) :: memory, empty_memory, small_memory
+      type(hds_memory_t) :: memory, empty_memory, small_memory, tie_memory
       type(cleanup_result_t) :: result
-      type(hv_t) :: a, b, c, out_hv, noisy, before, after
+      type(hv_t) :: a, b, c, out_hv, noisy, before, after, tie_a, tie_b, tie_query
       integer(int32) :: status
       logical :: found
 
@@ -239,6 +255,27 @@ contains
       call assert_true(.not. hv_equal(before, after), 'Hebbian association changes prototype')
       call mem_cleanup(memory, after, result, status)
       call assert_i32_equal(result%id, -1_int32, 'rebuilt LSH keeps updated exact retrieval')
+
+      ! Two candidates at the same nonzero Hamming distance must select the
+      ! lowest registration slot. This exercises the one-pass lexicographic
+      ! OpenMP reduction rather than relying on a serial second distance scan.
+      tie_a = hv_zero()
+      tie_b = hv_zero()
+      tie_b%bits(1) = ibset(tie_b%bits(1), 0)
+      tie_b%bits(1) = ibset(tie_b%bits(1), 1)
+      tie_query = hv_zero()
+      tie_query%bits(1) = ibset(tie_query%bits(1), 0)
+      call mem_init(tie_memory, 2_int32, status)
+      call assert_i32_equal(status, MEM_OK, 'tie-break memory initializes')
+      call mem_register_symbol(tie_memory, 501_int32, 'TIE:LOW', out_hv, status, tie_a)
+      call assert_i32_equal(status, MEM_OK, 'first tied candidate registers')
+      call mem_register_symbol(tie_memory, 502_int32, 'TIE:HIGH', out_hv, status, tie_b)
+      call assert_i32_equal(status, MEM_OK, 'second tied candidate registers')
+      call mem_cleanup(tie_memory, tie_query, result, status)
+      call assert_i32_equal(status, MEM_OK, 'nonzero tied cleanup succeeds')
+      call assert_i32_equal(result%distance, 1_int32, 'tied cleanup records the exact Hamming distance')
+      call assert_i32_equal(result%id, 501_int32, 'tied cleanup deterministically selects the lower slot')
+      call mem_destroy(tie_memory)
 
       call mem_init(empty_memory, 2_int32, status)
       call mem_cleanup(empty_memory, a, result, status)
@@ -368,6 +405,18 @@ contains
       call assert_hv_equal(reconstructed, target, 'reported factors rebind to target')
       call resonator_result_destroy(result)
       call assert_true(.not. allocated(result%factors), 'resonator result destroy releases workspace')
+
+      ! Exercise the maintained-composite Gauss-Seidel path separately from the
+      ! synchronous path above. The exact verifier remains an independent
+      ! oracle for the returned tuple, not a substitute for residual algebra.
+      config%synchronous_updates = .false.
+      call resonator_factorize(target, codebooks, config, result, status)
+      call assert_i32_equal(status, RN_OK, 'asynchronous resonator factorization succeeds')
+      call assert_true(result%exact, 'asynchronous resonator result is exact')
+      reconstructed = hv_bind(hv_bind(result%factors(1), result%factors(2)), result%factors(3))
+      call assert_hv_equal(reconstructed, target, 'asynchronous reported factors rebind to target')
+      call resonator_result_destroy(result)
+      config%synchronous_updates = .true.
 
       invalid_config = config
       invalid_config%max_exact_combinations = 0_int32
@@ -540,6 +589,7 @@ contains
       character(len=*), parameter :: HIERARCHICAL_PATH = 'vegai_hierarchical_context.txt'
       character(len=*), parameter :: PARALLEL_CONTEXT_PATH = 'vegai_parallel_context.txt'
       type(hdc_pretrain_model_t) :: model_a, model_b, restored, legacy_model, positional_model, continuation_model
+      type(hdc_pretrain_model_t) :: sampler_legacy_model, sampler_legacy_restored
       type(hdc_pretrain_model_t) :: hierarchical_model, local_only_model, hierarchical_replay, short_hierarchical_model
       type(hdc_pretrain_model_t) :: coherent_model, coherent_replay, short_coherent_model
       type(hdc_pretrain_model_t) :: context_serial_model, context_parallel_model
@@ -591,6 +641,8 @@ contains
       call assert_true(vocabulary_metrics%non_ascii_bytes == 0_int64, &
                        'fixture corpus has no non-ASCII input bytes')
       call assert_true(pretrain_model_is_ready(model_a), 'vocabulary pass initializes trainable model')
+      call assert_true(trim(pretrain_plasticity_sampler_name(model_a%plasticity_sampler)) == 'floyd-complement', &
+                       'fresh model exposes the v7 Floyd/complement sampler lineage')
       call assert_true(pretrain_model_footprint_bytes(model_a) > 0_int64, &
                        'pretraining model reports resident footprint')
 
@@ -802,22 +854,21 @@ contains
       call assert_i32_equal(status, PT_OK, 'coherent reference training succeeds')
       call assert_true(all(coherent_model%semantic_bits == coherent_replay%semantic_bits), &
                        'coherent fused local context remains bit-identical to reference learning')
-      ! The v5 byte contract applies to every pre-COHERENT semantic encoder,
-      ! not just the historical default.  Reading the raw header prevents a
-      ! future broad writer-version bump from defeating the fixed-baseline
-      ! checkpoint-byte regression harness.
+      ! v7 binds the new unbiased exact-mask sampler to every newly-trained
+      ! encoder lineage. Reading the raw header prevents a future broad writer
+      ! version change from silently weakening this continuation contract.
       call pretrain_checkpoint_save(legacy_model, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'legacy checkpoint save succeeds')
-      call assert_checkpoint_header_version(CHECKPOINT_PATH, 5_int32, 'legacy')
+      call assert_checkpoint_header_version(CHECKPOINT_PATH, 7_int32, 'legacy')
       call pretrain_checkpoint_save(positional_model, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'positional checkpoint save succeeds')
-      call assert_checkpoint_header_version(CHECKPOINT_PATH, 5_int32, 'positional')
+      call assert_checkpoint_header_version(CHECKPOINT_PATH, 7_int32, 'positional')
       call pretrain_checkpoint_save(local_only_model, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'hybrid checkpoint save succeeds')
-      call assert_checkpoint_header_version(CHECKPOINT_PATH, 5_int32, 'hybrid')
+      call assert_checkpoint_header_version(CHECKPOINT_PATH, 7_int32, 'hybrid')
       call pretrain_checkpoint_save(hierarchical_model, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'hierarchical checkpoint save succeeds')
-      call assert_checkpoint_header_version(CHECKPOINT_PATH, 5_int32, 'hierarchical')
+      call assert_checkpoint_header_version(CHECKPOINT_PATH, 7_int32, 'hierarchical')
       call pretrain_checkpoint_load(CHECKPOINT_PATH, restored, status)
       call assert_i32_equal(status, PT_OK, 'hierarchical checkpoint load succeeds')
       call assert_i32_equal(restored%context_mode, PT_CONTEXT_HIERARCHICAL, &
@@ -828,13 +879,36 @@ contains
                             'coherent model retains its context-mode identity before checkpointing')
       call pretrain_checkpoint_save(coherent_model, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'coherent checkpoint save succeeds')
-      call assert_checkpoint_header_version(CHECKPOINT_PATH, 6_int32, 'coherent')
+      call assert_checkpoint_header_version(CHECKPOINT_PATH, 7_int32, 'coherent')
       call pretrain_checkpoint_load(CHECKPOINT_PATH, restored, status)
       call assert_i32_equal(status, PT_OK, 'coherent checkpoint load succeeds')
       call assert_i32_equal(restored%context_mode, PT_CONTEXT_COHERENT, &
                             'checkpoint preserves coherent encoder semantics')
       call assert_true(all(restored%semantic_bits == coherent_model%semantic_bits), &
                        'coherent checkpoint restores semantic prototypes')
+
+      ! Exercise a synthetic historical coherent v6 lineage rather than only a
+      ! parser branch. Its continuation must keep the old mask stream while
+      ! retaining the coherent context contract.
+      coherent_model%plasticity_sampler = PT_PLASTICITY_SAMPLER_LEGACY
+      call pretrain_checkpoint_save(coherent_model, CHECKPOINT_PATH, status)
+      call assert_i32_equal(status, PT_OK, 'historical coherent checkpoint save succeeds')
+      call assert_checkpoint_header_version(CHECKPOINT_PATH, 6_int32, 'historical coherent sampler')
+      call pretrain_checkpoint_load(CHECKPOINT_PATH, restored, status)
+      call assert_i32_equal(status, PT_OK, 'historical coherent checkpoint load succeeds')
+      call assert_i32_equal(restored%context_mode, PT_CONTEXT_COHERENT, &
+                            'v6 checkpoint retains coherent context semantics')
+      call assert_i32_equal(restored%plasticity_sampler, PT_PLASTICITY_SAMPLER_LEGACY, &
+                            'v6 checkpoint restores historical sampler identity')
+      call pretrain_config_from_model(restored, resumed_config, status)
+      call assert_i32_equal(status, PT_OK, 'historical coherent resume configuration is available')
+      resumed_config%epochs = 1_int32
+      call pretrain_train_file(coherent_model, HIERARCHICAL_PATH, coherent_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'historical coherent uninterrupted epoch succeeds')
+      call pretrain_train_file(restored, HIERARCHICAL_PATH, resumed_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'historical coherent resumed epoch succeeds')
+      call assert_true(all(restored%semantic_bits == coherent_model%semantic_bits), &
+                       'v6 coherent resume retains historical selection stream')
 
       call pretrain_checkpoint_save(model_a, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'pretraining checkpoint save succeeds')
@@ -871,6 +945,36 @@ contains
       call pretrain_train_file(restored, CORPUS_PATH, resumed_config, train_metrics, status)
       call assert_i32_equal(status, PT_ERR_INCOMPATIBLE_CONFIG, &
                             'context encoder mismatch is rejected on resume')
+
+      ! A pre-v7 checkpoint must continue with its historical selection stream,
+      ! not silently switch to the new unbiased sampler and diverge after the
+      ! first resumed update. The version-selected compatibility metadata keeps
+      ! v5 as the on-disk identity of this synthetic legacy lineage.
+      call pretrain_build_vocabulary(sampler_legacy_model, CORPUS_PATH, config, vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'legacy-sampler vocabulary pass succeeds')
+      sampler_legacy_model%plasticity_sampler = PT_PLASTICITY_SAMPLER_LEGACY
+      call pretrain_train_file(sampler_legacy_model, CORPUS_PATH, config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'legacy-sampler initial epoch succeeds')
+      call pretrain_checkpoint_save(sampler_legacy_model, CHECKPOINT_PATH, status)
+      call assert_i32_equal(status, PT_OK, 'legacy-sampler checkpoint save succeeds')
+      call assert_checkpoint_header_version(CHECKPOINT_PATH, 5_int32, 'legacy sampler compatibility')
+      call pretrain_checkpoint_load(CHECKPOINT_PATH, sampler_legacy_restored, status)
+      call assert_i32_equal(status, PT_OK, 'legacy-sampler checkpoint load succeeds')
+      call assert_i32_equal(sampler_legacy_restored%plasticity_sampler, PT_PLASTICITY_SAMPLER_LEGACY, &
+                            'v5 checkpoint restores its historical sampler identity')
+      call assert_true(trim(pretrain_plasticity_sampler_name(sampler_legacy_restored%plasticity_sampler)) == &
+                       'legacy-bounded-retry', 'v5 sampler identity has an inspect-safe name')
+      call pretrain_config_from_model(sampler_legacy_restored, resumed_config, status)
+      call assert_i32_equal(status, PT_OK, 'legacy-sampler resume configuration is available')
+      resumed_config%epochs = 1_int32
+      call pretrain_train_file(sampler_legacy_model, CORPUS_PATH, config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'legacy-sampler uninterrupted second epoch succeeds')
+      call pretrain_train_file(sampler_legacy_restored, CORPUS_PATH, resumed_config, train_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'legacy-sampler resumed second epoch succeeds')
+      call assert_true(all(sampler_legacy_restored%semantic_bits == sampler_legacy_model%semantic_bits), &
+                       'v5 resume retains the historical deterministic selection stream')
+      call assert_true(all(sampler_legacy_restored%experience_count == sampler_legacy_model%experience_count), &
+                       'v5 resume retains the historical experience schedule')
 
       ! Continuous pretraining grows a fixed-capacity vocabulary transactionally
       ! at shard boundaries.  With min_frequency=1 every accepted token in a
@@ -978,6 +1082,8 @@ contains
       call pretrain_model_destroy(legacy_model)
       call pretrain_model_destroy(positional_model)
       call pretrain_model_destroy(continuation_model)
+      call pretrain_model_destroy(sampler_legacy_model)
+      call pretrain_model_destroy(sampler_legacy_restored)
       call pretrain_model_destroy(hierarchical_model)
       call pretrain_model_destroy(local_only_model)
       call pretrain_model_destroy(hierarchical_replay)
@@ -1029,7 +1135,7 @@ contains
       type(hdc_pretrain_model_t) :: model
       type(hdc_pretrain_config_t) :: training_config
       type(pretrain_metrics_t) :: vocabulary_metrics, training_metrics
-      type(dialogue_config_t) :: dialogue_config
+      type(dialogue_config_t) :: dialogue_config, nonfinite_dialogue_config
       type(dialogue_index_t) :: index, loaded_index, rejected_index
       type(dialogue_session_t) :: session, loaded_session
       type(dialogue_answer_t) :: answer
@@ -1061,6 +1167,19 @@ contains
       call assert_i32_equal(status, PT_OK, 'dialogue fixture vocabulary builds')
       call pretrain_train_file(model, CORPUS_PATH, training_config, training_metrics, status)
       call assert_i32_equal(status, PT_OK, 'dialogue fixture HDC training succeeds')
+
+      nonfinite_dialogue_config = dialogue_config_t()
+      nonfinite_dialogue_config%minimum_similarity = ieee_value(0.0_real32, ieee_quiet_nan)
+      call dialogue_index_init(rejected_index, nonfinite_dialogue_config, status)
+      call assert_i32_equal(status, DIALOGUE_ERR_INVALID_ARGUMENT, &
+                            'NaN dialogue similarity threshold is rejected fail-closed')
+      call assert_true(.not. dialogue_index_is_initialized(rejected_index), &
+                       'NaN threshold does not allocate a dialogue index')
+      nonfinite_dialogue_config = dialogue_config_t()
+      nonfinite_dialogue_config%minimum_margin = ieee_value(0.0_real32, ieee_positive_inf)
+      call dialogue_index_init(rejected_index, nonfinite_dialogue_config, status)
+      call assert_i32_equal(status, DIALOGUE_ERR_INVALID_ARGUMENT, &
+                            'infinite dialogue margin threshold is rejected fail-closed')
 
       dialogue_config = dialogue_config_t()
       dialogue_config%max_entries = 3_int32

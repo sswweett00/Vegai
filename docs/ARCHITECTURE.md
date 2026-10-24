@@ -141,17 +141,24 @@ H(A,B)   = Σ popcnt(A_word XOR B_word)
 sim(A,B) = 1 − 2H(A,B)/D
 ```
 
-`H` en fazla 16.384 olduğundan `int32` güvenlidir. `hv_hamming_zscore` bağımsız
-rastgele vektör hipotezinde `H ~ Binomial(D, 1/2)` için `(H−8192)/64` döndürür.
-Bu bir diagnostic'tir, dağılımsal garanti değildir.
+`H` en fazla 16.384 olduğundan `int32` güvenlidir. Tüm cleanup, retrieval,
+resonator ve pretraining raporları bu dönüşüm için tek
+`hv_similarity_from_distance(H)` primitive'ini kullanır; `D=2^14` olduğundan
+geçerli `H` için sonuç `real32` içinde `1/8192` adımlarıyla tam temsil edilir.
+Helper'ın girdisi `0 <= H <= D` olmalıdır. `hv_hamming_zscore` bağımsız rastgele
+vektör hipotezinde `H ~ Binomial(D, 1/2)` için `(H−8192)/64` döndürür. Bu bir
+diagnostic'tir, dağılımsal garanti değildir.
 
 ### 2.5 Exact noise test araçları
 
 `hv_inject_noise_exact(v,n,seed,...)` PRNG ile benzersiz bit konumları seçer,
 bir bitmask kurar ve XOR uygular. Sonuç için kesin olarak `H(v,noisy)=n`dir.
-Rastgele çakışmalar çok uzarsa deterministik lineer fallback ile terminasyon
-garantilidir. Yüzde wrapper'ı integral yüzdeyi en yakın bit sayısına çevirir;
-`25% × 16384 = 4096` tamdır.
+Yeni maskeler Floyd subset sampling kullanır: `n > D/2` ise daha küçük dışlanan
+küme örneklenir ve complement alınır. Bounded rejection draw modulo bias'ını
+önler; eski yüksek-oranlı ascending fallback yeni maskelerde yoktur. Yüzde
+wrapper'ı integral yüzdeyi en yakın bit sayısına çevirir; `25% × 16384 = 4096`
+tamdır. SplitMix tabanlı seçim deterministiktir ama kriptografik rastgelelik
+iddiası değildir.
 
 ## 3. Bellek düzeni ve lifecycle
 
@@ -191,8 +198,9 @@ ID hash'i bit-mixing ve linear probing kullanır. `hash_used` ayrı dizi olduğu
 slot tutar. Bu tasarım LSH'nin *candidate filter* olduğunu kabul eder:
 
 - `mem_cleanup`: global en yakın komşu; LSH yalnız distance-0 güvenli kısa yol
-  için kullanılır. Paralel minimum bulur, sonra seri ikinci geçişte en küçük
-  slot tie-break uygular.
+  için kullanılır. Tek paralel scan, `(Hamming distance, slot)` lexicographic
+  `int64` rank minimumunu indirger; böylece en küçük slot tie-break korunur ve
+  önceki seri ikinci distance scan'i gerekmez.
 - `mem_cleanup_lsh`: sadece bucket adayları; `exact_search=.false.` döner.
   Gerçek nearest neighbour garantisi yoktur.
 
@@ -201,9 +209,12 @@ seviyesinde görünür kılar.
 
 ### 3.4 Plasticity
 
-`mem_associate_hebbian` hedef prototipin yaklaşık %25 maskelenmiş bitini yeni
-context ile değiştirir. Güncellemeden sonra `mem_rebuild_lsh` çağrılır; aksi
-takdirde approximate sorgu yeni vektörün eski bucket'ına bakabilirdi.
+`mem_associate_hebbian` hedef prototipte **tam 4.096 seçili dimensionu**
+(%25 of 16.384) yeni context ile değiştirir; seçili bit zaten aynıysa görünür
+Hamming fark daha küçük olabilir. Mask hesaplaması hata verirse prototype ve
+experience counter commit edilmez. Güncellemeden sonra `mem_rebuild_lsh`
+çağrılır; aksi takdirde approximate sorgu yeni vektörün eski bucket'ına
+bakabilirdi.
 
 ## 4. Akıl yürütme katmanı
 

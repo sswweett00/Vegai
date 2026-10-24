@@ -350,7 +350,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Rich training data I/O | `tools/training_data_io.py`, `tools/training_dataset.py` | JSONL/JSON/TXT/Parquet/Arrow schema boundary, streaming/batching, exact text dedupe, split/imbalance audit ve explicit strict-HDC projection |
 | Capability curriculum | `tools/capability_curriculum.py` | operator-defined metadata paths/tag/difficulty stage policy'si, SQLite exact-dedupe + split/annotation conflict gate'i, held-out/source coverage, strict text-only projection, immutable continuous ledger ve source+policy replay verification; hardcoded task data veya capability claim'i degil |
 | Evidential Pareto Optimizer | `tools/evidential_optimizer.py` | gerçek algorithm/optimizer config ve artifact hash'lerini repeated held-out bounded metric'lerle Bonferroni-Hoeffding confidence + robust Pareto gate üzerinden seçer; neural optimizer/runtime veya universal-best claim'i değil |
-| HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, hierarchical default + CPU-only coherent cross-fold option, deterministic OpenMP / optional OpenVINO immutable-context preparation + source-ordered CPU commit, mode-selective v5/v6 checkpoint/resume |
+| HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, hierarchical default + CPU-only coherent cross-fold option, deterministic OpenMP / optional OpenVINO immutable-context preparation + source-ordered CPU commit, v7 Floyd/complement sampler checkpoint lineage with v4–v6 deterministic-resume compatibility |
 | Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect`, CPU/OpenVINO context-provider execution switch ve nearest semantic diagnostic |
 | Pretraining checkpoint quality gate | `tools/pretraining_quality_evaluation.py`, `tools/production_pretrain.py` | operator-held-out semantic-neighbour annotation/policy ile real inspect batch'i, immutable evaluator/binary/checkpoint/case/policy binding, HMAC-redacted report ve fail-closed optional production release; genel LLM/LMM quality benchmarkı değil |
 | Grounded dialogue retrieval | `src/dialogue_retrieval.f90`, `app/chat.f90` | operator TSV response index'i, strict ASCII/OOV gate, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; free-form LLM generation degil |
@@ -376,6 +376,8 @@ iddia etmiyoruz. Sıfır-kayıplı 64-byte hizalama gerekiyorsa derleyici/ABI'ye
 özel hizalı allocator uygulanmalıdır.
 
 Ayrıntılı tasarım ve invariantlar için [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
+matematiksel invariantlar, sampler/checkpoint lineage ve numerical edge-case
+sınırları için [docs/MATHEMATICAL_ASSURANCE.md](docs/MATHEMATICAL_ASSURANCE.md),
 raw-byte tokenless representation, exact Walsh contract ve semantic/physical
 sınırlar için [docs/TOKENLESS_SIGNAL_FIELD.md](docs/TOKENLESS_SIGNAL_FIELD.md),
 Resonator Network sözleşmesi için [docs/RESONATOR_NETWORK.md](docs/RESONATOR_NETWORK.md),

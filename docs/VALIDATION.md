@@ -126,8 +126,9 @@ saturate ederek ambiguity'yi doğrular.
   plane üretmesi; coherent fused/reference local-kernel eşitliği ve short-record
   `hybrid` eşitliği;
 - binary checkpoint save/load, rebuilt hash index ve payload plane round-trip;
-  raw header regression'ı ile legacy/hierarchical writer'ın v5, coherent
-  writer'ın v6 yazdığının doğrulanması;
+  raw header regression'ı ile fresh model writer'ın v7 yazdığının ve synthetic
+  v5/coherent-v6 lineage'lerinin historical exact-mask sampler identity'sini
+  koruduğunun doğrulanması;
 - kesintisiz ikinci epoch ile checkpoint'ten resume edilen ikinci epoch'un
   bit-tam eşitliği;
 - resume semantic config mismatch, strict long-token, strict non-ASCII byte ve
@@ -207,8 +208,9 @@ host için anlamlıdır.
 
 Native testler fused raw-word/permuted/pair accumulator plane bit-eşitliğini,
 fused/reference hybrid, hierarchical ve coherent replay eşitliğini,
-repeated-center serial/OpenMP context-build eşitliğini; hierarchical v5 ve
-coherent v6 checkpoint round-trip'ini denetler. `tools/compare_pretraining_modes.py`
+repeated-center serial/OpenMP context-build eşitliğini; tüm fresh context
+mode'ları için v7 checkpoint round-trip'ini ve v5 legacy sampler resume'ini
+denetler. `tools/compare_pretraining_modes.py`
 portable binary üzerinde yalnız her bir gerçek `vegai_pretrain train`
 child-process wall-clock'ını raporlar: compiler, CI setup, fixture construction,
 inspect ve harness süresi ölçüye girmez. Workflow summary; portable/native

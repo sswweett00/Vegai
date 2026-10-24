@@ -14,13 +14,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 from typing import Any
 
 from lmm_contract import canonical_json_bytes, file_identity
+from lmm_release_governor import MetricPolicy, confidence_radius
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -329,6 +332,32 @@ def advance_release(policy: Path, state: Path, observations: Path, state_output:
 
 def main() -> int:
     require(GOVERNOR.is_file(), f"missing {GOVERNOR}")
+    # The policy parser permits positive finite subnormal deltas. Validate that
+    # the time-uniform Hoeffding sequence handles that legal boundary in the
+    # log domain rather than overflowing its intermediate union-bound product.
+    extreme_metric = MetricPolicy(
+        metric_id="bounded",
+        kind="custom",
+        direction="maximize",
+        lower_bound=0.0,
+        upper_bound=1.0,
+        promotion_limit=0.0,
+        rollback_limit=1.0,
+        maximum_regression_vs_baseline=1.0,
+    )
+    extreme_policy = SimpleNamespace(
+        metrics=(extreme_metric,),
+        confidence_delta=float.fromhex("0x0.0000000000001p-1022"),
+    )
+    extreme_radius = confidence_radius(extreme_policy, extreme_metric, 1)
+    require(math.isfinite(extreme_radius) and extreme_radius > 0.0,
+            "subnormal release confidence delta keeps a finite radius")
+    ordinary_policy = SimpleNamespace(metrics=(extreme_metric,), confidence_delta=0.05)
+    ordinary_radius = confidence_radius(ordinary_policy, extreme_metric, 128)
+    ordinary_reference = math.sqrt(math.log((2.0 * 2.0 * 1.0 * 128.0 * 129.0) / 0.05) / (2.0 * 128.0))
+    require(math.isclose(ordinary_radius, ordinary_reference, rel_tol=1.0e-15, abs_tol=0.0),
+            "log-domain release confidence radius preserves the Hoeffding formula")
+
     with tempfile.TemporaryDirectory(prefix="vegai-release-governor-") as temporary_name:
         workspace = Path(temporary_name)
         portfolio, task, _ = make_portfolio_fixture(workspace)

@@ -499,8 +499,13 @@ def hoeffding_radius(metric: MetricPolicy, observations: int, candidate_count: i
     """Bonferroni-adjusted two-sided Hoeffding radius for bounded observations."""
     require(observations > 0 and candidate_count > 0 and metric_count > 0, "invalid confidence cardinality")
     intervals = candidate_count * metric_count
+    # Work in the log domain.  The algebra is identical to
+    # log((2 * intervals) / delta), but avoids intermediate overflow when a
+    # caller deliberately uses the smallest representable positive delta.
+    log_term = math.log(2.0 * float(intervals)) - math.log(delta)
+    require(math.isfinite(log_term) and log_term > 0.0, "confidence log term is invalid")
     radius = (metric.upper_bound - metric.lower_bound) * math.sqrt(
-        math.log((2.0 * intervals) / delta) / (2.0 * float(observations))
+        log_term / (2.0 * float(observations))
     )
     require(math.isfinite(radius) and radius >= 0.0, "confidence radius is not finite")
     return radius

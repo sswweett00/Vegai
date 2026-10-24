@@ -295,9 +295,9 @@ contains
       integer(int32), intent(out) :: next_slots(:), best_slots(:)
       integer(int32), intent(out) :: best_distance, iterations, status
       logical, intent(out) :: exact
-      type(hv_t) :: residual, composite, candidate
+      type(hv_t) :: residual, composite, current_factor, selected_factor
       type(cleanup_result_t) :: cleanup
-      integer(int32) :: factor, other, cleanup_status, distance, iteration
+      integer(int32) :: factor, cleanup_status, distance, iteration
       logical :: changed
 
       status = RN_OK
@@ -315,14 +315,13 @@ contains
          iterations = iteration
          changed = .false.
          if (config%synchronous_updates) then
+            ! Let P be the current XOR product of all factor estimates.  Since
+            ! XOR is self-inverse, T XOR P XOR F_i equals T XOR product(F_j,
+            ! j /= i).  Reusing P removes an O(N) recomposition from every
+            ! slot update without changing the discrete Resonator equation.
             do factor = 1, size(codebooks, kind=int32)
-               residual = target_hv
-               do other = 1, size(codebooks, kind=int32)
-                  if (other /= factor) then
-                     candidate%bits = codebooks(other)%vector_bits(:, current_slots(other))
-                     residual = hv_bind(residual, candidate)
-                  end if
-               end do
+               current_factor%bits = codebooks(factor)%vector_bits(:, current_slots(factor))
+               residual = hv_bind(hv_bind(target_hv, composite), current_factor)
                call mem_cleanup(codebooks(factor), residual, cleanup, cleanup_status)
                if (cleanup_status /= MEM_OK) then
                   status = RN_ERR_MEMORY
@@ -331,28 +330,32 @@ contains
                next_slots(factor) = cleanup%slot
                if (next_slots(factor) /= current_slots(factor)) changed = .true.
             end do
-            current_slots = next_slots
+            if (changed) then
+               current_slots = next_slots
+               call compose_slots(codebooks, current_slots, composite)
+            end if
          else
+            ! Gauss-Seidel updates see prior changes immediately.  Maintain P
+            ! with old/new factor cancellation so the residual remains exactly
+            ! equivalent to recomposing the current slot tuple each step.
             do factor = 1, size(codebooks, kind=int32)
-               residual = target_hv
-               do other = 1, size(codebooks, kind=int32)
-                  if (other /= factor) then
-                     candidate%bits = codebooks(other)%vector_bits(:, current_slots(other))
-                     residual = hv_bind(residual, candidate)
-                  end if
-               end do
+               current_factor%bits = codebooks(factor)%vector_bits(:, current_slots(factor))
+               residual = hv_bind(hv_bind(target_hv, composite), current_factor)
                call mem_cleanup(codebooks(factor), residual, cleanup, cleanup_status)
                if (cleanup_status /= MEM_OK) then
                   status = RN_ERR_MEMORY
                   return
                end if
-               if (cleanup%slot /= current_slots(factor)) changed = .true.
-               current_slots(factor) = cleanup%slot
+               if (cleanup%slot /= current_slots(factor)) then
+                  selected_factor%bits = codebooks(factor)%vector_bits(:, cleanup%slot)
+                  composite = hv_bind(hv_bind(composite, current_factor), selected_factor)
+                  current_slots(factor) = cleanup%slot
+                  changed = .true.
+               end if
             end do
             next_slots = current_slots
          end if
 
-         call compose_slots(codebooks, current_slots, composite)
          distance = hv_hamming(target_hv, composite)
          if (distance < best_distance) then
             best_distance = distance
@@ -394,8 +397,7 @@ contains
          result%factors(factor)%bits = codebooks(factor)%vector_bits(:, slots(factor))
       end do
       result%hamming_distance = distance
-      result%similarity = 1.0_real32 - 2.0_real32 * real(distance, real32) &
-                          / real(HV_BITS, real32)
+      result%similarity = hv_similarity_from_distance(distance)
    end subroutine populate_result
 
    ! Computes a non-cryptographic 64-bit fingerprint for the bounded exact

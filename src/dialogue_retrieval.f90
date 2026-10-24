@@ -11,8 +11,9 @@
 !==============================================================================
 module dialogue_retrieval
    use, intrinsic :: iso_fortran_env, only: int16, int32, int64, real32, iostat_end
+   use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
    use hyper_types, only: HV_BITS, HV_WORDS, HV_OK, hv_t, hv_acc_t, hv_zero, hv_acc_reset, &
-                          hv_acc_add, hv_acc_finalize, hv_equal, hv_hamming
+                          hv_acc_add, hv_acc_finalize, hv_equal, hv_hamming, hv_similarity_from_distance
    use text_tokenizer, only: TOKEN_LEN, MAX_LINE_CHARS, MAX_TOKENS_PER_LINE, tokenize_ascii_line
    use hdc_pretraining, only: PT_OK, PT_ERR_NOT_FOUND, hdc_pretrain_model_t, pretrain_model_is_ready, &
                                pretrain_lookup_token, pretrain_get_semantic_hv
@@ -167,6 +168,17 @@ contains
          status = DIALOGUE_ERR_INVALID_ARGUMENT
          return
       end if
+      ! Ordered comparisons alone accept IEEE NaN because every NaN comparison
+      ! is false.  Reject non-finite thresholds before they can silently turn a
+      ! similarity or ambiguity gate into an always-pass policy.
+      if (.not. ieee_is_finite(config%minimum_similarity) .or. &
+          .not. ieee_is_finite(config%minimum_margin)) then
+         status = DIALOGUE_ERR_INVALID_ARGUMENT
+         return
+      end if
+      ! Do this in a second IF. Fortran does not guarantee short-circuit
+      ! evaluation of .or.; comparing a NaN here could otherwise defeat the
+      ! fail-closed check under an invalid-operation floating-point trap.
       if (config%minimum_similarity < -1.0_real32 .or. config%minimum_similarity > 1.0_real32 .or. &
           config%minimum_margin < 0.0_real32 .or. config%minimum_margin > 2.0_real32) then
          status = DIALOGUE_ERR_INVALID_ARGUMENT
@@ -619,10 +631,9 @@ contains
       end do
       if (best_entry == 0_int32) return
       answer%entry = best_entry
-      answer%similarity = 1.0_real32 - 2.0_real32 * real(best_distance, real32) / real(HV_BITS, real32)
+      answer%similarity = hv_similarity_from_distance(best_distance)
       if (runner_up_distance <= HV_BITS) then
-         answer%runner_up_similarity = 1.0_real32 - 2.0_real32 * real(runner_up_distance, real32) / &
-                                       real(HV_BITS, real32)
+         answer%runner_up_similarity = hv_similarity_from_distance(runner_up_distance)
          answer%margin = answer%similarity - answer%runner_up_similarity
       else
          answer%runner_up_similarity = -1.0_real32

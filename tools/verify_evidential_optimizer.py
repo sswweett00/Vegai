@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -21,6 +22,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "tools" / "evidential_optimizer.py"
+sys.path.insert(0, str(ROOT / "tools"))
+from evidential_optimizer import MetricPolicy, hoeffding_radius
 
 
 def require(condition: bool, message: str) -> None:
@@ -173,6 +176,26 @@ def command(policy_path: Path, candidates_path: Path, observations_path: Path, o
 
 def main() -> int:
     try:
+        # A valid subnormal confidence budget used to overflow the intermediate
+        # ratio before log() was applied. The log-domain formulation must retain
+        # a finite conservative radius rather than rejecting valid policy input.
+        extreme_metric = MetricPolicy(
+            metric_id="bounded",
+            direction="maximize",
+            lower_bound=0.0,
+            upper_bound=1.0,
+            acceptance_limit=0.0,
+            minimum_improvement_vs_baseline=0.0,
+            dominance_margin=0.0,
+        )
+        extreme_radius = hoeffding_radius(extreme_metric, 1, 128, 16, float.fromhex("0x0.0000000000001p-1022"))
+        require(math.isfinite(extreme_radius) and extreme_radius > 0.0,
+                "subnormal optimizer confidence delta keeps a finite radius")
+        ordinary_radius = hoeffding_radius(extreme_metric, 128, 2, 1, 0.05)
+        ordinary_reference = math.sqrt(math.log((2.0 * 2.0 * 1.0) / 0.05) / (2.0 * 128.0))
+        require(math.isclose(ordinary_radius, ordinary_reference, rel_tol=1.0e-15, abs_tol=0.0),
+                "log-domain optimizer confidence radius preserves the Hoeffding formula")
+
         with tempfile.TemporaryDirectory(prefix="vegai-evidential-optimizer-") as temporary_name:
             workspace = Path(temporary_name)
             policy_path = workspace / "policy.json"

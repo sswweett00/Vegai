@@ -65,9 +65,16 @@ ambiguity içerir.
 Bir restart state'i her slot için bir codebook index'i tutar. Iterasyon `t` için:
 
 ```text
-R_i(t) = T XOR (XOR over j != i of F_j(t))
+P(t)   = F₁(t) XOR F₂(t) XOR ... XOR Fₙ(t)
+R_i(t) = T XOR P(t) XOR F_i(t) = T XOR (XOR over j != i of F_j(t))
 F_i(t+1) = argmin_{c in Codebook_i} Hamming(c, R_i(t))
 ```
+
+İkinci eşitlik XOR'un self-inverse olmasından gelir. Uygulama `P(t)`yi bir kez
+tutar: synchronous turda yalnız state değişirse yeniden compose eder; asynchronous
+(Gauss–Seidel) turda ise `P ← P XOR old_F_i XOR new_F_i` ile günceller. Bu
+hesaplama eski residual denklemiyle semantik olarak aynıdır, fakat her factor
+update'inde diğer bütün factor'ları tekrar bind etmez.
 
 `mem_cleanup` full exact nearest-neighbour olduğundan her slot update'i kendi
 codebook'u için deterministiktir. Eşit Hamming mesafesinde en düşük kayıt slotu
@@ -173,9 +180,11 @@ Negatif olmayan `RN_OK` ve `RN_WARN_AMBIGUOUS` kullanılabilir sonuçlardır.
 
 `m_i` factor `i`nin candidate sayısı, `N` factor sayısı, `D=16384` olsun.
 
-- Bir synchronous resonator turu yaklaşık
-  `O(N² × D/64 + Σ_i m_i × D/64)` bit işlemi/cleanup çalışmasıdır.
-  Pratikte `mem_cleanup` exact scan yaptığı için ikinci terim baskındır.
+- Tutulan composite ile synchronous veya asynchronous bir resonator turu
+  yaklaşık `O(N × D/64 + Σ_i m_i × D/64)` bit işlemi/cleanup çalışmasıdır.
+  Eski her-factor yeniden-compose yolu `O(N² × D/64)` ek bind maliyeti
+  taşıyordu. Exact `mem_cleanup` scan'i büyük codebook'larda hâlâ ikinci terimi
+  baskın yapar; bu değişiklik certificate veya cleanup semantiğini değiştirmez.
 - En çok `restarts × max_iterations` tur çalışır.
 - Verifier sağ yarı için `R` tuple tutar: yaklaşık
   `O(R × (8 + 4 + 4×N_right))` byte index workspace; full 2 KiB product
@@ -195,7 +204,10 @@ Native `test/test_all.f90` aşağıdakileri kapsar:
 2. returned factor'ların tekrar bind edilip target'a bit-bit eşitliği;
 3. invalid exact-limit ve uninitialized codebook hata yolları;
 4. aynı vectorün bir slotta iki farklı ID ile kaydedildiği ambiguity;
-5. result workspace lifecycle.
+5. result workspace lifecycle;
+6. retained-composite residual identity'nin hem synchronous hem async yolu;
+   returned factor'lar target'a yeniden bind edilerek bağımsız bit oracle ile
+   kontrol edilir.
 
 `app/main.f90` da üç farklı semantic codebook üzerinden 3-factor demo
 çalıştırır. CI, Fortran 2023 strict mode, runtime checks, OpenMP ve executable

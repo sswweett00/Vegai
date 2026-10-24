@@ -56,7 +56,7 @@ module hyper_types
 
    public :: hv_zero, hv_from_seed, hv_seed_from_id
    public :: hv_bind, hv_bundle3, hv_permute
-   public :: hv_hamming, hv_similarity, hv_hamming_zscore, hv_equal
+   public :: hv_hamming, hv_similarity, hv_similarity_from_distance, hv_hamming_zscore, hv_equal
    public :: hv_acc_reset, hv_acc_add, hv_acc_finalize
    public :: hv_bitacc_reset, hv_bitacc_add, hv_bitacc_add_words
    public :: hv_bitacc_add_permuted_words, hv_bitacc_add_permuted_pair_words, hv_bitacc_finalize
@@ -258,13 +258,23 @@ contains
       end do
    end function hv_hamming
 
+   ! Maps a valid Hamming distance to the bipolar dot-product normalization.
+   ! HV_BITS is 2**14, so every in-range result k / 8192 is represented exactly
+   ! in binary real32.  Keeping this mapping in one primitive prevents subtle
+   ! divergence between cleanup, dialogue, resonator, and pretraining reports.
+   pure function hv_similarity_from_distance(distance) result(similarity)
+      integer(int32), intent(in) :: distance
+      real(real32) :: similarity
+
+      similarity = 1.0_real32 - 2.0_real32 * real(distance, real32) / real(HV_BITS, real32)
+   end function hv_similarity_from_distance
+
    ! Maps Hamming distance to the bipolar dot-product normalization [-1, +1].
    pure function hv_similarity(a, b) result(similarity)
       type(hv_t), intent(in) :: a, b
       real(real32) :: similarity
 
-      similarity = 1.0_real32 - 2.0_real32 * real(hv_hamming(a, b), real32) &
-                   / real(HV_BITS, real32)
+      similarity = hv_similarity_from_distance(hv_hamming(a, b))
    end function hv_similarity
 
    ! Number of standard deviations from the expected D/2 distance of two
@@ -639,14 +649,18 @@ contains
    ! this routine replaces an exact percentage of dimensions, which makes a
    ! learning-rate schedule reproducible and independently auditable.
    pure subroutine hv_hebbian_update_percent(prototype, new_state, plasticity_percent, &
-                                             plasticity_seed, updated, status)
+                                             plasticity_seed, updated, status, legacy_selection_mask)
       type(hv_t), intent(in) :: prototype, new_state
       integer(int32), intent(in) :: plasticity_percent
       integer(int64), intent(in) :: plasticity_seed
       type(hv_t), intent(out) :: updated
       integer(int32), intent(out) :: status
+      ! Compatibility-only switch for pre-v7 pretraining checkpoints. New
+      ! callers must omit it and receive the unbiased Floyd/complement sampler.
+      logical, intent(in), optional :: legacy_selection_mask
       type(hv_t) :: plastic_mask
       integer(int32) :: flip_count, word
+      logical :: use_legacy_selection_mask
 
       updated = prototype
       status = HV_OK
@@ -655,7 +669,13 @@ contains
          return
       end if
       flip_count = (HV_BITS * plasticity_percent + 50_int32) / 100_int32
-      call hv_exact_selection_mask(flip_count, plasticity_seed, plastic_mask, status)
+      use_legacy_selection_mask = .false.
+      if (present(legacy_selection_mask)) use_legacy_selection_mask = legacy_selection_mask
+      if (use_legacy_selection_mask) then
+         call hv_exact_selection_mask_legacy(flip_count, plasticity_seed, plastic_mask, status)
+      else
+         call hv_exact_selection_mask(flip_count, plasticity_seed, plastic_mask, status)
+      end if
       if (status /= HV_OK) return
 
       !$omp simd
@@ -665,9 +685,86 @@ contains
       end do
    end subroutine hv_hebbian_update_percent
 
-   ! Produces an exact-cardinality binary mask without heap allocation.  It is
-   ! shared by deterministic plasticity and may be reused by future test tools.
+   ! Draws a uniformly bounded position from the low 31 bits of one SplitMix
+   ! word.  Rejection removes modulo bias for every bound up to HV_BITS while
+   ! retaining only signed-int64-safe arithmetic.  SplitMix's deterministic
+   ! stream makes this reproducible for a fixed selection seed.
+   pure subroutine hv_uniform_position(state, inclusive_upper, position)
+      integer(int64), intent(inout) :: state
+      integer(int32), intent(in) :: inclusive_upper
+      integer(int32), intent(out) :: position
+      integer(int64), parameter :: RANDOM31_DOMAIN = 2147483648_int64
+      integer(int64) :: random_word, draw, range, accepted_range
+
+      range = int(inclusive_upper, int64) + 1_int64
+      accepted_range = (RANDOM31_DOMAIN / range) * range
+      do
+         call splitmix64_next(state, random_word)
+         draw = ibits(random_word, 0, 31)
+         if (draw < accepted_range) exit
+      end do
+      position = int(modulo(draw, range), int32)
+   end subroutine hv_uniform_position
+
+   ! Produces an exact-cardinality binary mask without heap allocation.  Floyd
+   ! sampling chooses an unbiased subset of the smaller side of the requested
+   ! set; for rates above 50 percent it samples the excluded complement and
+   ! flips that mask.  This avoids the old high-rate coupon-collector fallback,
+   ! whose deterministic low-bit fill skewed masks toward early dimensions.
    pure subroutine hv_exact_selection_mask(selected_bits, selection_seed, mask, status)
+      integer(int32), intent(in) :: selected_bits
+      integer(int64), intent(in) :: selection_seed
+      type(hv_t), intent(out) :: mask
+      integer(int32), intent(out) :: status
+      type(hv_t) :: working_mask
+      integer(int64) :: state
+      integer(int32) :: draw_count, position, drawn_position, selected_position, word, bit
+      logical :: select_complement
+
+      mask = hv_zero()
+      status = HV_OK
+      if (selected_bits < 0_int32 .or. selected_bits > HV_BITS) then
+         status = HV_ERR_INVALID_ARGUMENT
+         return
+      end if
+
+      select_complement = selected_bits > HV_BITS / 2_int32
+      if (select_complement) then
+         draw_count = HV_BITS - selected_bits
+      else
+         draw_count = selected_bits
+      end if
+      if (draw_count == 0_int32) then
+         if (select_complement) mask%bits = not(0_int64)
+         return
+      end if
+
+      working_mask = hv_zero()
+      state = selection_seed
+      do position = HV_BITS - draw_count, HV_BITS - 1_int32
+         call hv_uniform_position(state, position, drawn_position)
+         selected_position = drawn_position
+         word = ishft(selected_position, -6) + 1_int32
+         bit = iand(selected_position, WORD_BITS - 1_int32)
+         if (btest(working_mask%bits(word), bit)) selected_position = position
+         word = ishft(selected_position, -6) + 1_int32
+         bit = iand(selected_position, WORD_BITS - 1_int32)
+         working_mask%bits(word) = ibset(working_mask%bits(word), bit)
+      end do
+
+      if (select_complement) then
+         mask%bits = not(working_mask%bits)
+      else
+         mask = working_mask
+      end if
+   end subroutine hv_exact_selection_mask
+
+   ! Reproduces the v4-v6 selection stream solely for checkpoint continuation.
+   ! Do not use this for new work: at high densities its bounded retry fallback
+   ! completes the subset in ascending position order and therefore is not an
+   ! unbiased sample. Keeping it private confines that historical contract to
+   ! the explicit compatibility path in hdc_pretraining.
+   pure subroutine hv_exact_selection_mask_legacy(selected_bits, selection_seed, mask, status)
       integer(int32), intent(in) :: selected_bits
       integer(int64), intent(in) :: selection_seed
       type(hv_t), intent(out) :: mask
@@ -688,9 +785,6 @@ contains
       attempts = 0_int32
       do while (selected < selected_bits)
          call splitmix64_next(state, random_word)
-         ! HV_BITS and WORD_BITS are powers of two.  Selecting the low 14 bits
-         ! is exactly the former nonnegative modulo-16,384 result, while
-         ! avoiding a signed modulo/divide in every exact-mask draw.
          position = int(iand(random_word, int(HV_BITS - 1_int32, int64)), int32)
          word = ishft(position, -6) + 1_int32
          bit = iand(position, WORD_BITS - 1_int32)
@@ -713,7 +807,7 @@ contains
             exit
          end if
       end do
-   end subroutine hv_exact_selection_mask
+   end subroutine hv_exact_selection_mask_legacy
 
    !---------------------------------------------------------------------------
    ! Exact deterministic noise injection for resilience tests

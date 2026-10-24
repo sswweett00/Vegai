@@ -117,7 +117,10 @@ allowlist'i `legacy`, `positional`, `hybrid`, `hierarchical` ve `coherent`
 değerlerini kabul eder; hierarchical mode yalnız ≥12 active-token içeren shard
 kayıtlarında bounded whole-record signal ekler. CPU-only `coherent`, aynı
 uzun-record eşiğinde full-record anchor ile opposite-parity fold evidence'i
-kullanır; checkpointleri v6 olduğundan policy/mode sonradan değiştirilemez.
+kullanır. Yeni continual run'lar v7 checkpoint üretir; v7 exact-mask sampler
+lineage'ini bağlar ve policy/mode sonradan değiştirilemez. Historical v6
+coherent checkpoint'ler okunur, ancak historical sampler lineage'iyle devam
+eder; bir generation zincirinde checkpoint lineage'ini karıştırmayın.
 Sıradan restart için aynı üç temel argüman
 yeterlidir:
 

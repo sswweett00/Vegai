@@ -70,14 +70,17 @@ module hdc_pretraining
    integer(int32), parameter :: OPENVINO_POLL_MILLISECONDS = 1_int32
 
    character(len=8), parameter :: CHECKPOINT_MAGIC = 'VGHDC001'
-   ! Version 6 reserves an explicit checkpoint contract for the COHERENT
-   ! context-mode semantics. The wire layout is otherwise stable; v4/v5
-   ! checkpoints remain readable. Existing encoder modes continue to write v5
-   ! so execution-only refactors retain byte-equality with their pre-COHERENT
-   ! checkpoints.
-   integer(int32), parameter :: CHECKPOINT_VERSION = 6_int32
+   ! v7 binds the unbiased Floyd/complement exact-mask sampler to a checkpoint
+   ! lineage. v4-v6 remain readable and explicitly retain their historical
+   ! bounded-retry sampler on resume, so an old checkpoint never silently
+   ! changes its future deterministic trajectory. The wire layout is stable;
+   ! the version is an algorithm/continuation contract as well as a parser key.
+   integer(int32), parameter :: CHECKPOINT_VERSION = 7_int32
    integer(int32), parameter :: CHECKPOINT_PRE_COHERENT_VERSION = 5_int32
+   integer(int32), parameter :: CHECKPOINT_COHERENT_LEGACY_VERSION = 6_int32
    integer(int32), parameter :: CHECKPOINT_MIN_VERSION = 4_int32
+   integer(int32), parameter, public :: PT_PLASTICITY_SAMPLER_LEGACY = 1_int32
+   integer(int32), parameter, public :: PT_PLASTICITY_SAMPLER_FLOYD_COMPLEMENT = 2_int32
 
    type, public :: hdc_pretrain_config_t
       integer(int32) :: max_vocabulary = 20000_int32
@@ -192,6 +195,9 @@ module hdc_pretraining
       integer(int32) :: initial_plasticity_percent = 0_int32
       integer(int32) :: minimum_plasticity_percent = 0_int32
       integer(int32) :: plasticity_decay_events = 0_int32
+      ! Kept outside the historical wire layout; the checkpoint format version
+      ! selects it on load and is selected from it on save.
+      integer(int32) :: plasticity_sampler = PT_PLASTICITY_SAMPLER_FLOYD_COMPLEMENT
       integer(int64) :: tie_seed = 0_int64
       integer(int64) :: training_epochs_completed = 0_int64
       type(pretrain_metrics_t) :: totals
@@ -207,6 +213,7 @@ module hdc_pretraining
    public :: pretrain_checkpoint_save, pretrain_checkpoint_load
    public :: pretrain_lookup_token, pretrain_get_semantic_hv, pretrain_nearest_semantic
    public :: pretrain_config_from_model, pretrain_context_mode_name, pretrain_context_provider_name
+   public :: pretrain_plasticity_sampler_name
    public :: pretrain_execution_report_reset
 
 contains
@@ -217,7 +224,9 @@ contains
 
       ready = model%ready .and. vocab_is_initialized(model%vocabulary) .and. &
               allocated(model%base_bits) .and. allocated(model%semantic_bits) .and. &
-              allocated(model%experience_count)
+              allocated(model%experience_count) .and. &
+              (model%plasticity_sampler == PT_PLASTICITY_SAMPLER_LEGACY .or. &
+               model%plasticity_sampler == PT_PLASTICITY_SAMPLER_FLOYD_COMPLEMENT)
    end function pretrain_model_is_ready
 
    pure function pretrain_context_mode_name(context_mode) result(name)
@@ -239,6 +248,22 @@ contains
          name = 'invalid'
       end select
    end function pretrain_context_mode_name
+
+   ! Human-readable continuation identity for inspect/report surfaces. This is
+   ! selected by checkpoint version, not a user-tunable training option.
+   pure function pretrain_plasticity_sampler_name(plasticity_sampler) result(name)
+      integer(int32), intent(in) :: plasticity_sampler
+      character(len=24) :: name
+
+      select case (plasticity_sampler)
+      case (PT_PLASTICITY_SAMPLER_LEGACY)
+         name = 'legacy-bounded-retry'
+      case (PT_PLASTICITY_SAMPLER_FLOYD_COMPLEMENT)
+         name = 'floyd-complement'
+      case default
+         name = 'invalid'
+      end select
+   end function pretrain_plasticity_sampler_name
 
    pure function pretrain_context_provider_name(context_provider) result(name)
       integer(int32), intent(in) :: context_provider
@@ -301,6 +326,7 @@ contains
       model%initial_plasticity_percent = 0_int32
       model%minimum_plasticity_percent = 0_int32
       model%plasticity_decay_events = 0_int32
+      model%plasticity_sampler = PT_PLASTICITY_SAMPLER_FLOYD_COMPLEMENT
       model%tie_seed = 0_int64
       model%training_epochs_completed = 0_int64
       call pretrain_metrics_reset(model%totals)
@@ -643,6 +669,7 @@ contains
       model%initial_plasticity_percent = config%initial_plasticity_percent
       model%minimum_plasticity_percent = config%minimum_plasticity_percent
       model%plasticity_decay_events = config%plasticity_decay_events
+      model%plasticity_sampler = PT_PLASTICITY_SAMPLER_FLOYD_COMPLEMENT
       model%tie_seed = config%tie_seed
       model%ready = .true.
    end subroutine pretrain_build_vocabulary
@@ -1903,7 +1930,14 @@ contains
       prototype%bits = model%semantic_bits(:, center_slot)
       tie_seed = ieor(vocab_seed_for_slot(model%vocabulary, center_slot), ishftc(experience_before, 19))
       plasticity_percent = scheduled_plasticity_percent(model, experience_before)
-      call hv_hebbian_update_percent(prototype, context, plasticity_percent, tie_seed, updated, update_status)
+      if (model%plasticity_sampler /= PT_PLASTICITY_SAMPLER_LEGACY .and. &
+          model%plasticity_sampler /= PT_PLASTICITY_SAMPLER_FLOYD_COMPLEMENT) then
+         status = PT_ERR_HYPERVECTOR
+         return
+      end if
+      call hv_hebbian_update_percent(prototype, context, plasticity_percent, tie_seed, updated, update_status, &
+                                     legacy_selection_mask = &
+                                     model%plasticity_sampler == PT_PLASTICITY_SAMPLER_LEGACY)
       if (update_status /= HV_OK) then
          status = PT_ERR_HYPERVECTOR
          return
@@ -2283,8 +2317,7 @@ contains
          return
       end if
       best_token = model%vocabulary%tokens(best_slot)
-      best_similarity = 1.0_real32 - 2.0_real32 * real(best_distance, real32) &
-                        / real(HV_BITS, real32)
+      best_similarity = hv_similarity_from_distance(best_distance)
    end subroutine pretrain_nearest_semantic
 
    subroutine pretrain_config_from_model(model, config, status)
@@ -2394,9 +2427,19 @@ contains
 
       ! Keep the result name distinct from CHECKPOINT_VERSION: Fortran names
       ! are case-insensitive, so a same-spelling result would shadow the module
-      ! constant and silently retain the legacy value.
-      format_version = CHECKPOINT_PRE_COHERENT_VERSION
-      if (model%context_mode == PT_CONTEXT_COHERENT) format_version = CHECKPOINT_VERSION
+      ! constant. A v7 model is the new unbiased sampler lineage. A loaded
+      ! v4-v6 model writes its legacy version so future resumes continue with
+      ! its original deterministic selection stream.
+      format_version = 0_int32
+      select case (model%plasticity_sampler)
+      case (PT_PLASTICITY_SAMPLER_FLOYD_COMPLEMENT)
+         format_version = CHECKPOINT_VERSION
+      case (PT_PLASTICITY_SAMPLER_LEGACY)
+         format_version = CHECKPOINT_PRE_COHERENT_VERSION
+         if (model%context_mode == PT_CONTEXT_COHERENT) then
+            format_version = CHECKPOINT_COHERENT_LEGACY_VERSION
+         end if
+      end select
    end function pretrain_checkpoint_write_version
 
    subroutine pretrain_checkpoint_save(model, checkpoint_path, status)
@@ -2485,6 +2528,11 @@ contains
          status = PT_ERR_CHECKPOINT
          return
       end if
+      if (version == CHECKPOINT_VERSION) then
+         model%plasticity_sampler = PT_PLASTICITY_SAMPLER_FLOYD_COMPLEMENT
+      else
+         model%plasticity_sampler = PT_PLASTICITY_SAMPLER_LEGACY
+      end if
       read(unit, iostat=io_status) capacity, count, stored_active_count, min_frequency
       if (io_status /= 0) then
          close(unit)
@@ -2535,7 +2583,8 @@ contains
       checkpoint_config%minimum_plasticity_percent = model%minimum_plasticity_percent
       checkpoint_config%plasticity_decay_events = model%plasticity_decay_events
       checkpoint_config%tie_seed = model%tie_seed
-      if (model%context_mode == PT_CONTEXT_COHERENT .and. version < CHECKPOINT_VERSION) then
+      if (model%context_mode == PT_CONTEXT_COHERENT .and. &
+          version < CHECKPOINT_COHERENT_LEGACY_VERSION) then
          close(unit)
          status = PT_ERR_CHECKPOINT
          call pretrain_model_destroy(model)
