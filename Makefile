@@ -30,7 +30,9 @@ LMM_PYTHON ?= $(LMM_VENV)/bin/python
 
 SOURCES := src/hyper_types.f90 src/tokenless_field.f90 src/text_tokenizer.f90 src/vocabulary.f90 \
            src/symbolic_memory.f90 src/resonator_network.f90 src/reasoning_core.f90 \
-           src/hdc_pretraining.f90 src/dialogue_retrieval.f90 src/fortran_control.f90
+           src/hdc_pretraining.f90 src/dialogue_retrieval.f90 src/fortran_integrity.f90 \
+           src/fortran_quality_gate.f90 \
+           src/fortran_control.f90
 APP := app/main.f90
 PRETRAIN_APP := app/pretrain.f90
 FIELD_APP := app/field.f90
@@ -98,6 +100,7 @@ fortran-check: $(TEST_BINARY) $(CONTROL)
 	$(CONTROL) profile --format json
 	OMP_NUM_THREADS=$${OMP_NUM_THREADS:-2} $(CONTROL) smoke examples/corpus/toy_hdc_corpus.txt \
 	  "$(BUILD_DIR)/fortran-control-smoke.vgai"
+	$(CONTROL) attest examples/corpus/toy_hdc_corpus.txt "$(BUILD_DIR)/fortran-control-smoke.vgai" --format json
 
 # Same-host binary launch/train/inspect smoke contract. CMake is the preferred
 # cross-platform entry point; this GNU Make convenience target mirrors it on

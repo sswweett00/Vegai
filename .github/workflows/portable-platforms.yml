@@ -61,7 +61,7 @@ jobs:
           cmake --preset portable-serial -DVEGAI_BUILD_TESTS=OFF
           cmake --build --preset portable-serial --parallel
 
-      - name: Run native Fortran control/profile/resource/checkpoint contract
+      - name: Run native Fortran control/profile/resource/checkpoint/attestation contract
         run: |
           ./build/portable-serial/vegai_control profile --format json
           ./build/portable-serial/vegai_control resource-plan examples/corpus/toy_hdc_corpus.txt \
@@ -69,6 +69,8 @@ jobs:
             --available-memory-bytes 8589934592 --available-storage-bytes 8589934592 --require-ready
           ./build/portable-serial/vegai_control smoke examples/corpus/toy_hdc_corpus.txt \
             build/portable-serial/fortran-control-smoke.vgai
+          ./build/portable-serial/vegai_control attest examples/corpus/toy_hdc_corpus.txt \
+            build/portable-serial/fortran-control-smoke.vgai --format json
 
       - name: Run same-host portable engine/train/inspect contract
         run: |
@@ -107,7 +109,7 @@ jobs:
           cmake --preset portable-serial -DVEGAI_BUILD_TESTS=OFF -DCMAKE_Fortran_COMPILER="$FC"
           cmake --build --preset portable-serial --parallel
 
-      - name: Run native Fortran control/profile/resource/checkpoint contract
+      - name: Run native Fortran control/profile/resource/checkpoint/attestation contract
         shell: bash
         run: |
           ./build/portable-serial/vegai_control profile --format json
@@ -116,6 +118,8 @@ jobs:
             --available-memory-bytes 8589934592 --available-storage-bytes 8589934592 --require-ready
           ./build/portable-serial/vegai_control smoke examples/corpus/toy_hdc_corpus.txt \
             build/portable-serial/fortran-control-smoke.vgai
+          ./build/portable-serial/vegai_control attest examples/corpus/toy_hdc_corpus.txt \
+            build/portable-serial/fortran-control-smoke.vgai --format json
 
       - name: Run same-host portable engine/train/inspect contract
         shell: bash
@@ -154,7 +158,7 @@ jobs:
           cmake --preset portable-serial -DVEGAI_BUILD_TESTS=OFF
           cmake --build --preset portable-serial --parallel
 
-      - name: Run native Fortran control/profile/resource/checkpoint contract
+      - name: Run native Fortran control/profile/resource/checkpoint/attestation contract
         shell: msys2 {0}
         run: |
           set -euo pipefail
@@ -164,6 +168,8 @@ jobs:
             --available-memory-bytes 8589934592 --available-storage-bytes 8589934592 --require-ready
           ./build/portable-serial/vegai_control.exe smoke examples/corpus/toy_hdc_corpus.txt \
             build/portable-serial/fortran-control-smoke.vgai
+          ./build/portable-serial/vegai_control.exe attest examples/corpus/toy_hdc_corpus.txt \
+            build/portable-serial/fortran-control-smoke.vgai --format json
 
       - name: Run same-host portable engine/train/inspect contract
         shell: msys2 {0}

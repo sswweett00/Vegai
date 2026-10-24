@@ -19,6 +19,10 @@ module fortran_control
                               pretrain_build_vocabulary, pretrain_train_file, &
                               pretrain_checkpoint_save, pretrain_checkpoint_load, &
                               pretrain_model_destroy, pretrain_model_is_ready
+   use fortran_integrity, only: FI_OK, sha256_file
+   use fortran_quality_gate, only: QG_OK, QG_ERR_IO, quality_case_t, quality_policy_t, &
+                                   quality_report_t, quality_case_file_load, quality_gate_evaluate, &
+                                   quality_policy_is_valid
    implicit none
    private
 
@@ -27,6 +31,8 @@ module fortran_control
    integer(int32), parameter, public :: FC_ERR_IO = -901_int32
    integer(int32), parameter, public :: FC_ERR_NOT_READY = -902_int32
    integer(int32), parameter, public :: FC_ERR_TRAINING = -903_int32
+   integer(int32), parameter, public :: FC_ERR_QUALITY = -904_int32
+   integer(int32), parameter, public :: FC_ERR_ATTESTATION = -905_int32
 
    ! These estimates intentionally match the documented portable HDC model
    ! contract. They are a preflight reservation, not a claim about allocator,
@@ -123,6 +129,10 @@ contains
          call resource_plan_command(argument_count, exit_status)
       case ('smoke')
          call smoke_command(argument_count, exit_status)
+      case ('quality-gate')
+         call quality_gate_command(argument_count, exit_status)
+      case ('attest')
+         call attest_command(argument_count, exit_status)
       case ('help', '--help', '-h')
          call print_usage(output_unit)
       case default
@@ -374,6 +384,249 @@ contains
       status = FC_OK
    end subroutine smoke_command
 
+   subroutine quality_gate_command(argument_count, status)
+      integer, intent(in) :: argument_count
+      integer(int32), intent(out) :: status
+      type(hdc_pretrain_model_t) :: model
+      type(quality_case_t), allocatable :: cases(:)
+      type(quality_policy_t) :: policy
+      type(quality_report_t) :: report
+      character(len=512) :: checkpoint_path, cases_path, output_path, format, option, value
+      integer(int32) :: gate_status
+      integer :: index, io_status
+      logical :: have_minimum_cases, have_minimum_accuracy, have_minimum_wilson
+      logical :: have_minimum_mean, have_minimum_case, have_maximum_incorrect
+
+      status = FC_ERR_INVALID_ARGUMENT
+      if (argument_count < 3) then
+         write(error_unit, '(A)') 'vegai_control quality-gate: expected CHECKPOINT CASES'
+         return
+      end if
+      call get_command_argument(2, checkpoint_path)
+      call get_command_argument(3, cases_path)
+      output_path = ''
+      format = 'text'
+      policy = quality_policy_t()
+      have_minimum_cases = .false.
+      have_minimum_accuracy = .false.
+      have_minimum_wilson = .false.
+      have_minimum_mean = .false.
+      have_minimum_case = .false.
+      have_maximum_incorrect = .false.
+      status = FC_OK
+      index = 4
+      do while (index <= argument_count)
+         call get_command_argument(index, option)
+         select case (trim(option))
+         case ('--minimum-cases')
+            call option_value(argument_count, index, value, status)
+            if (status == FC_OK) then
+               read(value, *, iostat=io_status) policy%minimum_cases
+               if (io_status /= 0) status = FC_ERR_INVALID_ARGUMENT
+            end if
+            have_minimum_cases = status == FC_OK
+         case ('--minimum-top1-accuracy')
+            call option_value(argument_count, index, value, status)
+            if (status == FC_OK) then
+               read(value, *, iostat=io_status) policy%minimum_top1_accuracy
+               if (io_status /= 0) status = FC_ERR_INVALID_ARGUMENT
+            end if
+            have_minimum_accuracy = status == FC_OK
+         case ('--minimum-top1-wilson-lower-bound-95')
+            call option_value(argument_count, index, value, status)
+            if (status == FC_OK) then
+               read(value, *, iostat=io_status) policy%minimum_top1_wilson_lower_bound_95
+               if (io_status /= 0) status = FC_ERR_INVALID_ARGUMENT
+            end if
+            have_minimum_wilson = status == FC_OK
+         case ('--minimum-mean-similarity')
+            call option_value(argument_count, index, value, status)
+            if (status == FC_OK) then
+               read(value, *, iostat=io_status) policy%minimum_mean_similarity
+               if (io_status /= 0) status = FC_ERR_INVALID_ARGUMENT
+            end if
+            have_minimum_mean = status == FC_OK
+         case ('--minimum-case-similarity')
+            call option_value(argument_count, index, value, status)
+            if (status == FC_OK) then
+               read(value, *, iostat=io_status) policy%minimum_case_similarity
+               if (io_status /= 0) status = FC_ERR_INVALID_ARGUMENT
+            end if
+            have_minimum_case = status == FC_OK
+         case ('--maximum-incorrect-cases')
+            call option_value(argument_count, index, value, status)
+            if (status == FC_OK) then
+               read(value, *, iostat=io_status) policy%maximum_incorrect_cases
+               if (io_status /= 0) status = FC_ERR_INVALID_ARGUMENT
+            end if
+            have_maximum_incorrect = status == FC_OK
+         case ('--format')
+            call option_value(argument_count, index, format, status)
+         case ('--output')
+            call option_value(argument_count, index, output_path, status)
+         case default
+            write(error_unit, '(A,A)') 'vegai_control quality-gate: unsupported option: ', trim(option)
+            status = FC_ERR_INVALID_ARGUMENT
+         end select
+         if (status /= FC_OK) then
+            write(error_unit, '(A,A)') 'vegai_control quality-gate: invalid value for ', trim(option)
+            return
+         end if
+      end do
+      if (.not. have_minimum_cases .or. .not. have_minimum_accuracy .or. .not. have_minimum_wilson .or. &
+          .not. have_minimum_mean .or. .not. have_minimum_case .or. .not. have_maximum_incorrect) then
+         write(error_unit, '(A)') 'vegai_control quality-gate: every policy threshold must be explicit'
+         status = FC_ERR_INVALID_ARGUMENT
+         return
+      end if
+      if (trim(format) /= 'text' .and. trim(format) /= 'json') then
+         write(error_unit, '(A)') 'vegai_control quality-gate: --format must be text or json'
+         status = FC_ERR_INVALID_ARGUMENT
+         return
+      end if
+      if (.not. quality_policy_is_valid(policy)) then
+         write(error_unit, '(A)') 'vegai_control quality-gate: policy bounds are invalid'
+         status = FC_ERR_INVALID_ARGUMENT
+         return
+      end if
+
+      call pretrain_checkpoint_load(trim(checkpoint_path), model, gate_status)
+      if (gate_status /= PT_OK .or. .not. pretrain_model_is_ready(model)) then
+         write(error_unit, '(A,I0)') 'vegai_control quality-gate: checkpoint load failed, status=', gate_status
+         call pretrain_model_destroy(model)
+         status = FC_ERR_TRAINING
+         return
+      end if
+      call quality_case_file_load(trim(cases_path), cases, gate_status)
+      if (gate_status /= QG_OK) then
+         write(error_unit, '(A,I0)') 'vegai_control quality-gate: cases load failed, status=', gate_status
+         call pretrain_model_destroy(model)
+         if (allocated(cases)) deallocate(cases)
+         if (gate_status == QG_ERR_IO) then
+            status = FC_ERR_IO
+         else
+            status = FC_ERR_QUALITY
+         end if
+         return
+      end if
+      call quality_gate_evaluate(model, cases, policy, report, gate_status)
+      call emit_quality_report(output_unit, trim(format), trim(checkpoint_path), trim(cases_path), policy, report)
+      if (len_trim(output_path) > 0) then
+         call emit_quality_report_file(trim(output_path), trim(format), trim(checkpoint_path), trim(cases_path), &
+                                       policy, report, status)
+         if (status /= FC_OK) then
+            call pretrain_model_destroy(model)
+            deallocate(cases)
+            return
+         end if
+      end if
+      call pretrain_model_destroy(model)
+      deallocate(cases)
+      if (gate_status == QG_OK) then
+         status = FC_OK
+      else
+         write(error_unit, '(A)') 'vegai_control quality-gate: REJECTED'
+         status = FC_ERR_QUALITY
+      end if
+   end subroutine quality_gate_command
+
+   subroutine attest_command(argument_count, status)
+      integer, intent(in) :: argument_count
+      integer(int32), intent(out) :: status
+      type(hdc_pretrain_model_t) :: model
+      character(len=512) :: corpus_path, checkpoint_path, quality_report_path, output_path, format, option
+      character(len=64) :: corpus_digest, checkpoint_digest, quality_report_digest
+      integer(int64) :: corpus_bytes, checkpoint_bytes, quality_report_bytes
+      integer(int32) :: integrity_status, checkpoint_status
+      integer :: index
+
+      status = FC_ERR_INVALID_ARGUMENT
+      if (argument_count < 3) then
+         write(error_unit, '(A)') 'vegai_control attest: expected CORPUS CHECKPOINT'
+         return
+      end if
+      call get_command_argument(2, corpus_path)
+      call get_command_argument(3, checkpoint_path)
+      quality_report_path = ''
+      output_path = ''
+      format = 'text'
+      status = FC_OK
+      index = 4
+      do while (index <= argument_count)
+         call get_command_argument(index, option)
+         select case (trim(option))
+         case ('--quality-report')
+            call option_value(argument_count, index, quality_report_path, status)
+         case ('--format')
+            call option_value(argument_count, index, format, status)
+         case ('--output')
+            call option_value(argument_count, index, output_path, status)
+         case default
+            write(error_unit, '(A,A)') 'vegai_control attest: unsupported option: ', trim(option)
+            status = FC_ERR_INVALID_ARGUMENT
+         end select
+         if (status /= FC_OK) then
+            write(error_unit, '(A,A)') 'vegai_control attest: invalid value for ', trim(option)
+            return
+         end if
+      end do
+      if (trim(format) /= 'text' .and. trim(format) /= 'json') then
+         write(error_unit, '(A)') 'vegai_control attest: --format must be text or json'
+         status = FC_ERR_INVALID_ARGUMENT
+         return
+      end if
+      if (len_trim(output_path) > 0 .and. &
+          (trim(output_path) == trim(corpus_path) .or. trim(output_path) == trim(checkpoint_path) .or. &
+           trim(output_path) == trim(quality_report_path))) then
+         write(error_unit, '(A)') 'vegai_control attest: output must not overwrite an attested input'
+         status = FC_ERR_INVALID_ARGUMENT
+         return
+      end if
+
+      call sha256_file(trim(corpus_path), corpus_digest, corpus_bytes, integrity_status)
+      if (integrity_status /= FI_OK) then
+         write(error_unit, '(A,I0)') 'vegai_control attest: corpus hash failed, status=', integrity_status
+         status = FC_ERR_ATTESTATION
+         return
+      end if
+      call sha256_file(trim(checkpoint_path), checkpoint_digest, checkpoint_bytes, integrity_status)
+      if (integrity_status /= FI_OK) then
+         write(error_unit, '(A,I0)') 'vegai_control attest: checkpoint hash failed, status=', integrity_status
+         status = FC_ERR_ATTESTATION
+         return
+      end if
+      ! Bind the identity to a checkpoint that the native reader actually
+      ! accepts; a byte hash alone does not establish Vegai checkpoint validity.
+      call pretrain_checkpoint_load(trim(checkpoint_path), model, checkpoint_status)
+      if (checkpoint_status /= PT_OK .or. .not. pretrain_model_is_ready(model)) then
+         write(error_unit, '(A,I0)') 'vegai_control attest: checkpoint validation failed, status=', checkpoint_status
+         call pretrain_model_destroy(model)
+         status = FC_ERR_ATTESTATION
+         return
+      end if
+      call pretrain_model_destroy(model)
+      quality_report_digest = ''
+      quality_report_bytes = 0_int64
+      if (len_trim(quality_report_path) > 0) then
+         call sha256_file(trim(quality_report_path), quality_report_digest, quality_report_bytes, integrity_status)
+         if (integrity_status /= FI_OK) then
+            write(error_unit, '(A,I0)') 'vegai_control attest: quality report hash failed, status=', integrity_status
+            status = FC_ERR_ATTESTATION
+            return
+         end if
+      end if
+      call emit_attestation_report(output_unit, trim(format), trim(corpus_path), corpus_digest, corpus_bytes, &
+                                   trim(checkpoint_path), checkpoint_digest, checkpoint_bytes, &
+                                   trim(quality_report_path), quality_report_digest, quality_report_bytes)
+      if (len_trim(output_path) > 0) then
+         call emit_attestation_report_file(trim(output_path), trim(format), trim(corpus_path), corpus_digest, corpus_bytes, &
+                                           trim(checkpoint_path), checkpoint_digest, checkpoint_bytes, &
+                                           trim(quality_report_path), quality_report_digest, quality_report_bytes, status)
+         if (status /= FC_OK) return
+      end if
+      status = FC_OK
+   end subroutine attest_command
+
    subroutine option_value(argument_count, index, value, status)
       integer, intent(in) :: argument_count
       integer, intent(inout) :: index
@@ -522,6 +775,146 @@ contains
       status = FC_OK
    end subroutine emit_resource_plan_file
 
+   subroutine emit_quality_report(unit, format, checkpoint_path, cases_path, policy, report)
+      integer, intent(in) :: unit
+      character(len=*), intent(in) :: format, checkpoint_path, cases_path
+      type(quality_policy_t), intent(in) :: policy
+      type(quality_report_t), intent(in) :: report
+
+      if (trim(format) == 'json') then
+         write(unit, '(A)') '{'
+         write(unit, '(A)') '  "schema": "vegai-fortran-quality-gate/v1",'
+         write(unit, '(A)') '  "checkpoint_path": ' // json_quote(checkpoint_path) // ','
+         write(unit, '(A)') '  "cases_path": ' // json_quote(cases_path) // ','
+         write(unit, '(A)') '  "policy": {'
+         write(unit, '(A)') '    "minimum_cases": ' // integer32_text(policy%minimum_cases) // ','
+         write(unit, '(A)') '    "minimum_top1_accuracy": ' // real_text(policy%minimum_top1_accuracy) // ','
+         write(unit, '(A)') '    "minimum_top1_wilson_lower_bound_95": ' // &
+                              real_text(policy%minimum_top1_wilson_lower_bound_95) // ','
+         write(unit, '(A)') '    "minimum_mean_similarity": ' // real_text(policy%minimum_mean_similarity) // ','
+         write(unit, '(A)') '    "minimum_case_similarity": ' // real_text(policy%minimum_case_similarity) // ','
+         write(unit, '(A)') '    "maximum_incorrect_cases": ' // &
+                              integer32_text(policy%maximum_incorrect_cases)
+         write(unit, '(A)') '  },'
+         write(unit, '(A)') '  "result": {'
+         write(unit, '(A)') '    "declared_cases": ' // integer32_text(report%declared_cases) // ','
+         write(unit, '(A)') '    "evaluated_cases": ' // integer32_text(report%evaluated_cases) // ','
+         write(unit, '(A)') '    "correct_cases": ' // integer32_text(report%correct_cases) // ','
+         write(unit, '(A)') '    "incorrect_cases": ' // integer32_text(report%incorrect_cases) // ','
+         write(unit, '(A)') '    "unavailable_cases": ' // integer32_text(report%unavailable_cases) // ','
+         write(unit, '(A)') '    "top1_accuracy": ' // real_text(report%top1_accuracy) // ','
+         write(unit, '(A)') '    "top1_wilson_lower_bound_95": ' // &
+                              real_text(report%top1_wilson_lower_bound_95) // ','
+         write(unit, '(A)') '    "mean_similarity": ' // real_text(report%mean_similarity) // ','
+         write(unit, '(A)') '    "minimum_observed_similarity": ' // &
+                              real_text(report%minimum_observed_similarity) // ','
+         write(unit, '(A)') '    "passed": ' // logical_text(report%passed)
+         write(unit, '(A)') '  },'
+         write(unit, '(A)') '  "scope": "held-out top-1 HDC semantic-neighbour gate; not a general LMM quality claim"'
+         write(unit, '(A)') '}'
+      else
+         write(unit, '(A)') 'Vegai native Fortran quality gate'
+         write(unit, '(A,A)') 'Checkpoint: ', trim(checkpoint_path)
+         write(unit, '(A,A)') 'Cases: ', trim(cases_path)
+         write(unit, '(A,I0)') 'Declared cases: ', report%declared_cases
+         write(unit, '(A,I0)') 'Evaluated cases: ', report%evaluated_cases
+         write(unit, '(A,I0)') 'Correct cases: ', report%correct_cases
+         write(unit, '(A,I0)') 'Incorrect cases: ', report%incorrect_cases
+         write(unit, '(A,I0)') 'Unavailable cases: ', report%unavailable_cases
+         write(unit, '(A,ES14.6E3)') 'Top-1 accuracy: ', report%top1_accuracy
+         write(unit, '(A,ES14.6E3)') 'Top-1 Wilson lower bound 95%: ', report%top1_wilson_lower_bound_95
+         write(unit, '(A,ES14.6E3)') 'Mean similarity: ', report%mean_similarity
+         write(unit, '(A,ES14.6E3)') 'Minimum observed similarity: ', report%minimum_observed_similarity
+         write(unit, '(A,L1)') 'Passed: ', report%passed
+         write(unit, '(A)') 'Scope: held-out top-1 HDC semantic-neighbour gate; not a general LMM quality claim'
+      end if
+   end subroutine emit_quality_report
+
+   subroutine emit_quality_report_file(path, format, checkpoint_path, cases_path, policy, report, status)
+      character(len=*), intent(in) :: path, format, checkpoint_path, cases_path
+      type(quality_policy_t), intent(in) :: policy
+      type(quality_report_t), intent(in) :: report
+      integer(int32), intent(out) :: status
+      integer :: unit, io_status
+
+      open(newunit=unit, file=trim(path), status='replace', action='write', form='formatted', iostat=io_status)
+      if (io_status /= 0) then
+         write(error_unit, '(A,A)') 'vegai_control quality-gate: cannot write output: ', trim(path)
+         status = FC_ERR_IO
+         return
+      end if
+      call emit_quality_report(unit, format, checkpoint_path, cases_path, policy, report)
+      close(unit)
+      status = FC_OK
+   end subroutine emit_quality_report_file
+
+   subroutine emit_attestation_report(unit, format, corpus_path, corpus_digest, corpus_bytes, checkpoint_path, &
+                                      checkpoint_digest, checkpoint_bytes, quality_report_path, quality_report_digest, &
+                                      quality_report_bytes)
+      integer, intent(in) :: unit
+      character(len=*), intent(in) :: format, corpus_path, corpus_digest, checkpoint_path, checkpoint_digest
+      character(len=*), intent(in) :: quality_report_path, quality_report_digest
+      integer(int64), intent(in) :: corpus_bytes, checkpoint_bytes, quality_report_bytes
+      character(len=:), allocatable :: quality_report_rendered
+
+      if (len_trim(quality_report_path) > 0) then
+         quality_report_rendered = '{"path": ' // json_quote(quality_report_path) // ', "bytes": ' // &
+                                    integer_text(quality_report_bytes) // ', "sha256": ' // &
+                                    json_quote(quality_report_digest) // '}'
+      else
+         quality_report_rendered = 'null'
+      end if
+      if (trim(format) == 'json') then
+         write(unit, '(A)') '{'
+         write(unit, '(A)') '  "schema": "vegai-fortran-attestation/v1",'
+         write(unit, '(A)') '  "corpus": {"path": ' // json_quote(corpus_path) // ', "bytes": ' // &
+                            integer_text(corpus_bytes) // ', "sha256": ' // json_quote(corpus_digest) // '},'
+         write(unit, '(A)') '  "checkpoint": {"path": ' // json_quote(checkpoint_path) // ', "bytes": ' // &
+                            integer_text(checkpoint_bytes) // ', "sha256": ' // json_quote(checkpoint_digest) // '},'
+         write(unit, '(A)') '  "quality_report": ' // quality_report_rendered // ','
+         write(unit, '(A)') '  "checkpoint_validation": "loaded by the native Fortran checkpoint reader",'
+         write(unit, '(A)') '  "integrity_scope": "SHA-256 only; no signature, provenance, lock, or atomic publish claim"'
+         write(unit, '(A)') '}'
+      else
+         write(unit, '(A)') 'Vegai native Fortran attestation identity'
+         write(unit, '(A,A)') 'Corpus: ', trim(corpus_path)
+         write(unit, '(A,I0)') 'Corpus bytes: ', corpus_bytes
+         write(unit, '(A,A)') 'Corpus SHA-256: ', trim(corpus_digest)
+         write(unit, '(A,A)') 'Checkpoint: ', trim(checkpoint_path)
+         write(unit, '(A,I0)') 'Checkpoint bytes: ', checkpoint_bytes
+         write(unit, '(A,A)') 'Checkpoint SHA-256: ', trim(checkpoint_digest)
+         if (len_trim(quality_report_path) > 0) then
+            write(unit, '(A,A)') 'Quality report: ', trim(quality_report_path)
+            write(unit, '(A,I0)') 'Quality report bytes: ', quality_report_bytes
+            write(unit, '(A,A)') 'Quality report SHA-256: ', trim(quality_report_digest)
+         end if
+         write(unit, '(A)') 'Checkpoint validation: loaded by the native Fortran checkpoint reader'
+         write(unit, '(A)') 'Integrity scope: SHA-256 only; no signature, provenance, lock, or atomic publish claim'
+      end if
+   end subroutine emit_attestation_report
+
+   subroutine emit_attestation_report_file(path, format, corpus_path, corpus_digest, corpus_bytes, checkpoint_path, &
+                                           checkpoint_digest, checkpoint_bytes, quality_report_path, quality_report_digest, &
+                                           quality_report_bytes, status)
+      character(len=*), intent(in) :: path, format, corpus_path, corpus_digest, checkpoint_path, checkpoint_digest
+      character(len=*), intent(in) :: quality_report_path, quality_report_digest
+      integer(int64), intent(in) :: corpus_bytes, checkpoint_bytes, quality_report_bytes
+      integer(int32), intent(out) :: status
+      integer :: unit, io_status
+
+      open(newunit=unit, file=trim(path), status='replace', action='write', form='formatted', iostat=io_status)
+      if (io_status /= 0) then
+         write(error_unit, '(A,A)') 'vegai_control attest: cannot write output: ', trim(path)
+         status = FC_ERR_IO
+         return
+      end if
+      call emit_attestation_report(unit, format, corpus_path, corpus_digest, corpus_bytes, checkpoint_path, &
+                                   checkpoint_digest, checkpoint_bytes, quality_report_path, quality_report_digest, &
+                                   quality_report_bytes)
+      close(unit)
+      status = FC_OK
+   end subroutine emit_attestation_report_file
+
    function integer_text(value) result(rendered)
       integer(int64), intent(in) :: value
       character(len=:), allocatable :: rendered
@@ -539,6 +932,15 @@ contains
       write(buffer, '(I0)') value
       rendered = trim(buffer)
    end function integer32_text
+
+   function real_text(value) result(rendered)
+      real(real64), intent(in) :: value
+      character(len=:), allocatable :: rendered
+      character(len=64) :: buffer
+
+      write(buffer, '(ES24.16E3)') value
+      rendered = trim(adjustl(buffer))
+   end function real_text
 
    function optional_integer_text(known, value) result(rendered)
       logical, intent(in) :: known
@@ -605,6 +1007,12 @@ contains
       write(unit, '(A)') '      [--available-memory-bytes N] [--available-storage-bytes N]'
       write(unit, '(A)') '      [--require-ready] [--format text|json] [--output PATH]'
       write(unit, '(A)') '  vegai_control smoke CORPUS CHECKPOINT'
+      write(unit, '(A)') '  vegai_control quality-gate CHECKPOINT CASES --minimum-cases N'
+      write(unit, '(A)') '      --minimum-top1-accuracy R --minimum-top1-wilson-lower-bound-95 R'
+      write(unit, '(A)') '      --minimum-mean-similarity R --minimum-case-similarity R'
+      write(unit, '(A)') '      --maximum-incorrect-cases N [--format text|json] [--output PATH]'
+      write(unit, '(A)') '  vegai_control attest CORPUS CHECKPOINT [--quality-report PATH]'
+      write(unit, '(A)') '      [--format text|json] [--output PATH]'
       write(unit, '(A)') 'The native resource path does not invoke Python or OS shell inventory commands.'
    end subroutine print_usage
 

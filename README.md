@@ -175,6 +175,14 @@ make fortran-check
   --checkpoint /safe/runtime/toy.vgai --max-vocab 128 \
   --available-memory-bytes 8589934592 --available-storage-bytes 17179869184 \
   --require-ready --format json
+# Native streaming SHA-256 identities and same-host checkpoint-reader validation.
+./build/vegai_control attest examples/corpus/toy_hdc_corpus.txt /safe/runtime/toy.vgai --format json
+# Strict TSV: query_token<TAB>expected_self_excluded_neighbour; all policy
+# thresholds are mandatory and a failure exits non-zero after reporting.
+./build/vegai_control quality-gate /safe/runtime/toy.vgai CASES.tsv \
+  --minimum-cases 20 --minimum-top1-accuracy 0.80 \
+  --minimum-top1-wilson-lower-bound-95 0.55 --minimum-mean-similarity 0.05 \
+  --minimum-case-similarity -0.10 --maximum-incorrect-cases 4 --format json
 
 # Exact 9 MiB deterministic structural fixture + real train child attestation.
 # Bu bir natural-language/domain-quality dataset'i değildir; runtime artifacts
@@ -441,7 +449,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | OpenVINO context worker | `tools/openvino_context_worker.py` | optional Intel uint32-lane immutable-context bridge; resident per-train service, dynamic-batch compiled-graph cache, execution mask / native-CPU bypass contract |
 | Çalıştırılabilir doğrulama | `app/main.f90` | %25 exact gürültü, analoji, causal chain ve 3-faktör Resonator demo |
 | Native testler | `test/test_all.f90` | cebirsel invariantlar, hata yolları, native resource-plan sınırları, serial/OpenMP pretraining eşitliği ve uçtan uca test |
-| Native Fortran control plane | `src/fortran_control.f90`, `app/control.f90` | compiler/runtime profile, explicit RAM/SSD preflight and actual vocab/train/stream-checkpoint/load smoke; Python veya shell inventory çağırmaz |
+| Native Fortran control plane | `src/fortran_control.f90`, `src/fortran_integrity.f90`, `src/fortran_quality_gate.f90`, `app/control.f90` | compiler/runtime profile, explicit RAM/SSD preflight, stream SHA-256 checkpoint identity, actual vocab/train/stream-checkpoint/load smoke and fail-closed aggregate semantic-neighbour quality gate; Python veya shell inventory çağırmaz |
 | Donanım/OS profili (legacy adapter) | `tools/hardware_compatibility.py` | privacy-conscious CPU/RAM/GPU/NPU inventory; native portable baseline bunu çağırmaz |
 | Bağımsız HDC oracle | `tools/verify_reference.py` | standart SplitMix64 ve demo sözleşmelerinin Python modeli |
 | Bağımsız tokenless-field oracle | `tools/verify_tokenless_field.py` | raw byte-event construction, Walsh/inverse/Parseval ve compiled CLI fail-closed contract'inin Python modeli |

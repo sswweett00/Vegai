@@ -120,6 +120,8 @@ jobs:
             --checkpoint "${RUNNER_TEMP}/fortran-resource-plan.vgai" --max-vocab 128 \
             --available-memory-bytes 8589934592 --available-storage-bytes 8589934592 \
             --require-ready --format json --output "${RUNNER_TEMP}/fortran-resource-plan.json"
+          ./build-ci/vegai_control attest examples/corpus/toy_hdc_corpus.txt "${RUNNER_TEMP}/vegai-smoke.vgai" \
+            --format json --output "${RUNNER_TEMP}/fortran-native-attestation.json"
           python3 tools/hardware_compatibility.py --format json --require-recognized-os \
             --output "${RUNNER_TEMP}/hardware-profile.json" > /dev/null
           python3 tools/training_resource_plan.py \

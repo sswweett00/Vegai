@@ -11,6 +11,10 @@ program test_all
    use tokenless_field
    use fortran_control, only: FC_OK, FC_ERR_INVALID_ARGUMENT, fortran_resource_plan_t, &
                               fortran_resource_plan_estimate
+   use fortran_integrity, only: FI_OK, sha256_file
+   use fortran_quality_gate, only: QG_OK, QG_ERR_INVALID_ARGUMENT, QG_ERR_CASE, QG_ERR_REJECTED, &
+                                   quality_case_t, quality_policy_t, &
+                                   quality_report_t, quality_case_file_load, quality_gate_evaluate
    use text_tokenizer, only: TOKEN_LEN, MAX_LINE_CHARS, MAX_TOKENS_PER_LINE, tokenize_ascii_line
    use vocabulary
    use test_support
@@ -23,6 +27,8 @@ program test_all
    call test_tokenless_signal_field()
    call test_text_ingest()
    call test_fortran_control()
+   call test_fortran_integrity()
+   call test_fortran_quality_gate()
    call test_hdc_pretraining()
    call test_dialogue_retrieval()
    call finish_tests()
@@ -622,6 +628,134 @@ contains
       call assert_i32_equal(status, FC_ERR_INVALID_ARGUMENT, &
                             'native Fortran resource planner rejects overflowing capacity request')
    end subroutine test_fortran_control
+
+   subroutine test_fortran_integrity()
+      character(len=*), parameter :: PAYLOAD_PATH = 'vegai_fortran_integrity_test.bin'
+      character(len=64) :: digest
+      integer(int64) :: byte_count
+      integer(int32) :: status
+      integer :: unit, io_status
+
+      open(newunit=unit, file=PAYLOAD_PATH, status='replace', action='write', access='stream', &
+           form='unformatted', iostat=io_status)
+      call assert_true(io_status == 0, 'native Fortran SHA-256 fixture opens')
+      if (io_status /= 0) return
+      write(unit) 'abc'
+      close(unit)
+      call sha256_file(PAYLOAD_PATH, digest, byte_count, status)
+      call assert_i32_equal(status, FI_OK, 'native Fortran SHA-256 streams fixture bytes')
+      call assert_true(byte_count == 3_int64, 'native Fortran SHA-256 reports exact stream byte count')
+      call assert_true(trim(digest) == 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad', &
+                       'native Fortran SHA-256 matches the FIPS abc vector')
+      open(newunit=unit, file=PAYLOAD_PATH, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+   end subroutine test_fortran_integrity
+
+   subroutine test_fortran_quality_gate()
+      character(len=*), parameter :: CORPUS_PATH = 'vegai_quality_gate_test_corpus.txt'
+      character(len=*), parameter :: CASES_PATH = 'vegai_quality_gate_test_cases.tsv'
+      type(hdc_pretrain_model_t) :: model
+      type(hdc_pretrain_config_t) :: config
+      type(pretrain_metrics_t) :: vocabulary_metrics, training_metrics
+      type(quality_case_t), allocatable :: cases(:)
+      type(quality_policy_t) :: policy
+      type(quality_report_t) :: report
+      type(hv_t) :: query_hv
+      character(len=TOKEN_LEN) :: neighbour_token
+      integer(int32) :: status, query_slot, neighbour_slot
+      integer :: unit, io_status
+      logical :: found
+      real(real32) :: similarity
+
+      open(newunit=unit, file=CORPUS_PATH, status='replace', action='write', form='formatted', iostat=io_status)
+      call assert_true(io_status == 0, 'native quality-gate corpus fixture opens')
+      if (io_status /= 0) return
+      write(unit, '(A)') 'alpha beta gamma'
+      write(unit, '(A)') 'alpha beta gamma'
+      write(unit, '(A)') 'alpha beta gamma'
+      write(unit, '(A)') 'delta epsilon zeta'
+      write(unit, '(A)') 'delta epsilon zeta'
+      close(unit)
+
+      found = .false.
+      neighbour_token = ''
+      config = hdc_pretrain_config_t()
+      config%max_vocabulary = 16_int32
+      config%min_frequency = 2_int64
+      config%context_window = 2_int32
+      config%position_shift_bits = 17_int32
+      config%epochs = 1_int32
+      config%strict_tokenization = .true.
+      call pretrain_build_vocabulary(model, CORPUS_PATH, config, vocabulary_metrics, status)
+      call assert_i32_equal(status, PT_OK, 'native quality-gate vocabulary fixture builds')
+      if (status == PT_OK) then
+         call pretrain_train_file(model, CORPUS_PATH, config, training_metrics, status)
+         call assert_i32_equal(status, PT_OK, 'native quality-gate training fixture completes')
+      end if
+      if (status == PT_OK) then
+         call pretrain_lookup_token(model, 'alpha', query_slot, found, status)
+         call assert_i32_equal(status, PT_OK, 'native quality-gate query token resolves')
+         call assert_true(found, 'native quality-gate query token is active')
+      end if
+      if (status == PT_OK .and. found) then
+         call pretrain_get_semantic_hv(model, query_slot, query_hv, status)
+         call assert_i32_equal(status, PT_OK, 'native quality-gate retrieves query semantic vector')
+      end if
+      if (status == PT_OK .and. found) then
+         call pretrain_nearest_semantic(model, query_hv, neighbour_slot, neighbour_token, similarity, status, &
+                                        exclude_slot=query_slot)
+         call assert_i32_equal(status, PT_OK, 'native quality-gate derives self-excluded expected neighbour')
+      end if
+      if (status == PT_OK .and. len_trim(neighbour_token) > 0) then
+         open(newunit=unit, file=CASES_PATH, status='replace', action='write', form='formatted', iostat=io_status)
+         call assert_true(io_status == 0, 'native quality-gate TSV case fixture opens')
+         if (io_status == 0) then
+            write(unit, '(A)') 'alpha' // achar(9) // trim(neighbour_token)
+            close(unit)
+            call quality_case_file_load(CASES_PATH, cases, status)
+            call assert_i32_equal(status, QG_OK, 'native quality-gate loads strict TSV case')
+         end if
+      end if
+      if (allocated(cases)) then
+         policy = quality_policy_t()
+         policy%minimum_cases = 1_int32
+         policy%minimum_top1_accuracy = 1.0_real64
+         policy%minimum_top1_wilson_lower_bound_95 = 0.0_real64
+         policy%minimum_mean_similarity = -1.0_real64
+         policy%minimum_case_similarity = -1.0_real64
+         policy%maximum_incorrect_cases = 0_int32
+         call quality_gate_evaluate(model, cases, policy, report, status)
+         call assert_i32_equal(status, QG_OK, 'native quality-gate accepts matching self-excluded case')
+         call assert_true(report%passed .and. report%correct_cases == 1_int32, &
+                          'native quality-gate publishes a passed aggregate only for matching case')
+
+         policy%minimum_top1_accuracy = ieee_value(0.0_real64, ieee_quiet_nan)
+         call quality_gate_evaluate(model, cases, policy, report, status)
+         call assert_i32_equal(status, QG_ERR_INVALID_ARGUMENT, &
+                               'native quality-gate rejects nonfinite policy thresholds')
+         policy%minimum_top1_accuracy = 1.0_real64
+         cases(1)%expected_neighbour = 'omega'
+         call quality_gate_evaluate(model, cases, policy, report, status)
+         call assert_i32_equal(status, QG_ERR_REJECTED, 'native quality-gate rejects incorrect expected neighbour')
+         call assert_true(.not. report%passed .and. report%incorrect_cases == 1_int32, &
+                          'native quality-gate fail-closes incorrect neighbour expectation')
+         deallocate(cases)
+         open(newunit=unit, file=CASES_PATH, status='replace', action='write', form='formatted', iostat=io_status)
+         call assert_true(io_status == 0, 'native quality-gate malformed TSV fixture opens')
+         if (io_status == 0) then
+            write(unit, '(A)') 'malformed case without tab'
+            close(unit)
+            call quality_case_file_load(CASES_PATH, cases, status)
+            call assert_i32_equal(status, QG_ERR_CASE, 'native quality-gate rejects malformed TSV rows')
+            if (allocated(cases)) deallocate(cases)
+         end if
+      end if
+      call pretrain_model_destroy(model)
+      open(newunit=unit, file=CORPUS_PATH, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+      open(newunit=unit, file=CASES_PATH, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+   end subroutine test_fortran_quality_gate
 
    subroutine test_hdc_pretraining()
       character(len=*), parameter :: CORPUS_PATH = 'vegai_pretraining_test_corpus.txt'

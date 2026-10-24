@@ -31,6 +31,8 @@ add_library(vegai_hds STATIC
     src/reasoning_core.f90
     src/hdc_pretraining.f90
     src/dialogue_retrieval.f90
+    src/fortran_integrity.f90
+    src/fortran_quality_gate.f90
     src/fortran_control.f90
 )
 
@@ -154,6 +156,13 @@ if(VEGAI_BUILD_TESTS)
                 ${CMAKE_CURRENT_BINARY_DIR}/fortran-control-smoke.vgai
     )
     set_tests_properties(vegai_fortran_control_smoke PROPERTIES TIMEOUT 120)
+    add_test(
+        NAME vegai_fortran_control_attest
+        COMMAND $<TARGET_FILE:vegai_control> attest
+                ${CMAKE_CURRENT_SOURCE_DIR}/examples/corpus/toy_hdc_corpus.txt
+                ${CMAKE_CURRENT_BINARY_DIR}/fortran-control-smoke.vgai --format json
+    )
+    set_tests_properties(vegai_fortran_control_attest PROPERTIES DEPENDS vegai_fortran_control_smoke)
 
     # Python remains available only as a migration-era verifier/control-plane
     # adapter. The default CMake build/test path is self-contained Fortran.
