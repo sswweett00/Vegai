@@ -151,6 +151,14 @@ if(VEGAI_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_9mib_pretraining.py
         )
         set_tests_properties(vegai_9mib_pretraining_contract PROPERTIES TIMEOUT 120)
+        # The fixed 900MB -> 90MB orchestrator is exercised with tiny exact
+        # byte budgets and a hermetic native ABI fixture here; its separate
+        # manual workflow owns the real large native measurement.
+        add_test(
+            NAME vegai_900mb_continuous_pretraining_contract
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_900mb_continuous_pretraining.py
+        )
+        set_tests_properties(vegai_900mb_continuous_pretraining_contract PROPERTIES TIMEOUT 180)
         # A small instance of the same schema verifies that the bounded runner
         # parses the actual compiled Fortran train/inspect ABI. The dedicated
         # workflow owns the full 9 MiB real-binary measurement.
@@ -242,6 +250,15 @@ if(VEGAI_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_continuous_pretraining.py
                     --pretrain-bin $<TARGET_FILE:vegai_pretrain>
         )
+        # Real native anchor/candidate inspection plus a hermetic catastrophic-
+        # forgetting subcase. A continuation candidate is never journaled when
+        # its immutable held-out regression policy fails.
+        add_test(
+            NAME vegai_continuous_quality_regression
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_continuous_quality_regression.py
+                    --pretrain-bin $<TARGET_FILE:vegai_pretrain>
+        )
+        set_tests_properties(vegai_continuous_quality_regression PROPERTIES TIMEOUT 240)
         add_test(
             NAME vegai_production_pretraining
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_production_pretraining.py

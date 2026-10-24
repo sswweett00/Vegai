@@ -674,7 +674,10 @@ def continuous_command(
         "--context-mode", arguments.context_mode, "--epochs", str(arguments.epochs),
         "--initial-plasticity", str(arguments.initial_plasticity),
         "--minimum-plasticity", str(arguments.minimum_plasticity), "--decay-events", str(arguments.decay_events),
+        "--reserve-fraction", str(arguments.reserve_fraction),
     ]
+    if arguments.omp_threads is not None:
+        command.extend(["--omp-threads", str(arguments.omp_threads)])
     if arguments.max_shards is not None:
         command.extend(["--max-shards", str(arguments.max_shards)])
     if arguments.recover_locks:

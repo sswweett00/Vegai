@@ -122,7 +122,11 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 > Tam 9 MiB sentetik structural fixture ile real binary/checkpoint/throughput
 > zinciri ise [PRETRAINING_9MIB.md](docs/PRETRAINING_9MIB.md)'de tanımlıdır:
 > bu yalnız streaming ve operasyon sözleşmesi testidir, gerçek dil/domain bilgisi
-> veya genel kapasite kanıtı değildir.
+> veya genel kapasite kanıtı değildir. Frozen held-out anchor'a karşı continuous
+> forgetting/regression gate'i ve exact decimal 900 MB → 90 MB controlled native
+> run sözleşmesi [CONTINUOUS_QUALITY_REGRESSION.md](docs/CONTINUOUS_QUALITY_REGRESSION.md)'dedir;
+> denetim kapsamı/açık sınırlar [TRAINING_SYSTEM_AUDIT_2026-10.md](docs/TRAINING_SYSTEM_AUDIT_2026-10.md)'de
+> kayıtlıdır; sentetik topology sonucu yine gerçek domain veya general quality kanıtı değildir.
 > Target-domain semantic-neighbour kalite iddiası gerekiyorsa hardcoded fixture
 > yerine operator-held-out case/policy ile gerçek checkpoint release gate'i
 > [PRETRAINING_QUALITY_GATE.md](docs/PRETRAINING_QUALITY_GATE.md)'deki sözleşme
@@ -164,6 +168,15 @@ make pretrain-9mib
 # Generic direct-train manifest/provenance/staged-publication verifier.
 # Gerçek native binary kullanır; tiny fixture yalnız control-contract testidir.
 make attested-pretrain-check
+
+# Native frozen-anchor continuous quality gate (real checkpoint path + intentional
+# forgetting rejection fixture); genel model-quality benchmark değildir.
+make continuous-quality-check
+
+# Ignored runtime artifacts altında exact decimal 900,000,000-byte pretraining,
+# ardından 90,000,000-byte continuation ve frozen quality regression gate.
+# Bu büyük synthetic topology fixture için GitHub manual workflow tercih edilir.
+make pretrain-900mb-continuous
 
 # Raw byte-event field: independent Python oracle + compiled CLI contract
 make field-check
@@ -381,6 +394,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Direct-train attestation | `tools/attested_pretrain.py`, `tools/verify_attested_pretrain.py` | reviewed generic corpus-manifest/v1 binding, strict native ingest, exclusive output lock, checkpoint/report'un kendi final directory'sinde staged publication, train-only timing ve retraining yapmadan corpus/manifest/binary/checkpoint/inspect re-verification; signed adversarial attestation veya semantic-quality evidence değil |
 | Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect`, CPU/OpenVINO context-provider execution switch ve nearest semantic diagnostic |
 | Pretraining checkpoint quality gate | `tools/pretraining_quality_evaluation.py`, `tools/production_pretrain.py` | operator-held-out semantic-neighbour annotation/policy ile real inspect batch'i, immutable evaluator/binary/checkpoint/case/policy binding, HMAC-redacted report ve fail-closed optional production release; genel LLM/LMM quality benchmarkı değil |
+| Continuous anchor-regression gate | `tools/continuous_pretrain.py`, `tools/continuous_quality_gate.py`, `tools/run_900mb_continuous_pretraining.py` | generation-1 frozen held-out anchor, per-candidate absolute + aggregate/per-case forgetting comparison, binary/policy/evaluator identity binding, rejection-before-checkpoint-publication, child-only timing; exact 900MB→90MB workflow synthetic structural evidence only |
 | Grounded dialogue retrieval | `src/dialogue_retrieval.f90`, `app/chat.f90` | operator TSV response index'i, strict ASCII/OOV gate, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; free-form LLM generation degil |
 | Dialogue quality release gate | `tools/dialogue_evaluation.py` | versioned held-out JSONL ile stateless exact prompt grounding/abstention olcumu, immutable input digest binding, privacy-conscious report ve threshold gate |
 | Optional LMM integration | `tools/lmm_contract.py`, `tools/lmm_model_manifest.py`, `tools/lmm_gateway.py`, `tools/lmm_quality_evaluation.py`, `tools/lmm_portfolio.py`, `tools/lmm_session.py`, `tools/lmm_knowledge.py`, `tools/lmm_assets.py` | gerçek external model backend'i için Unicode/subword tokenizer binding, model-artifact hash, long-context packer, trust-role-isolated source evidence, strict structured-output contract, bounded worker/redirect-safe transport, content-addressed media, held-out citation/abstention release gate, measured domain-expert routing/independent-panel planı ve fail-closed provenance; model weights/native neural training degil |

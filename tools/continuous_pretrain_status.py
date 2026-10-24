@@ -183,6 +183,28 @@ def inspect_state(
             "bytes": checkpoint_path.stat().st_size,
         }
 
+    quality_guard = state.get("quality_guard")
+    quality: dict[str, Any]
+    if quality_guard is None:
+        quality = {"mode": "not-configured", "latest_evidence": None}
+    elif generation == 0:
+        quality = {"mode": "held-out-anchor-regression/v1", "latest_evidence": None}
+    else:
+        latest = applied[-1]
+        evidence = latest.get("quality") if isinstance(latest, dict) else None
+        require(isinstance(evidence, dict), "quality-guarded state omitted latest quality evidence")
+        quality = {
+            "mode": "held-out-anchor-regression/v1",
+            "latest_evidence": {
+                "quality_report": evidence.get("quality_report"),
+                "quality_report_sha256": evidence.get("quality_report_sha256"),
+                "comparison_report": evidence.get("comparison_report"),
+                "comparison_report_sha256": evidence.get("comparison_report_sha256"),
+                "anchor_generation": evidence.get("anchor_generation"),
+                "anchor_checkpoint_sha256": evidence.get("anchor_checkpoint_sha256"),
+            },
+        }
+
     lock = lock_report(state_directory / LOCK_FILENAME)
     require(not require_unlocked or not lock["present"],
             f"continuous controller lock is present: {lock['path']}")
@@ -210,6 +232,8 @@ def inspect_state(
             "shards": len(shards),
         },
         "policy": state["policy"],
+        "pretrain_binary": state.get("pretrain_binary"),
+        "quality": quality,
         "progress": {
             "generation": generation,
             "committed_shards": len(applied),
@@ -251,6 +275,12 @@ def print_text(report: dict[str, Any]) -> None:
     if checkpoint is not None:
         print(f"latest checkpoint: {checkpoint['path']}")
         print(f"latest checkpoint SHA-256: {checkpoint['sha256']}")
+    quality = report["quality"]
+    print(f"quality regression protection: {quality['mode']}")
+    if quality["latest_evidence"] is not None:
+        evidence = quality["latest_evidence"]
+        print(f"quality anchor generation: {evidence['anchor_generation']}")
+        print(f"quality comparison report: {evidence['comparison_report']}")
     print(
         "shard payload verification: "
         f"{verification['shard_payloads']} ({verification['verified_shards']} shard(s))"

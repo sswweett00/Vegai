@@ -46,8 +46,11 @@ FIXTURE_9MIB_CORPUS ?= corpora/synthetic_hdc_9mib.txt
 FIXTURE_9MIB_MANIFEST ?= corpora/synthetic_hdc_9mib.manifest.json
 FIXTURE_9MIB_CHECKPOINT ?= checkpoints/synthetic_hdc_9mib.vgai
 FIXTURE_9MIB_REPORT ?= pretraining-runs/synthetic_hdc_9mib.json
+# Exact decimal 900MB + 90MB controlled continuation artifacts are large and
+# remain ignored. Prefer the dedicated GitHub workflow for CI-hosted evidence.
+CONTINUOUS_900_RUN_DIR ?= pretraining-runs/synthetic_900mb_then_90mb
 
-.PHONY: all engine pretrain field chat test run run-pretrain run-field run-chat check field-check optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check quality-check attested-pretrain-check lookup-cache-compare fixture-9mib verify-fixture-9mib pretrain-9mib clean clean-all debug portable native portable-test native-test
+.PHONY: all engine pretrain field chat test run run-pretrain run-field run-chat check field-check optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check quality-check continuous-quality-check attested-pretrain-check lookup-cache-compare fixture-9mib verify-fixture-9mib pretrain-9mib pretrain-900mb-continuous clean clean-all debug portable native portable-test native-test
 
 # Default target: portable optimized GNU binaries without host-only ISA flags.
 all: engine pretrain field chat
@@ -123,6 +126,7 @@ check:
 	python3 tools/verify_hardware_compatibility.py
 	python3 tools/verify_training_resource_plan.py
 	python3 tools/verify_9mib_pretraining.py
+	python3 tools/verify_900mb_continuous_pretraining.py
 	python3 tools/verify_openvino_provider.py
 	python3 tools/verify_openvino_context_worker.py
 	python3 tools/verify_pretraining_revision_comparison.py
@@ -170,6 +174,13 @@ dialogue-check: $(PRETRAIN) $(CHAT)
 # measures a narrow semantic-neighbour contract, not general model intelligence.
 quality-check: $(PRETRAIN)
 	python3 tools/verify_pretraining_quality_evaluation.py --pretrain-bin $(PRETRAIN)
+	python3 tools/verify_continuous_quality_regression.py --pretrain-bin $(PRETRAIN)
+
+# Two-generation native checkpoint gate: the first checkpoint becomes the
+# immutable held-out anchor, and a forgotten continuation is rejected before
+# it can enter the exactly-once journal. This is not a general-quality claim.
+continuous-quality-check: $(PRETRAIN)
+	python3 tools/verify_continuous_quality_regression.py --pretrain-bin $(PRETRAIN)
 
 # Real direct-CLI attestation integration: a reviewed generic corpus manifest,
 # strict native train, same-filesystem staged publication, independent verify,
@@ -204,6 +215,14 @@ pretrain-9mib: pretrain fixture-9mib
 		--manifest "$(FIXTURE_9MIB_MANIFEST)" --checkpoint "$(FIXTURE_9MIB_CHECKPOINT)" \
 		--report "$(FIXTURE_9MIB_REPORT)" --max-vocab 1024 --min-frequency 1 \
 		--window 2 --context-mode hierarchical --epochs 1 --omp-threads 2 --overwrite
+
+# This performs a real exact-decimal 900,000,000-byte initial train and a
+# 90,000,000-byte native continuation. The train-only timings and held-out
+# topology regression decision are written below the ignored run directory.
+pretrain-900mb-continuous: pretrain
+	python3 tools/run_900mb_continuous_pretraining.py \
+		--pretrain-bin "$(PRETRAIN)" --run-dir "$(CONTINUOUS_900_RUN_DIR)" \
+		--omp-threads 2 --train-timeout-seconds 2400
 
 # Rich JSON/Parquet/Arrow data formats are optional rather than a dependency of
 # the portable Fortran runtime. This explicit target installs only the adapter

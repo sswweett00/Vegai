@@ -124,7 +124,7 @@ lineage'ini ve debiased continuation contract'ini bağlar, policy/mode sonradan
 değiştirilemez. Historical v6 coherent checkpoint'ler okunur, ancak historical
 sampler lineage'iyle devam eder; bir generation zincirinde checkpoint lineage'ini
 karıştırmayın.
-Sıradan restart için aynı üç temel argüman
+Quality gate **olmayan** sıradan restart için aynı üç temel argüman
 yeterlidir:
 
 ```bash
@@ -133,6 +133,22 @@ python3 tools/continuous_pretrain.py \
   --manifest data/continual-ledger.json \
   --state-dir state/continual
 ```
+
+Yeni controller state'i ayrıca native executable SHA-256/byte identity'sini
+bağlar; farklı binary ile resume fail-closed reddedilir. Her yeni generation
+bounded child I/O, native child-only timing/throughput evidence'i ve RAM/
+checkpoint-space preflight'i taşır. Bu operational metric compilation,
+controller, checkpoint publication veya quality evaluation süresini training
+throughput'e katmaz.
+
+Held-out continuation forgetting gate'i isteniyorsa ilk invocation'da
+`--quality-cases`, `--quality-policy`, `--quality-redaction-key-file` ve
+`--quality-regression-policy` **birlikte** verilmelidir. Bu modda aynı immutable
+input'lar her resume'da yeniden verilmelidir; generation 1 frozen anchor olur,
+sonraki candidate anchor'a göre karşılaştırılır ve regression varsa checkpoint
+state'e commit edilmez. Tam sözleşme, policy schema, redaction ve failure
+artefact'leri için [CONTINUOUS_QUALITY_REGRESSION.md](CONTINUOUS_QUALITY_REGRESSION.md)'ye
+bakın.
 
 Yeni atomik manifest yayınlarını izlemek için:
 
@@ -202,14 +218,21 @@ Her pending shard için controller aşağıdaki sırayı uygular:
    checkpoint üzerinde gerçek `vegai_pretrain train`/`continue` komutu çalışır.
    CLI çıktısında observed/raw/active token kapsamı, `OOV=0`, zero
    truncation/non-ASCII/overlong telemetry ve beklenen epoch sayısı doğrulanır.
-5. Publisher shard yeniden hash'lenir. Candidate `fsync` edilir ve immutable
-   generation dosyasına atomik rename edilir.
-6. Sadece en son `state.json`, `fsync` edilmiş temporary JSON + atomic rename
+5. Publisher shard yeniden hash'lenir; candidate `fsync` edilir. Quality
+   regression protection configured ise held-out evaluator + frozen anchor
+   comparator **private candidate** üzerinde tamamlanır. Absolute gate veya
+   regression başarısızsa candidate checkpoint publish edilmeden silinir;
+   redacted rejection report kalır.
+6. Kabul edilen candidate immutable generation dosyasına atomik rename edilir.
+7. Sadece en son `state.json`, `fsync` edilmiş temporary JSON + atomic rename
    ile yeni generation'ı commit marker olarak yayınlar.
 
 `state.json` içindeki `applied_shards` her generation için shard SHA-256,
-byte/token sayıları, checkpoint SHA-256 ve doğrulanan OOV metriklerini taşır.
-`generations/` içindeki checkpoint tek başına commit sayılmaz.
+byte/token sayıları, checkpoint SHA-256, doğrulanan OOV metrikleri ve native
+child-only timing/throughput evidence'ini taşır. Quality-gated state'lerde
+ayrıca accepted evaluator/comparison report SHA-256'ları bulunur; read-only
+status bu report identity'lerini de doğrular. `generations/` içindeki checkpoint
+tek başına commit sayılmaz.
 
 | Kesinti noktası | Sonraki çağrının sonucu |
 |---|---|
@@ -245,7 +268,9 @@ CLI ile iki shard çalıştırır. Test şunları denetler:
 - non-ASCII ve CRLF shard'ların manifest authoring aşamasında reddi ile
   manifest output'unun input shard'ı overwrite etmesine karşı koruma.
 
-Tek başına iki-pass corpus pipeline, telemetri ve checkpoint formatı için
+Held-out continuation regression gate ve exact decimal 900 MB → 90 MB
+controlled experiment için [CONTINUOUS_QUALITY_REGRESSION.md](CONTINUOUS_QUALITY_REGRESSION.md)'ye;
+tek başına iki-pass corpus pipeline, telemetri ve checkpoint formatı için
 [PRETRAINING.md](PRETRAINING.md)'ye; exact record-deduplicated dataset foundry,
 held-out leakage gate, binary/data/policy run provenance ve production wrapper
 için [PRODUCTION_PRETRAINING.md](PRODUCTION_PRETRAINING.md)'ye; gerçek
