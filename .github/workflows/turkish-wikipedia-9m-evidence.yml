@@ -70,6 +70,26 @@ jobs:
             --target-tokens 9000000 --vocabulary-size 32768 --epochs 2 --omp-threads 2 \
             --train-timeout-seconds 3600 --inspect-timeout-seconds 300
 
+      - name: Surface bounded experiment failure reason
+        if: failure()
+        run: |
+          set -euo pipefail
+          failure="${VEGAI_TURKISH_9M_DIR}/experiment/experiment-failure.json"
+          if [ -f "$failure" ]; then
+            python3 - "$failure" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          message = str(payload.get("error", "experiment failed without a controller message")).replace("\r", " ").replace("\n", " ")
+          print(f"::error title=Turkish Wikipedia 9M controller::{message[:1800]}")
+          print(json.dumps(payload, sort_keys=True))
+          PY
+          else
+            echo "::error title=Turkish Wikipedia 9M controller::The controller did not publish experiment-failure.json"
+          fi
+
       - name: Publish native timing, provenance, and retrieval summary
         if: always()
         run: |
