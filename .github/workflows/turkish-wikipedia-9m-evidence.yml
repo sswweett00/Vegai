@@ -61,7 +61,7 @@ jobs:
           set -euo pipefail
           python3 tools/run_turkish_wikipedia_9m.py \
             --pretrain-bin "${GITHUB_WORKSPACE}/build-turkish-9m/vegai_pretrain" \
-            --chat-bin "${GITHUB_WORKSPACE}/build-turkish-chat/vegai_chat" \
+            --chat-bin "${GITHUB_WORKSPACE}/build-turkish-9m/vegai_chat" \
             --source-root "${VEGAI_TURKISH_9M_DIR}/trwiki-67-extracted" \
             --source-repo "${VEGAI_TURKISH_9M_DIR}/trwiki-67-metadata" \
             --source-archive "${VEGAI_TURKISH_9M_DIR}/trwiki-67.tar.bz2" \
