@@ -31,8 +31,10 @@ Vegai bunu ölçülebilir katmanlara ayırır:
 
 `CMakePresets.json` üç açık profil sağlar: `portable`, `portable-serial` ve
 host-only `native`. `.github/workflows/portable-platforms.yml`, source/launcher
-sözleşmesini Linux x86-64 ve ARM64, macOS ARM64 ve Windows x86-64 üzerinde
-serial portable profile ile çalıştıracak şekilde tanımlanmıştır. Bu workflow her
+sözleşmesini Linux x86-64, macOS ARM64 ve Windows x86-64 üzerinde serial
+portable profile ile çalıştıracak şekilde tanımlanmıştır. ARM64 source/runtime
+sözleşmesi macOS ARM64 worker üzerinde ölçülür; Linux ARM64 ise aynı portable
+preset'i hedefte çalıştırılması gereken bir build adayıdır. Bu workflow her
 platformda gerçek `hds_engine` çalıştırır, küçük bir corpus ile `vegai_pretrain
 train` çağrısı yapar ve oluşan checkpoint'i **aynı binary** ile inspect eder.
 Bu, compiler/OS/launcher/path uyumluluğu kanıtıdır; platformlar arası checkpoint

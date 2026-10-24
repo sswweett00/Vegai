@@ -248,9 +248,10 @@ python3 tools/verify_portable_runtime.py \
   --pretrain-bin ./build/portable-serial/vegai_pretrain
 ```
 
-Kaynak/launcher contract'i için Linux x86-64/ARM64, macOS ARM64 ve Windows
-x86-64 portable smoke workflow'u tanımlıdır. Bu, her olası OS/CPU/driver
-kombinasyonunda performans veya binary checkpoint taşınabilirliği garantisi
+Kaynak/launcher contract'i için Linux x86-64, macOS ARM64 ve Windows x86-64
+portable smoke workflow'u tanımlıdır; Linux ARM64 aynı preset'i hedef hostta
+ayrıca doğrulamalıdır. Bu, her olası OS/CPU/driver kombinasyonunda performans
+veya binary checkpoint taşınabilirliği garantisi
 anlamına gelmez; doğrulanmış kapsam ve hedefte çalıştırma adımları
 [HARDWARE_COMPATIBILITY.md](docs/HARDWARE_COMPATIBILITY.md)'dedir.
 
