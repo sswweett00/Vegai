@@ -56,7 +56,7 @@ program vegai_dialogue_eval
    character(len=512) :: checkpoint_path, knowledge_path, evaluation_path
    type(hdc_pretrain_model_t) :: model
    type(dialogue_config_t) :: config
-   type(dialogue_index_t) :: index
+   type(dialogue_index_t) :: dialogue_index
    type(dialogue_session_t) :: session
    type(evaluation_metrics_t) :: metrics
    type(evaluation_identities_t) :: identities
@@ -85,20 +85,20 @@ program vegai_dialogue_eval
       maximum_cases = 100000_int64
       call parse_options(5, argument_count, config, maximum_cases, status)
       if (status /= EVAL_OK) call fail_usage()
-      call load_dialogue(trim(checkpoint_path), trim(knowledge_path), config, model, index, session, entries_loaded, status)
+      call load_dialogue(trim(checkpoint_path), trim(knowledge_path), config, model, dialogue_index, session, entries_loaded, status)
       if (status /= EVAL_OK) call fail_with_status('dialogue initialization failed', status)
-      call evaluate_tsv(trim(evaluation_path), index, model, session, maximum_cases, metrics, status)
+      call evaluate_tsv(trim(evaluation_path), dialogue_index, model, session, maximum_cases, metrics, status)
       if (status /= EVAL_OK) then
-         call cleanup(model, index, session)
+         call cleanup(model, dialogue_index, session)
          call fail_with_status('native dialogue evaluation failed', status)
       end if
       call collect_identities(trim(checkpoint_path), trim(knowledge_path), trim(evaluation_path), identities, status)
       if (status /= EVAL_OK) then
-         call cleanup(model, index, session)
+         call cleanup(model, dialogue_index, session)
          call fail_with_status('native dialogue identity collection failed', status)
       end if
       call print_json_report(config, entries_loaded, maximum_cases, identities, metrics)
-      call cleanup(model, index, session)
+      call cleanup(model, dialogue_index, session)
 
    case ('help', '--help', '-h')
       call print_usage()
@@ -187,24 +187,24 @@ contains
       integer(int64), intent(inout) :: parsed_maximum_cases
       integer(int32), intent(out) :: parse_status
       character(len=1024) :: option, value
-      integer :: index, io_status
+      integer :: argument_index, io_status
 
       parse_status = EVAL_OK
-      index = first_argument
-      do while (index <= last_argument)
-         call read_cli_argument(index, option, parse_status)
+      argument_index = first_argument
+      do while (argument_index <= last_argument)
+         call read_cli_argument(argument_index, option, parse_status)
          if (parse_status /= EVAL_OK) return
          select case (trim(option))
          case ('--require-all-known')
             parsed_config%require_all_prompt_tokens_known = .true.
-            index = index + 1
+            argument_index = argument_index + 1
          case ('--max-entries', '--max-cases', '--min-known-tokens', '--min-similarity', '--min-margin', &
                '--semantic-weight', '--lexical-weight', '--min-hybrid-score', '--min-hybrid-margin')
-            if (index == last_argument) then
+            if (argument_index == last_argument) then
                parse_status = EVAL_ERR_INVALID_ARGUMENT
                return
             end if
-            call read_cli_argument(index + 1, value, parse_status)
+            call read_cli_argument(argument_index + 1, value, parse_status)
             if (parse_status /= EVAL_OK) return
             select case (trim(option))
             case ('--max-entries')
@@ -230,7 +230,7 @@ contains
                parse_status = EVAL_ERR_INVALID_ARGUMENT
                return
             end if
-            index = index + 2
+            argument_index = argument_index + 2
          case default
             parse_status = EVAL_ERR_INVALID_ARGUMENT
             return
