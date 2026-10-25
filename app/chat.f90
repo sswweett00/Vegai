@@ -141,6 +141,10 @@ contains
       write(output_unit, '(A,I0)') 'conversation history turns: ', active_index%config%max_history_turns
       write(output_unit, '(A,F8.5)') 'minimum grounding similarity: ', active_index%config%minimum_similarity
       write(output_unit, '(A,F8.5)') 'minimum grounding margin: ', active_index%config%minimum_margin
+      write(output_unit, '(A,F8.5)') 'semantic retrieval weight: ', active_index%config%semantic_weight
+      write(output_unit, '(A,F8.5)') 'lexical retrieval weight: ', active_index%config%lexical_weight
+      write(output_unit, '(A,F8.5)') 'minimum hybrid grounding score: ', active_index%config%minimum_hybrid_score
+      write(output_unit, '(A,F8.5)') 'minimum hybrid grounding margin: ', active_index%config%minimum_hybrid_margin
       write(output_unit, '(A,L1)') 'live prompt requires all known tokens: ', active_index%config%require_all_prompt_tokens_known
    end subroutine print_index_summary
 
@@ -152,6 +156,11 @@ contains
       write(output_unit, '(A,I0)') 'candidates examined: ', answer%candidates_examined
       write(output_unit, '(A,F8.5)') 'best bipolar similarity: ', answer%similarity
       write(output_unit, '(A,F8.5)') 'runner-up bipolar similarity: ', answer%runner_up_similarity
+      write(output_unit, '(A,F8.5)') 'best lexical similarity: ', answer%lexical_similarity
+      write(output_unit, '(A,F8.5)') 'runner-up lexical similarity: ', answer%runner_up_lexical_similarity
+      write(output_unit, '(A,F8.5)') 'hybrid grounding score: ', answer%hybrid_score
+      write(output_unit, '(A,F8.5)') 'runner-up hybrid grounding score: ', answer%runner_up_hybrid_score
+      write(output_unit, '(A,F8.5)') 'hybrid grounding margin: ', answer%hybrid_margin
       write(output_unit, '(A,F8.5)') 'grounding margin: ', answer%margin
       if (answer%found) then
          write(output_unit, '(A)') 'grounded: true'
@@ -264,7 +273,8 @@ contains
             parsed_config%require_all_prompt_tokens_known = .true.
             index = index + 1
          case ('--max-entries', '--history-turns', '--min-known-tokens', '--current-weight', &
-               '--history-weight', '--min-similarity', '--min-margin', '--prompt')
+               '--history-weight', '--min-similarity', '--min-margin', '--semantic-weight', '--lexical-weight', &
+               '--min-hybrid-score', '--min-hybrid-margin', '--prompt')
             if (index == last_argument) then
                parse_status = DIALOGUE_ERR_INVALID_ARGUMENT
                return
@@ -286,6 +296,14 @@ contains
                read(value, *, iostat=io_status) parsed_config%minimum_similarity
             case ('--min-margin')
                read(value, *, iostat=io_status) parsed_config%minimum_margin
+            case ('--semantic-weight')
+               read(value, *, iostat=io_status) parsed_config%semantic_weight
+            case ('--lexical-weight')
+               read(value, *, iostat=io_status) parsed_config%lexical_weight
+            case ('--min-hybrid-score')
+               read(value, *, iostat=io_status) parsed_config%minimum_hybrid_score
+            case ('--min-hybrid-margin')
+               read(value, *, iostat=io_status) parsed_config%minimum_hybrid_margin
             case ('--prompt')
                if (.not. allow_prompt .or. prompt_seen) then
                   parse_status = DIALOGUE_ERR_INVALID_ARGUMENT
@@ -310,13 +328,16 @@ contains
    subroutine print_usage()
       write(output_unit, '(A)') 'Vegai grounded HDC dialogue retrieval (data-driven, not an LLM generator)'
       write(output_unit, '(A)') 'Usage:'
-      write(output_unit, '(A)') '  vegai_chat ask CHECKPOINT KNOWLEDGE.tsv --prompt "ASCII prompt" [options]'
+      write(output_unit, '(A)') '  vegai_chat ask CHECKPOINT KNOWLEDGE.tsv --prompt "Turkish UTF-8 prompt" [options]'
       write(output_unit, '(A)') '  vegai_chat repl CHECKPOINT KNOWLEDGE.tsv [options]'
-      write(output_unit, '(A)') 'Knowledge TSV: exactly one ASCII TAB per nonblank row: prompt<TAB>response'
+      write(output_unit, '(A)') 'Knowledge TSV: exactly one ASCII TAB per nonblank UTF-8 row: prompt<TAB>response'
+      write(output_unit, '(A)') 'Turkish prompt letters are folded to the checkpoint ASCII projection; UTF-8 responses stay verbatim.'
       write(output_unit, '(A)') 'Options:'
       write(output_unit, '(A)') '  --max-entries N --history-turns N --min-known-tokens N'
       write(output_unit, '(A)') '  --current-weight N --history-weight N --min-similarity R --min-margin R'
+      write(output_unit, '(A)') '  --semantic-weight R --lexical-weight R --min-hybrid-score R --min-hybrid-margin R'
       write(output_unit, '(A)') '  --require-all-known'
+      write(output_unit, '(A)') 'Hybrid lexical retrieval is grounded data lookup, not free-form generation.'
       write(output_unit, '(A)') 'The answer is returned verbatim from the knowledge TSV only when grounded.'
    end subroutine print_usage
 
@@ -352,7 +373,7 @@ contains
       case (DIALOGUE_ERR_CAPACITY)
          description = 'dialogue knowledge exceeds configured max entries'
       case (DIALOGUE_ERR_TOKENIZATION)
-         description = 'dialogue input violates the strict ASCII text contract'
+         description = 'dialogue input violates the strict UTF-8/Turkish text contract'
       case (DIALOGUE_ERR_MODEL)
          description = 'checkpoint is unavailable or incompatible with dialogue retrieval'
       case (DIALOGUE_ERR_NO_KNOWN_TOKENS)

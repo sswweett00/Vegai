@@ -1586,10 +1586,12 @@ contains
       type(hdc_pretrain_model_t) :: model
       type(hdc_pretrain_config_t) :: training_config
       type(pretrain_metrics_t) :: vocabulary_metrics, training_metrics
-      type(dialogue_config_t) :: dialogue_config, nonfinite_dialogue_config
-      type(dialogue_index_t) :: index, loaded_index, rejected_index
-      type(dialogue_session_t) :: session, loaded_session
+      type(dialogue_config_t) :: dialogue_config, nonfinite_dialogue_config, hybrid_config
+      type(dialogue_index_t) :: index, loaded_index, rejected_index, hybrid_index
+      type(dialogue_session_t) :: session, loaded_session, hybrid_session
       type(dialogue_answer_t) :: answer
+      character(len=DIALOGUE_MAX_PROMPT_CHARS) :: utf8_prompt, utf8_query
+      character(len=DIALOGUE_MAX_RESPONSE_CHARS) :: utf8_response
       integer :: unit, io_status
       integer(int32) :: status, entries_loaded
 
@@ -1602,6 +1604,8 @@ contains
       write(unit, '(A)') 'omega psi phi'
       write(unit, '(A)') 'omega psi tau'
       write(unit, '(A)') 'gamma delta theta'
+      write(unit, '(A)') 'ogrenci kayit nasil yapilir'
+      write(unit, '(A)') 'ogrenci ders program nerede'
       close(unit)
 
       training_config = hdc_pretrain_config_t()
@@ -1631,6 +1635,11 @@ contains
       call dialogue_index_init(rejected_index, nonfinite_dialogue_config, status)
       call assert_i32_equal(status, DIALOGUE_ERR_INVALID_ARGUMENT, &
                             'infinite dialogue margin threshold is rejected fail-closed')
+      nonfinite_dialogue_config = dialogue_config_t()
+      nonfinite_dialogue_config%lexical_weight = ieee_value(0.0_real32, ieee_quiet_nan)
+      call dialogue_index_init(rejected_index, nonfinite_dialogue_config, status)
+      call assert_i32_equal(status, DIALOGUE_ERR_INVALID_ARGUMENT, &
+                            'NaN hybrid lexical weight is rejected fail-closed')
 
       dialogue_config = dialogue_config_t()
       dialogue_config%max_entries = 3_int32
@@ -1694,6 +1703,46 @@ contains
       call assert_true(answer%found .and. trim(answer%response) == 'loaded response from TSV', &
                        'TSV content controls the user-visible dialogue answer')
 
+      ! Build Turkish UTF-8 strings with raw byte constructors so the native
+      ! test remains source-encoding-independent. The trained checkpoint keeps
+      ! an ASCII projection, while the dialogue boundary accepts/display
+      ! preserves Turkish characters.
+      utf8_prompt = achar(195) // achar(150) // achar(196) // achar(159) // 'renci kay' // achar(196) // &
+                    achar(177) // 't nas' // achar(196) // achar(177) // 'l yap' // achar(196) // achar(177) // &
+                    'l' // achar(196) // achar(177) // 'r'
+      utf8_query = achar(195) // achar(150) // achar(196) // achar(159) // 'rencinin kayd' // achar(196) // &
+                   achar(177) // ' nas' // achar(196) // achar(177) // 'l yap' // achar(196) // achar(177) // 'labilir'
+      utf8_response = achar(195) // achar(150) // achar(196) // achar(159) // 'renci kayd' // achar(196) // &
+                      achar(177) // ' i' // achar(195) // achar(167) // 'in veri taban' // achar(196) // achar(177) // &
+                      'ndaki kayna' // achar(196) // achar(159) // 'a bakiniz.'
+      hybrid_config = dialogue_config_t()
+      hybrid_config%max_entries = 2_int32
+      hybrid_config%max_history_turns = 0_int32
+      hybrid_config%minimum_similarity = -1.0_real32
+      hybrid_config%minimum_margin = 0.0_real32
+      hybrid_config%semantic_weight = 0.25_real32
+      hybrid_config%lexical_weight = 0.75_real32
+      hybrid_config%minimum_hybrid_score = 0.50_real32
+      hybrid_config%minimum_hybrid_margin = 0.00_real32
+      call dialogue_index_init(hybrid_index, hybrid_config, status)
+      call assert_i32_equal(status, DIALOGUE_OK, 'hybrid Turkish dialogue index initializes')
+      call dialogue_index_add(hybrid_index, model, utf8_prompt, utf8_response, status)
+      call assert_i32_equal(status, DIALOGUE_OK, 'UTF-8 Turkish prompt and response register natively')
+      call dialogue_index_add(hybrid_index, model, 'ogrenci ders program nerede', 'second Turkish retrieval target', status)
+      call assert_i32_equal(status, DIALOGUE_OK, 'hybrid comparison prompt registers')
+      call dialogue_session_init(hybrid_session, 0_int32, status)
+      call assert_i32_equal(status, DIALOGUE_OK, 'stateless hybrid dialogue session initializes')
+      call dialogue_ask(hybrid_index, model, hybrid_session, utf8_prompt, answer, status)
+      call assert_i32_equal(status, DIALOGUE_OK, 'exact UTF-8 Turkish prompt is accepted')
+      call assert_true(answer%found .and. trim(answer%matched_prompt) == trim(utf8_prompt) .and. &
+                       trim(answer%response) == trim(utf8_response), &
+                       'UTF-8 Turkish source text is retained verbatim in grounded output')
+      call dialogue_ask(hybrid_index, model, hybrid_session, utf8_query, answer, status)
+      call assert_i32_equal(status, DIALOGUE_OK, 'morphological Turkish hybrid query is accepted')
+      call assert_true(answer%found .and. trim(answer%response) == trim(utf8_response) .and. &
+                       answer%lexical_similarity > 0.70_real32 .and. answer%hybrid_score > 0.50_real32, &
+                       'hybrid retrieval uses transparent Turkish lexical/morphology evidence')
+
       open(newunit=unit, file=REJECTED_KNOWLEDGE_PATH, status='replace', action='write', access='stream', &
            form='unformatted', iostat=io_status)
       call assert_true(io_status == 0, 'rejected dialogue TSV fixture opens')
@@ -1711,9 +1760,11 @@ contains
 
       call dialogue_session_destroy(session)
       call dialogue_session_destroy(loaded_session)
+      call dialogue_session_destroy(hybrid_session)
       call dialogue_index_destroy(index)
       call dialogue_index_destroy(loaded_index)
       call dialogue_index_destroy(rejected_index)
+      call dialogue_index_destroy(hybrid_index)
       call pretrain_model_destroy(model)
       open(newunit=unit, file=CORPUS_PATH, status='old', iostat=io_status)
       if (io_status == 0) close(unit, status='delete')

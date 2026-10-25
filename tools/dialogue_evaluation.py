@@ -99,7 +99,7 @@ def text_digest(value: str | None, hmac_key: bytes | None) -> str | None:
     """Return a reproducible SHA-256 or keyed HMAC-SHA-256 text identifier."""
     if value is None:
         return None
-    encoded = value.encode("ascii")
+    encoded = value.encode("utf-8")
     if hmac_key is None:
         return hashlib.sha256(encoded).hexdigest()
     return hmac.new(hmac_key, encoded, hashlib.sha256).hexdigest()
@@ -186,6 +186,28 @@ def validate_ascii_text(value: object, field: str, maximum_bytes: int, *, allow_
     return value
 
 
+def validate_utf8_dialogue_text(value: object, field: str, maximum_bytes: int, *, allow_none: bool = False) -> str | None:
+    """Validate the printable UTF-8 dialogue-field envelope used by vegai_chat.
+
+    The native boundary performs the authoritative Turkish-fold check for a
+    live prompt. This evaluator mirrors the byte/control safety portion so a
+    malformed held-out file fails before it can be confused with a model result.
+    """
+    if value is None and allow_none:
+        return None
+    require(isinstance(value, str) and value, f"{field} must be a nonempty string" + (" or null" if allow_none else ""))
+    require("\r" not in value and "\n" not in value and "\t" not in value,
+            f"{field} must not contain CR/LF/TAB")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise DialogueEvaluationError(f"{field} is not strict UTF-8 text") from error
+    require(len(encoded) <= maximum_bytes, f"{field} exceeds {maximum_bytes} UTF-8 bytes")
+    require(all(ord(character) >= 32 and not 127 <= ord(character) <= 159 for character in value),
+            f"{field} contains a control character")
+    return value
+
+
 def _iter_bounded_lines(handle: Any, maximum_bytes: int) -> Iterator[tuple[int, bytes, bool]]:
     """Yield LF records without allocating an unbounded hostile JSONL line."""
     number = 0
@@ -215,8 +237,8 @@ def parse_case_mapping(value: object, number: int) -> EvaluationCase:
     require("id" in value and "prompt" in value and "expected_prompt" in value,
             f"evaluation record {number} must contain id, prompt, and expected_prompt")
     case_id = validate_ascii_text(value["id"], f"evaluation record {number}.id", MAX_CASE_ID_BYTES)
-    prompt = validate_ascii_text(value["prompt"], f"evaluation record {number}.prompt", MAX_PROMPT_BYTES)
-    expected = validate_ascii_text(
+    prompt = validate_utf8_dialogue_text(value["prompt"], f"evaluation record {number}.prompt", MAX_PROMPT_BYTES)
+    expected = validate_utf8_dialogue_text(
         value["expected_prompt"], f"evaluation record {number}.expected_prompt", MAX_PROMPT_BYTES, allow_none=True
     )
     assert case_id is not None and prompt is not None
@@ -302,7 +324,7 @@ def parse_chat_output(output: str) -> ChatObservation:
     grounded = grounded_value == "true"
     if grounded:
         require(len(matched) == 1 and len(answers) == 1, "grounded chat output omitted or duplicated source answer fields")
-        matched_prompt = validate_ascii_text(matched[0], "vegai_chat matched prompt", MAX_PROMPT_BYTES)
+        matched_prompt = validate_utf8_dialogue_text(matched[0], "vegai_chat matched prompt", MAX_PROMPT_BYTES)
         assert matched_prompt is not None
     else:
         require(not matched and not answers, "abstained chat output must not expose a matched prompt or answer")
@@ -345,6 +367,14 @@ def chat_command(arguments: argparse.Namespace, case: EvaluationCase) -> list[st
         normalized_float(arguments.min_similarity),
         "--min-margin",
         normalized_float(arguments.min_margin),
+        "--semantic-weight",
+        normalized_float(arguments.semantic_weight),
+        "--lexical-weight",
+        normalized_float(arguments.lexical_weight),
+        "--min-hybrid-score",
+        normalized_float(arguments.min_hybrid_score),
+        "--min-hybrid-margin",
+        normalized_float(arguments.min_hybrid_margin),
     ]
     if arguments.require_all_known:
         command.append("--require-all-known")
@@ -495,6 +525,10 @@ def build_report(
             "require_all_known": arguments.require_all_known,
             "minimum_similarity": arguments.min_similarity,
             "minimum_margin": arguments.min_margin,
+            "semantic_weight": arguments.semantic_weight,
+            "lexical_weight": arguments.lexical_weight,
+            "minimum_hybrid_score": arguments.min_hybrid_score,
+            "minimum_hybrid_margin": arguments.min_hybrid_margin,
             "per_case_timeout_seconds": arguments.timeout_seconds,
         },
         "metrics": metrics,
@@ -597,6 +631,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--require-all-known", action="store_true")
     parser.add_argument("--min-similarity", type=float, default=0.05)
     parser.add_argument("--min-margin", type=float, default=0.01)
+    parser.add_argument("--semantic-weight", type=float, default=1.0,
+                        help="native semantic contribution in [0, 1]")
+    parser.add_argument("--lexical-weight", type=float, default=0.0,
+                        help="native Turkish lexical/morphology contribution in [0, 1]; enables hybrid ranking")
+    parser.add_argument("--min-hybrid-score", type=float, default=0.50)
+    parser.add_argument("--min-hybrid-margin", type=float, default=0.01)
     parser.add_argument("--timeout-seconds", type=parse_positive_float, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--min-grounded-prompt-accuracy", type=parse_fraction)
     parser.add_argument("--min-grounded-precision", type=parse_fraction)
@@ -618,6 +658,16 @@ def validate_arguments(arguments: argparse.Namespace) -> None:
             "--min-similarity must be finite and in [-1, 1]")
     require(math.isfinite(arguments.min_margin) and 0.0 <= arguments.min_margin <= 2.0,
             "--min-margin must be finite and in [0, 2]")
+    require(math.isfinite(arguments.semantic_weight) and 0.0 <= arguments.semantic_weight <= 1.0,
+            "--semantic-weight must be finite and in [0, 1]")
+    require(math.isfinite(arguments.lexical_weight) and 0.0 <= arguments.lexical_weight <= 1.0,
+            "--lexical-weight must be finite and in [0, 1]")
+    require(arguments.semantic_weight + arguments.lexical_weight > 0.0,
+            "--semantic-weight and --lexical-weight must not both be zero")
+    require(math.isfinite(arguments.min_hybrid_score) and 0.0 <= arguments.min_hybrid_score <= 1.0,
+            "--min-hybrid-score must be finite and in [0, 1]")
+    require(math.isfinite(arguments.min_hybrid_margin) and 0.0 <= arguments.min_hybrid_margin <= 1.0,
+            "--min-hybrid-margin must be finite and in [0, 1]")
     require(os.access(arguments.chat_bin.resolve(), os.X_OK),
             f"chat executable is not executable: {arguments.chat_bin}")
     if arguments.output is not None:

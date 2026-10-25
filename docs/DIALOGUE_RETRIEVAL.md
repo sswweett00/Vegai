@@ -28,10 +28,14 @@ hyper_types + text_tokenizer + hdc_pretraining checkpoint
                 vegai_chat   operator TSV knowledge base
 ```
 
+- `src/turkish_text.f90`: strict UTF-8 kontrolü ve Türkçe Latin harflerini
+  checkpoint'in ASCII projeksiyonuna deterministik katlayan native Fortran
+  sınırı. Response byte'ları dönüştürülmez.
 - `src/dialogue_retrieval.f90`: bounded index, deterministic prompt encoding,
-  confidence/margin gate ve bounded turn history. Corpus training veya
-  checkpoint semantigini degistirmez.
-- `app/chat.f90`: `ask` ve `repl` CLI adaptoru. Cevap üretmez; yalnizca modülün
+  legacy HDC veya opt-in lexical/HDC hybrid reranking, confidence/margin gate
+  ve bounded turn history. Corpus training veya checkpoint semantiğini
+  değiştirmez.
+- `app/chat.f90`: `ask` ve `repl` CLI adaptörü. Cevap üretmez; yalnızca modülün
   sonucunu raporlar.
 - `tools/verify_dialogue_retrieval.py`: gerçek derlenmis `vegai_pretrain` ve
   `vegai_chat` ile runtime TSV cevabi, abstention, strict failure ve REPL
@@ -61,18 +65,26 @@ okul ders	okul ders kitap ogrenci ogretmen ile ilgili bilgi
 hastane doktor	hastane doktor hasta hemsire tedavi ile ilgili bilgi
 ```
 
-Runtime fail-closed kurallari:
+Runtime fail-closed kuralları:
 
-- yalniz LF ve `<= 8.192` byte fiziksel kayit;
-- CR/CRLF, `>127` byte, ikinci TAB, bos prompt/response reddedilir;
-- prompt en cok 1.024, response en cok 2.048 printable ASCII byte olabilir;
-  oversized `--prompt` veya REPL physical record'u truncate edilmeden reddedilir;
-- bilgi bankasi prompt'undaki **her** token yuklenmis checkpoint'in active
-  vocabulary'sinde olmalidir; OOV anahtar sessizce indexlenmez;
-- ayni HDC prompt embedding'i (response ayni olsa bile) ikinci kez yayinlanamaz;
-- `--max-entries` kapasitesi asilirsa index buyumez;
-- herhangi bir TSV publication/load hatasinda partial index destroy edilir ve
-  `entries_loaded=0` olur; duzeltilmis revision icin operator yeniden init/load
+- yalnız LF ve `<= 8.192` byte fiziksel kayıt;
+- ayrac **tek ASCII TAB**'dır; CR/CRLF, ikinci TAB, boş alan ve C0/C1 kontrol
+  karakterleri reddedilir;
+- prompt en çok 1.024, response en çok 2.048 **UTF-8 byte** olabilir; UTF-8
+  biçimi doğrulanır, oversized `--prompt` veya REPL physical record'u truncate
+  edilmeden reddedilir;
+- native prompt sınırı `ÇçĞğİıÖöŞşÜü` harflerini sırasıyla ASCII
+  `c/g/i/o/s/u` projeksiyonuna katlar; common typographic apostrophe/dash ve
+  NBSP için de açık katlama vardır. Desteklenmeyen Unicode prompt karakteri
+  sessizce düşürülmez, fail-closed olur;
+- response alanı geçerli printable UTF-8 olarak **verbatim** saklanır ve
+  döndürülür; doğal görünen metin yalnız operatorun yayınladığı veridir;
+- bilgi bankası prompt'undaki **her** canonical token yüklenmiş checkpoint'in
+  active vocabulary'sinde olmalıdır; OOV anahtar sessizce indexlenmez;
+- aynı HDC prompt embedding'i (response aynı olsa bile) ikinci kez yayınlanamaz;
+- `--max-entries` kapasitesi aşılırsa index büyümez;
+- herhangi bir TSV publication/load hatasında partial index destroy edilir ve
+  `entries_loaded=0` olur; düzeltilmiş revision için operator yeniden init/load
   etmelidir.
 
 Cevap alani tokenization veya execution icin kullanilmaz; display edilecek
@@ -80,11 +92,12 @@ operator verisidir. Bu nedenle bilgi bankasini guvenilir/veri-yonetisiminden
 gecmis bir kaynak olarak ele alin. Bir response içindeki instruction benzeri
 metin executable degildir, fakat kullaniciya oldugu gibi gösterilir.
 
-Mevcut core ASCII sozlesmesi Unicode Turkce'yi dogrudan kabul etmez. Upstream
-normalizasyon/transliteration surumu, source license'i ve bilgi-bankasi hash'i
+Checkpoint'in training tokenizer'ı hâlâ ASCII/transliterasyonludur; UTF-8
+sınırı bunu değiştirmez veya yeni model bilgisi icat etmez. Bu yüzden upstream
+normalizasyon/transliteration sürümü, source license'i ve bilgi-bankası hash'i
 kaydedilmelidir. `examples/dialogue/mini_turkish_hdc_dialogue.tsv` tamamen
-sentetik, ASCII transliterasyonlu bir integration fixture'dir; gercek bilgi veya
-kalite iddiasi degildir.
+sentetik, ASCII transliterasyonlu bir integration fixture'dir; gerçek bilgi veya
+kalite iddiası değildir.
 
 ## Kullanım
 
@@ -107,6 +120,20 @@ Tek bir grounded sorgu:
   --min-similarity 0.05 --min-margin 0.01
 ```
 
+HDC komşuluklarının zayıf olduğu Türkçe biçimbirimli/parafrazlı sorgular için
+**opt-in hybrid** policy, checkpoint association ile şeffaf lexical kanıtı
+ayrı ayrı raporlar ve yalnız explicit hybrid gate geçerse response döndürür:
+
+```bash
+./build/vegai_chat ask /tmp/mini.vgai /srv/kb/turkish-dialogue.tsv \
+  --prompt "Öğrencinin kaydı nasıl yapılabilir?" --max-entries 50000 --history-turns 0 \
+  --semantic-weight 0.25 --lexical-weight 0.75 \
+  --min-hybrid-score 0.65 --min-hybrid-margin 0.03
+```
+
+Bu örnekte TSV'deki prompt ve response UTF-8 olabilir; seçenek, cevap
+üretmediği için coverage dışındaki soru için hâlâ abstain etmelidir.
+
 Stateful terminal oturumu:
 
 ```bash
@@ -123,22 +150,35 @@ ile aktif grounding policy esiklerini yayinlar.
 
 ## Retrieval, baglam ve olcek siniri
 
-1. Prompt ASCII tokenizer ile canonicalize edilir.
+1. UTF-8 prompt doğrulanır ve desteklenen Türkçe harfleri checkpoint'in ASCII
+   tokenizer projection'ına canonicalize edilir. Original UTF-8 source prompt
+   provenance/display alanında korunur.
 2. Active checkpoint semantic hypervector'leri deterministic weighted majority
-   bundle'a cevrilir.
+   bundle'a çevrilir.
 3. Son `--history-turns` user prompt'u varsa, current prompt weight'i ve
-   history weight'i ile ikinci bounded bundle olusturulur. Varsayilan policy
-   current=`2`, her history turn=`1`, history capacity=`3`tur; tumu CLI ile
-   degistirilebilir, `--history-turns 0` state'i kapatir.
-4. Index tum entry'leri exact Hamming mesafesiyle tarar. En iyi response ancak
-   `--min-similarity` ve en iyi/ikinci-en-iyi `--min-margin` esiklerini
-   gecerse döndürülür.
+   history weight'i ile ikinci bounded bundle oluşturulur. Varsayılan policy
+   current=`2`, her history turn=`1`, history capacity=`3`tür; tümü CLI ile
+   değiştirilebilir, `--history-turns 0` state'i kapatır.
+4. Index tüm entry'leri exact Hamming mesafesiyle tarar. Varsayılan legacy
+   ranking yalnız bu bipolar semantic similarity'dir ve
+   `--min-similarity`/`--min-margin` kapılarını kullanır.
+5. `--lexical-weight > 0` ise her candidate için canonical token overlap,
+   exact adjacent bigram ve en az dört-character ortak-prefix biçimbirim
+   kanıtı hesaplanır. `semantic_weight` ile normalize edilen hybrid score,
+   semantic score ve lexical score ayrı yayımlanır; ranking/gate yalnız
+   `--min-hybrid-score`/`--min-hybrid-margin` ile yapılır. Eski semantic
+   eşikler hibrit moda gizlice uygulanmaz.
+
+Bu prefix heuristic Türkçe morfoloji desteği sağlar; anlam eşdeğerliği, factual
+truth veya doğal dil anlayışı kanıtı değildir. Türkçe paraphrase/coverage
+kalitesi source-disjoint held-out set ile ölçülmeden iddia edilmez.
 
 Exact tarama deterministik ve recall kayipsizdir, fakat bir turn icin `O(N ×
 16.384-bit)` maliyetlidir. Bu modul uzak/dağıtık milyarlarca dokuman retrieval
 servisi oldugunu iddia etmez. `--max-entries` ile RAM siniri aciktir; index
-yaklasik olarak entry basina 2.048 byte prompt HV + 1.024 byte prompt + 2.048
-byte response + sayaçlar kullanir. CLI `knowledge index resident bytes` ile
+yaklaşık olarak entry başına 2.048 byte prompt HV + 1.024 byte original
+UTF-8 prompt buffer + 1.024 byte canonical projection + 2.048 byte response
+buffer + sayaçlar kullanır. CLI `knowledge index resident bytes` ile
 veri-duzlemi estimate'ini yayinlar. Daha buyuk deployment'ta index sharding,
 external search backend ve versioned retrieval evaluation ayrı bir adapter
 karari olmalidir; HDC exact semantics gizlice approximate result olarak
@@ -153,7 +193,8 @@ kapisindan gecmek zorundadir.
 
 Grounding eşiğini yalnız örnek prompt'a bakarak seçmek güvenilirlik kanıtı
 değildir. `tools/dialogue_evaluation.py`, gerçek `vegai_chat ask` binary'sini
-versioned JSONL held-out case seti üzerinde history kapalı çalıştırır. Her case
+versioned UTF-8 JSONL held-out case seti üzerinde history kapalı çalıştırır.
+Evaluator semantic ve hybrid CLI policy'nin tamamını report'a bağlar; Her case
 ya beklenen KB prompt'unu ya da açık `expected_prompt: null` abstention
 beklentisini taşır. Report raw prompt/response yerine SHA-256 prompt kimlikleri
 veya `--case-hmac-key-file` verildiğinde keyed HMAC-SHA-256 kimlikleri,
@@ -174,6 +215,8 @@ python3 tools/dialogue_evaluation.py \
   --evaluation examples/dialogue/mini_turkish_hdc_evaluation.jsonl \
   --output /tmp/mini-dialogue-quality.json \
   --max-entries 64 --min-similarity 0.90 --min-margin 0.00 \
+  --semantic-weight 0.25 --lexical-weight 0.75 \
+  --min-hybrid-score 0.65 --min-hybrid-margin 0.03 \
   --min-grounded-prompt-accuracy 1.0 --min-grounded-precision 1.0 \
   --min-grounded-recall 1.0 --min-abstain-precision 1.0 --min-abstain-recall 1.0 \
   --max-false-grounded-cases 0 --max-false-abstain-cases 0
@@ -198,8 +241,10 @@ CTest'teki `vegai_dialogue_retrieval` gerçek Fortran binary'leriyle:
 - known ama uygun olmayan prompt'un abstain etmesini;
 - OOV user prompt, malformed TSV ve capacity/duplicate prompt error'larini;
 - stateful `repl` yolunu;
-- native Fortran property testinde bounded session ring, strict TSV load,
-  deterministic exact retrieval ve reset davranisini denetler;
+- native Fortran property testinde bounded session ring, strict UTF-8 TSV load,
+  Türkçe diacritic folding, response byte preservation, deterministic hybrid
+  lexical/morphology reranking, exact legacy retrieval ve reset davranışını
+  denetler;
 - `vegai_dialogue_evaluation`, real binaries ile held-out exact grounding,
   expected abstention, privacy-preserving report, malformed evaluation schema
   ve intentionally failed release-gate davranisini denetler.

@@ -30,6 +30,7 @@ add_library(vegai_hds STATIC
     src/resonator_network.f90
     src/reasoning_core.f90
     src/hdc_pretraining.f90
+    src/turkish_text.f90
     src/dialogue_retrieval.f90
     src/fortran_integrity.f90
     src/fortran_quality_gate.f90

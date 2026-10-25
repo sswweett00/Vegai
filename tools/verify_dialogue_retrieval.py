@@ -250,7 +250,7 @@ def main() -> int:
             crlf_knowledge = workspace / "crlf.tsv"
             crlf_knowledge.write_bytes(b"okul ders\tokul ders kaynak cevabi\r\n")
             crlf_output = rejected(ask_command(chat, checkpoint, crlf_knowledge, "okul ders"))
-            require("strict ASCII text contract" in crlf_output, f"CRLF knowledge record was not rejected\n{crlf_output}")
+            require("strict UTF-8/Turkish text contract" in crlf_output, f"CRLF knowledge record was not rejected\n{crlf_output}")
 
             repl = run(
                 [
