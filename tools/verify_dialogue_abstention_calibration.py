@@ -47,7 +47,7 @@ evaluation = args[3]
 score = float(args[args.index('--min-hybrid-score') + 1])
 def identity(path):
     data = pathlib.Path(path).read_bytes()
-    return {{'path': pathlib.Path(path).name, 'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}}
+    return {{'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}}
 if evaluation.endswith('train.tsv'):
     metrics = {{
       'total_cases': 2, 'expected_grounded_cases': 2, 'expected_abstain_cases': 0,

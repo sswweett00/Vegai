@@ -128,8 +128,15 @@ def run_native_evaluation(
     require(isinstance(identities, dict), f"{output.name}: native report has no identities object")
     for name, source_path in (("checkpoint", checkpoint), ("knowledge", knowledge), ("evaluation", evaluation)):
         expected_identity = sha256_identity(source_path)
+        # Native reports intentionally avoid filesystem paths; the controller's
+        # decision separately records basename/hash/size identities. Compare
+        # the common cryptographic identity rather than requiring a path leak.
+        expected_native_identity = {
+            "sha256": expected_identity["sha256"],
+            "bytes": expected_identity["bytes"],
+        }
         reported_identity = identities.get(name)
-        require(reported_identity == expected_identity,
+        require(reported_identity == expected_native_identity,
                 f"{output.name}: native report {name} identity does not bind the supplied input")
     return payload
 
