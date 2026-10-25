@@ -73,8 +73,10 @@ Runtime fail-closed kuralları:
 - prompt en çok 1.024, response en çok 2.048 **UTF-8 byte** olabilir; UTF-8
   biçimi doğrulanır, oversized `--prompt` veya REPL physical record'u truncate
   edilmeden reddedilir;
-- native prompt sınırı `ÇçĞğİıÖöŞşÜü` harflerini sırasıyla ASCII
-  `c/g/i/o/s/u` projeksiyonuna katlar; common typographic apostrophe/dash ve
+- native prompt sınırı `ÇçĞğİıÖöŞşÜü` ile Turkish circumflex
+  `ÂâÎîÛû` harflerini sırasıyla ASCII `c/g/i/o/s/u/a/i/u` projeksiyonuna
+  katlar; public source'larda görülen Romanian `Șș` varyantı da `s` olur;
+  common typographic apostrophe/dash ve
   NBSP için de açık katlama vardır. Desteklenmeyen Unicode prompt karakteri
   sessizce düşürülmez, fail-closed olur;
 - response alanı geçerli printable UTF-8 olarak **verbatim** saklanır ve

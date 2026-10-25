@@ -7,6 +7,8 @@ program test_all
    use reasoning_core
    use resonator_network
    use hdc_pretraining
+   use turkish_text, only: TURKISH_TEXT_OK, TURKISH_TEXT_ERR_CONTROL, turkish_fold_prompt_utf8, &
+                           turkish_validate_display_utf8
    use dialogue_retrieval
    use tokenless_field
    use fortran_control, only: FC_OK, FC_ERR_INVALID_ARGUMENT, fortran_resource_plan_t, &
@@ -30,6 +32,7 @@ program test_all
    call test_fortran_integrity()
    call test_fortran_quality_gate()
    call test_hdc_pretraining()
+   call test_turkish_text_boundary()
    call test_dialogue_retrieval()
    call finish_tests()
 
@@ -1578,6 +1581,23 @@ contains
                                trim(encoder_name) // ' checkpoint has the expected format version')
       end if
    end subroutine assert_checkpoint_header_version
+
+   subroutine test_turkish_text_boundary()
+      character(len=64) :: input, folded
+      integer(int32) :: status
+
+      ! Construct UTF-8 bytes directly so this test does not depend on the
+      ! source-file locale. It covers standard Turkish diacritics, Turkish
+      ! circumflex spellings, and a public-source Romanian comma-below-s typo.
+      input = 'h' // achar(195) // achar(162) // 'l' // achar(195) // achar(162) // ' ' // &
+              achar(195) // achar(174) // ' ' // achar(195) // achar(187) // ' ' // achar(200) // achar(153)
+      call turkish_fold_prompt_utf8(input, folded, status)
+      call assert_i32_equal(status, TURKISH_TEXT_OK, 'Turkish orthographic UTF-8 variants fold successfully')
+      call assert_true(trim(folded) == 'hala i u s', 'Turkish orthographic variants retain deterministic ASCII projection')
+      input = achar(194) // achar(128)
+      call turkish_validate_display_utf8(input, 64_int32, status)
+      call assert_i32_equal(status, TURKISH_TEXT_ERR_CONTROL, 'UTF-8 encoded C1 display control is rejected')
+   end subroutine test_turkish_text_boundary
 
    subroutine test_dialogue_retrieval()
       character(len=*), parameter :: CORPUS_PATH = 'vegai_dialogue_test_corpus.txt'

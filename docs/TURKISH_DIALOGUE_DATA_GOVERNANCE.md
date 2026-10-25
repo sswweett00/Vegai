@@ -77,7 +77,8 @@ Tool şunları fail-closed doğrular:
 - train/validation/test arasında `conversation_id` benzersizliği;
 - exact source file SHA-256/byte identity ve açık repository/revision/license/
   attribution metadata;
-- Türkçe `ÇçĞğİıÖöŞşÜü` → native ASCII checkpoint projection;
+- Türkçe `ÇçĞğİıÖöŞşÜü`, Turkish circumflex `ÂâÎîÛû` ve public-source
+  `Șș` varyantı → native ASCII checkpoint projection;
 - train canonical prompt için yalnız aynı literal response tekrarlarının
   deterministic dedupe edilmesi; çelişen response fail-closed;
 - existing package'ın sessizce değiştirilmemesi.

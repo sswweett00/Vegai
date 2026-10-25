@@ -82,13 +82,21 @@ contains
          end if
          second = iachar(input(position + 1:position + 1))
 
-         ! ç Ç ö Ö ü Ü
+         ! ç Ç ö Ö ü Ü, and Turkish orthographic circumflex variants
+         ! â Â î Î û Û. The latter retain a display distinction in source TSV
+         ! but map to the current ASCII checkpoint's lexical projection.
          if (first == 195) then
             select case (second)
+            case (130, 162)
+               call append_ascii(output, output_length, iachar('a'), status)
             case (135, 167)
                call append_ascii(output, output_length, iachar('c'), status)
+            case (142, 174)
+               call append_ascii(output, output_length, iachar('i'), status)
             case (150, 182)
                call append_ascii(output, output_length, iachar('o'), status)
+            case (155, 187)
+               call append_ascii(output, output_length, iachar('u'), status)
             case (156, 188)
                call append_ascii(output, output_length, iachar('u'), status)
             case default
@@ -118,6 +126,21 @@ contains
          if (first == 197) then
             select case (second)
             case (158, 159)
+               call append_ascii(output, output_length, iachar('s'), status)
+            case default
+               status = TURKISH_TEXT_ERR_UNSUPPORTED
+            end select
+            position = position + 2
+            if (status /= TURKISH_TEXT_OK) return
+            cycle
+         end if
+
+         ! Some public Turkish material contains Romanian comma-below s
+         ! instead of Turkish cedilla s. Fold it explicitly rather than either
+         ! rejecting an otherwise useful licensed row or silently dropping it.
+         if (first == 200) then
+            select case (second)
+            case (152, 153)
                call append_ascii(output, output_length, iachar('s'), status)
             case default
                status = TURKISH_TEXT_ERR_UNSUPPORTED
