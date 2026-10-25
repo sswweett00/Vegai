@@ -91,15 +91,13 @@ jobs:
             if python3 - "$status" "$manifest" "$status_url" <<'PY2'
           import json
           from pathlib import Path
+          import re
           import sys
 
           status_path, output_path, status_url = sys.argv[1:]
           status_path = Path(status_path)
           output_path = Path(output_path)
           status = json.loads(status_path.read_text(encoding="utf-8"))
-          revision = status.get("version")
-          if not isinstance(revision, str) or not revision.isdigit() or len(revision) != 8:
-              raise SystemExit("status lacks an eight-digit dump revision")
           job = status.get("jobs", {}).get("articlesdump")
           if not isinstance(job, dict) or job.get("status") != "done":
               raise SystemExit("articlesdump is not done")
@@ -116,6 +114,15 @@ jobs:
           if not candidates:
               raise SystemExit("articlesdump has no pages-articles XML bzip2 file")
           _preference, name, details = sorted(candidates)[0]
+          # Wikimedia dumpstatus itself uses a schema-version field rather
+          # than the dump date. The exact revision is encoded in the selected
+          # official filename (and redundantly in versioned status URLs).
+          revision_match = re.search(r"trwiki-(\d{8})-pages-articles", name)
+          if revision_match is None:
+              revision_match = re.search(r"/trwiki/(\d{8})/dumpstatus\.json$", status_url)
+          if revision_match is None:
+              raise SystemExit("cannot derive an eight-digit dump revision from the official selected file")
+          revision = revision_match.group(1)
           url = details.get("url")
           if not isinstance(url, str) or not url.startswith("https://"):
               url = f"https://dumps.wikimedia.org/trwiki/{revision}/{name}"
