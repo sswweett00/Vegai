@@ -584,7 +584,7 @@ contains
       type(decoding_policy_t) :: policy
       type(temperature_calibration_t) :: calibration
       character(len=64) :: source, decoded
-      integer(int32) :: encoded(64), encoded_count, decoded_bytes, status, merged, index
+      integer(int32) :: encoded(64), encoded_count, decoded_bytes, status, first_merge, second_merge, index
       integer(int32) :: history(8), selected, targets(4)
       integer(int64) :: random_state
       real(real32) :: hidden_full(16), hidden_chunked(16), logits_full(64), logits_chunked(64)
@@ -595,9 +595,9 @@ contains
       call bpe_init(bpe, 8_int32, status)
       call assert_i32_equal(status, BPE_OK, 'byte-BPE model initializes')
       call bpe_add_merge(bpe, bpe_base_token_for_byte(int(iachar(source(1:1)), int32)), &
-                         bpe_base_token_for_byte(int(iachar(source(2:2)), int32)), merged, status)
+                         bpe_base_token_for_byte(int(iachar(source(2:2)), int32)), first_merge, status)
       call assert_i32_equal(status, BPE_OK, 'byte-BPE accepts first UTF-8 merge')
-      call bpe_add_merge(bpe, merged, bpe_base_token_for_byte(int(iachar(source(3:3)), int32)), merged, status)
+      call bpe_add_merge(bpe, first_merge, bpe_base_token_for_byte(int(iachar(source(3:3)), int32)), second_merge, status)
       call assert_i32_equal(status, BPE_OK, 'byte-BPE accepts chained UTF-8 merge')
       call bpe_encode(bpe, source, int(len_trim(source), int32), encoded, encoded_count, status)
       call assert_i32_equal(status, BPE_OK, 'byte-BPE encodes Turkish UTF-8 bytes')

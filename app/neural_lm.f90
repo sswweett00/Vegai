@@ -56,7 +56,7 @@ contains
       type(decoding_policy_t) :: policy
       type(temperature_calibration_t) :: calibration
       character(len=64) :: input, decoded
-      integer(int32) :: tokens(64), token_count, output_bytes, status, merged, position
+      integer(int32) :: tokens(64), token_count, output_bytes, status, first_merge, second_merge, position
       integer(int32) :: history(8), selected
       integer(int64) :: random_state
       real(real32) :: hidden_a(16), hidden_b(16), logits_a(64), logits_b(64), prefix_logits(64)
@@ -68,9 +68,9 @@ contains
       call bpe_init(bpe, 8_int32, status)
       call require_ok(status, 'BPE init')
       call bpe_add_merge(bpe, bpe_base_token_for_byte(int(iachar(input(1:1)), int32)), &
-                          bpe_base_token_for_byte(int(iachar(input(2:2)), int32)), merged, status)
+                          bpe_base_token_for_byte(int(iachar(input(2:2)), int32)), first_merge, status)
       call require_ok(status, 'BPE first UTF-8 merge')
-      call bpe_add_merge(bpe, merged, bpe_base_token_for_byte(int(iachar(input(3:3)), int32)), merged, status)
+      call bpe_add_merge(bpe, first_merge, bpe_base_token_for_byte(int(iachar(input(3:3)), int32)), second_merge, status)
       call require_ok(status, 'BPE chained UTF-8 merge')
       call bpe_encode(bpe, input, int(len_trim(input), int32), tokens, token_count, status)
       call require_ok(status, 'BPE encode')
