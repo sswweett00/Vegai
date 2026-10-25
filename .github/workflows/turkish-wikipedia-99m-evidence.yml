@@ -112,7 +112,8 @@ jobs:
                   continue
               candidates.append((0 if "multistream" in name else 1, name, details))
           if not candidates:
-              raise SystemExit("articlesdump has no pages-articles XML bzip2 file")
+              available = ", ".join(sorted(str(name) for name in files)[:80])
+              raise SystemExit("articlesdump has no pages-articles XML bzip2 file; available keys: " + available)
           _preference, name, details = sorted(candidates)[0]
           # Wikimedia dumpstatus itself uses a schema-version field rather
           # than the dump date. The exact revision is encoded in the selected
