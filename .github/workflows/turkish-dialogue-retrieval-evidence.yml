@@ -97,11 +97,21 @@ jobs:
           print(first.split("\t", 1)[0])
           PY
           )
+          set +e
           ./build-turkish-dialogue-evidence/vegai_chat ask \
             "$TURKISH_DIALOGUE_CHECKPOINT" "$TURKISH_DIALOGUE_PACKAGE_DIR/knowledge_train.tsv" \
             --prompt "$prompt" --max-entries 5000 --history-turns 0 \
             --min-similarity 0.99 --min-margin 0.00 \
-            | tee "$RUNNER_TEMP/utf8-literal-retrieval.txt"
+            >"$RUNNER_TEMP/utf8-literal-retrieval.txt" 2>&1
+          chat_status=$?
+          set -e
+          cat "$RUNNER_TEMP/utf8-literal-retrieval.txt"
+          if test "$chat_status" -ne 0; then
+            diagnostic=$(tail -n 30 "$RUNNER_TEMP/utf8-literal-retrieval.txt" | tr '\n' ' ')
+            echo "::error title=literal UTF-8 retrieval failed::$diagnostic"
+            exit "$chat_status"
+          fi
+          set +e
           python3 tools/dialogue_evaluation.py \
             --chat-bin ./build-turkish-dialogue-evidence/vegai_chat \
             --checkpoint "$TURKISH_DIALOGUE_CHECKPOINT" \
@@ -109,7 +119,15 @@ jobs:
             --evaluation "$TURKISH_DIALOGUE_PACKAGE_DIR/train_exact_retrieval_contract.jsonl" \
             --output "$RUNNER_TEMP/train-exact-retrieval-report.json" \
             --max-entries 5000 --max-cases 64 --min-similarity 0.99 --min-margin 0.00 \
-            | tee "$RUNNER_TEMP/train-exact-evaluation.txt"
+            >"$RUNNER_TEMP/train-exact-evaluation.txt" 2>&1
+          evaluation_status=$?
+          set -e
+          cat "$RUNNER_TEMP/train-exact-evaluation.txt"
+          if test "$evaluation_status" -ne 0; then
+            diagnostic=$(tail -n 30 "$RUNNER_TEMP/train-exact-evaluation.txt" | tr '\n' ' ')
+            echo "::error title=train exact evaluation failed::$diagnostic"
+            exit "$evaluation_status"
+          fi
 
       - name: Measure frozen source-disjoint hybrid abstention behaviour
         run: |
