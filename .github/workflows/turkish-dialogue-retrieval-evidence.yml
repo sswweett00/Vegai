@@ -1,0 +1,190 @@
+name: Real licensed Turkish dialogue retrieval evidence
+
+on:
+  # Keep this real-data job scoped to changes that can alter the corpus package,
+  # native dialogue path, evaluator, or its evidence protocol. It intentionally
+  # runs from the PR so the exact branch implementation is what is measured.
+  pull_request:
+    paths:
+      - '.github/workflows/turkish-dialogue-retrieval-evidence.yml'
+      - 'tools/build_turkish_dialogue_retrieval_corpus.py'
+      - 'tools/dialogue_evaluation.py'
+      - 'src/turkish_text.f90'
+      - 'src/dialogue_retrieval.f90'
+      - 'src/hdc_pretraining.f90'
+      - 'app/chat.f90'
+      - 'app/pretrain.f90'
+      - 'CMakeLists.txt'
+      - 'Makefile'
+      - 'docs/TURKISH_DIALOGUE_DATA_GOVERNANCE.md'
+      - 'docs/DIALOGUE_RETRIEVAL.md'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  # Preserve completed evidence artifacts. A later code revision must make its
+  # own run rather than cancelling an in-progress licensed-source measurement.
+  group: turkish-dialogue-retrieval-evidence-${{ github.event.pull_request.number }}-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  evidence:
+    name: Native Turkish dialogue retrieval train and held-out evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out Vegai source
+        uses: actions/checkout@v4
+
+      - name: Install GNU Fortran toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gfortran
+
+      - name: Compile portable native Fortran training and chat executables
+        run: make pretrain chat BUILD_DIR=build-turkish-dialogue-evidence
+
+      - name: Retrieve and verify pinned licensed Turkish dialogue source
+        run: |
+          set -euo pipefail
+          source_dir="${RUNNER_TEMP}/turkish-daily-dialogues-5k"
+          git init --quiet "$source_dir"
+          git -C "$source_dir" remote add origin https://github.com/3nesdeniz/turkish-daily-dialogues-5k.git
+          git -C "$source_dir" fetch --quiet --depth 1 origin ccd9f05c2f97684bbd9a55d818528da9dfb6bd5a
+          git -C "$source_dir" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$source_dir" rev-parse HEAD)" = "ccd9f05c2f97684bbd9a55d818528da9dfb6bd5a"
+          test -f "$source_dir/LICENSE"
+          sha256sum --check "$source_dir/SHA256SUMS"
+          echo "TURKISH_DIALOGUE_SOURCE_DIR=$source_dir" >> "$GITHUB_ENV"
+
+      - name: Build immutable source-hashed native dialogue package
+        run: |
+          set -euo pipefail
+          package_dir="${RUNNER_TEMP}/vegai-turkish-dialogue-package"
+          python3 tools/build_turkish_dialogue_retrieval_corpus.py \
+            --train-jsonl "$TURKISH_DIALOGUE_SOURCE_DIR/data/train.jsonl" \
+            --validation-jsonl "$TURKISH_DIALOGUE_SOURCE_DIR/data/validation.jsonl" \
+            --test-jsonl "$TURKISH_DIALOGUE_SOURCE_DIR/data/test.jsonl" \
+            --output-dir "$package_dir" \
+            --source-repository https://github.com/3nesdeniz/turkish-daily-dialogues-5k \
+            --source-revision ccd9f05c2f97684bbd9a55d818528da9dfb6bd5a \
+            --source-license CC-BY-4.0 \
+            --attribution 'Turkish Daily Dialogues 5K by Enes Deniz, CC BY 4.0' \
+            --source-nature synthetic-ai-assisted-deterministic | tee "$RUNNER_TEMP/package-build.json"
+          echo "TURKISH_DIALOGUE_PACKAGE_DIR=$package_dir" >> "$GITHUB_ENV"
+
+      - name: Train native HDC checkpoint on the package train split
+        run: |
+          set -euo pipefail
+          checkpoint="${RUNNER_TEMP}/turkish-dialogue-retrieval.vgai"
+          OMP_NUM_THREADS=2 ./build-turkish-dialogue-evidence/vegai_pretrain train \
+            "$TURKISH_DIALOGUE_PACKAGE_DIR/pretrain_train_ascii.txt" "$checkpoint" \
+            --max-vocab 4096 --min-frequency 1 --window 4 --position-shift 73 \
+            --context-mode resonant --epochs 2 --strict --parallel-context-build --parallel-min-contexts 32 \
+            | tee "$RUNNER_TEMP/native-train.txt"
+          test -s "$checkpoint"
+          echo "TURKISH_DIALOGUE_CHECKPOINT=$checkpoint" >> "$GITHUB_ENV"
+
+      - name: Run literal UTF-8 retrieval and train-key contract sample
+        run: |
+          set -euo pipefail
+          prompt=$(python3 - "$TURKISH_DIALOGUE_PACKAGE_DIR/knowledge_train.tsv" <<'PY'
+          import sys
+          from pathlib import Path
+          first = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()[0]
+          print(first.split("\t", 1)[0])
+          PY
+          )
+          ./build-turkish-dialogue-evidence/vegai_chat ask \
+            "$TURKISH_DIALOGUE_CHECKPOINT" "$TURKISH_DIALOGUE_PACKAGE_DIR/knowledge_train.tsv" \
+            --prompt "$prompt" --max-entries 5000 --history-turns 0 \
+            --min-similarity 0.99 --min-margin 0.00 \
+            | tee "$RUNNER_TEMP/utf8-literal-retrieval.txt"
+          python3 tools/dialogue_evaluation.py \
+            --chat-bin ./build-turkish-dialogue-evidence/vegai_chat \
+            --checkpoint "$TURKISH_DIALOGUE_CHECKPOINT" \
+            --knowledge "$TURKISH_DIALOGUE_PACKAGE_DIR/knowledge_train.tsv" \
+            --evaluation "$TURKISH_DIALOGUE_PACKAGE_DIR/train_exact_retrieval_contract.jsonl" \
+            --output "$RUNNER_TEMP/train-exact-retrieval-report.json" \
+            --max-entries 5000 --max-cases 64 --min-similarity 0.99 --min-margin 0.00 \
+            | tee "$RUNNER_TEMP/train-exact-evaluation.txt"
+
+      - name: Measure frozen source-disjoint hybrid abstention behaviour
+        run: |
+          set -euo pipefail
+          # This is an intentionally honest negative-set measurement. It does
+          # not call unseen source responses correct; it quantifies only false
+          # grounding versus abstention under the declared hybrid policy.
+          python3 tools/dialogue_evaluation.py \
+            --chat-bin ./build-turkish-dialogue-evidence/vegai_chat \
+            --checkpoint "$TURKISH_DIALOGUE_CHECKPOINT" \
+            --knowledge "$TURKISH_DIALOGUE_PACKAGE_DIR/knowledge_train.tsv" \
+            --evaluation "$TURKISH_DIALOGUE_PACKAGE_DIR/test_source_disjoint_abstention.jsonl" \
+            --output "$RUNNER_TEMP/test-source-disjoint-hybrid-report.json" \
+            --max-entries 5000 --max-cases 128 --min-similarity -1.0 --min-margin 0.00 \
+            --semantic-weight 0.25 --lexical-weight 0.75 \
+            --min-hybrid-score 0.65 --min-hybrid-margin 0.03 \
+            | tee "$RUNNER_TEMP/test-source-disjoint-evaluation.txt"
+
+      - name: Render artifact-derived evidence summary
+        env:
+          RUN_ID: ${{ github.run_id }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 - "$TURKISH_DIALOGUE_PACKAGE_DIR/manifest.json" \
+            "$RUNNER_TEMP/train-exact-retrieval-report.json" \
+            "$RUNNER_TEMP/test-source-disjoint-hybrid-report.json" \
+            "$RUNNER_TEMP/turkish-dialogue-evidence-summary.md" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          manifest, train_report, test_report, output = map(Path, sys.argv[1:])
+          package = json.loads(manifest.read_text(encoding="utf-8"))
+          train = json.loads(train_report.read_text(encoding="utf-8"))
+          test = json.loads(test_report.read_text(encoding="utf-8"))
+          counts = package["counts"]
+          source = package["source"]
+          tm = train["metrics"]
+          sm = test["metrics"]
+          text = f"""## Native licensed Turkish dialogue retrieval evidence
+
+          - Evidence run: `{os.environ['RUN_ID']}` at commit `{os.environ['COMMIT']}`
+          - Source: `{source['repository']}` @ `{source['revision']}`, declared `{source['license']}`; **{source['synthetic_or_human_status']}**
+          - Package: `{counts['train_knowledge_rows_unique_canonical_prompt']}` unique train TSV rows, `{counts['train_pretraining_records']}` native ASCII training records, `{counts['test_abstention_cases']}` source-disjoint test prompts available.
+          - Train exact-key contract sample (64 cases): grounded-prompt accuracy `{tm.get('grounded_prompt_accuracy')}`, precision `{tm.get('grounded_precision')}`, recall `{tm.get('grounded_recall')}`. This checks literal TSV retrieval, **not generalization**.
+          - Frozen source-disjoint hybrid abstention sample (128 cases): true abstain `{sm.get('true_abstain_cases')}`, false grounded `{sm.get('false_grounded_cases')}`, abstain recall `{sm.get('abstain_recall')}`, abstain precision `{sm.get('abstain_precision')}`.
+          - Hybrid policy: semantic weight `0.25`, lexical weight `0.75`, score floor `0.65`, margin floor `0.03`.
+
+          The second metric is an abstention/leakage-safety measurement only: test responses are not in the train TSV, so it does **not** establish answer relevance, factual truth, human naturalness, or free-form generation. Full manifests/reports and native train output are attached to this run.
+          """
+          output.write_text(text.replace("          ", ""), encoding="utf-8")
+          PY
+          cat "$RUNNER_TEMP/turkish-dialogue-evidence-summary.md"
+
+      - name: Upload provenance and evaluation evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: turkish-dialogue-retrieval-evidence-${{ github.run_id }}
+          retention-days: 30
+          path: |
+            ${{ runner.temp }}/vegai-turkish-dialogue-package/manifest.json
+            ${{ runner.temp }}/package-build.json
+            ${{ runner.temp }}/native-train.txt
+            ${{ runner.temp }}/utf8-literal-retrieval.txt
+            ${{ runner.temp }}/train-exact-retrieval-report.json
+            ${{ runner.temp }}/train-exact-evaluation.txt
+            ${{ runner.temp }}/test-source-disjoint-hybrid-report.json
+            ${{ runner.temp }}/test-source-disjoint-evaluation.txt
+            ${{ runner.temp }}/turkish-dialogue-evidence-summary.md
+          if-no-files-found: error
+
+      - name: Publish summary to this pull request
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr comment ${{ github.event.pull_request.number }} --body-file "$RUNNER_TEMP/turkish-dialogue-evidence-summary.md"

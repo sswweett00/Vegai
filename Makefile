@@ -54,7 +54,7 @@ FIXTURE_9MIB_REPORT ?= pretraining-runs/synthetic_hdc_9mib.json
 # remain ignored. Prefer the dedicated GitHub workflow for CI-hosted evidence.
 CONTINUOUS_900_RUN_DIR ?= pretraining-runs/synthetic_900mb_then_90mb
 
-.PHONY: all engine pretrain field chat control test fortran-check portable-runtime-check run run-pretrain run-field run-chat run-control check field-check optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check quality-check continuous-quality-check attested-pretrain-check lookup-cache-compare fixture-9mib verify-fixture-9mib pretrain-9mib pretrain-900mb-continuous clean clean-all debug portable native portable-test native-test
+.PHONY: all engine pretrain field chat control test fortran-check portable-runtime-check run run-pretrain run-field run-chat run-control check field-check optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check turkish-dialogue-data-check quality-check continuous-quality-check attested-pretrain-check lookup-cache-compare fixture-9mib verify-fixture-9mib pretrain-9mib pretrain-900mb-continuous clean clean-all debug portable native portable-test native-test
 
 # Default target: portable optimized GNU binaries without host-only ISA flags.
 all: engine pretrain field chat control
@@ -158,6 +158,7 @@ check:
 	python3 tools/verify_openvino_context_worker.py
 	python3 tools/verify_pretraining_revision_comparison.py
 	python3 tools/verify_capability_curriculum.py
+	python3 tools/verify_turkish_dialogue_retrieval_corpus.py
 
 # Independent Python oracle plus compiled CLI integration for the finite
 # byte-event field.  This verifies representation identities, not semantics.
@@ -195,6 +196,13 @@ capability-check:
 # strict evaluator schema, input provenance and an intentional failed gate.
 dialogue-check: $(PRETRAIN) $(CHAT)
 	python3 tools/verify_dialogue_evaluation.py --pretrain-bin $(PRETRAIN) --chat-bin $(CHAT)
+
+# Strict local-source data compiler contract: validates UTF-8 dialogue rows,
+# deterministic native ASCII projection, source-disjoint partitions, licence
+# metadata and immutable output package publication. It performs no download
+# and does not itself claim native Fortran model execution.
+turkish-dialogue-data-check:
+	python3 tools/verify_turkish_dialogue_retrieval_corpus.py
 
 # Real compiled checkpoint inspection plus strict held-out case/policy,
 # HMAC-redaction, provenance and intentional failed-gate verification. This

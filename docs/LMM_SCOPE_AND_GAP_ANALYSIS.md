@@ -19,8 +19,8 @@ multimodal neural runtime yapmaz.
 | CPU operation | portable/native Fortran build, OpenMP immutable-context preparation, conservative RAM/checkpoint preflight |
 | Optional Intel boundary | OpenVINO yalnız supported positional/hybrid/hierarchical immutable packed-HDC context preparation için; explicit CPU policy native fused kernel'dir. Center-dependent coherent cross-fold mode CPU/OpenMP-only'dir; GPU/NPU execution ayrıca doğrulanmalıdır |
 | Yeni production control plane | disk-backed exact raw-record dedupe, content-addressed shards, deterministic held-out split, exact leakage gate, max-vocabulary capacity preflight, binary/data/policy provenance |
-| Grounded diyalog retrieval | checkpoint semantic HV + operator TSV prompt/response index, exact Hamming retrieval, confidence/margin abstention ve bounded turn history; cevap TSV'den gelir |
-| Grounded retrieval quality gate | versioned held-out JSONL, stateless real-binary exact prompt/abstention metrikleri, immutable input digest binding, privacy-conscious report ve explicit release threshold'lari |
+| Grounded diyalog retrieval | checkpoint semantic HV + operator TSV prompt/response index, strict UTF-8 Türkçe→ASCII checkpoint projection, exact Hamming legacy veya opt-in lexical/HDC hybrid reranking, evidence/margin abstention ve bounded turn history; cevap TSV'den gelir |
+| Grounded retrieval quality gate | versioned UTF-8 held-out JSONL, stateless real-binary exact prompt/abstention metrikleri, semantic/hybrid policy + immutable input digest binding, privacy-conscious report ve explicit release threshold'ları |
 | Optional LMM integration plane | Unicode/subword model-tokenizer manifest, hash-chained long dialogue, trust-role-isolated FTS evidence, content-addressed image/audio/video asset registry, strict structured-output contract, model-emitted citation/abstention release gate, measured domain-expert router/independent-panel planı, typed independently verified read-only tool planı ve gerçek OpenVINO/API/worker backend gateway'i; model ağırlığı depoda değildir |
 | LMM release control | Frozen portfolio/task/model/gateway/quality identity'leriyle aggregate-only shadow → canary → promote/rollback governor; verified artifact'ler için strict-LF canonical local hash-chain, single-host expected-state CAS ve privacy-safe head (`lmm_release_governor.py`, `lmm_release_registry.py`) |
 | Algorithm/optimizer evidence governor | Immutable algorithm/optimizer/training/artifact identity'lerini repeated held-out bounded observation ile Bonferroni-Hoeffding/Pareto gate'ten geçirir; actual optimizer veya neural training runtime değildir (`evidential_optimizer.py`) |
@@ -97,6 +97,30 @@ yeni data plane, model runtime ve test yüzeyi gerektirir.
 | Tool-use/reasoning control plane | Typed read-only plan, request+registry binding, no-shell executor, prior-result reference, declared separate verifier ve gateway evidence var | OS sandbox/network policy, mutation authorization, real independent audit, tool availability/retry, semantic plan/result correctness ve held-out tool-use score gerekir |
 | GPU/NPU neural training backend | Optional OpenVINO GenAI text inference adapter var; neural training/joint dispatch yok | adapter inventory/OpenVINO context dispatch, neural training kernel veya CPU+GPU+NPU joint compute kanıtı değildir |
 | Dataset governance at LMM scale | Kısmi; document/asset source-license contract eklendi | semantic near-duplicate, licensing/PII/consent, benchmark contamination ve multimodal rights pipeline ayrıca gerekir |
+
+## Native causal Türkçe model için architecture decision
+
+Mevcut çalışma için karar nettir: HDC retrieval katmanı Türkçe UTF-8,
+morfoloji-duyarlı lexical kanıt ve versioned/licensed dialogue package ile
+iyileştirilebilir; **HDC checkpoint'e decoder etiketi eklenerek causal model
+olduğu iddia edilmeyecektir.**
+
+Gerçek native Fortran causal model kararı ancak ayrı bir design/implementation
+ile alınabilir. En az şunlar artifact/test olarak mevcut olmalıdır: Unicode
+subword tokenizer ABI ve frozen vocabulary; causal mask/position contract'i;
+embedding-attention-MLP tensor kernels; forward cross-entropy, backward ve
+optimizer-state ABI; deterministic checkpoint/resume; bounded decoder
+sampling/stop policy; train/validation/test source-disjoint data registry;
+perplexity yanında Turkish dialogue relevance/factual grounding/abstention ve
+human preference evaluation. Bu maddeler uygulanana kadar `vegai_chat`in
+literal TSV response'u retrieval olarak etiketlenir.
+
+Native data-plane başlangıcı
+[TURKISH_DIALOGUE_DATA_GOVERNANCE.md](TURKISH_DIALOGUE_DATA_GOVERNANCE.md)'nde
+belgelenmiştir: pinned CC-BY-4.0 Turkish Daily Dialogues 5K kaynağı, immutable
+local package builder, strict split isolation ve abstention-only source-disjoint
+set sağlar. Kaynağın sentetik/küçük olması özellikle kaydedilir; causal training
+veya insan-benzeri konuşma iddiası değildir.
 
 ## Bu değişiklikte bilinçli olarak eklenenler
 

@@ -276,6 +276,10 @@ if(VEGAI_BUILD_TESTS)
         )
         set_tests_properties(vegai_dialogue_evaluation PROPERTIES TIMEOUT 180)
         add_test(
+            NAME vegai_turkish_dialogue_corpus
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_turkish_dialogue_retrieval_corpus.py
+        )
+        add_test(
             NAME vegai_lmm_runtime
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_lmm_runtime.py
         )
