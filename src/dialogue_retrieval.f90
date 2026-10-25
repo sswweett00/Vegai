@@ -663,12 +663,43 @@ contains
       query_hv = hv_acc_finalize(accumulator, index%config%tie_seed)
    end subroutine compose_dialogue_query
 
+   pure real(real32) function dialogue_bounded_edit_similarity(left, right) result(similarity)
+      ! A bounded Levenshtein pass is used only after a shared Turkish root
+      ! prefix has been established. It recognizes transparent inflectional
+      ! forms such as kayit/kaydi without turning arbitrary short words into a
+      ! lexical match. TOKEN_LEN bounds both stack rows and work per comparison.
+      character(len=*), intent(in) :: left, right
+      integer :: previous(0:TOKEN_LEN), current(0:TOKEN_LEN)
+      integer :: left_length, right_length, left_position, right_position, substitution_cost
+
+      similarity = 0.0_real32
+      left_length = len_trim(left)
+      right_length = len_trim(right)
+      if (left_length <= 0 .or. right_length <= 0 .or. left_length > TOKEN_LEN .or. right_length > TOKEN_LEN) return
+      do right_position = 0, right_length
+         previous(right_position) = right_position
+      end do
+      do left_position = 1, left_length
+         current(0) = left_position
+         do right_position = 1, right_length
+            substitution_cost = 1
+            if (left(left_position:left_position) == right(right_position:right_position)) substitution_cost = 0
+            current(right_position) = min(previous(right_position) + 1, current(right_position - 1) + 1, &
+                                          previous(right_position - 1) + substitution_cost)
+         end do
+         previous(0:right_length) = current(0:right_length)
+      end do
+      similarity = 1.0_real32 - real(previous(right_length), real32) / real(max(left_length, right_length), real32)
+   end function dialogue_bounded_edit_similarity
+
    pure real(real32) function dialogue_token_similarity(left, right) result(similarity)
       ! Turkish is agglutinative. Exact words remain the strongest lexical
-      ! evidence; a conservative shared-prefix score supplies a transparent
-      ! morphology-aware fallback without claiming linguistic understanding.
+      ! evidence. A conservative shared-root prefix plus bounded edit score
+      ! supplies a transparent morphology-aware fallback without claiming
+      ! linguistic understanding.
       character(len=*), intent(in) :: left, right
       integer :: left_length, right_length, common_length, position
+      real(real32) :: edit_similarity
 
       similarity = 0.0_real32
       left_length = len_trim(left)
@@ -684,9 +715,16 @@ contains
          if (left(position:position) /= right(position:position)) exit
          common_length = common_length + 1
       end do
-      if (common_length < 4) return
-      similarity = 0.60_real32 + 0.30_real32 * &
-                   real(common_length, real32) / real(max(left_length, right_length), real32)
+      ! At least three shared bytes are required before edit distance can
+      ! contribute. This covers Turkish consonant softening plus suffixes while
+      ! keeping generic spelling-neighbour matches out of the lexical score.
+      if (common_length < 3) return
+      if (common_length >= 4) then
+         similarity = 0.60_real32 + 0.30_real32 * &
+                      real(common_length, real32) / real(max(left_length, right_length), real32)
+      end if
+      edit_similarity = dialogue_bounded_edit_similarity(left, right)
+      if (edit_similarity >= 0.55_real32) similarity = max(similarity, edit_similarity)
    end function dialogue_token_similarity
 
    subroutine dialogue_lexical_similarity(query, candidate, similarity)

@@ -163,8 +163,8 @@ ile aktif grounding policy esiklerini yayinlar.
    ranking yalnız bu bipolar semantic similarity'dir ve
    `--min-similarity`/`--min-margin` kapılarını kullanır.
 5. `--lexical-weight > 0` ise her candidate için canonical token overlap,
-   exact adjacent bigram ve en az dört-character ortak-prefix biçimbirim
-   kanıtı hesaplanır. `semantic_weight` ile normalize edilen hybrid score,
+   exact adjacent bigram ve en az üç-character ortak-root sonrası bounded edit
+   / ortak-prefix biçimbirim kanıtı hesaplanır. `semantic_weight` ile normalize edilen hybrid score,
    semantic score ve lexical score ayrı yayımlanır; ranking/gate yalnız
    `--min-hybrid-score`/`--min-hybrid-margin` ile yapılır. Eski semantic
    eşikler hibrit moda gizlice uygulanmaz.

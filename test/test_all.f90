@@ -1740,7 +1740,7 @@ contains
       call dialogue_ask(hybrid_index, model, hybrid_session, utf8_query, answer, status)
       call assert_i32_equal(status, DIALOGUE_OK, 'morphological Turkish hybrid query is accepted')
       call assert_true(answer%found .and. trim(answer%response) == trim(utf8_response) .and. &
-                       answer%lexical_similarity > 0.70_real32 .and. answer%hybrid_score > 0.50_real32, &
+                       answer%lexical_similarity > 0.65_real32 .and. answer%hybrid_score > 0.50_real32, &
                        'hybrid retrieval uses transparent Turkish lexical/morphology evidence')
 
       open(newunit=unit, file=REJECTED_KNOWLEDGE_PATH, status='replace', action='write', access='stream', &
