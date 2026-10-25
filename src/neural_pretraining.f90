@@ -152,18 +152,25 @@ contains
          return
       end if
       clip_scale = min(1.0_real64, config%gradient_clip_norm / max(hidden_norm, tiny(1.0_real64)))
-      scale = config%learning_rate * clip_scale / sqrt(real(width, real64))
+      ! neural_decoder_step uses logits = E^T h + b, so this is the
+      ! cross-entropy gradient for its tied output head (with norm clipping).
+      scale = config%learning_rate * clip_scale
       do token = 1_int32, vocabulary_size
          residual = probabilities(token)
          if (token == target) residual = residual - 1.0_real64
          do feature = 1_int32, width
-            proposal = real(model%embedding(feature, token), real64) - &
+            proposal = real(model%token_embedding(feature, token), real64) - &
                        scale * residual * real(hidden(feature), real64)
             proposal = max(-config%embedding_value_limit, min(config%embedding_value_limit, proposal))
-            model%embedding(feature, token) = real(proposal, real32)
+            model%token_embedding(feature, token) = real(proposal, real32)
          end do
+         proposal = real(model%output_bias(token), real64) - scale * residual
+         proposal = max(-config%embedding_value_limit, min(config%embedding_value_limit, proposal))
+         model%output_bias(token) = real(proposal, real32)
       end do
-      if (.not. all(ieee_is_finite(model%embedding))) status = NPT_ERR_NUMERICAL
+      if (.not. all(ieee_is_finite(model%token_embedding)) .or. .not. all(ieee_is_finite(model%output_bias))) then
+         status = NPT_ERR_NUMERICAL
+      end if
    end subroutine tied_output_update
 
    subroutine process_token_sequence(model, tokens, token_count, config, state, metrics, update_model, status)
@@ -363,7 +370,10 @@ contains
       type(neural_decoder_t), intent(in) :: model
       integer, intent(inout) :: io_status
 
-      if (io_status == 0) write(unit, iostat=io_status) model%embedding
+      if (io_status == 0) write(unit, iostat=io_status) model%token_embedding
+      if (io_status == 0) write(unit, iostat=io_status) model%output_bias
+      if (io_status == 0) write(unit, iostat=io_status) model%attention_rms
+      if (io_status == 0) write(unit, iostat=io_status) model%ffn_rms
       if (io_status == 0) write(unit, iostat=io_status) model%query
       if (io_status == 0) write(unit, iostat=io_status) model%key
       if (io_status == 0) write(unit, iostat=io_status) model%value
@@ -371,7 +381,7 @@ contains
       if (io_status == 0) write(unit, iostat=io_status) model%ffn_gate
       if (io_status == 0) write(unit, iostat=io_status) model%ffn_value
       if (io_status == 0) write(unit, iostat=io_status) model%ffn_output
-      if (io_status == 0) write(unit, iostat=io_status) model%final_scale
+      if (io_status == 0) write(unit, iostat=io_status) model%global_mix_logit
    end subroutine write_model_payload
 
    subroutine read_model_payload(unit, model, io_status)
@@ -379,7 +389,10 @@ contains
       type(neural_decoder_t), intent(inout) :: model
       integer, intent(inout) :: io_status
 
-      if (io_status == 0) read(unit, iostat=io_status) model%embedding
+      if (io_status == 0) read(unit, iostat=io_status) model%token_embedding
+      if (io_status == 0) read(unit, iostat=io_status) model%output_bias
+      if (io_status == 0) read(unit, iostat=io_status) model%attention_rms
+      if (io_status == 0) read(unit, iostat=io_status) model%ffn_rms
       if (io_status == 0) read(unit, iostat=io_status) model%query
       if (io_status == 0) read(unit, iostat=io_status) model%key
       if (io_status == 0) read(unit, iostat=io_status) model%value
@@ -387,17 +400,19 @@ contains
       if (io_status == 0) read(unit, iostat=io_status) model%ffn_gate
       if (io_status == 0) read(unit, iostat=io_status) model%ffn_value
       if (io_status == 0) read(unit, iostat=io_status) model%ffn_output
-      if (io_status == 0) read(unit, iostat=io_status) model%final_scale
+      if (io_status == 0) read(unit, iostat=io_status) model%global_mix_logit
    end subroutine read_model_payload
 
    pure logical function model_payload_is_finite(model)
       type(neural_decoder_t), intent(in) :: model
 
-      model_payload_is_finite = all(ieee_is_finite(model%embedding)) .and. all(ieee_is_finite(model%query)) .and. &
+      model_payload_is_finite = all(ieee_is_finite(model%token_embedding)) .and. &
+                                all(ieee_is_finite(model%output_bias)) .and. all(ieee_is_finite(model%attention_rms)) .and. &
+                                all(ieee_is_finite(model%ffn_rms)) .and. all(ieee_is_finite(model%query)) .and. &
                                 all(ieee_is_finite(model%key)) .and. all(ieee_is_finite(model%value)) .and. &
                                 all(ieee_is_finite(model%attention_output)) .and. all(ieee_is_finite(model%ffn_gate)) .and. &
                                 all(ieee_is_finite(model%ffn_value)) .and. all(ieee_is_finite(model%ffn_output)) .and. &
-                                all(ieee_is_finite(model%final_scale))
+                                all(ieee_is_finite(model%global_mix_logit))
    end function model_payload_is_finite
 
    ! Checkpoints include every mutable neural parameter and the update cursor.
