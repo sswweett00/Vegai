@@ -365,6 +365,12 @@ def exact_utf8_substring(data: bytes, target_bytes: int) -> bytes | None:
         end = start + target_bytes
         if valid_utf8_boundary(data, start) and valid_utf8_boundary(data, end):
             candidate = data[start:end]
+            # Formatted Fortran record reads use LEN_TRIM for byte accounting;
+            # a terminal ASCII blank would make native observed bytes differ
+            # from the exact corpus manifest.  Choose another source-contiguous
+            # boundary rather than write a padded-looking final record.
+            if candidate[:1] == b" " or candidate[-1:] == b" ":
+                continue
             try:
                 candidate.decode("utf-8")
             except UnicodeDecodeError:
