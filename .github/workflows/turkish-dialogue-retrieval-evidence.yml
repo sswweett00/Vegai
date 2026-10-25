@@ -118,7 +118,7 @@ jobs:
             --knowledge "$TURKISH_DIALOGUE_PACKAGE_DIR/knowledge_train.tsv" \
             --evaluation "$TURKISH_DIALOGUE_PACKAGE_DIR/train_exact_retrieval_evidence_sample.jsonl" \
             --output "$RUNNER_TEMP/train-exact-retrieval-report.json" \
-            --max-entries 5000 --max-cases 64 --min-similarity 0.99 --min-margin 0.00 \
+            --max-entries 5000 --max-cases 128 --min-similarity 0.99 --min-margin 0.00 \
             >"$RUNNER_TEMP/train-exact-evaluation.txt" 2>&1
           evaluation_status=$?
           set -e
@@ -174,7 +174,7 @@ jobs:
           - Evidence run: `{os.environ['RUN_ID']}` at commit `{os.environ['COMMIT']}`
           - Source: `{source['repository']}` @ `{source['revision']}`, declared `{source['license']}`; **{source['synthetic_or_human_status']}**
           - Package: `{counts['train_knowledge_rows_unique_canonical_prompt']}` unique train TSV rows, `{counts['train_pretraining_records']}` native ASCII training records, `{counts['test_abstention_cases']}` source-disjoint test prompts available.
-          - Train exact-key contract sample (64 cases): grounded-prompt accuracy `{tm.get('grounded_prompt_accuracy')}`, precision `{tm.get('grounded_precision')}`, recall `{tm.get('grounded_recall')}`. This checks literal TSV retrieval, **not generalization**.
+          - Train exact-key contract sample (128 cases): grounded-prompt accuracy `{tm.get('grounded_prompt_accuracy')}`, precision `{tm.get('grounded_precision')}`, recall `{tm.get('grounded_recall')}`. This checks literal TSV retrieval, **not generalization**.
           - Frozen source-disjoint hybrid abstention sample (128 cases): true abstain `{sm.get('true_abstain_cases')}`, false grounded `{sm.get('false_grounded_cases')}`, abstain recall `{sm.get('abstain_recall')}`, abstain precision `{sm.get('abstain_precision')}`.
           - Hybrid policy: semantic weight `0.25`, lexical weight `0.75`, score floor `0.65`, margin floor `0.03`.
 
