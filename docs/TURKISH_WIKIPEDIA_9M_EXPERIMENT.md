@@ -64,19 +64,22 @@ run Unicode-Türkçe tokenizer benchmarkı veya dil kusursuzluğu iddiası deği
 Native Fortran komutu şuna eşdeğerdir:
 
 ```bash
-OMP_NUM_THREADS=2 ./vegai_pretrain train TURKISH_WIKIPEDIA_9M_ASCII.txt checkpoint.vgai \
+OMP_NUM_THREADS=4 ./vegai_pretrain train TURKISH_WIKIPEDIA_9M_ASCII.txt checkpoint.vgai \
   --max-vocab 8192 --min-frequency 1 --window 2 --position-shift 41 \
-  --context-mode resonant --epochs 2 --strict \
+  --context-mode resonant --epochs 1 --strict \
   --parallel-context-build --parallel-min-contexts 32
 ```
 
-İki epoch bilinçlidir: RESONANT'ın ilk epoch'u HYBRID ile aynı başlangıç
-semantic düzleminden çalışır; ikinci epoch yalnız önceki epoch sonunda commit
-edilmiş frozen semantic snapshot'ı topical feedback olarak kullanabilir.
-`train_process_wall_seconds` yalnız bu tek `vegai_pretrain train` child
-process'ini kapsar. İndirme, tar açma, normalizasyon, frekans seçimi,
-derleme, checkpoint hash'i, inspect, TSV kurma, chat veya CI süreye dahil
-değildir.
+Bu operasyonel kanıt run'ı hosted sürede tamamlanabilen **bir epoch** kullanır.
+RESONANT'ın ilk epoch'u HYBRID ile aynı başlangıç semantic düzleminden çalışır;
+bu nedenle önceki epoch'tan öğrenilmiş frozen semantic feedback veya iki-epoch
+kalite artışı bu run için iddia edilmez. Ayrı kontrollü fixture çalışması,
+RESONANT'ın ikinci epoch davranışını zaten doğrular; burada ölçülen şey gerçek
+Türkçe corpus üzerinde native ingest, gerçek prototype update, checkpoint ve
+retrieval hattıdır. `train_process_wall_seconds` yalnız bu tek
+`vegai_pretrain train` child process'ini kapsar. İndirme, tar açma,
+normalizasyon, frekans seçimi, derleme, checkpoint hash'i, inspect, TSV kurma,
+chat veya CI süreye dahil değildir.
 
 ## On bir checkpoint semantic sonucu
 

@@ -35,7 +35,7 @@ SCHEMA = "vegai-turkish-wikipedia-9m-experiment/v1"
 CORPUS_SCHEMA = "vegai-turkish-wikipedia-ascii-corpus/v1"
 TARGET_TOKENS_DEFAULT = 9_000_000
 VOCABULARY_SIZE_DEFAULT = 8_192
-EPOCHS_DEFAULT = 2
+EPOCHS_DEFAULT = 1
 TOKENS_PER_RECORD = 128
 MAX_NATIVE_RECORD_BYTES = 8_192
 TOKEN_MAX_BYTES = 48
@@ -704,7 +704,7 @@ def run_experiment(arguments: argparse.Namespace) -> dict[str, Any]:
     require(arguments.chat_bin.is_file() and os.access(arguments.chat_bin, os.X_OK),
             f"chat executable is not usable: {arguments.chat_bin}")
     require(arguments.source_root.is_dir(), f"extracted Turkish Wikipedia source root is unavailable: {arguments.source_root}")
-    require(arguments.epochs >= 2, "this RESONANT evidence run requires at least two epochs")
+    require(arguments.epochs >= 1, "at least one native training epoch is required")
     require(arguments.omp_threads > 0, "OMP thread count must be positive")
 
     candidates = sorted(arguments.source_root.rglob("*train*.raw"))
@@ -889,6 +889,11 @@ def run_experiment(arguments: argparse.Namespace) -> dict[str, Any]:
             "raw_training_tokens_per_second": expected_training_tokens / training.elapsed_seconds,
             "metrics": metrics,
             "timing_scope": "Only the one native vegai_pretrain train child process; archive retrieval, decompression, normalization, vocabulary selection, compilation, inspection, TSV construction, chat retrieval, hashing, and CI overhead are excluded.",
+            "resonant_epoch_feedback": (
+                "Two or more epochs permit epoch-two frozen semantic feedback."
+                if arguments.epochs >= 2
+                else "One epoch uses the RESONANT initialization contract (identical to HYBRID for epoch one); no learned prior-epoch semantic feedback is claimed."
+            ),
         },
         "checkpoint": checkpoint_identity,
         "active_vocabulary": {
