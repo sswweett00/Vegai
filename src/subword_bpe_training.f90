@@ -12,8 +12,9 @@
 !  that this reference trainer is the fastest way to build a huge tokenizer.
 !==============================================================================
 module subword_bpe_training
-   use, intrinsic :: iso_fortran_env, only: int32, int64, iostat_end
+   use, intrinsic :: iso_fortran_env, only: int32, int64
    use subword_bpe
+   use utf8_record_stream
    implicit none
    private
 
@@ -127,8 +128,9 @@ contains
       type(bpe_training_metrics_t), intent(inout) :: metrics
       integer(int32), intent(out) :: status
       character(len=BPE_MAX_INPUT_BYTES) :: line
-      integer(int32) :: tokens(BPE_MAX_INPUT_BYTES), token_count, line_bytes, pair_index, bpe_status
+      integer(int32) :: tokens(BPE_MAX_INPUT_BYTES), token_count, line_bytes, pair_index, bpe_status, stream_status
       integer :: unit, io_status
+      logical :: end_of_file, oversized
 
       status = BPET_OK
       keys = 0_int64
@@ -136,23 +138,22 @@ contains
       right_tokens = 0_int32
       counts = 0_int64
       used = .false.
-      open(newunit=unit, file=trim(path), status='old', action='read', form='formatted', iostat=io_status)
+      open(newunit=unit, file=trim(path), status='old', action='read', access='stream', &
+           form='unformatted', iostat=io_status)
       if (io_status /= 0) then
          status = BPET_ERR_IO
          return
       end if
       do
-         line = ''
-         read(unit, '(A)', iostat=io_status) line
-         if (io_status == iostat_end) exit
-         if (io_status /= 0) then
+         call utf8_stream_read_record(unit, line, line_bytes, end_of_file, oversized, stream_status)
+         if (stream_status /= UTF8_STREAM_OK) then
             close(unit)
             status = BPET_ERR_IO
             return
          end if
-         line_bytes = int(len_trim(line), int32)
+         if (end_of_file) exit
          metrics%records_scanned = metrics%records_scanned + 1_int64
-         if (line_bytes > config%maximum_line_bytes) then
+         if (oversized .or. line_bytes > config%maximum_line_bytes) then
             metrics%oversized_records = metrics%oversized_records + 1_int64
             cycle
          end if

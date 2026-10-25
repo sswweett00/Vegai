@@ -28,7 +28,8 @@ DATAIO_PYTHON ?= $(DATAIO_VENV)/bin/python
 LMM_VENV ?= .venv-lmm
 LMM_PYTHON ?= $(LMM_VENV)/bin/python
 
-SOURCES := src/hyper_types.f90 src/tokenless_field.f90 src/text_tokenizer.f90 src/subword_bpe.f90 \
+SOURCES := src/hyper_types.f90 src/tokenless_field.f90 src/text_tokenizer.f90 src/utf8_record_stream.f90 \
+           src/subword_bpe.f90 \
            src/subword_bpe_training.f90 src/calibrated_decoder.f90 src/neural_retention_decoder.f90 src/neural_pretraining.f90 \
            src/causal_ngram_lm.f90 src/vocabulary.f90 \
            src/symbolic_memory.f90 src/resonator_network.f90 src/reasoning_core.f90 \

@@ -25,6 +25,7 @@ add_library(vegai_hds STATIC
     src/hyper_types.f90
     src/tokenless_field.f90
     src/text_tokenizer.f90
+    src/utf8_record_stream.f90
     src/subword_bpe.f90
     src/subword_bpe_training.f90
     src/calibrated_decoder.f90

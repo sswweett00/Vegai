@@ -66,7 +66,7 @@ T = O(mB),\qquad M = O(C),
 
 where \(m\) is the number of added merges, \(B\) retained corpus bytes scanned per pass, and \(C\) configured pair-table capacity. If the table cannot hold all distinct observed pairs, training fails with `BPET_ERR_PAIR_CAPACITY`; it never silently drops statistics. This favors auditability over pretending to be a universal large-corpus tokenizer trainer.
 
-The line adapter has an explicit bounded-record contract (`BPE_MAX_INPUT_BYTES`). Corpus manifests, licensing, document boundaries, and exact source hashes must be recorded by the caller/workflow; tokenizer code does not infer provenance from a path.
+The line adapter reads an LF-framed unformatted byte stream: it preserves every non-LF byte, including trailing spaces and CR bytes, and rejects/records overlong records instead of trimming or partially training them. The bounded codec limit is `BPE_MAX_INPUT_BYTES`. Corpus manifests, licensing, document boundaries, and exact source hashes must be recorded by the caller/workflow; tokenizer code does not infer provenance from a path.
 
 ### Tokenizer persistence
 

@@ -14,9 +14,10 @@
 !  BPTT/optimizer backends.
 !==============================================================================
 module neural_pretraining
-   use, intrinsic :: iso_fortran_env, only: int32, int64, real32, real64, iostat_end
+   use, intrinsic :: iso_fortran_env, only: int32, int64, real32, real64
    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
    use subword_bpe
+   use utf8_record_stream
    use neural_retention_decoder
    implicit none
    private
@@ -354,9 +355,10 @@ contains
       integer(int64), intent(in), optional :: maximum_new_source_records
       character(len=FILE_LINE_BYTES) :: line
       integer(int32), allocatable :: tokens(:)
-      integer(int32) :: token_count, bpe_status, line_bytes
+      integer(int32) :: token_count, bpe_status, line_bytes, stream_status
       integer(int64) :: skipped_source_records, source_record, source_records_this_call, source_record_limit
       integer :: unit, io_status, allocation_status
+      logical :: end_of_file, oversized
 
       status = NPT_OK
       skipped_source_records = 0_int64
@@ -376,7 +378,8 @@ contains
          status = NPT_ERR_ALLOCATION
          return
       end if
-      open(newunit=unit, file=trim(path), status='old', action='read', form='formatted', iostat=io_status)
+      open(newunit=unit, file=trim(path), status='old', action='read', access='stream', &
+           form='unformatted', iostat=io_status)
       if (io_status /= 0) then
          deallocate(tokens)
          status = NPT_ERR_IO
@@ -386,20 +389,23 @@ contains
       source_records_this_call = 0_int64
       do
          if (source_records_this_call >= source_record_limit) exit
-         line = ''
-         read(unit, '(A)', iostat=io_status) line
-         if (io_status == iostat_end) exit
-         if (io_status /= 0) then
+         call utf8_stream_read_record(unit, line, line_bytes, end_of_file, oversized, stream_status)
+         if (stream_status /= UTF8_STREAM_OK) then
             close(unit)
             deallocate(tokens)
             status = NPT_ERR_IO
             return
          end if
+         if (end_of_file) exit
          source_record = source_record + 1_int64
          if (source_record <= skipped_source_records) cycle
          source_records_this_call = source_records_this_call + 1_int64
          state%source_records_completed = state%source_records_completed + 1_int64
-         line_bytes = int(len_trim(line), int32)
+         if (oversized .or. line_bytes > BPE_MAX_INPUT_BYTES) then
+            metrics%tokenizer_truncations = metrics%tokenizer_truncations + 1_int64
+            metrics%skipped_records = metrics%skipped_records + 1_int64
+            cycle
+         end if
          if (line_bytes < 2_int32) then
             metrics%skipped_records = metrics%skipped_records + 1_int64
             cycle

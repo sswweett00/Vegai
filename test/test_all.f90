@@ -18,6 +18,7 @@ program test_all
                                    quality_case_t, quality_policy_t, &
                                    quality_report_t, quality_case_file_load, quality_gate_evaluate
    use text_tokenizer, only: TOKEN_LEN, MAX_LINE_CHARS, MAX_TOKENS_PER_LINE, tokenize_ascii_line
+   use utf8_record_stream
    use subword_bpe
    use subword_bpe_training
    use neural_retention_decoder
@@ -32,6 +33,7 @@ program test_all
    call test_reasoning_pipeline()
    call test_resonator_network()
    call test_tokenless_signal_field()
+   call test_utf8_record_stream()
    call test_neural_causal_design()
    call test_neural_continuation_checkpoint()
    call test_text_ingest()
@@ -577,6 +579,44 @@ contains
       call assert_i32_equal(status, FIELD_ERR_CAPACITY, 'oversized byte stream is rejected before accumulation')
       deallocate(too_large_bytes)
    end subroutine test_tokenless_signal_field
+
+   subroutine test_utf8_record_stream()
+      character(len=16) :: record
+      integer(int32) :: record_bytes, status
+      logical :: end_of_file, oversized
+      integer :: unit, io_status
+      character(len=*), parameter :: path = 'test_utf8_record_stream.txt'
+
+      open(newunit=unit, file=path, status='replace', action='write', access='stream', form='unformatted', iostat=io_status)
+      call assert_true(io_status == 0, 'raw UTF-8 record stream fixture opens')
+      if (io_status == 0) then
+         write(unit) 'a  ', achar(10), 'b', achar(10)
+         close(unit)
+      end if
+      open(newunit=unit, file=path, status='old', action='read', access='stream', form='unformatted', iostat=io_status)
+      call assert_true(io_status == 0, 'raw UTF-8 record stream fixture reopens')
+      if (io_status == 0) then
+         call utf8_stream_read_record(unit, record, record_bytes, end_of_file, oversized, status)
+         call assert_i32_equal(status, UTF8_STREAM_OK, 'raw stream first record reads')
+         call assert_true(.not. end_of_file .and. .not. oversized .and. record_bytes == 3_int32, &
+                          'raw stream retains first record length including trailing spaces')
+         if (record_bytes == 3_int32) then
+            call assert_true(record(:record_bytes) == 'a  ', 'raw stream preserves trailing spaces byte-for-byte')
+         end if
+         call utf8_stream_read_record(unit, record, record_bytes, end_of_file, oversized, status)
+         call assert_i32_equal(status, UTF8_STREAM_OK, 'raw stream second record reads')
+         call assert_true(.not. end_of_file .and. record_bytes == 1_int32, 'raw stream reads LF-framed second record')
+         if (record_bytes == 1_int32) then
+            call assert_true(record(:record_bytes) == 'b', 'raw stream preserves second record byte')
+         end if
+         call utf8_stream_read_record(unit, record, record_bytes, end_of_file, oversized, status)
+         call assert_i32_equal(status, UTF8_STREAM_OK, 'raw stream EOF reads')
+         call assert_true(end_of_file, 'raw stream reports EOF only after final complete record')
+         close(unit)
+      end if
+      open(newunit=unit, file=path, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+   end subroutine test_utf8_record_stream
 
    subroutine test_neural_causal_design()
       type(bpe_model_t) :: bpe, trained_bpe
