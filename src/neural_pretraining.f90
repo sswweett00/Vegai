@@ -70,9 +70,21 @@ module neural_pretraining
       real(real64) :: mean_nll = 0.0_real64
    end type neural_train_metrics_t
 
+   ! Conservative resident-memory accounting for one sequential training
+   ! stream. It deliberately excludes compiler/runtime/OpenMP overhead and is
+   ! therefore a resource floor, not a host-RAM sufficiency certification.
+   type, public :: neural_training_resource_plan_t
+      integer(int64) :: decoder_parameter_bytes_real32 = 0_int64
+      integer(int64) :: tokenizer_bytes = 0_int64
+      integer(int64) :: decoder_state_bytes_real32 = 0_int64
+      integer(int64) :: record_token_buffer_bytes = 0_int64
+      integer(int64) :: per_step_working_bytes = 0_int64
+      integer(int64) :: minimum_resident_bytes = 0_int64
+   end type neural_training_resource_plan_t
+
    public :: neural_train_config_is_valid, neural_train_state_init, neural_train_metrics_reset
    public :: neural_train_token_sequence, neural_evaluate_token_sequence, neural_train_utf8_file
-   public :: neural_checkpoint_save, neural_checkpoint_load
+   public :: neural_training_resource_plan, neural_checkpoint_save, neural_checkpoint_load
 
 contains
 
@@ -99,6 +111,44 @@ contains
 
       metrics = neural_train_metrics_t()
    end subroutine neural_train_metrics_reset
+
+   subroutine neural_training_resource_plan(decoder_config, bpe, train_config, plan, status)
+      type(neural_decoder_config_t), intent(in) :: decoder_config
+      type(bpe_model_t), intent(in) :: bpe
+      type(neural_train_config_t), intent(in) :: train_config
+      type(neural_training_resource_plan_t), intent(out) :: plan
+      integer(int32), intent(out) :: status
+      type(neural_resource_plan_t) :: decoder_plan
+      integer(int32) :: decoder_status
+      integer(int64) :: width, vocabulary, ffn_width
+
+      plan = neural_training_resource_plan_t()
+      status = NPT_OK
+      if (.not. neural_decoder_config_is_valid(decoder_config) .or. .not. bpe_is_initialized(bpe) .or. &
+          .not. neural_train_config_is_valid(train_config) .or. decoder_config%vocabulary_size < bpe%token_count) then
+         status = NPT_ERR_INVALID_ARGUMENT
+         return
+      end if
+      call neural_decoder_plan(decoder_config, decoder_plan, decoder_status)
+      if (decoder_status /= NRD_OK) then
+         status = NPT_ERR_MODEL
+         return
+      end if
+      width = int(decoder_config%width, int64)
+      vocabulary = int(decoder_config%vocabulary_size, int64)
+      ffn_width = int(decoder_config%ffn_width, int64)
+      plan%decoder_parameter_bytes_real32 = decoder_plan%parameter_bytes_real32
+      plan%tokenizer_bytes = bpe_model_footprint_bytes(bpe)
+      plan%decoder_state_bytes_real32 = decoder_plan%per_stream_state_bytes_real32
+      plan%record_token_buffer_bytes = 4_int64 * int(train_config%maximum_tokens_per_record, int64)
+      ! Decoder temporaries: 10 width-sized real32 vectors plus three FFN
+      ! vectors; trainer allocations: hidden, logits, and real64 softmax.
+      plan%per_step_working_bytes = 4_int64 * (11_int64 * width + 3_int64 * ffn_width + vocabulary) + &
+                                    8_int64 * vocabulary
+      plan%minimum_resident_bytes = plan%decoder_parameter_bytes_real32 + plan%tokenizer_bytes + &
+                                    plan%decoder_state_bytes_real32 + plan%record_token_buffer_bytes + &
+                                    plan%per_step_working_bytes
+   end subroutine neural_training_resource_plan
 
    subroutine stable_softmax(logits, probabilities, status)
       real(real32), intent(in) :: logits(:)
@@ -155,9 +205,15 @@ contains
       ! neural_decoder_step uses logits = E^T h + b, so this is the
       ! cross-entropy gradient for its tied output head (with norm clipping).
       scale = config%learning_rate * clip_scale
+      ! Columns are disjoint. An OpenMP-enabled build can therefore update a
+      ! sufficiently large vocabulary in parallel without changing the online
+      ! token order or requiring a reduction; a compiler without OpenMP simply
+      ! treats these directives as comments.
+      !$omp parallel do private(residual, proposal, feature) schedule(static) if(vocabulary_size >= 512_int32)
       do token = 1_int32, vocabulary_size
          residual = probabilities(token)
          if (token == target) residual = residual - 1.0_real64
+         !$omp simd private(proposal)
          do feature = 1_int32, width
             proposal = real(model%token_embedding(feature, token), real64) - &
                        scale * residual * real(hidden(feature), real64)
@@ -168,6 +224,7 @@ contains
          proposal = max(-config%embedding_value_limit, min(config%embedding_value_limit, proposal))
          model%output_bias(token) = real(proposal, real32)
       end do
+      !$omp end parallel do
       if (.not. all(ieee_is_finite(model%token_embedding)) .or. .not. all(ieee_is_finite(model%output_bias))) then
          status = NPT_ERR_NUMERICAL
       end if

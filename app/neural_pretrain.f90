@@ -28,6 +28,8 @@ program vegai_neural_pretrain
       call run_generate()
    case ('train-chunk')
       call run_train_chunk()
+   case ('plan')
+      call run_training_plan()
    case ('help', '--help', '-h')
       call print_help()
    case default
@@ -262,6 +264,36 @@ contains
       call bpe_destroy(bpe)
    end subroutine run_train
 
+   subroutine run_training_plan()
+      type(bpe_model_t) :: bpe
+      type(neural_decoder_t) :: model
+      type(neural_train_config_t) :: train_config
+      type(neural_train_state_t) :: train_state
+      type(neural_training_resource_plan_t) :: plan
+      character(len=1024) :: checkpoint_path, tokenizer_path
+      integer(int32) :: status
+
+      if (command_argument_count() /= 3) call usage_and_stop()
+      call get_command_argument(2, checkpoint_path)
+      call get_command_argument(3, tokenizer_path)
+      call bpe_load(bpe, trim(tokenizer_path), status)
+      call require_ok(status, 'training-plan tokenizer load')
+      call neural_checkpoint_load(trim(checkpoint_path), bpe, model, train_config, train_state, status)
+      call require_ok(status, 'training-plan checkpoint load')
+      call neural_training_resource_plan(model%config, bpe, train_config, plan, status)
+      call require_ok(status, 'training resource plan')
+      write(output_unit, '(A)') 'NEURAL_TRAINING_PLAN_JSON: {'// &
+         '"schema_version":"vegai-neural-training-resource-plan/v1",'// &
+         '"decoder_parameter_bytes_real32":'//trim(i64_text(plan%decoder_parameter_bytes_real32))//','// &
+         '"tokenizer_bytes":'//trim(i64_text(plan%tokenizer_bytes))//','// &
+         '"decoder_state_bytes_real32":'//trim(i64_text(plan%decoder_state_bytes_real32))//','// &
+         '"record_token_buffer_bytes":'//trim(i64_text(plan%record_token_buffer_bytes))//','// &
+         '"per_step_working_bytes":'//trim(i64_text(plan%per_step_working_bytes))//','// &
+         '"minimum_resident_bytes":'//trim(i64_text(plan%minimum_resident_bytes))//'}'
+      call neural_decoder_destroy(model)
+      call bpe_destroy(bpe)
+   end subroutine run_training_plan
+
    ! Bounded record chunks are the CLI surface for continuous neural
    ! pretraining. The caller must attest that a resumed corpus is byte/order
    ! identical; this command never treats a filename as provenance evidence.
@@ -467,6 +499,7 @@ contains
       write(output_unit, '(A)') '  vegai_neural_pretrain resume CORPUS CHECKPOINT TOKENIZER [EPOCHS]'
       write(output_unit, '(A)') '  vegai_neural_pretrain generate CHECKPOINT TOKENIZER PROMPT [TOKENS] [SEED]'
       write(output_unit, '(A)') '  vegai_neural_pretrain train-chunk CORPUS CHECKPOINT TOKENIZER NEW_RECORDS [START_RECORD]'
+      write(output_unit, '(A)') '  vegai_neural_pretrain plan CHECKPOINT TOKENIZER'
       write(output_unit, '(A)') 'The current trainer updates only tied output embeddings; it is not full BPTT.'
    end subroutine print_help
 

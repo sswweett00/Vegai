@@ -776,6 +776,7 @@ contains
       type(neural_train_config_t) :: train_config, restored_config
       type(neural_train_state_t) :: full_state, split_state, restored_state
       type(neural_train_metrics_t) :: full_metrics, split_metrics, resumed_metrics
+      type(neural_training_resource_plan_t) :: resource_plan
       integer(int32) :: status
       integer :: unit, io_status
       character(len=*), parameter :: corpus_path = 'test_neural_continuation.txt'
@@ -799,6 +800,11 @@ contains
                                                local_window=4_int32, ffn_width=32_int32)
       train_config = neural_train_config_t(learning_rate=0.025_real64, gradient_clip_norm=4.0_real64, &
                                            embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32)
+      call neural_training_resource_plan(decoder_config, bpe, train_config, resource_plan, status)
+      call assert_i32_equal(status, NPT_OK, 'neural continuous resource plan succeeds')
+      call assert_true(resource_plan%minimum_resident_bytes > resource_plan%decoder_parameter_bytes_real32 .and. &
+                       resource_plan%per_step_working_bytes > 0_int64, &
+                       'neural resource plan includes bounded state and working storage')
       call neural_decoder_init(full_model, decoder_config, 2468_int64, status)
       call assert_i32_equal(status, NRD_OK, 'full continuous model initializes')
       call neural_decoder_init(split_model, decoder_config, 2468_int64, status)

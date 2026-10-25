@@ -183,6 +183,8 @@ jobs:
           run_neural neural-train-chunk-1 ./build-ci/vegai_neural_pretrain train-chunk "$neural_fixture" "$neural_checkpoint" "$bpe_path" 4
           run_neural neural-train-chunk-2 ./build-ci/vegai_neural_pretrain train-chunk "$neural_fixture" "$neural_checkpoint" "$bpe_path" 4
           grep -q '"source_records_completed":8' "${RUNNER_TEMP}/neural-train-chunk-2.txt"
+          run_neural neural-training-plan ./build-ci/vegai_neural_pretrain plan "$neural_checkpoint" "$bpe_path"
+          grep -q '"schema_version":"vegai-neural-training-resource-plan/v1"' "${RUNNER_TEMP}/neural-training-plan.txt"
           run_neural neural-generate-smoke ./build-ci/vegai_neural_pretrain generate "$neural_checkpoint" "$bpe_path" "Trabzon" 8 7
           run_neural neural-generate-repeat ./build-ci/vegai_neural_pretrain generate "$neural_checkpoint" "$bpe_path" "Trabzon" 8 7
           cmp "${RUNNER_TEMP}/neural-generate-smoke.txt" "${RUNNER_TEMP}/neural-generate-repeat.txt"

@@ -182,9 +182,9 @@ FLOPs/token, with local score work reported separately as
 F_{\text{local-score}}\approx2H d_h(W+1).
 \]
 
-These are countable engineering models, not a throughput promise. Actual latency depends on compiler, BLAS/vectorization choices, memory bandwidth, cache behavior, CPU ISA, power limits, OS scheduling, and accelerator backend. The native neural path currently runs on the portable Fortran CPU path; it does **not** silently claim OpenVINO, GPU, NPU, or joint CPU/GPU/NPU neural execution.
+These are countable engineering models, not a throughput promise. Actual latency depends on compiler, BLAS/vectorization choices, memory bandwidth, cache behavior, CPU ISA, power limits, OS scheduling, and accelerator backend. The tied-output update has an optional OpenMP parallel loop across independent vocabulary columns (enabled only at vocabulary size \(\ge512\)); it preserves online token order and has no reduction. The native neural path otherwise runs on the portable Fortran CPU path; it does **not** silently claim OpenVINO, GPU, NPU, or joint CPU/GPU/NPU neural execution.
 
-For a specific machine, use `vegai_neural_lm plan` to obtain the configuration-dependent counts, then benchmark the exact built binary and record compiler/version, threads, thermal/power state, corpus/tokenizer, and measured wall time.
+For a specific machine, use `vegai_neural_lm plan` to obtain the configuration-dependent architectural counts. For a trained checkpoint, `vegai_neural_pretrain plan CHECKPOINT TOKENIZER` reports a conservative sequential-training resident-memory floor: parameters, tokenizer, stream state, record token buffer, and step temporaries. It intentionally excludes compiler/runtime, allocator, OS page cache, OpenMP-team, and accelerator overhead, so it is not a RAM-sufficiency certificate. Then benchmark the exact built binary and record compiler/version, threads, thermal/power state, corpus/tokenizer, and measured wall time.
 
 ---
 
