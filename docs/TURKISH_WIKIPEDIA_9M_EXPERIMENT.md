@@ -42,7 +42,8 @@ uygulanır:
    token (frekans azalan, lexical tie-break) seçilir. Bu açık vocabulary
    sınırı, her yazılmış token'ın actual update olmasını doğrularken checkpoint
    working setini hosted CPU run'ında bounded tutar; corpus'un kaynak/provenance
-   niteliğini değiştirmez.
+   niteliğini değiştirmez. Bu, geniş sözlük kapsamı değil, gerçek-data native
+   train/retrieval hattı için ölçülü bir hosted-run sınırıdır.
 5. Kaynak sırası korunur. Seçili olmayan her token record boundary'dir;
    dolayısıyla filtrelenmiş kelimelerin iki tarafı yapay biçimde komşu olmaz.
    Tek seçili token içeren segmentler de atılır: context'i olmayan bir token
@@ -59,6 +60,26 @@ Bu projection Türkçe karakter ayrımlarını native ASCII yüzeyinde taşımaz
 dönüştürücü kimliği, çıktı SHA-256 ve strict telemetry'yi birlikte taşır; bu
 run Unicode-Türkçe tokenizer benchmarkı veya dil kusursuzluğu iddiası değildir.
 
+### Singleton denetimi
+
+Workflow, kaynak indirmeden önce
+`python3 tools/run_turkish_wikipedia_9m.py --controller-smoke-test` çalıştırır.
+Geçici sentetik test girdisi kanıt corpus'u değildir: tek-seçilmiş-token ve
+tek token artığı dallarını doğrudan zorlar; ardından 9,000,000 tokenlık geçici
+akış için bağımsız olarak boş record olmadığını, her record'un 2–128 token
+olduğunu, ASCII/LF/48-byte token kurallarını ve tam token sayısını doğrular.
+Bu testin amacı `emit_segment` içinde bir singleton'ın ilerleme döngüsünü
+kilitlememesini kanıtlamaktır; gerçek veri sonucu yerine geçmez.
+
+### Uygulama sınırı
+
+`vegai_pretrain`, checkpoint inspect ve `vegai_chat` native Fortran
+executable'larıdır. Corpus/provenance orkestrasyonu ise şu an stdlib Python
+controller'dadır; bu dosya bütün-proje Fortran talebini tek başına karşılamaz.
+Artifact bunu gizlemez: sonuçtaki native eğitim/retrieval ölçümleri Fortran
+çocuk proseslerinden gelir, controller'ın dönüşüm/kimlik kayıtları ise ayrı
+bir automation katmanıdır.
+
 ## Eğitim protokolü
 
 Native Fortran komutu şuna eşdeğerdir:
@@ -70,8 +91,9 @@ OMP_NUM_THREADS=4 ./vegai_pretrain train TURKISH_WIKIPEDIA_9M_ASCII.txt checkpoi
   --parallel-context-build --parallel-min-contexts 32
 ```
 
-Bu operasyonel kanıt run'ı hosted sürede tamamlanabilen **bir epoch** kullanır.
-RESONANT'ın ilk epoch'u HYBRID ile aynı başlangıç semantic düzleminden çalışır;
+Bu operasyonel kanıt run'ı hosted sürede tamamlanabilen **bir epoch** kullanır
+ve daha önce doğrulanmış `--window 2` yerel bağlamını korur. RESONANT'ın ilk
+epoch'u HYBRID ile aynı başlangıç semantic düzleminden çalışır;
 bu nedenle önceki epoch'tan öğrenilmiş frozen semantic feedback veya iki-epoch
 kalite artışı bu run için iddia edilmez. Ayrı kontrollü fixture çalışması,
 RESONANT'ın ikinci epoch davranışını zaten doğrular; burada ölçülen şey gerçek

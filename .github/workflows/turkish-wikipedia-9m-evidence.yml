@@ -10,6 +10,7 @@ on:
     branches: [arena/4f78773c-vegai]
     paths:
       - '.github/workflows/turkish-wikipedia-9m-evidence.yml'
+      - 'tools/run_turkish_wikipedia_9m.py'
 
 permissions:
   contents: read
@@ -21,10 +22,10 @@ permissions:
 # the 9M count is also a real prototype-update count rather than lexical-only
 # reader telemetry.
 concurrency:
-  # The original two-epoch attempt remains independently auditable.  This
-  # one-epoch operational evidence run has its own group, so a timed-out
-  # historical attempt cannot block the bounded, real-data report.
-  group: turkish-wikipedia-9m-oneepoch-${{ github.ref }}
+  # Earlier attempts with a defective singleton controller branch remain
+  # independently auditable. This corrected one-epoch operational run has its
+  # own group, so they cannot block the real-data evidence report.
+  group: turkish-wikipedia-9m-bounded-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -43,6 +44,9 @@ jobs:
 
       - name: Compile portable native Fortran executables
         run: make pretrain chat BUILD_DIR=build-turkish-9m
+
+      - name: Verify corpus controller singleton and 9M-token invariants
+        run: python3 tools/run_turkish_wikipedia_9m.py --controller-smoke-test
 
       - name: Allocate ignored evidence paths
         run: |
@@ -73,7 +77,7 @@ jobs:
             --source-archive "${VEGAI_TURKISH_9M_DIR}/trwiki-67.tar.bz2" \
             --faq-repo "${VEGAI_TURKISH_9M_DIR}/turkish-faq" \
             --run-dir "${VEGAI_TURKISH_9M_DIR}/experiment" \
-            --target-tokens 9000000 --vocabulary-size 8192 --epochs 1 --omp-threads 4 \
+            --target-tokens 9000000 --vocabulary-size 8192 --epochs 1 --context-window 2 --omp-threads 4 \
             --train-timeout-seconds 4500 --inspect-timeout-seconds 300
 
       - name: Surface bounded experiment failure reason

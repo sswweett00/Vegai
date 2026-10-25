@@ -26,6 +26,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 from typing import Any, Iterable, Mapping, Sequence
@@ -36,6 +37,7 @@ CORPUS_SCHEMA = "vegai-turkish-wikipedia-ascii-corpus/v1"
 TARGET_TOKENS_DEFAULT = 9_000_000
 VOCABULARY_SIZE_DEFAULT = 8_192
 EPOCHS_DEFAULT = 1
+CONTEXT_WINDOW_DEFAULT = 2
 TOKENS_PER_RECORD = 128
 MAX_NATIVE_RECORD_BYTES = 8_192
 TOKEN_MAX_BYTES = 48
@@ -272,7 +274,10 @@ def emit_segment(
         if take % 2 != 0:
             take = take - 1
         if take < 2:
-            exit
+            # A one-token remainder cannot be contextualized.  This is a
+            # record-local boundary: stop this segment rather than attempting
+            # to advance into a malformed singleton record.
+            break
         record = " ".join(segment[cursor : cursor + take])
         encoded = record.encode("ascii", "strict")
         require(len(encoded) <= MAX_NATIVE_RECORD_BYTES, "generated native record exceeds 8,192 bytes")
@@ -415,6 +420,81 @@ def prepare_corpus(
         },
         "output": corpus_identity,
     }
+
+
+def run_controller_smoke_test() -> None:
+    """Exercise singleton/odd-boundary control flow and the full 9M contract.
+
+    This deliberately uses a temporary synthetic *controller test input*, never
+    evidence data.  Its purpose is to prove that a selected singleton is
+    dropped with loop control, rather than becoming a blank record or stalling
+    corpus construction.  The real evidence workflow separately retrieves and
+    reports the licensed Turkish Wikipedia source.
+    """
+    tokenizer_probe = "Çığ ÖŞÜ öğrenci 12_3 'x' " + ("q" * (TOKEN_MAX_BYTES + 1))
+    require(
+        normalize_tokens(tokenizer_probe) == ["cig", "osu", "ogrenci", "12_3", "'x'"],
+        "controller smoke tokenizer projection changed unexpectedly",
+    )
+
+    with tempfile.TemporaryDirectory(prefix="vegai-turkish-controller-smoke-") as temporary_name:
+        temporary = Path(temporary_name)
+        direct = temporary / "direct.txt"
+        with direct.open("w", encoding="ascii", newline="\n") as handle:
+            singleton_tokens, singleton_records = emit_segment(handle, ["aa"], 2)
+            odd_tokens, odd_records = emit_segment(handle, ["bb", "cc", "dd"], 3)
+        require((singleton_tokens, singleton_records) == (0, 0),
+                "singleton segment was not dropped deterministically")
+        require((odd_tokens, odd_records) == (2, 1),
+                "odd-sized selected segment did not retain its contextual pair")
+        require(direct.read_text(encoding="ascii") == "bb cc\n",
+                "singleton/odd direct emission produced an unexpected record")
+
+        selected_words = ("aa", "bb", "cc", "dd", "ee", "ff", "gg", "hh", "ii", "jj", "kk", "ll")
+        tokens_per_body_record = len(selected_words) * 10
+        require(TARGET_TOKENS_DEFAULT % tokens_per_body_record == 0,
+                "controller smoke record construction no longer divides the 9M target")
+        source = temporary / "controller-smoke-train.raw"
+        body = " ".join(selected_words * 10) + "\n"
+        with source.open("w", encoding="utf-8", newline="\n") as handle:
+            # Both selected runs around `filtered` are singletons.  They must
+            # be dropped, then the following 75,000 120-token records must
+            # reach exactly 9,000,000 without blank output or a hang.
+            handle.write("aa filtered bb\n")
+            for _ in range(TARGET_TOKENS_DEFAULT // tokens_per_body_record):
+                handle.write(body)
+
+        corpus = temporary / "controller-smoke-corpus.txt"
+        vocabulary = temporary / "controller-smoke-vocabulary.tsv"
+        manifest = prepare_corpus(
+            source,
+            corpus,
+            vocabulary,
+            target_tokens=TARGET_TOKENS_DEFAULT,
+            vocabulary_size=len(selected_words),
+        )
+        output = manifest["output"]
+        require(output["native_token_count"] == TARGET_TOKENS_DEFAULT,
+                "controller smoke corpus does not contain exactly 9,000,000 tokens")
+        require(output["non_ascii_bytes"] == 0 and output["crlf_records"] == 0 and
+                output["overlong_records"] == 0 and output["tokenizer_truncations"] == 0,
+                "controller smoke corpus violated a tokenizer/input invariant")
+        require(manifest["selection"]["minimum_tokens_per_output_record"] == 2 and
+                manifest["selection"]["maximum_tokens_per_output_record"] == TOKENS_PER_RECORD,
+                "controller smoke manifest record bounds changed unexpectedly")
+        observed_tokens = 0
+        with corpus.open("rb") as handle:
+            for raw in handle:
+                require(raw not in (b"", b"\n") and raw.endswith(b"\n"),
+                        "controller smoke emitted a blank or non-LF record")
+                fields = raw[:-1].split(b" ")
+                require(2 <= len(fields) <= TOKENS_PER_RECORD,
+                        "controller smoke emitted a non-contextual or overlong token record")
+                require(all(TOKEN_PATTERN.fullmatch(field.decode("ascii")) is not None for field in fields),
+                        "controller smoke emitted an invalid native token")
+                observed_tokens += len(fields)
+        require(observed_tokens == TARGET_TOKENS_DEFAULT,
+                "controller smoke independent token scan differs from manifest")
 
 
 def run_child(command: Sequence[str], *, timeout_seconds: float, cwd: Path) -> ProcessResult:
@@ -705,6 +785,8 @@ def run_experiment(arguments: argparse.Namespace) -> dict[str, Any]:
             f"chat executable is not usable: {arguments.chat_bin}")
     require(arguments.source_root.is_dir(), f"extracted Turkish Wikipedia source root is unavailable: {arguments.source_root}")
     require(arguments.epochs >= 1, "at least one native training epoch is required")
+    require(arguments.context_window >= 1 and arguments.context_window < TOKENS_PER_RECORD,
+            "context window must be positive and smaller than the emitted record bound")
     require(arguments.omp_threads > 0, "OMP thread count must be positive")
 
     candidates = sorted(arguments.source_root.rglob("*train*.raw"))
@@ -737,7 +819,7 @@ def run_experiment(arguments: argparse.Namespace) -> dict[str, Any]:
         "--min-frequency",
         "1",
         "--window",
-        "2",
+        str(arguments.context_window),
         "--position-shift",
         "41",
         "--context-mode",
@@ -885,6 +967,7 @@ def run_experiment(arguments: argparse.Namespace) -> dict[str, Any]:
         "training": {
             "command": list(training.command),
             "omp_num_threads": arguments.omp_threads,
+            "context_window": arguments.context_window,
             "train_process_wall_seconds": training.elapsed_seconds,
             "raw_training_tokens_per_second": expected_training_tokens / training.elapsed_seconds,
             "metrics": metrics,
@@ -963,6 +1046,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--target-tokens", type=int, default=TARGET_TOKENS_DEFAULT)
     parser.add_argument("--vocabulary-size", type=int, default=VOCABULARY_SIZE_DEFAULT)
     parser.add_argument("--epochs", type=int, default=EPOCHS_DEFAULT)
+    parser.add_argument("--context-window", type=int, default=CONTEXT_WINDOW_DEFAULT)
     parser.add_argument("--omp-threads", type=int, default=2)
     parser.add_argument("--train-timeout-seconds", type=float, default=3_600.0)
     parser.add_argument("--inspect-timeout-seconds", type=float, default=300.0)
@@ -970,6 +1054,18 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def main() -> int:
+    # Keep the controller's contract smoke independent of external downloads
+    # and executable paths so the workflow can prove the singleton branch
+    # before allocating an expensive real-data runner.
+    if sys.argv[1:] == ["--controller-smoke-test"]:
+        try:
+            run_controller_smoke_test()
+        except ExperimentError as error:
+            print(f"Turkish Wikipedia controller smoke: FAIL: {error}", file=sys.stderr)
+            return 1
+        print("Turkish Wikipedia controller smoke: PASS")
+        return 0
+
     arguments = parse_arguments()
     try:
         require(arguments.train_timeout_seconds > 0 and arguments.inspect_timeout_seconds > 0,
