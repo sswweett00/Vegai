@@ -142,8 +142,10 @@ factual doğruluğunu ya da geniş sohbet yeteneğini tek başına kanıtlamaz.
 
 ## Run kaydı
 
-Bu commit sadece reproducible protocol'ü ekler. Gerçek run tamamlandıktan sonra
-şu alanlar artifact'ten buraya eklenir:
+Başarılı gerçek-data koşusu tamamlandı. Immutable artifact’ten çıkarılan kesin
+sonuçlar, 11 semantic nearest-neighbour satırı ve 11 literal grounded TSV yanıtı
+ayrı tutulmuş [ölçülmüş sonuç kaydında](TURKISH_WIKIPEDIA_9M_RESULTS.md)
+bulunur. Bu kayıt şunları taşır:
 
 - Actions run URL/ID ve commit SHA;
 - raw arşiv, raw split, normalized 9M corpus ve checkpoint SHA-256;
@@ -151,5 +153,5 @@ Bu commit sadece reproducible protocol'ü ekler. Gerçek run tamamlandıktan son
 - 11 semantic nearest-neighbour satırı;
 - 11 grounded TSV prompt/answer, similarity, runner-up ve margin satırı.
 
-Sonuçlar bir sonraki belge güncellemesinde yalnız kesin artifact değerleriyle
-doldurulacaktır; tahmin veya önceden yazılmış başarı değeri kullanılmaz.
+Başarısız/yarım eski koşular sonuç olarak kullanılmaz; bu belge yalnız başarılı
+`40154058047` artifact’inden doğrulanmış değerleri işaret eder.
