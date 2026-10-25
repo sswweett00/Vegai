@@ -6,9 +6,9 @@ kalite kartı değildir.
 
 | Alan | Değer |
 |---|---|
-| Evidence run | [GitHub Actions 40197237783](https://github.com/sswweett00/Vegai/actions/runs/40197237783) |
-| Branch head | `949220a3e23d42337a8b86402e170c0dedaa8d65` |
-| Workflow merge commit | `d84c0e741e071170237066231fd06282315d80c1` |
+| Evidence run | [GitHub Actions 40197729219](https://github.com/sswweett00/Vegai/actions/runs/40197729219) |
+| Branch head | `a19ca193fe5176e9680b36de5870b931fa6e3b86` |
+| Workflow merge commit | `6165f191e207281d8fe6926e1b337b69a1e51da1` |
 | Kaynak | `3nesdeniz/turkish-daily-dialogues-5k` @ `ccd9f05c2f97684bbd9a55d818528da9dfb6bd5a` |
 | Kaynağın beyan ettiği lisans | `CC-BY-4.0` |
 | Kaynağın beyan ettiği doğa | `synthetic-ai-assisted-deterministic` |
