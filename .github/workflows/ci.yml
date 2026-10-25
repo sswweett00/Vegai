@@ -38,9 +38,16 @@ jobs:
           set +e
           cmake --build build-ci --parallel > compile-output.txt 2>&1
           exit_code=$?
-          cat compile-output.txt
-          if [ "$exit_code" -ne 0 ]; then
-            detail=$(tail -n 12 compile-output.txt | tr '\n' ' ' | cut -c1-1900)
+          if [ "$exit_code" -eq 0 ]; then
+            tail -n 80 compile-output.txt
+          else
+            # Avoid losing the actual compiler error to GitHub's log-size
+            # truncation when parallel builds also emit legacy warnings.
+            grep -Ein 'fatal error|error:|warning:|ninja: build stopped' compile-output.txt | tail -n 160 || true
+            detail=$(grep -Ein 'fatal error|error:|ninja: build stopped' compile-output.txt | tail -n 12 | tr '\n' ' ' | cut -c1-1900)
+            if [ -z "$detail" ]; then
+              detail=$(tail -n 24 compile-output.txt | tr '\n' ' ' | cut -c1-1900)
+            fi
             echo "::error title=Fortran compile diagnostic::$detail"
           fi
           exit "$exit_code"
