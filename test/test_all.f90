@@ -837,7 +837,8 @@ contains
       call bpe_init(bpe, 1_int32, status)
       call assert_i32_equal(status, BPE_OK, 'continuation byte tokenizer initializes')
       decoder_config = neural_decoder_config_t(vocabulary_size=256_int32, width=16_int32, heads=2_int32, &
-                                               local_window=4_int32, ffn_width=32_int32)
+                                               local_window=4_int32, ffn_width=32_int32, memory_decay=0.91_real32, &
+                                               rms_epsilon=2.0e-5_real32, rotary_period=4096_int32)
       train_config = neural_train_config_t(learning_rate=0.025_real64, gradient_clip_norm=4.0_real64, &
                                            embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32)
       call neural_training_resource_plan(decoder_config, bpe, train_config, resource_plan, status)

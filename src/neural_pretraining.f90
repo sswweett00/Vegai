@@ -37,7 +37,9 @@ module neural_pretraining
    integer(int32), parameter, public :: NPT_TRAINABLE_TIED_OUTPUT = 1_int32
 
    character(len=8), parameter :: NEURAL_CHECKPOINT_MAGIC = 'VGNR0001'
-   integer(int32), parameter :: NEURAL_CHECKPOINT_VERSION = 1_int32
+   ! v2 binds all decoder configuration fields (including retention decay,
+   ! numerical epsilon, and rotary period) to the serialized parameter state.
+   integer(int32), parameter :: NEURAL_CHECKPOINT_VERSION = 2_int32
    integer(int32), parameter :: FILE_LINE_BYTES = 32768_int32
 
    type, public :: neural_train_config_t
@@ -523,7 +525,9 @@ contains
       write(unit, iostat=io_status) NEURAL_CHECKPOINT_MAGIC
       if (io_status == 0) write(unit, iostat=io_status) NEURAL_CHECKPOINT_VERSION
       if (io_status == 0) write(unit, iostat=io_status) model%config%vocabulary_size, model%config%width, model%config%heads, &
-                                                         model%config%local_window, model%config%ffn_width
+                                                         model%config%local_window, model%config%ffn_width, &
+                                                         model%config%memory_decay, model%config%rms_epsilon, &
+                                                         model%config%rotary_period
       if (io_status == 0) write(unit, iostat=io_status) bpe%token_count, bpe%merge_count
       if (io_status == 0) write(unit, iostat=io_status) config%trainable_mode, config%learning_rate, config%gradient_clip_norm, &
                                                          config%embedding_value_limit, config%maximum_tokens_per_record
@@ -543,7 +547,7 @@ contains
       type(neural_train_state_t), intent(out) :: state
       integer(int32), intent(out) :: status
       character(len=8) :: magic
-      integer :: unit, io_status
+      integer :: unit, io_status, read_status
       integer(int32) :: version, stored_bpe_tokens, stored_bpe_merges
       type(neural_decoder_config_t) :: decoder_config
 
@@ -564,7 +568,9 @@ contains
       read(unit, iostat=io_status) magic
       if (io_status == 0) read(unit, iostat=io_status) version
       if (io_status == 0) read(unit, iostat=io_status) decoder_config%vocabulary_size, decoder_config%width, decoder_config%heads, &
-                                                       decoder_config%local_window, decoder_config%ffn_width
+                                                       decoder_config%local_window, decoder_config%ffn_width, &
+                                                       decoder_config%memory_decay, decoder_config%rms_epsilon, &
+                                                       decoder_config%rotary_period
       if (io_status == 0) read(unit, iostat=io_status) stored_bpe_tokens, stored_bpe_merges
       if (io_status == 0) read(unit, iostat=io_status) config%trainable_mode, config%learning_rate, config%gradient_clip_norm, &
                                                        config%embedding_value_limit, config%maximum_tokens_per_record
@@ -593,8 +599,9 @@ contains
          return
       end if
       call read_model_payload(unit, model, io_status)
+      read_status = io_status
       close(unit, iostat=io_status)
-      if (io_status /= 0 .or. .not. model_payload_is_finite(model)) then
+      if (read_status /= 0 .or. io_status /= 0 .or. .not. model_payload_is_finite(model)) then
          call neural_decoder_destroy(model)
          status = NPT_ERR_IO
          return
