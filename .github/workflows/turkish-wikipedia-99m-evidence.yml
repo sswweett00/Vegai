@@ -1,0 +1,261 @@
+name: Real 99M Turkish Wikipedia training and held-out inference evidence
+
+on:
+  workflow_dispatch:
+  # The workflow lives on the PR branch. This narrow trigger makes the real
+  # evidence run reachable before the workflow reaches the default branch,
+  # without spending a large-data job for ordinary documentation changes.
+  push:
+    branches: [arena/4f78773c-vegai]
+    paths:
+      - '.github/workflows/turkish-wikipedia-99m-evidence.yml'
+      - 'tools/run_turkish_wikipedia_99m.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  # Historical 9M attempts and this 99M evidence job must remain independently
+  # auditable. Do not silently cancel a run after its source snapshot has been
+  # selected.
+  group: turkish-wikipedia-99m-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  real-turkish-99m:
+    name: Native 99M Turkish Wikipedia RESONANT train and held-out inference
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install GNU Fortran toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gfortran
+
+      - name: Compile portable native Fortran executables
+        run: make pretrain chat BUILD_DIR=build-turkish-99m
+
+      - name: Verify 99M controller partition and strict-record invariants
+        run: python3 tools/run_turkish_wikipedia_99m.py --controller-smoke-test
+
+      - name: Allocate ignored large-data paths
+        run: |
+          run_dir="${RUNNER_TEMP}/vegai-turkish-wikipedia-99m"
+          mkdir -p "$run_dir"
+          echo "VEGAI_TURKISH_99M_DIR=$run_dir" >> "$GITHUB_ENV"
+
+      - name: Retrieve a pinned compatible WikiExtractor revision
+        run: |
+          set -euo pipefail
+          extractor_dir="${VEGAI_TURKISH_99M_DIR}/wikiextractor"
+          git init --quiet "$extractor_dir"
+          git -C "$extractor_dir" remote add origin https://github.com/attardi/wikiextractor.git
+          git -C "$extractor_dir" fetch --quiet --depth 1 origin eeaae048eaa3057c9cd5dfb992eb42104a7a5174
+          git -C "$extractor_dir" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$extractor_dir" rev-parse HEAD)" = "eeaae048eaa3057c9cd5dfb992eb42104a7a5174"
+          echo "VEGAI_WIKIEXTRACTOR_DIR=$extractor_dir" >> "$GITHUB_ENV"
+
+      - name: Retrieve versioned official Turkish Wikipedia dump and separate FAQ source
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/Aliumutcan/Turkish_NLP_FAQ_DATASET.git "${VEGAI_TURKISH_99M_DIR}/turkish-faq"
+          status="${VEGAI_TURKISH_99M_DIR}/trwiki-dumpstatus.json"
+          curl --fail --location --retry 4 --retry-delay 5 --connect-timeout 30 \
+            --output "$status" 'https://dumps.wikimedia.org/trwiki/latest/dumpstatus.json'
+          python3 - "$status" "${VEGAI_TURKISH_99M_DIR}/trwiki-source-manifest.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          status_path, output_path = map(Path, sys.argv[1:])
+          status = json.loads(status_path.read_text(encoding="utf-8"))
+          revision = status.get("version")
+          if not isinstance(revision, str) or not revision.isdigit() or len(revision) != 8:
+              raise SystemExit("dumpstatus.json has no eight-digit completed dump revision")
+          job = status.get("jobs", {}).get("articlesdump")
+          if not isinstance(job, dict) or job.get("status") != "done":
+              raise SystemExit("official trwiki articlesdump is not in done state")
+          files = job.get("files")
+          if not isinstance(files, dict):
+              raise SystemExit("official trwiki articlesdump has no files mapping")
+          candidates = []
+          for name, details in files.items():
+              if not isinstance(name, str) or not isinstance(details, dict):
+                  continue
+              if "pages-articles" not in name or not name.endswith(".xml.bz2") or "index" in name:
+                  continue
+              preference = 0 if "multistream" in name else 1
+              candidates.append((preference, name, details))
+          if not candidates:
+              raise SystemExit("official trwiki articlesdump has no pages-articles XML bzip2 file")
+          _preference, name, details = sorted(candidates)[0]
+          url = details.get("url")
+          if not isinstance(url, str) or not url.startswith("https://"):
+              url = f"https://dumps.wikimedia.org/trwiki/{revision}/{name}"
+          payload = {
+              "schema": "vegai-wikimedia-dump-source/v1",
+              "status_url": "https://dumps.wikimedia.org/trwiki/latest/dumpstatus.json",
+              "dump_revision": revision,
+              "source_url": url,
+              "source_file": name,
+              "announced_size": details.get("size"),
+              "announced_sha1": details.get("sha1"),
+          }
+          output_path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+          print(url)
+          PY
+          source_url=$(python3 - "${VEGAI_TURKISH_99M_DIR}/trwiki-source-manifest.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["source_url"])
+          PY
+          )
+          archive="${VEGAI_TURKISH_99M_DIR}/trwiki-pages-articles.xml.bz2"
+          curl --fail --location --retry 4 --retry-delay 10 --connect-timeout 30 --output "$archive" "$source_url"
+          python3 - "$archive" "${VEGAI_TURKISH_99M_DIR}/trwiki-source-manifest.json" <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+
+          archive, manifest = map(Path, sys.argv[1:])
+          digest = hashlib.sha256()
+          count = 0
+          with archive.open("rb") as handle:
+              while chunk := handle.read(1024 * 1024):
+                  digest.update(chunk)
+                  count += len(chunk)
+          payload = json.loads(manifest.read_text(encoding="utf-8"))
+          payload["downloaded_archive_bytes"] = count
+          payload["downloaded_archive_sha256"] = digest.hexdigest()
+          manifest.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+          PY
+          echo "VEGAI_TURKISH_99M_ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      - name: Extract article text with the pinned WikiExtractor revision
+        run: |
+          set -euo pipefail
+          extracted="${VEGAI_TURKISH_99M_DIR}/trwiki-extracted"
+          PYTHONPATH="${VEGAI_WIKIEXTRACTOR_DIR}" python3 -m wikiextractor.WikiExtractor \
+            "$VEGAI_TURKISH_99M_ARCHIVE" --json --no-templates --discard_empty \
+            --processes 4 --bytes 100M --output "$extracted"
+          test "$(find "$extracted" -type f -name 'wiki_*' | wc -l)" -gt 0
+          echo "VEGAI_TURKISH_99M_EXTRACTED=$extracted" >> "$GITHUB_ENV"
+
+      - name: Train real 99M native-token corpus and run real held-out inference
+        run: |
+          set -euo pipefail
+          python3 tools/run_turkish_wikipedia_99m.py \
+            --pretrain-bin "${GITHUB_WORKSPACE}/build-turkish-99m/vegai_pretrain" \
+            --chat-bin "${GITHUB_WORKSPACE}/build-turkish-99m/vegai_chat" \
+            --extracted-root "$VEGAI_TURKISH_99M_EXTRACTED" \
+            --source-archive "$VEGAI_TURKISH_99M_ARCHIVE" \
+            --source-manifest "${VEGAI_TURKISH_99M_DIR}/trwiki-source-manifest.json" \
+            --faq-repo "${VEGAI_TURKISH_99M_DIR}/turkish-faq" \
+            --run-dir "${VEGAI_TURKISH_99M_DIR}/experiment" \
+            --target-tokens 99000000 --vocabulary-size 32768 --epochs 2 --context-window 2 --omp-threads 4 \
+            --train-timeout-seconds 18000 --inspect-timeout-seconds 600
+
+      - name: Surface bounded experiment failure reason
+        if: failure()
+        run: |
+          set -euo pipefail
+          failure="${VEGAI_TURKISH_99M_DIR}/experiment/experiment-failure.json"
+          if [ -f "$failure" ]; then
+            python3 - "$failure" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          message = str(payload.get("error", "experiment failed without a controller message")).replace("\r", " ").replace("\n", " ")
+          print(f"::error title=Turkish Wikipedia 99M controller::{message[:1800]}")
+          print(json.dumps(payload, sort_keys=True))
+          PY
+          else
+            echo "::error title=Turkish Wikipedia 99M controller::The controller did not publish experiment-failure.json"
+          fi
+
+      - name: Publish native training and held-out inference summary
+        if: always()
+        run: |
+          python3 - "${VEGAI_TURKISH_99M_DIR}/experiment/experiment-report.json" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          report_path, summary_path = map(Path, sys.argv[1:])
+          with summary_path.open("a", encoding="utf-8") as summary:
+              print("## Real Turkish Wikipedia 99M native-token evidence", file=summary)
+              print(file=summary)
+              if not report_path.is_file():
+                  failure = report_path.with_name("experiment-failure.json")
+                  if failure.is_file():
+                      print("```json", file=summary)
+                      print(failure.read_text(encoding="utf-8"), file=summary)
+                      print("```", file=summary)
+                  else:
+                      print("No experiment report was published; inspect the failed job step.", file=summary)
+                  raise SystemExit(0)
+              report = json.loads(report_path.read_text(encoding="utf-8"))
+              corpus = report["corpus"]["output"]
+              training = report["training"]
+              heldout = report["heldout_inference_quality"]
+              source = report["provenance"]["Turkish_Wikipedia_training_source"]
+              print("```text", file=summary)
+              print(
+                  f"dump_revision={source['dump_revision']}; corpus_sha256={corpus['sha256']}; "
+                  f"native_tokens={corpus['native_token_count']}; train_seconds={training['train_process_wall_seconds']:.6f}; "
+                  f"tokens_per_second={training['raw_training_tokens_per_second']:.3f}",
+                  file=summary,
+              )
+              print("```", file=summary)
+              print(file=summary)
+              metrics = heldout["metrics"]
+              print("### Held-out article-local co-occurrence consistency", file=summary)
+              print(f"Eligible queries: {metrics['eligible_queries']}; exact top-1 agreement: {metrics['exact_top1_agreement']:.6f}; "
+                    f"prediction observed in held-out window: {metrics['checkpoint_prediction_observed_in_heldout_window_rate']:.6f}; "
+                    f"MRR: {metrics['mean_reciprocal_rank_by_heldout_association']:.6f}.", file=summary)
+              print(file=summary)
+              print("### 11 real checkpoint semantic probes", file=summary)
+              print("| query | neighbour | similarity |", file=summary)
+              print("| --- | --- | ---: |", file=summary)
+              for row in report["semantic_retrieval"]["results"]:
+                  print(f"| {row['query']} | {row['nearest_semantic_neighbour']} | {row['bipolar_similarity']:.5f} |", file=summary)
+              print(file=summary)
+              print("### 11 literal grounded TSV retrievals", file=summary)
+              print("| # | best similarity | runner-up | margin | grounded |", file=summary)
+              print("| ---: | ---: | ---: | ---: | --- |", file=summary)
+              for row in report["grounded_dialogue"]["results"]:
+                  print(f"| {row['ordinal']} | {row['best_bipolar_similarity']:.5f} | "
+                        f"{row['runner_up_bipolar_similarity']:.5f} | {row['grounding_margin']:.5f} | "
+                        f"{str(row['grounded']).lower()} |", file=summary)
+              print(file=summary)
+              print("> Timing covers only native Fortran training. Held-out co-occurrence is a narrow real-inference consistency metric, not a general semantic benchmark or an LLM quality claim. Grounded answers are TSV retrievals, not free-form generation.", file=summary)
+          PY
+
+      - name: Upload compact provenance and inference evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: turkish-wikipedia-99m-evidence-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/vegai-turkish-wikipedia-99m/experiment/evidence/
+            ${{ runner.temp }}/vegai-turkish-wikipedia-99m/experiment/experiment-failure.json
+            ${{ runner.temp }}/vegai-turkish-wikipedia-99m/trwiki-source-manifest.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload native checkpoint separately
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: turkish-wikipedia-99m-checkpoint-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/vegai-turkish-wikipedia-99m/experiment/turkish_wikipedia_99m_resonant.vgai
+            ${{ runner.temp }}/vegai-turkish-wikipedia-99m/experiment/evidence/checkpoint.sha256
+          if-no-files-found: error
+          retention-days: 30

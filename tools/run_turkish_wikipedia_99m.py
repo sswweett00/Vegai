@@ -836,7 +836,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--dataset-url", default="https://dumps.wikimedia.org/trwiki/")
     parser.add_argument("--dataset-license", default="CC-BY-SA-4.0")
     parser.add_argument("--dataset-attribution", default="Turkish Wikipedia contributors / Wikimedia Foundation")
-    parser.add_argument("--wikiextractor-version", default="3.0.6")
+    parser.add_argument("--wikiextractor-version", default="git-eeaae048eaa3057c9cd5dfb992eb42104a7a5174")
     parser.add_argument("--faq-url", default="https://github.com/Aliumutcan/Turkish_NLP_FAQ_DATASET")
     parser.add_argument("--faq-license", default="MIT")
     parser.add_argument("--target-tokens", type=int, default=TARGET_TOKENS)
