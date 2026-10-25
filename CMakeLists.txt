@@ -25,6 +25,7 @@ add_library(vegai_hds STATIC
     src/hyper_types.f90
     src/tokenless_field.f90
     src/text_tokenizer.f90
+    src/causal_ngram_lm.f90
     src/vocabulary.f90
     src/symbolic_memory.f90
     src/resonator_network.f90
@@ -102,6 +103,11 @@ target_link_libraries(hds_engine PRIVATE vegai_hds)
 
 add_executable(vegai_pretrain app/pretrain.f90)
 target_link_libraries(vegai_pretrain PRIVATE vegai_hds)
+
+# A genuine causal, UTF-8-preserving next-token model.  This bounded n-gram
+# path remains distinct from the HDC association learner and TSV retrieval.
+add_executable(vegai_causal_lm app/causal_lm.f90)
+target_link_libraries(vegai_causal_lm PRIVATE vegai_hds)
 
 # Raw-byte field inspection remains separate from text-token pretraining.  It
 # exposes finite representation checks only and has no generative surface.
