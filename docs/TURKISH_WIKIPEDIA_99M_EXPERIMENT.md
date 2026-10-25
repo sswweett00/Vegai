@@ -19,7 +19,7 @@ doldurmaz.
 
 | Amaç | Kaynak | Lisans / kimlik |
 |---|---|---|
-| Eğitim ve held-out makale havuzu | Resmi [Turkish Wikipedia pages-articles dump](https://dumps.wikimedia.org/trwiki/) | `CC-BY-SA-4.0`; workflow o an tamamlanmış `dumpstatus.json` revision'ını, exact archive URL'sini, archive SHA-256'sını ve dump-status SHA-256'sını kaydeder |
+| Eğitim ve held-out makale havuzu | Resmi [Turkish Wikipedia pages-articles dump](https://dumps.wikimedia.org/trwiki/) | `CC-BY-SA-4.0`; workflow o an tamamlanmış `dumpstatus.json` revision'ını, her completed pages-articles XML bzip2 shard'ının URL'sini, byte sayısını ve SHA-256'sını, ayrıca dump-status SHA-256'sını kaydeder. Split shard'lar tek bir dump'ın parçasıdır; ilk shard seçilip diğerleri sessizce atlanmaz. |
 | Metin extraction | [`attardi/wikiextractor`](https://github.com/attardi/wikiextractor) commit `eeaae048eaa3057c9cd5dfb992eb42104a7a5174` | Workflow, Python 3.11+ ile doğrulanmış commit'i kullanır; `--json --no-templates --discard_empty` modunu raporlar |
 | Grounded response knowledge base | [`Aliumutcan/Turkish_NLP_FAQ_DATASET`](https://github.com/Aliumutcan/Turkish_NLP_FAQ_DATASET), `dataset_v1.txt` | `MIT`; revision, LICENSE SHA-256, data-file SHA-256, kaynak URL ve row numarası raporda bulunur |
 

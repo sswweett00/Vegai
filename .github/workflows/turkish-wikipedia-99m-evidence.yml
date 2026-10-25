@@ -108,33 +108,56 @@ jobs:
           for name, details in files.items():
               if not isinstance(name, str) or not isinstance(details, dict):
                   continue
-              if "pages-articles" not in name or not name.endswith(".xml.bz2") or "index" in name:
+              # Newer Wikimedia snapshots shard pages-articles as names such
+              # as ``pages-articles1.xml-p1p1500000.bz2`` rather than one
+              # filename ending in ``.xml.bz2``.  Keep every completed XML
+              # article shard; never arbitrarily select just one.
+              if ("pages-articles" not in name or ".xml" not in name or
+                      not name.endswith(".bz2") or "index" in name):
                   continue
-              candidates.append((0 if "multistream" in name else 1, name, details))
+              file_status = details.get("status")
+              if file_status not in (None, "done"):
+                  continue
+              candidates.append((name, details))
           if not candidates:
               available = ", ".join(sorted(str(name) for name in files)[:80])
-              raise SystemExit("articlesdump has no pages-articles XML bzip2 file; available keys: " + available)
-          _preference, name, details = sorted(candidates)[0]
+              raise SystemExit("articlesdump has no completed pages-articles XML bzip2 file; available keys: " + available)
+          # Prefer the regular split article dumps when they exist. A
+          # multistream dump is an alternative representation, not an extra
+          # source to concatenate with the split representation.
+          split_candidates = [item for item in candidates if "multistream" not in item[0]]
+          selected_files = sorted(split_candidates or candidates)
           # Wikimedia dumpstatus itself uses a schema-version field rather
-          # than the dump date. The exact revision is encoded in the selected
-          # official filename (and redundantly in versioned status URLs).
-          revision_match = re.search(r"trwiki-(\d{8})-pages-articles", name)
-          if revision_match is None:
-              revision_match = re.search(r"/trwiki/(\d{8})/dumpstatus\.json$", status_url)
-          if revision_match is None:
-              raise SystemExit("cannot derive an eight-digit dump revision from the official selected file")
-          revision = revision_match.group(1)
-          url = details.get("url")
-          if not isinstance(url, str) or not url.startswith("https://"):
-              url = f"https://dumps.wikimedia.org/trwiki/{revision}/{name}"
+          # than the dump date. The exact revision is encoded in every
+          # selected official filename (and redundantly in dated status URLs).
+          revisions = {
+              match.group(1)
+              for name, _details in selected_files
+              for match in [re.search(r"trwiki-(\d{8})-pages-articles", name)]
+              if match is not None
+          }
+          if len(revisions) != 1:
+              dated = re.search(r"/trwiki/(\d{8})/dumpstatus\.json$", status_url)
+              if dated is None:
+                  raise SystemExit("cannot derive one eight-digit dump revision from the official selected files")
+              revisions = {dated.group(1)}
+          revision = next(iter(revisions))
+          source_files = []
+          for name, details in selected_files:
+              url = details.get("url")
+              if not isinstance(url, str) or not url.startswith("https://"):
+                  url = f"https://dumps.wikimedia.org/trwiki/{revision}/{name}"
+              source_files.append({
+                  "source_url": url,
+                  "source_file": name,
+                  "announced_size": details.get("size"),
+                  "announced_sha1": details.get("sha1"),
+              })
           payload = {
-              "schema": "vegai-wikimedia-dump-source/v1",
+              "schema": "vegai-wikimedia-dump-source/v2",
               "status_url": status_url,
               "dump_revision": revision,
-              "source_url": url,
-              "source_file": name,
-              "announced_size": details.get("size"),
-              "announced_sha1": details.get("sha1"),
+              "source_files": source_files,
           }
           output_path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
           PY2
@@ -147,54 +170,93 @@ jobs:
             echo 'No completed official trwiki pages-articles dump could be selected.' >&2
             exit 1
           }
-          source_url=$(python3 - "$manifest" <<'PY2'
+          archive_dir="${VEGAI_TURKISH_99M_DIR}/trwiki-pages-articles"
+          mkdir -p "$archive_dir"
+          while IFS=$'\t' read -r source_file source_url; do
+            test -n "$source_file"
+            case "$source_file" in
+              *"/"*|*"\\"*|.*) echo "unsafe official dump file name: $source_file" >&2; exit 1 ;;
+            esac
+            curl --show-error --fail --location --retry 4 --retry-delay 10 --connect-timeout 30 \
+              --user-agent 'Vegai-real-99m-evidence/1.0 (GitHub Actions)' \
+              --output "$archive_dir/$source_file" "$source_url"
+          done < <(python3 - "$manifest" <<'PY2'
           import json
           from pathlib import Path
           import sys
-          print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["source_url"])
+
+          payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          for item in payload["source_files"]:
+              print(f"{item['source_file']}\t{item['source_url']}")
           PY2
           )
-          archive="${VEGAI_TURKISH_99M_DIR}/trwiki-pages-articles.xml.bz2"
-          curl --show-error --fail --location --retry 4 --retry-delay 10 --connect-timeout 30 \
-            --user-agent 'Vegai-real-99m-evidence/1.0 (GitHub Actions)' --output "$archive" "$source_url"
-          python3 - "$archive" "$manifest" <<'PY2'
+          python3 - "$archive_dir" "$manifest" <<'PY2'
           import hashlib
           import json
           from pathlib import Path
           import sys
 
-          archive, manifest = map(Path, sys.argv[1:])
-          digest = hashlib.sha256()
-          count = 0
-          with archive.open("rb") as handle:
-              while chunk := handle.read(1024 * 1024):
-                  digest.update(chunk)
-                  count += len(chunk)
+          archive_dir, manifest = map(Path, sys.argv[1:])
           payload = json.loads(manifest.read_text(encoding="utf-8"))
-          payload["downloaded_archive_bytes"] = count
-          payload["downloaded_archive_sha256"] = digest.hexdigest()
+          seen = set()
+          for item in payload["source_files"]:
+              name = item["source_file"]
+              if not isinstance(name, str) or not name or Path(name).name != name or name in seen:
+                  raise SystemExit(f"unsafe or repeated official archive name: {name!r}")
+              seen.add(name)
+              archive = archive_dir / name
+              if not archive.is_file():
+                  raise SystemExit(f"official archive is absent after download: {archive}")
+              sha256 = hashlib.sha256()
+              sha1 = hashlib.sha1()
+              count = 0
+              with archive.open("rb") as handle:
+                  while chunk := handle.read(1024 * 1024):
+                      sha256.update(chunk)
+                      sha1.update(chunk)
+                      count += len(chunk)
+              announced_size = item.get("announced_size")
+              if isinstance(announced_size, int) and announced_size > 0 and count != announced_size:
+                  raise SystemExit(f"official archive size mismatch for {name}: {count} != {announced_size}")
+              announced_sha1 = item.get("announced_sha1")
+              if isinstance(announced_sha1, str) and len(announced_sha1) == 40:
+                  if sha1.hexdigest().lower() != announced_sha1.lower():
+                      raise SystemExit(f"official archive SHA-1 mismatch for {name}")
+              item["downloaded_archive_bytes"] = count
+              item["downloaded_archive_sha256"] = sha256.hexdigest()
+              item["verified_announced_sha1"] = sha1.hexdigest()
           manifest.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
           PY2
-          echo "VEGAI_TURKISH_99M_ARCHIVE=$archive" >> "$GITHUB_ENV"
+          echo "VEGAI_TURKISH_99M_ARCHIVE_DIR=$archive_dir" >> "$GITHUB_ENV"
 
       - name: Extract article text with the pinned WikiExtractor revision
         run: |
           set -euo pipefail
           extracted="${VEGAI_TURKISH_99M_DIR}/trwiki-extracted"
-          PYTHONPATH="${VEGAI_WIKIEXTRACTOR_DIR}" python3 -m wikiextractor.WikiExtractor \
-            "$VEGAI_TURKISH_99M_ARCHIVE" --json --no-templates --discard_empty \
-            --processes 4 --bytes 100M --output "$extracted"
+          mkdir -p "$extracted"
+          while IFS= read -r -d '' archive; do
+            shard=$(basename "$archive" .bz2)
+            output="$extracted/$shard"
+            PYTHONPATH="${VEGAI_WIKIEXTRACTOR_DIR}" python3 -m wikiextractor.WikiExtractor \
+              "$archive" --json --no-templates --discard_empty \
+              --processes 4 --bytes 100M --output "$output"
+          done < <(find "$VEGAI_TURKISH_99M_ARCHIVE_DIR" -maxdepth 1 -type f -name '*.bz2' -print0 | sort -z)
           test "$(find "$extracted" -type f -name 'wiki_*' | wc -l)" -gt 0
           echo "VEGAI_TURKISH_99M_EXTRACTED=$extracted" >> "$GITHUB_ENV"
 
       - name: Train real 99M native-token corpus and run real held-out inference
         run: |
           set -euo pipefail
+          archive_args=()
+          while IFS= read -r -d '' archive; do
+            archive_args+=(--source-archive "$archive")
+          done < <(find "$VEGAI_TURKISH_99M_ARCHIVE_DIR" -maxdepth 1 -type f -name '*.bz2' -print0 | sort -z)
+          test "${#archive_args[@]}" -gt 0
           python3 tools/run_turkish_wikipedia_99m.py \
             --pretrain-bin "${GITHUB_WORKSPACE}/build-turkish-99m/vegai_pretrain" \
             --chat-bin "${GITHUB_WORKSPACE}/build-turkish-99m/vegai_chat" \
             --extracted-root "$VEGAI_TURKISH_99M_EXTRACTED" \
-            --source-archive "$VEGAI_TURKISH_99M_ARCHIVE" \
+            "${archive_args[@]}" \
             --source-manifest "${VEGAI_TURKISH_99M_DIR}/trwiki-source-manifest.json" \
             --faq-repo "${VEGAI_TURKISH_99M_DIR}/turkish-faq" \
             --run-dir "${VEGAI_TURKISH_99M_DIR}/experiment" \

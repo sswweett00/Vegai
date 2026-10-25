@@ -522,12 +522,76 @@ def heldout_cooccurrence_evaluation(
 
 
 def source_provenance(arguments: argparse.Namespace, corpus_manifest: Mapping[str, Any]) -> dict[str, Any]:
-    archive = require_regular_file(arguments.source_archive, "downloaded official dump archive")
+    """Bind every split Wikimedia archive to its status-manifest identity.
+
+    Recent official ``pages-articles`` dumps are split into several bzip2 XML
+    shards.  Treating an arbitrary first shard as the whole dump would make the
+    reported source incomplete and makes exact-corpus capacity depend on an
+    incidental dictionary sort.  The workflow therefore downloads every
+    completed shard and this function cryptographically binds every local file
+    to a distinct status-manifest entry before native training starts.
+    """
+    archive_paths = [
+        require_regular_file(path, f"downloaded official dump archive {ordinal}")
+        for ordinal, path in enumerate(arguments.source_archive, start=1)
+    ]
+    require(archive_paths, "at least one downloaded official dump archive is required")
+    require(len({path.resolve() for path in archive_paths}) == len(archive_paths),
+            "the same downloaded official dump archive was supplied more than once")
     manifest = require_regular_file(arguments.source_manifest, "downloaded dump status manifest")
     manifest_payload = json_load_strict(manifest, "downloaded dump status manifest")
-    for field in ("dump_revision", "source_url", "status_url"):
+    for field in ("dump_revision", "status_url"):
         require(isinstance(manifest_payload.get(field), str) and manifest_payload[field],
                 f"downloaded dump status manifest is missing {field!r}")
+    source_files = manifest_payload.get("source_files")
+    require(isinstance(source_files, list) and source_files,
+            "downloaded dump status manifest has no completed source_files list")
+    require(len(source_files) == len(archive_paths),
+            "downloaded archive count differs from the status-manifest source_files count")
+
+    manifest_by_name: dict[str, Mapping[str, Any]] = {}
+    for ordinal, raw in enumerate(source_files, start=1):
+        require(isinstance(raw, dict), f"source_files entry {ordinal} is not an object")
+        name = raw.get("source_file")
+        url = raw.get("source_url")
+        expected_sha256 = raw.get("downloaded_archive_sha256")
+        expected_bytes = raw.get("downloaded_archive_bytes")
+        require(isinstance(name, str) and name and Path(name).name == name,
+                f"source_files entry {ordinal} has an unsafe source_file")
+        require(isinstance(url, str) and url.startswith("https://"),
+                f"source_files entry {ordinal} lacks an HTTPS source_url")
+        require(isinstance(expected_sha256, str) and len(expected_sha256) == 64 and
+                all(character in "0123456789abcdef" for character in expected_sha256),
+                f"source_files entry {ordinal} lacks a lowercase SHA-256 archive digest")
+        require(isinstance(expected_bytes, int) and expected_bytes > 0,
+                f"source_files entry {ordinal} lacks a positive downloaded archive size")
+        require(name not in manifest_by_name, f"source_files repeats archive name {name!r}")
+        manifest_by_name[name] = raw
+
+    archive_shards: list[dict[str, Any]] = []
+    observed_names: set[str] = set()
+    for archive in archive_paths:
+        source_file = archive.name
+        require(source_file in manifest_by_name,
+                f"downloaded archive {source_file!r} is absent from the status manifest")
+        require(source_file not in observed_names, f"downloaded archive {source_file!r} was repeated")
+        entry = manifest_by_name[source_file]
+        identity = sha256_file(archive)
+        require(identity["sha256"] == entry["downloaded_archive_sha256"],
+                f"downloaded archive SHA-256 differs from status-manifest record for {source_file}")
+        require(identity["bytes"] == entry["downloaded_archive_bytes"],
+                f"downloaded archive byte count differs from status-manifest record for {source_file}")
+        observed_names.add(source_file)
+        archive_shards.append({
+            "source_file": source_file,
+            "source_url": entry["source_url"],
+            "announced_size": entry.get("announced_size"),
+            "announced_sha1": entry.get("announced_sha1"),
+            "downloaded_archive": identity,
+        })
+    require(observed_names == set(manifest_by_name),
+            "not every source-manifest archive was supplied to the controller")
+
     faq_repo = arguments.faq_repo.resolve()
     faq_file = faq_repo / "dataset_v1.txt"
     require(faq_repo.is_dir() and faq_file.is_file(), "independent FAQ repository/data file is unavailable")
@@ -536,12 +600,12 @@ def source_provenance(arguments: argparse.Namespace, corpus_manifest: Mapping[st
             "retrieved_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "dataset_project_url": arguments.dataset_url,
             "dump_revision": manifest_payload["dump_revision"],
-            "source_url": manifest_payload["source_url"],
             "status_url": manifest_payload["status_url"],
             "declared_license": arguments.dataset_license,
             "attribution": arguments.dataset_attribution,
             "dump_status_manifest": sha256_file(manifest),
-            "archive": sha256_file(archive),
+            "source_urls": [shard["source_url"] for shard in archive_shards],
+            "archive_shards": archive_shards,
             "extractor": {
                 "name": "WikiExtractor",
                 "version": arguments.wikiextractor_version,
@@ -829,7 +893,10 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--pretrain-bin", type=Path, required=True)
     parser.add_argument("--chat-bin", type=Path, required=True)
     parser.add_argument("--extracted-root", type=Path, required=True, help="WikiExtractor --json output root")
-    parser.add_argument("--source-archive", type=Path, required=True, help="downloaded versioned Wikimedia XML archive")
+    parser.add_argument(
+        "--source-archive", type=Path, required=True, action="append",
+        help="downloaded versioned Wikimedia XML archive shard; repeat for every status-manifest shard",
+    )
     parser.add_argument("--source-manifest", type=Path, required=True, help="workflow-produced exact dump status manifest")
     parser.add_argument("--faq-repo", type=Path, required=True)
     parser.add_argument("--run-dir", type=Path, required=True)
