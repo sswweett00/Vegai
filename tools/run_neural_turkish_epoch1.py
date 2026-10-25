@@ -161,8 +161,9 @@ def render_results_md(evidence: dict[str, Any]) -> str:
     lines.append("## Model ve eğitim (epoch = 1)")
     lines.append("")
     cfg = evidence["config"]
+    actual_vocab = evidence.get("tokenizer", {}).get("actual_vocabulary_size", cfg['vocab'])
     lines.append(
-        f"- Mimari: byte-BPE vocab {cfg['vocab']:,}, genişlik {cfg['width']}, başlık {cfg['heads']}, "
+        f"- Mimari: byte-BPE vocab {actual_vocab:,} (istenen {cfg['vocab']:,}), genişlik {cfg['width']}, başlık {cfg['heads']}, "
         f"pencere {cfg['window']}, FFN {cfg['ffn']} (bağlı-çıktı katmanı eğitilir; dikkat/retention çekirdeği donuktur)"
     )
     lines.append(
@@ -230,6 +231,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--optimizer", default="adamw", choices=("adamw", "sgd"))
     parser.add_argument("--schedule", default="invsqrt", choices=("constant", "invsqrt", "cosine"))
     parser.add_argument("--warmup-updates", type=int, default=2000)
+    parser.add_argument("--total-updates", type=int, default=0,
+                        help="cosine horizon in updates (estimate from measured bytes/token); 0 = omit")
+    parser.add_argument("--min-lr-ratio", type=float, default=0.1)
     parser.add_argument("--label-smoothing", type=float, default=0.05)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--seed", type=int, default=20261025)
@@ -264,7 +268,10 @@ def main(argv: list[str] | None = None) -> int:
             "--optimizer", args.optimizer, "--schedule", args.schedule,
             "--warmup-updates", str(args.warmup_updates),
             "--label-smoothing", repr(args.label_smoothing), "--weight-decay", repr(args.weight_decay),
+            "--min-lr-ratio", repr(args.min_lr_ratio),
         ]
+        if args.total_updates:
+            model_options += ["--total-updates", str(args.total_updates)]
 
         stdout, tokenizer_wall = run_child(
             [binary, "tokenizer-train-fast", str(corpus_dir / manifest["outputs"]["tokenizer_sample"]["path"]),
@@ -342,6 +349,8 @@ def main(argv: list[str] | None = None) -> int:
                 "optimizer": args.optimizer,
                 "schedule": args.schedule,
                 "warmup_updates": args.warmup_updates,
+                "total_updates": args.total_updates,
+                "min_lr_ratio": args.min_lr_ratio,
                 "label_smoothing": args.label_smoothing,
                 "weight_decay": args.weight_decay,
                 "seed": args.seed,

@@ -331,6 +331,7 @@ def write_byte_budget_slice(source: Path, destination: Path, budget: int) -> dic
             writer.hasher.update(raw)
             writer.bytes_written += len(raw)
             writer.records += 1
+            writer.approx_words += raw.count(b" ") + 1
             used += len(raw)
     result = writer.close()
     return result
@@ -369,8 +370,8 @@ def build_corpus(args: argparse.Namespace) -> dict[str, Any]:
         }
 
     funnel = Funnel()
-    seen_documents: set[str] = set()
-    seen_paragraphs: set[str] = set()
+    seen_documents: set[bytes] = set()
+    seen_paragraphs: set[bytes] = set()
     train_writer = HashedWriter(output_dir / "train.txt")
     heldout_writer = HashedWriter(output_dir / "heldout.txt")
     try:
@@ -383,7 +384,7 @@ def build_corpus(args: argparse.Namespace) -> dict[str, Any]:
             if reason is not None:
                 funnel.reject(reason)
                 continue
-            document_key = hashlib.sha256(" ".join(cleaned.split()).encode("utf-8")).hexdigest()
+            document_key = hashlib.sha256(" ".join(cleaned.split()).encode("utf-8")).digest()
             if document_key in seen_documents:
                 funnel.duplicate_documents += 1
                 continue
@@ -393,7 +394,7 @@ def build_corpus(args: argparse.Namespace) -> dict[str, Any]:
             for paragraph in split_paragraphs(cleaned):
                 normalized = " ".join(paragraph.lower().split())
                 if len(normalized) >= PARAGRAPH_DEDUPE_MIN_CHARS:
-                    key = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+                    key = hashlib.sha256(normalized.encode("utf-8")).digest()
                     if key in seen_paragraphs:
                         funnel.duplicate_paragraphs += 1
                         continue

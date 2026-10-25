@@ -14,10 +14,11 @@ olsun sonuç aynı kapıya çıkar:
 
 | Ölçülen hız (tahmin tokenı/sn) | 99B için tek-host süre |
 |---:|---:|
-| 1.000 | ~3.140 yıl |
-| 10.000 | ~314 yıl |
-| 100.000 | ~31 yıl |
-| 1.000.000 | ~3,1 yıl |
+| 1.000 | ~1.147 gün (~3,1 yıl) |
+| 5.125 (bu repo, koşu 40225294843) | ~224 gün |
+| 10.000 | ~115 gün |
+| 100.000 | ~11,5 gün |
+| 1.000.000 | ~1,15 gün |
 
 Gerçek koşunun hızı kanıt dosyasında (`evidence.json.scale_projection`)
 ölçüm olarak yayınlanır; yukarıdaki tablo yalnızca büyüklük hissi içindir.

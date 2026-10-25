@@ -43,6 +43,12 @@ on:
         default: "384"
       lr:
         default: "0.003"
+      schedule:
+        default: "cosine"
+      total_updates:
+        default: "52000000"
+      warmup_updates:
+        default: "4000"
       max_eval_records:
         description: Held-out evaluation record cap (0 = full held-out split)
         default: "0"
@@ -68,8 +74,15 @@ jobs:
           set -euo pipefail
           # Phase control for push-triggered runs: edit the two literals in
           # this step to move probe -> full with the probe-sized budget.
-          echo "VEGAI_MODE=${{ inputs.mode || 'probe' }}" >> "$GITHUB_ENV"
-          echo "VEGAI_INPUT_BUDGET=${{ inputs.train_byte_budget || '0' }}" >> "$GITHUB_ENV"
+          # Phase: full.  Probe run 40225294843 measured 5125.05 token/s and
+          # 3.82 bytes/token at vocab 4096 / width 96, so 200 MB ~= 52M
+          # prediction tokens ~= 2.9 h of native training inside the job
+          # budget.  Cosine horizon is the same token estimate.
+          echo "VEGAI_MODE=${{ inputs.mode || 'full' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_INPUT_BUDGET=${{ inputs.train_byte_budget || '200000000' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_SCHEDULE=${{ inputs.schedule || 'cosine' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_TOTAL_UPDATES=${{ inputs.total_updates || '52000000' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_WARMUP=${{ inputs.warmup_updates || '4000' }}" >> "$GITHUB_ENV"
           echo "VEGAI_INPUT_MAX_DOCS=${{ inputs.max_docs || '0' }}" >> "$GITHUB_ENV"
           echo "VEGAI_TOKENIZER_SAMPLE=${{ inputs.tokenizer_sample_bytes || '2000000' }}" >> "$GITHUB_ENV"
           echo "VEGAI_VOCAB=${{ inputs.vocab || '4096' }}" >> "$GITHUB_ENV"
@@ -170,6 +183,8 @@ jobs:
             --width "${VEGAI_WIDTH}" --heads "${VEGAI_HEADS}" \
             --window "${VEGAI_WINDOW}" --ffn "${VEGAI_FFN}" \
             --lr "${VEGAI_LR}" \
+            --schedule "${VEGAI_SCHEDULE}" --total-updates "${VEGAI_TOTAL_UPDATES}" \
+            --warmup-updates "${VEGAI_WARMUP}" \
             --max-eval-records "${VEGAI_MAX_EVAL}" \
             | tee "${VEGAI_RUN_ROOT}/runner.json"
 
