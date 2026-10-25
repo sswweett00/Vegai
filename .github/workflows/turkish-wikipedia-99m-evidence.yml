@@ -13,6 +13,9 @@ on:
 
 permissions:
   contents: read
+  # A bounded failure comment makes a source-host availability failure visible
+  # even when Actions' external log/archive redirect cannot be read locally.
+  pull-requests: write
 
 concurrency:
   # Historical 9M attempts and this 99M evidence job must remain independently
@@ -61,43 +64,64 @@ jobs:
       - name: Retrieve versioned official Turkish Wikipedia dump and separate FAQ source
         run: |
           set -euo pipefail
+          retrieval_log="${VEGAI_TURKISH_99M_DIR}/source-retrieval.log"
+          exec > >(tee -a "$retrieval_log") 2>&1
           git clone --depth 1 https://github.com/Aliumutcan/Turkish_NLP_FAQ_DATASET.git "${VEGAI_TURKISH_99M_DIR}/turkish-faq"
+          manifest="${VEGAI_TURKISH_99M_DIR}/trwiki-source-manifest.json"
           status="${VEGAI_TURKISH_99M_DIR}/trwiki-dumpstatus.json"
-          curl --fail --location --retry 4 --retry-delay 5 --connect-timeout 30 \
-            --output "$status" 'https://dumps.wikimedia.org/trwiki/latest/dumpstatus.json'
-          python3 - "$status" "${VEGAI_TURKISH_99M_DIR}/trwiki-source-manifest.json" <<'PY'
+          candidates=('https://dumps.wikimedia.org/trwiki/latest/dumpstatus.json')
+          index="${VEGAI_TURKISH_99M_DIR}/trwiki-index.html"
+          if curl --show-error --fail --location --retry 2 --retry-delay 5 --connect-timeout 30 \
+              --user-agent 'Vegai-real-99m-evidence/1.0 (GitHub Actions)' --output "$index" \
+              'https://dumps.wikimedia.org/trwiki/'; then
+            while IFS= read -r revision; do
+              candidates+=("https://dumps.wikimedia.org/trwiki/${revision}/dumpstatus.json")
+            done < <(grep -oE 'href="[0-9]{8}/"' "$index" | sed -E 's/[^0-9]//g' | sort -ru | head -n 12)
+          else
+            echo 'WARNING: trwiki directory index was unavailable; trying latest only.'
+          fi
+          selected=0
+          for status_url in "${candidates[@]}"; do
+            echo "Trying official dump status: $status_url"
+            rm -f "$status" "$manifest"
+            if ! curl --show-error --fail --location --retry 2 --retry-delay 5 --connect-timeout 30 \
+                --user-agent 'Vegai-real-99m-evidence/1.0 (GitHub Actions)' --output "$status" "$status_url"; then
+              continue
+            fi
+            if python3 - "$status" "$manifest" "$status_url" <<'PY2'
           import json
           from pathlib import Path
           import sys
 
-          status_path, output_path = map(Path, sys.argv[1:])
+          status_path, output_path, status_url = sys.argv[1:]
+          status_path = Path(status_path)
+          output_path = Path(output_path)
           status = json.loads(status_path.read_text(encoding="utf-8"))
           revision = status.get("version")
           if not isinstance(revision, str) or not revision.isdigit() or len(revision) != 8:
-              raise SystemExit("dumpstatus.json has no eight-digit completed dump revision")
+              raise SystemExit("status lacks an eight-digit dump revision")
           job = status.get("jobs", {}).get("articlesdump")
           if not isinstance(job, dict) or job.get("status") != "done":
-              raise SystemExit("official trwiki articlesdump is not in done state")
+              raise SystemExit("articlesdump is not done")
           files = job.get("files")
           if not isinstance(files, dict):
-              raise SystemExit("official trwiki articlesdump has no files mapping")
+              raise SystemExit("articlesdump lacks its files mapping")
           candidates = []
           for name, details in files.items():
               if not isinstance(name, str) or not isinstance(details, dict):
                   continue
               if "pages-articles" not in name or not name.endswith(".xml.bz2") or "index" in name:
                   continue
-              preference = 0 if "multistream" in name else 1
-              candidates.append((preference, name, details))
+              candidates.append((0 if "multistream" in name else 1, name, details))
           if not candidates:
-              raise SystemExit("official trwiki articlesdump has no pages-articles XML bzip2 file")
+              raise SystemExit("articlesdump has no pages-articles XML bzip2 file")
           _preference, name, details = sorted(candidates)[0]
           url = details.get("url")
           if not isinstance(url, str) or not url.startswith("https://"):
               url = f"https://dumps.wikimedia.org/trwiki/{revision}/{name}"
           payload = {
               "schema": "vegai-wikimedia-dump-source/v1",
-              "status_url": "https://dumps.wikimedia.org/trwiki/latest/dumpstatus.json",
+              "status_url": status_url,
               "dump_revision": revision,
               "source_url": url,
               "source_file": name,
@@ -105,18 +129,27 @@ jobs:
               "announced_sha1": details.get("sha1"),
           }
           output_path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-          print(url)
-          PY
-          source_url=$(python3 - "${VEGAI_TURKISH_99M_DIR}/trwiki-source-manifest.json" <<'PY'
+          PY2
+            then
+              selected=1
+              break
+            fi
+          done
+          test "$selected" = 1 || {
+            echo 'No completed official trwiki pages-articles dump could be selected.' >&2
+            exit 1
+          }
+          source_url=$(python3 - "$manifest" <<'PY2'
           import json
           from pathlib import Path
           import sys
           print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["source_url"])
-          PY
+          PY2
           )
           archive="${VEGAI_TURKISH_99M_DIR}/trwiki-pages-articles.xml.bz2"
-          curl --fail --location --retry 4 --retry-delay 10 --connect-timeout 30 --output "$archive" "$source_url"
-          python3 - "$archive" "${VEGAI_TURKISH_99M_DIR}/trwiki-source-manifest.json" <<'PY'
+          curl --show-error --fail --location --retry 4 --retry-delay 10 --connect-timeout 30 \
+            --user-agent 'Vegai-real-99m-evidence/1.0 (GitHub Actions)' --output "$archive" "$source_url"
+          python3 - "$archive" "$manifest" <<'PY2'
           import hashlib
           import json
           from pathlib import Path
@@ -133,7 +166,7 @@ jobs:
           payload["downloaded_archive_bytes"] = count
           payload["downloaded_archive_sha256"] = digest.hexdigest()
           manifest.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-          PY
+          PY2
           echo "VEGAI_TURKISH_99M_ARCHIVE=$archive" >> "$GITHUB_ENV"
 
       - name: Extract article text with the pinned WikiExtractor revision
@@ -178,6 +211,38 @@ jobs:
           else
             echo "::error title=Turkish Wikipedia 99M controller::The controller did not publish experiment-failure.json"
           fi
+
+      - name: Publish bounded source/controller failure to the pull request
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pr_number=$(gh pr view "${GITHUB_REF_NAME}" --repo "$GITHUB_REPOSITORY" --json number --jq .number 2>/dev/null || true)
+          [ -n "$pr_number" ] || exit 0
+          log="${VEGAI_TURKISH_99M_DIR}/source-retrieval.log"
+          failure="${VEGAI_TURKISH_99M_DIR}/experiment/experiment-failure.json"
+          {
+            echo "<!-- vegai-turkish-wikipedia-99m-failure:${GITHUB_RUN_ID} -->"
+            echo "## Turkish Wikipedia 99M evidence run failed before a report"
+            echo
+            echo "Run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            if [ -f "$failure" ]; then
+              echo
+              echo '```json'
+              cat "$failure"
+              echo '```'
+            fi
+            if [ -f "$log" ]; then
+              echo
+              echo 'Last source-retrieval diagnostics:'
+              echo '```text'
+              tail -c 6000 "$log"
+              echo
+              echo '```'
+            fi
+          } > "$RUNNER_TEMP/vegai-99m-failure-comment.md"
+          gh pr comment "$pr_number" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/vegai-99m-failure-comment.md"
 
       - name: Publish native training and held-out inference summary
         if: always()
@@ -246,6 +311,9 @@ jobs:
             ${{ runner.temp }}/vegai-turkish-wikipedia-99m/experiment/evidence/
             ${{ runner.temp }}/vegai-turkish-wikipedia-99m/experiment/experiment-failure.json
             ${{ runner.temp }}/vegai-turkish-wikipedia-99m/trwiki-source-manifest.json
+            ${{ runner.temp }}/vegai-turkish-wikipedia-99m/source-retrieval.log
+            ${{ runner.temp }}/vegai-turkish-wikipedia-99m/trwiki-index.html
+            ${{ runner.temp }}/vegai-turkish-wikipedia-99m/trwiki-dumpstatus.json
           if-no-files-found: warn
           retention-days: 30
 
