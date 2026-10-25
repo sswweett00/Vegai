@@ -122,6 +122,7 @@ native model/inference ölçümü ile orchestration katmanı açıkça ayrılmı
 
 ## Sonuç kaydı
 
-Başarılı immutable artifact oluştuğunda gerçek SHA-256 değerleri, train-only
-süre, 128-query held-out metrics, 11 semantic sonuç ve 11 grounded response
-ayrı sonuç belgesine eklenecektir. Tahmini veya fixture değeri eklenmez.
+Başarılı immutable artifact oluştu; gerçek SHA-256 değerleri, train-only süre,
+128-query held-out metrics, 11 semantic output ve 11 grounded response’un
+canonical artifact-derived kaydı [TURKISH_WIKIPEDIA_99M_RESULTS.md](TURKISH_WIKIPEDIA_99M_RESULTS.md)
+belgesindedir. Tahmini veya fixture değeri eklenmez.
