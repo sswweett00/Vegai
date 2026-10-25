@@ -127,8 +127,10 @@ def main() -> int:
                     f"canonical duplicate policy is wrong: {counts}")
             require(counts["train_identical_canonical_prompt_duplicates_dropped"] == 1,
                     "identical train prompt/response was not reported as deduplicated")
-            require(counts["train_exact_retrieval_contract_cases"] == 3,
-                    "non-held-out exact lookup contract case count is wrong")
+            require(counts["train_exact_retrieval_contract_cases"] == 3
+                    and counts["train_exact_retrieval_evidence_sample_cases"] == 3
+                    and counts["test_source_disjoint_abstention_evidence_sample_cases"] == 1,
+                    "non-held-out/source-disjoint bounded evidence sample counts are wrong")
             require(counts["validation_abstention_cases"] == 1 and counts["test_abstention_cases"] == 1,
                     "source-disjoint abstention cases are wrong")
             knowledge = (output / "knowledge_train.tsv").read_text(encoding="utf-8")
@@ -141,6 +143,10 @@ def main() -> int:
                            (output / "train_exact_retrieval_contract.jsonl").read_text(encoding="utf-8").splitlines()]
             require(len(exact_cases) == 3 and all(case["prompt"] == case["expected_prompt"] for case in exact_cases),
                     "train exact retrieval package contract is not explicitly scoped")
+            exact_sample = [json.loads(line) for line in
+                            (output / "train_exact_retrieval_evidence_sample.jsonl").read_text(encoding="utf-8").splitlines()]
+            require(len(exact_sample) == 3 and {case["id"] for case in exact_sample} == {case["id"] for case in exact_cases},
+                    "hash-ranked exact evidence sample is not a deterministic complete small-set subset")
             validation_cases = [json.loads(line) for line in
                                 (output / "validation_source_disjoint_abstention.jsonl").read_text(encoding="utf-8").splitlines()]
             require(len(validation_cases) == 1 and validation_cases[0]["schema_version"] == EVALUATION_SCHEMA

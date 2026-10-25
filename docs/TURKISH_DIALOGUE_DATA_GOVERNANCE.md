@@ -90,6 +90,7 @@ Output package:
 | `knowledge_train.tsv` | yalnız train split'ten UTF-8 `prompt<TAB>literal response`; native `vegai_chat`'e yüklenir |
 | `pretrain_train_ascii.txt` | prompt ve response turn'lerinin strict ASCII projection'ı; native `vegai_pretrain` input'u |
 | `train_exact_retrieval_contract.jsonl` | train TSV key'lerinin literal lookup integrity suite'i; held-out/generalization metriği değildir |
+| `*_evidence_sample.jsonl` | full setten SHA-256-ranked deterministic bounded subset; evaluator prefix'i sessizce ölçmesin diye CI evidence için kullanılır |
 | `validation_source_disjoint_abstention.jsonl` | validation konuşmalarından `expected_prompt: null` seti |
 | `test_source_disjoint_abstention.jsonl` | frozen test konuşmalarından `expected_prompt: null` seti |
 | `manifest.json` | source/output identity, dedupe sayıları, split isolation ve açık non-generative scope |

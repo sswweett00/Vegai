@@ -116,7 +116,7 @@ jobs:
             --chat-bin ./build-turkish-dialogue-evidence/vegai_chat \
             --checkpoint "$TURKISH_DIALOGUE_CHECKPOINT" \
             --knowledge "$TURKISH_DIALOGUE_PACKAGE_DIR/knowledge_train.tsv" \
-            --evaluation "$TURKISH_DIALOGUE_PACKAGE_DIR/train_exact_retrieval_contract.jsonl" \
+            --evaluation "$TURKISH_DIALOGUE_PACKAGE_DIR/train_exact_retrieval_evidence_sample.jsonl" \
             --output "$RUNNER_TEMP/train-exact-retrieval-report.json" \
             --max-entries 5000 --max-cases 64 --min-similarity 0.99 --min-margin 0.00 \
             >"$RUNNER_TEMP/train-exact-evaluation.txt" 2>&1
@@ -139,7 +139,7 @@ jobs:
             --chat-bin ./build-turkish-dialogue-evidence/vegai_chat \
             --checkpoint "$TURKISH_DIALOGUE_CHECKPOINT" \
             --knowledge "$TURKISH_DIALOGUE_PACKAGE_DIR/knowledge_train.tsv" \
-            --evaluation "$TURKISH_DIALOGUE_PACKAGE_DIR/test_source_disjoint_abstention.jsonl" \
+            --evaluation "$TURKISH_DIALOGUE_PACKAGE_DIR/test_source_disjoint_abstention_evidence_sample.jsonl" \
             --output "$RUNNER_TEMP/test-source-disjoint-hybrid-report.json" \
             --max-entries 5000 --max-cases 128 --min-similarity -1.0 --min-margin 0.00 \
             --semantic-weight 0.25 --lexical-weight 0.75 \

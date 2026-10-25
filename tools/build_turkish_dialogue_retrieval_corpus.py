@@ -15,7 +15,8 @@ The generated package contains:
 * ``pretrain_train_ascii.txt``: deterministic ASCII-projected dialogue turns
   suitable for the existing native HDC tokenizer;
 * ``train_exact_retrieval_contract.jsonl``: non-held-out literal key lookup
-  integrity cases (not a generalization metric);
+  integrity cases (not a generalization metric), plus a deterministic bounded
+  hash-ranked evidence sample;
 * ``validation_source_disjoint_abstention.jsonl`` and
   ``test_source_disjoint_abstention.jsonl``: frozen source-disjoint negative
   retrieval sets.  They measure false grounding/abstention behaviour only;
@@ -48,6 +49,7 @@ TRANSFORMATION = "turkish-dialogue-jsonl-to-native-retrieval/v1"
 MAX_SOURCE_LINE_BYTES = 64 * 1024
 MAX_DIALOGUE_TEXT_BYTES = 1024
 MAX_DIALOGUE_TURNS = 64
+DEFAULT_EVIDENCE_SAMPLE_CASES = 128
 
 # Match the explicit native Turkish boundary projection. Python is used here
 # only to prepare an immutable corpus; native Fortran validates it again at
@@ -309,6 +311,25 @@ def render_abstention_evaluation(split_name: str, pairs: Sequence[tuple[str, int
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
+def deterministic_evidence_sample(evaluation: bytes, maximum_cases: int) -> bytes:
+    """Select a fixed, source-order-independent bounded evidence subset.
+
+    ``dialogue_evaluation.py`` deliberately rejects a file larger than its
+    configured maximum rather than silently measuring a prefix. Hash-ranking
+    records gives a reproducible mixed sample while the full frozen set remains
+    in the package for a later exhaustive/native batch evaluation.
+    """
+    require(maximum_cases > 0, "evidence sample case limit must be positive")
+    lines = evaluation.decode("utf-8").splitlines()
+    require(lines, "internal error: cannot sample an empty evaluation set")
+    ranked = sorted(
+        ((hashlib.sha256(line.encode("utf-8")).digest(), line) for line in lines),
+        key=lambda item: item[0],
+    )
+    selected = [line for _, line in ranked[:maximum_cases]]
+    return ("\n".join(selected) + "\n").encode("utf-8")
+
+
 def output_identity(path: Path) -> dict[str, object]:
     digest, byte_count = sha256_file(path)
     return {"path": path.name, "sha256": digest, "bytes": byte_count}
@@ -324,6 +345,7 @@ def build_package(arguments: argparse.Namespace) -> dict[str, object]:
     require(bool(arguments.source_license.strip()), "--source-license must not be blank")
     require(bool(arguments.attribution.strip()), "--attribution must not be blank")
     require(bool(arguments.source_nature.strip()), "--source-nature must not be blank")
+    require(arguments.evidence_sample_cases > 0, "--evidence-sample-cases must be positive")
 
     source_identities = {
         "train": file_identity(arguments.train_jsonl, "train JSONL"),
@@ -340,6 +362,8 @@ def build_package(arguments: argparse.Namespace) -> dict[str, object]:
     train_exact_evaluation = render_train_exact_retrieval_evaluation(knowledge)
     validation_evaluation = render_abstention_evaluation("validation", validation_pairs)
     test_evaluation = render_abstention_evaluation("test", test_pairs)
+    train_exact_sample = deterministic_evidence_sample(train_exact_evaluation, arguments.evidence_sample_cases)
+    test_abstention_sample = deterministic_evidence_sample(test_evaluation, arguments.evidence_sample_cases)
 
     staging_parent = output.parent
     staging_parent.mkdir(parents=True, exist_ok=True)
@@ -348,20 +372,26 @@ def build_package(arguments: argparse.Namespace) -> dict[str, object]:
         knowledge_path = staging / "knowledge_train.tsv"
         pretraining_path = staging / "pretrain_train_ascii.txt"
         train_exact_path = staging / "train_exact_retrieval_contract.jsonl"
+        train_exact_sample_path = staging / "train_exact_retrieval_evidence_sample.jsonl"
         validation_path = staging / "validation_source_disjoint_abstention.jsonl"
         test_path = staging / "test_source_disjoint_abstention.jsonl"
+        test_sample_path = staging / "test_source_disjoint_abstention_evidence_sample.jsonl"
         write_bytes_atomic(knowledge_path, knowledge)
         write_bytes_atomic(pretraining_path, pretraining)
         write_bytes_atomic(train_exact_path, train_exact_evaluation)
+        write_bytes_atomic(train_exact_sample_path, train_exact_sample)
         write_bytes_atomic(validation_path, validation_evaluation)
         write_bytes_atomic(test_path, test_evaluation)
+        write_bytes_atomic(test_sample_path, test_abstention_sample)
 
         outputs = {
             "knowledge_train": output_identity(knowledge_path),
             "pretrain_train_ascii": output_identity(pretraining_path),
             "train_exact_retrieval_contract": output_identity(train_exact_path),
+            "train_exact_retrieval_evidence_sample": output_identity(train_exact_sample_path),
             "validation_source_disjoint_abstention": output_identity(validation_path),
             "test_source_disjoint_abstention": output_identity(test_path),
+            "test_source_disjoint_abstention_evidence_sample": output_identity(test_sample_path),
         }
         manifest: dict[str, object] = {
             "schema": PACKAGE_SCHEMA,
@@ -394,6 +424,9 @@ def build_package(arguments: argparse.Namespace) -> dict[str, object]:
                 "train_identical_canonical_prompt_duplicates_dropped": duplicates,
                 "train_pretraining_records": pretraining_records,
                 "train_exact_retrieval_contract_cases": train_exact_evaluation.count(b"\n"),
+                "evidence_sample_cases_requested": arguments.evidence_sample_cases,
+                "train_exact_retrieval_evidence_sample_cases": train_exact_sample.count(b"\n"),
+                "test_source_disjoint_abstention_evidence_sample_cases": test_abstention_sample.count(b"\n"),
                 "train_utterances_under_two_tokens_skipped": skipped_records,
                 "validation_pairs_raw": len(validation_pairs),
                 "test_pairs_raw": len(test_pairs),
@@ -425,6 +458,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--attribution", required=True, help="attribution text required when the source licence requires it")
     parser.add_argument("--source-nature", required=True,
                         help="e.g. synthetic-ai-assisted or human-authored; recorded rather than inferred")
+    parser.add_argument("--evidence-sample-cases", type=int, default=DEFAULT_EVIDENCE_SAMPLE_CASES,
+                        help="deterministic hash-ranked case count for bounded evaluator evidence files")
     return parser.parse_args()
 
 
