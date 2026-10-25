@@ -154,27 +154,37 @@ jobs:
       - name: Run native neural teacher-forced checkpoint smoke test
         run: |
           set -euo pipefail
-          ./build-ci/vegai_neural_pretrain smoke | tee "${RUNNER_TEMP}/neural-pretrain-smoke.txt"
+          run_neural() {
+            local label="$1"
+            shift
+            local output="${RUNNER_TEMP}/${label}.txt"
+            set +e
+            "$@" > "$output" 2>&1
+            local exit_code=$?
+            set -e
+            cat "$output"
+            if [ "$exit_code" -ne 0 ]; then
+              detail=$(tail -n 30 "$output" | tr '\n' ' ' | cut -c1-1900)
+              echo "::error title=Native neural smoke diagnostic (${label})::$detail"
+              exit "$exit_code"
+            fi
+          }
+          run_neural neural-pretrain-smoke ./build-ci/vegai_neural_pretrain smoke
           grep -q '"nll_improved":true' "${RUNNER_TEMP}/neural-pretrain-smoke.txt"
           grep -q '"checkpoint_exact":true' "${RUNNER_TEMP}/neural-pretrain-smoke.txt"
           neural_fixture="examples/neural_pretraining/mini_turkish_byte_bpe.txt"
           test "$(wc -c < "$neural_fixture")" = 444
           printf '%s  %s\n' '131a8c6d817ca073e88fbaaad97e1400806516d8bf3a114f76e565a0527d14b4' "$neural_fixture" | sha256sum -c -
           bpe_path="${RUNNER_TEMP}/neural-smoke.bpe"
-          ./build-ci/vegai_neural_pretrain tokenizer-train "$neural_fixture" "$bpe_path" 300 \
-            | tee "${RUNNER_TEMP}/bpe-train-smoke.txt"
+          run_neural bpe-train-smoke ./build-ci/vegai_neural_pretrain tokenizer-train "$neural_fixture" "$bpe_path" 300
           grep -q '"schema_version":"vegai-byte-bpe-train/v1"' "${RUNNER_TEMP}/bpe-train-smoke.txt"
           test -s "$bpe_path"
           neural_checkpoint="${RUNNER_TEMP}/neural-generation-smoke.vgnr"
-          ./build-ci/vegai_neural_pretrain train-chunk "$neural_fixture" "$neural_checkpoint" "$bpe_path" 4 \
-            | tee "${RUNNER_TEMP}/neural-train-chunk-1.txt"
-          ./build-ci/vegai_neural_pretrain train-chunk "$neural_fixture" "$neural_checkpoint" "$bpe_path" 4 \
-            | tee "${RUNNER_TEMP}/neural-train-chunk-2.txt"
+          run_neural neural-train-chunk-1 ./build-ci/vegai_neural_pretrain train-chunk "$neural_fixture" "$neural_checkpoint" "$bpe_path" 4
+          run_neural neural-train-chunk-2 ./build-ci/vegai_neural_pretrain train-chunk "$neural_fixture" "$neural_checkpoint" "$bpe_path" 4
           grep -q '"source_records_completed":8' "${RUNNER_TEMP}/neural-train-chunk-2.txt"
-          ./build-ci/vegai_neural_pretrain generate "$neural_checkpoint" "$bpe_path" "Trabzon" 8 7 \
-            | tee "${RUNNER_TEMP}/neural-generate-smoke.txt"
-          ./build-ci/vegai_neural_pretrain generate "$neural_checkpoint" "$bpe_path" "Trabzon" 8 7 \
-            > "${RUNNER_TEMP}/neural-generate-repeat.txt"
+          run_neural neural-generate-smoke ./build-ci/vegai_neural_pretrain generate "$neural_checkpoint" "$bpe_path" "Trabzon" 8 7
+          run_neural neural-generate-repeat ./build-ci/vegai_neural_pretrain generate "$neural_checkpoint" "$bpe_path" "Trabzon" 8 7
           cmp "${RUNNER_TEMP}/neural-generate-smoke.txt" "${RUNNER_TEMP}/neural-generate-repeat.txt"
           grep -q '"mode":"causal-byte-bpe-retention-calibrated/v1"' "${RUNNER_TEMP}/neural-generate-smoke.txt"
           grep -q '^NEURAL_GENERATION_END$' "${RUNNER_TEMP}/neural-generate-smoke.txt"
