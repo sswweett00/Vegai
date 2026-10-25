@@ -14,6 +14,8 @@ fixture, nominal byte sayısı veya tekrar eden corpus değildir.
 - Dataset-card lisansı: `CC-BY-4.0`
 - Dataset-card SHA-256:
   `8906a49d554dd78e4c9be02e8584472894492832816cc214291eed21c4d9f72b`
+- Native checkpoint: 103,547,412 byte;
+  SHA-256 `0d7c5e96855640530124084d0cc8968262d3809851e13047307f8ddde1a8f395`
 
 ## Doğrulanmış corpus sınırı
 
@@ -43,6 +45,9 @@ generation ve CI orchestration throughput hesabından çıkarılmıştır.
 
 | Metrik | Gerçek değer |
 |---|---:|
+| Eligible known-token transition | 201,290 |
+| Trigram-context hit | 201,290 |
+| Bigram fallback hit | 0 |
 | Top-1 next-token accuracy | 0.7560882309106265 |
 | Bounded-successor coverage | 1.0 |
 
