@@ -28,7 +28,8 @@ DATAIO_PYTHON ?= $(DATAIO_VENV)/bin/python
 LMM_VENV ?= .venv-lmm
 LMM_PYTHON ?= $(LMM_VENV)/bin/python
 
-SOURCES := src/hyper_types.f90 src/tokenless_field.f90 src/text_tokenizer.f90 src/causal_ngram_lm.f90 src/vocabulary.f90 \
+SOURCES := src/hyper_types.f90 src/tokenless_field.f90 src/text_tokenizer.f90 src/subword_bpe.f90 \
+           src/calibrated_decoder.f90 src/neural_retention_decoder.f90 src/causal_ngram_lm.f90 src/vocabulary.f90 \
            src/symbolic_memory.f90 src/resonator_network.f90 src/reasoning_core.f90 \
            src/hdc_pretraining.f90 src/turkish_text.f90 src/dialogue_retrieval.f90 src/fortran_integrity.f90 \
            src/fortran_quality_gate.f90 \
@@ -36,6 +37,7 @@ SOURCES := src/hyper_types.f90 src/tokenless_field.f90 src/text_tokenizer.f90 sr
 APP := app/main.f90
 PRETRAIN_APP := app/pretrain.f90
 CAUSAL_LM_APP := app/causal_lm.f90
+NEURAL_LM_APP := app/neural_lm.f90
 FIELD_APP := app/field.f90
 CHAT_APP := app/chat.f90
 DIALOGUE_EVAL_APP := app/dialogue_eval.f90
@@ -44,6 +46,7 @@ TEST_SOURCES := test/test_support.f90 test/test_all.f90
 ENGINE := $(BUILD_DIR)/hds_engine
 PRETRAIN := $(BUILD_DIR)/vegai_pretrain
 CAUSAL_LM := $(BUILD_DIR)/vegai_causal_lm
+NEURAL_LM := $(BUILD_DIR)/vegai_neural_lm
 FIELD := $(BUILD_DIR)/vegai_field
 CHAT := $(BUILD_DIR)/vegai_chat
 DIALOGUE_EVAL := $(BUILD_DIR)/vegai_dialogue_eval
@@ -58,10 +61,10 @@ FIXTURE_9MIB_REPORT ?= pretraining-runs/synthetic_hdc_9mib.json
 # remain ignored. Prefer the dedicated GitHub workflow for CI-hosted evidence.
 CONTINUOUS_900_RUN_DIR ?= pretraining-runs/synthetic_900mb_then_90mb
 
-.PHONY: all engine pretrain causal-lm field chat dialogue-eval control test fortran-check portable-runtime-check run run-pretrain run-causal-lm run-field run-chat run-control check field-check optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check turkish-dialogue-data-check quality-check continuous-quality-check attested-pretrain-check lookup-cache-compare fixture-9mib verify-fixture-9mib pretrain-9mib pretrain-900mb-continuous clean clean-all debug portable native portable-test native-test
+.PHONY: all engine pretrain causal-lm neural-lm field chat dialogue-eval control test fortran-check portable-runtime-check run run-pretrain run-causal-lm run-neural-lm run-field run-chat run-control check field-check optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check turkish-dialogue-data-check quality-check continuous-quality-check attested-pretrain-check lookup-cache-compare fixture-9mib verify-fixture-9mib pretrain-9mib pretrain-900mb-continuous clean clean-all debug portable native portable-test native-test
 
 # Default target: portable optimized GNU binaries without host-only ISA flags.
-all: engine pretrain causal-lm field chat dialogue-eval control
+all: engine pretrain causal-lm neural-lm field chat dialogue-eval control
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)/mod
@@ -80,6 +83,11 @@ causal-lm: $(CAUSAL_LM)
 
 $(CAUSAL_LM): $(SOURCES) $(CAUSAL_LM_APP) | $(BUILD_DIR)
 	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(SOURCES) $(CAUSAL_LM_APP) -o $@ $(LDFLAGS)
+
+neural-lm: $(NEURAL_LM)
+
+$(NEURAL_LM): $(SOURCES) $(NEURAL_LM_APP) | $(BUILD_DIR)
+	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(SOURCES) $(NEURAL_LM_APP) -o $@ $(LDFLAGS)
 
 field: $(FIELD)
 
@@ -130,6 +138,9 @@ run-pretrain: $(PRETRAIN)
 
 run-causal-lm: $(CAUSAL_LM)
 	$(CAUSAL_LM) help
+
+run-neural-lm: $(NEURAL_LM)
+	$(NEURAL_LM) self-test
 
 run-field: $(FIELD)
 	$(FIELD) help

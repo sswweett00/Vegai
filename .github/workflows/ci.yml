@@ -135,6 +135,15 @@ jobs:
           grep -q '"phase":"evaluate"' "$causal_output"
           grep -q '^CAUSAL_RESPONSE: ' "$causal_output"
 
+      - name: Run native neural subword/retention/decoder mathematical-invariant smoke test
+        run: |
+          set -euo pipefail
+          ./build-ci/vegai_neural_lm self-test | tee "${RUNNER_TEMP}/neural-self-test.txt"
+          ./build-ci/vegai_neural_lm plan | tee "${RUNNER_TEMP}/neural-plan.txt"
+          grep -q '"bpe_roundtrip":true' "${RUNNER_TEMP}/neural-self-test.txt"
+          grep -q '"causal_chunk_equivalence":true' "${RUNNER_TEMP}/neural-self-test.txt"
+          grep -q '"calibration_non_worse":true' "${RUNNER_TEMP}/neural-self-test.txt"
+
       - name: Verify exact-byte COSMOS causal evidence controller contracts without downloading data
         run: python3 tools/verify_cosmos_turkish_9gb.py
 

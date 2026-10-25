@@ -1,7 +1,7 @@
 ! SPDX-License-Identifier: MIT
 program test_all
    use, intrinsic :: iso_fortran_env, only: int8, int16, int32, int64, real32, real64
-   use, intrinsic :: ieee_arithmetic, only: ieee_quiet_nan, ieee_positive_inf, ieee_value
+   use, intrinsic :: ieee_arithmetic, only: ieee_quiet_nan, ieee_positive_inf, ieee_value, ieee_is_finite
    use hyper_types
    use symbolic_memory
    use reasoning_core
@@ -18,6 +18,9 @@ program test_all
                                    quality_case_t, quality_policy_t, &
                                    quality_report_t, quality_case_file_load, quality_gate_evaluate
    use text_tokenizer, only: TOKEN_LEN, MAX_LINE_CHARS, MAX_TOKENS_PER_LINE, tokenize_ascii_line
+   use subword_bpe
+   use neural_retention_decoder
+   use calibrated_decoder
    use vocabulary
    use test_support
    implicit none
@@ -27,6 +30,7 @@ program test_all
    call test_reasoning_pipeline()
    call test_resonator_network()
    call test_tokenless_signal_field()
+   call test_neural_causal_design()
    call test_text_ingest()
    call test_fortran_control()
    call test_fortran_integrity()
@@ -570,6 +574,102 @@ contains
       call assert_i32_equal(status, FIELD_ERR_CAPACITY, 'oversized byte stream is rejected before accumulation')
       deallocate(too_large_bytes)
    end subroutine test_tokenless_signal_field
+
+   subroutine test_neural_causal_design()
+      type(bpe_model_t) :: bpe
+      type(neural_decoder_t) :: model
+      type(neural_decoder_state_t) :: full_state, chunked_state
+      type(neural_decoder_config_t) :: config
+      type(neural_resource_plan_t) :: plan
+      type(decoding_policy_t) :: policy
+      type(temperature_calibration_t) :: calibration
+      character(len=64) :: source, decoded
+      integer(int32) :: encoded(64), encoded_count, decoded_bytes, status, merged, index
+      integer(int32) :: history(8), selected, targets(4)
+      integer(int64) :: random_state
+      real(real32) :: hidden_full(16), hidden_chunked(16), logits_full(64), logits_chunked(64)
+      real(real64) :: raw_logits(4), probabilities(4), heldout_logits(3, 4)
+
+      source = ''
+      source = 'Türkçe'
+      call bpe_init(bpe, 8_int32, status)
+      call assert_i32_equal(status, BPE_OK, 'byte-BPE model initializes')
+      call bpe_add_merge(bpe, bpe_base_token_for_byte(int(iachar(source(1:1)), int32)), &
+                         bpe_base_token_for_byte(int(iachar(source(2:2)), int32)), merged, status)
+      call assert_i32_equal(status, BPE_OK, 'byte-BPE accepts first UTF-8 merge')
+      call bpe_add_merge(bpe, merged, bpe_base_token_for_byte(int(iachar(source(3:3)), int32)), merged, status)
+      call assert_i32_equal(status, BPE_OK, 'byte-BPE accepts chained UTF-8 merge')
+      call bpe_encode(bpe, source, int(len_trim(source), int32), encoded, encoded_count, status)
+      call assert_i32_equal(status, BPE_OK, 'byte-BPE encodes Turkish UTF-8 bytes')
+      call bpe_decode(bpe, encoded, encoded_count, decoded, decoded_bytes, status)
+      call assert_i32_equal(status, BPE_OK, 'byte-BPE decodes Turkish UTF-8 bytes')
+      if (decoded_bytes > 0_int32) then
+         call assert_true(decoded_bytes == len_trim(source) .and. decoded(:decoded_bytes) == source(:decoded_bytes), &
+                          'byte-BPE round trip is byte-lossless')
+      else
+         call assert_true(.false., 'byte-BPE output unexpectedly empty')
+      end if
+
+      config = neural_decoder_config_t(vocabulary_size=64_int32, width=16_int32, heads=2_int32, &
+                                      local_window=4_int32, ffn_width=32_int32)
+      call neural_decoder_init(model, config, 20261025_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'hybrid neural retention decoder initializes')
+      call neural_decoder_state_init(full_state, model, status)
+      call assert_i32_equal(status, NRD_OK, 'full-prefix neural state initializes')
+      call neural_decoder_state_init(chunked_state, model, status)
+      call assert_i32_equal(status, NRD_OK, 'chunked neural state initializes')
+      do index = 1_int32, 4_int32
+         call neural_decoder_step(model, full_state, index, hidden_full, logits_full, status)
+         call assert_i32_equal(status, NRD_OK, 'full-prefix causal neural step succeeds')
+      end do
+      do index = 1_int32, 2_int32
+         call neural_decoder_step(model, chunked_state, index, hidden_chunked, logits_chunked, status)
+         call assert_i32_equal(status, NRD_OK, 'first causal stream chunk succeeds')
+      end do
+      do index = 3_int32, 4_int32
+         call neural_decoder_step(model, chunked_state, index, hidden_chunked, logits_chunked, status)
+         call assert_i32_equal(status, NRD_OK, 'second causal stream chunk succeeds')
+      end do
+      call assert_true(maxval(abs(full_state%retention_numerator - chunked_state%retention_numerator)) < 1.0e-6_real32, &
+                       'retention state is exactly prefix/chunk invariant')
+      call assert_true(maxval(abs(logits_full - logits_chunked)) < 1.0e-6_real32, &
+                       'causal logits are invariant to chunk boundaries')
+      call assert_true(all(ieee_is_finite(full_state%retention_numerator)) .and. all(ieee_is_finite(logits_full)), &
+                       'positive-feature retention state and logits remain finite')
+      call neural_decoder_plan(config, plan, status)
+      call assert_i32_equal(status, NRD_OK, 'neural resource planner succeeds')
+      call assert_true(plan%parameter_count > 0_int64 .and. plan%per_stream_state_bytes_real32 > 0_int64 .and. &
+                       plan%approximate_forward_flops_per_token > 0_int64, &
+                       'neural resource plan exposes finite positive costs')
+
+      raw_logits = [7.0_real64, 2.0_real64, 1.0_real64, 0.0_real64]
+      history = [1_int32, 2_int32, 1_int32, 2_int32, 0_int32, 0_int32, 0_int32, 0_int32]
+      policy = decoding_policy_t(temperature=1.0_real64, frequency_penalty=0.0_real64, presence_penalty=0.0_real64, &
+                                 immediate_repeat_penalty=0.0_real64, no_repeat_ngram=3_int32, top_k=4_int32, top_p=1.0_real64)
+      call decoder_distribution(raw_logits, history, 4_int32, policy, probabilities, status)
+      call assert_i32_equal(status, DECODER_OK, 'calibrated decoder distribution succeeds')
+      call assert_true(abs(sum(probabilities) - 1.0_real64) < 1.0e-12_real64 .and. probabilities(1) == 0.0_real64, &
+                       'decoder renormalizes after no-repeat mask')
+      random_state = 91_int64
+      call decoder_select(probabilities, policy, random_state, selected, status)
+      call assert_i32_equal(status, DECODER_OK, 'calibrated decoder selection succeeds')
+      call assert_true(selected /= 1_int32, 'repetition-aware decoder cannot select masked repeated ngram')
+
+      heldout_logits(:, 1) = [2.0_real64, 0.0_real64, -1.0_real64]
+      heldout_logits(:, 2) = [1.5_real64, 0.0_real64, -1.0_real64]
+      heldout_logits(:, 3) = [0.5_real64, 0.0_real64, -1.0_real64]
+      heldout_logits(:, 4) = [1.0_real64, 0.0_real64, -1.0_real64]
+      targets = [1_int32, 1_int32, 2_int32, 1_int32]
+      call decoder_temperature_calibrate(heldout_logits, targets, 4_int32, calibration, status)
+      call assert_i32_equal(status, DECODER_OK, 'convex inverse-temperature calibration succeeds')
+      call assert_true(calibration%mean_nll_after <= calibration%mean_nll_before + 1.0e-12_real64, &
+                       'temperature calibration retains non-worse held-out NLL')
+
+      call bpe_destroy(bpe)
+      call neural_decoder_state_destroy(full_state)
+      call neural_decoder_state_destroy(chunked_state)
+      call neural_decoder_destroy(model)
+   end subroutine test_neural_causal_design
 
    subroutine test_text_ingest()
       type(vocabulary_t) :: vocab

@@ -25,6 +25,9 @@ add_library(vegai_hds STATIC
     src/hyper_types.f90
     src/tokenless_field.f90
     src/text_tokenizer.f90
+    src/subword_bpe.f90
+    src/calibrated_decoder.f90
+    src/neural_retention_decoder.f90
     src/causal_ngram_lm.f90
     src/vocabulary.f90
     src/symbolic_memory.f90
@@ -108,6 +111,12 @@ target_link_libraries(vegai_pretrain PRIVATE vegai_hds)
 # path remains distinct from the HDC association learner and TSV retrieval.
 add_executable(vegai_causal_lm app/causal_lm.f90)
 target_link_libraries(vegai_causal_lm PRIVATE vegai_hds)
+
+# Neural causal-design reference kernel: lossless byte-BPE, hybrid local and
+# retained causal attention, and calibrated repetition-aware decoding.  It is
+# intentionally distinct from both HDC pretraining and the bounded n-gram LM.
+add_executable(vegai_neural_lm app/neural_lm.f90)
+target_link_libraries(vegai_neural_lm PRIVATE vegai_hds)
 
 # Raw-byte field inspection remains separate from text-token pretraining.  It
 # exposes finite representation checks only and has no generative surface.
