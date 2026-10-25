@@ -1,0 +1,47 @@
+# Fortran compiler products
+*.mod
+*.smod
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.dylib
+*.gcda
+*.gcno
+
+# Build systems
+/build/
+/build-portable/
+/build-native/
+/cmake-build-*/
+/CMakeFiles/
+/CMakeCache.txt
+/Testing/
+/fpm_build/
+
+# Editors and Python verification environment
+.vscode/
+.idea/
+__pycache__/
+*.py[cod]
+.venv/
+/.venv-dataio/
+/.venv-lmm/
+
+# Runtime artifacts and locally governed corpora/checkpoints
+*.out
+*.prof
+*.vgai
+*.vclm
+/cosmos-turkish-9gb-runs/
+/corpora/
+/checkpoints/
+/production-datasets/
+/production-runs/
+/pretraining-runs/
+/lmm-models/
+/lmm-assets/
+/lmm-knowledge/
+/lmm-sessions/
+/lmm-runs/

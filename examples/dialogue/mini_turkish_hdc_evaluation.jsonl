@@ -1,0 +1,9 @@
+{"schema_version":"vegai-dialogue-evaluation-case/v1","id":"education-exact","prompt":"okul ders","expected_prompt":"okul ders"}
+{"schema_version":"vegai-dialogue-evaluation-case/v1","id":"health-exact","prompt":"hastane doktor","expected_prompt":"hastane doktor"}
+{"schema_version":"vegai-dialogue-evaluation-case/v1","id":"nature-exact","prompt":"orman doga","expected_prompt":"orman doga"}
+{"schema_version":"vegai-dialogue-evaluation-case/v1","id":"technology-exact","prompt":"bilgisayar yazilim","expected_prompt":"bilgisayar yazilim"}
+{"schema_version":"vegai-dialogue-evaluation-case/v1","id":"market-exact","prompt":"pazar fiyat","expected_prompt":"pazar fiyat"}
+{"schema_version":"vegai-dialogue-evaluation-case/v1","id":"transport-exact","prompt":"ulasim trafik","expected_prompt":"ulasim trafik"}
+{"schema_version":"vegai-dialogue-evaluation-case/v1","id":"agriculture-exact","prompt":"tarim hasat","expected_prompt":"tarim hasat"}
+{"schema_version":"vegai-dialogue-evaluation-case/v1","id":"community-exact","prompt":"mahalle destek","expected_prompt":"mahalle destek"}
+{"schema_version":"vegai-dialogue-evaluation-case/v1","id":"single-token-abstention","prompt":"tarim","expected_prompt":null}

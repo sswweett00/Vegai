@@ -1,0 +1,180 @@
+name: Publish verified 9 GB COSMOS causal evidence
+
+on:
+  # This publisher executes only on same-repository PR context after its own
+  # source changes. It consumes a completed push artifact and never executes
+  # untrusted PR training code with a write-capable token.
+  pull_request:
+    paths:
+      - '.github/workflows/publish-cosmos-turkish-9gb-causal-evidence.yml'
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+
+jobs:
+  publish:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    name: Verify and publish immutable COSMOS evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Locate successful one-epoch evidence artifact
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_run=$(gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/cosmos-turkish-9gb-causal-evidence.yml/runs" \
+            -f event=push -f branch="${HEAD_REF}" -f status=success -f per_page=20 \
+            --jq '.workflow_runs[0].id')
+          [[ "$source_run" =~ ^[0-9]+$ ]] || {
+            echo "No successful 9 GB COSMOS evidence workflow exists for ${HEAD_REF}." >&2
+            exit 1
+          }
+          artifact_name=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${source_run}/artifacts" \
+            --jq '.artifacts[] | select(.expired == false and (.name | startswith("cosmos-turkish-9gb-causal-evidence-"))) | .name' \
+            | head -n 1)
+          [ -n "$artifact_name" ] || {
+            echo "Successful COSMOS workflow has no auditable artifact." >&2
+            exit 1
+          }
+          echo "run_id=$source_run" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+
+      - name: Download immutable compact evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/vegai-cosmos-turkish-9gb-evidence"
+          mkdir -p "$evidence_dir"
+          gh run download "${{ steps.source.outputs.run_id }}" --repo "$GITHUB_REPOSITORY" \
+            --name "${{ steps.source.outputs.artifact_name }}" --dir "$evidence_dir"
+          report=$(find "$evidence_dir" -type f -name result.json -print -quit)
+          [ -n "$report" ] && [ -f "$report" ] || {
+            echo "Evidence artifact omitted result.json." >&2
+            exit 1
+          }
+          echo "REPORT=$report" >> "$GITHUB_ENV"
+
+      - name: Verify strict corpus/provenance/train boundaries and render exact outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$REPORT" "${{ steps.source.outputs.run_id }}" "$GITHUB_REPOSITORY" > "$RUNNER_TEMP/comment.md" <<'PY'
+          import json
+          import math
+          from pathlib import Path
+          import sys
+
+          report = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          run_id, repository = sys.argv[2:]
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(f"Evidence invariant failed: {message}")
+
+          def finite_positive(value, label):
+              require(isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0,
+                      f"{label} must be positive finite")
+              return value
+
+          def fraction(value, label):
+              require(isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and 0 <= value <= 1,
+                      f"{label} must be a [0,1] finite fraction")
+              return value
+
+          require(report.get("schema_version") == "vegai-cosmos-turkish-9gb-causal-run/v1", "unexpected schema")
+          require(report.get("status") == "completed", "run did not complete")
+          dataset = report.get("dataset")
+          corpus = report.get("corpus")
+          native = report.get("native")
+          require(isinstance(dataset, dict) and isinstance(corpus, dict) and isinstance(native, dict), "core report sections missing")
+          require(dataset.get("repository") == "ytu-ce-cosmos/Cosmos-Turkish-Corpus-v1.0", "unexpected dataset")
+          require(dataset.get("declared_license") == "cc-by-4.0", "dataset card did not verify CC-BY-4.0")
+          require(isinstance(dataset.get("resolved_revision"), str) and len(dataset["resolved_revision"]) >= 40,
+                  "immutable source revision absent")
+          train = corpus.get("train")
+          heldout = corpus.get("heldout")
+          require(isinstance(train, dict) and isinstance(heldout, dict), "corpus partitions missing")
+          require(train.get("bytes") == 9_000_000_000, "train corpus is not exact decimal 9 GB")
+          require(heldout.get("bytes") == 50_000_000, "held-out corpus is not exact 50 MB")
+          require(corpus.get("source_document_disjoint") is True, "held-out source document split is not disjoint")
+          for label, partition in (("train", train), ("heldout", heldout)):
+              digest = partition.get("sha256")
+              require(isinstance(digest, str) and len(digest) == 64 and all(c in "0123456789abcdef" for c in digest),
+                      f"{label} SHA-256 invalid")
+          training = native.get("training")
+          checkpoint = native.get("checkpoint")
+          heldout_evaluation = native.get("heldout_evaluation")
+          generations = native.get("generated_prompt_responses")
+          require(isinstance(training, dict) and isinstance(checkpoint, dict) and isinstance(heldout_evaluation, dict) and isinstance(generations, list),
+                  "native evidence incomplete")
+          checkpoint_digest = checkpoint.get("sha256")
+          require(isinstance(checkpoint_digest, str) and len(checkpoint_digest) == 64 and
+                  all(c in "0123456789abcdef" for c in checkpoint_digest), "checkpoint SHA-256 invalid")
+          require(training.get("exact_epochs") == 1, "native train did not contain exactly one epoch")
+          train_metric = training.get("native_train_report")
+          require(isinstance(train_metric, dict) and train_metric.get("corpus_bytes") == 9_000_000_000,
+                  "native child did not report exactly 9 GB")
+          raw_tokens = train_metric.get("raw_tokens")
+          require(isinstance(raw_tokens, int) and raw_tokens > 0, "native raw token count invalid")
+          update_seconds = finite_positive(training.get("native_training_epoch_wall_seconds"), "native update seconds")
+          throughput = finite_positive(training.get("raw_training_tokens_per_second"), "raw token throughput")
+          evaluation = heldout_evaluation.get("report")
+          require(isinstance(evaluation, dict) and isinstance(evaluation.get("eligible_transitions"), int) and evaluation["eligible_transitions"] > 0,
+                  "held-out evaluation is empty")
+          top1 = fraction(evaluation.get("top1_accuracy"), "held-out top-1")
+          coverage = fraction(evaluation.get("successor_coverage"), "held-out successor coverage")
+          require(len(generations) == 5, "expected exactly five generated prompts")
+          for item in generations:
+              require(isinstance(item, dict) and isinstance(item.get("prompt"), str) and item["prompt"] and
+                      isinstance(item.get("response"), str) and item["response"], "generated prompt/response malformed")
+
+          def markdown(value):
+              return value.replace("`", "\\`").replace("\r", " ").replace("\n", " ")
+
+          print(f"<!-- vegai-cosmos-9gb-causal-evidence:{run_id} -->")
+          print("## Verified real 9 GB COSMOS Turkish causal-pretraining evidence")
+          print()
+          print(f"Source workflow: https://github.com/{repository}/actions/runs/{run_id}")
+          print()
+          print(f"- Dataset: `{dataset['repository']}` at `{dataset['resolved_revision']}`")
+          print(f"- Dataset card: CC-BY-4.0; SHA-256 `{dataset.get('dataset_card_sha256')}`")
+          print(f"- Exact train corpus: `{train['bytes']}` bytes; SHA-256 `{train['sha256']}`")
+          print(f"- Source-document-disjoint held-out corpus: `{heldout['bytes']}` bytes; SHA-256 `{heldout['sha256']}`")
+          print(f"- Native checkpoint: `{checkpoint.get('bytes')}` bytes; SHA-256 `{checkpoint_digest}`")
+          print()
+          print("| native update epochs | native update seconds | raw tokens | raw token/s | held-out Top-1 | bounded successor coverage |")
+          print("|---:|---:|---:|---:|---:|---:|")
+          print(f"| 1 | {update_seconds} | {raw_tokens} | {throughput} | {top1} | {coverage} |")
+          print(f"Held-out eligible known-token transitions: `{evaluation['eligible_transitions']}`; trigram hits: `{evaluation.get('trigram_context_hits')}`; bigram hits: `{evaluation.get('bigram_context_hits')}`.")
+          print()
+          print("### Exact native prompt/response continuations")
+          print()
+          for item in generations:
+              print(f"- **Prompt:** {markdown(item['prompt'])}")
+              print(f"  **Response:** {markdown(item['response'])}")
+          print()
+          print("> Boundary: these are outputs of a bounded causal n-gram heavy-hitter sketch. They are not claims of factual correctness, instruction following, neural-LLM equivalence, or general intelligence.")
+          PY
+
+      - name: Publish verified evidence comment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$RUNNER_TEMP/comment.md" "$RUNNER_TEMP/comment.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          Path(sys.argv[2]).write_text(json.dumps({"body": Path(sys.argv[1]).read_text(encoding="utf-8")}), encoding="utf-8")
+          PY
+          # REST avoids the GitHub CLI PR GraphQL project-cards query, which
+          # is unavailable on repositories after the classic-Projects sunset.
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            --input "$RUNNER_TEMP/comment.json" > /dev/null

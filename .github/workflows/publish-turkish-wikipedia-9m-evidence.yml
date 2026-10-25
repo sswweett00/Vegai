@@ -1,0 +1,225 @@
+name: Publish verified Turkish Wikipedia 9M evidence
+
+on:
+  # The workflow is intentionally narrow: updating this publisher causes one
+  # PR-visible extraction of the latest immutable successful evidence artifact
+  # for the PR branch. Ordinary code/docs changes do not post duplicate reports.
+  pull_request:
+    paths:
+      - .github/workflows/publish-turkish-wikipedia-9m-evidence.yml
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+
+jobs:
+  publish:
+    # Do not give a write-capable token to a fork. This job downloads only an
+    # already-completed artifact from this repository and does not check out or
+    # execute PR source code.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    name: Extract immutable Turkish 9M evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Locate successful real-data evidence artifact
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_run=$(gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/turkish-wikipedia-9m-evidence.yml/runs" \
+            -f event=push -f branch="${HEAD_REF}" -f status=success -f per_page=20 \
+            --jq '.workflow_runs[0].id')
+          [[ "$source_run" =~ ^[0-9]+$ ]] || {
+            echo "No successful Turkish Wikipedia evidence workflow was found for ${HEAD_REF}." >&2
+            exit 1
+          }
+          artifact_name=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${source_run}/artifacts" \
+            --jq '.artifacts[] | select(.expired == false and (.name | startswith("turkish-wikipedia-9m-evidence-"))) | .name' \
+            | head -n 1)
+          [ -n "$artifact_name" ] || {
+            echo "The successful Turkish evidence run has no compact evidence artifact." >&2
+            exit 1
+          }
+          echo "run_id=$source_run" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+
+      - name: Download immutable compact evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/vegai-turkish-wikipedia-9m-evidence"
+          mkdir -p "$evidence_dir"
+          gh run download "${{ steps.source.outputs.run_id }}" --repo "$GITHUB_REPOSITORY" \
+            --name "${{ steps.source.outputs.artifact_name }}" --dir "$evidence_dir"
+          report=$(find "$evidence_dir" -type f -name experiment-report.json -print -quit)
+          [ -n "$report" ] && [ -f "$report" ] || {
+            echo "The artifact omitted experiment-report.json." >&2
+            exit 1
+          }
+          echo "REPORT=$report" >> "$GITHUB_ENV"
+
+      - name: Verify invariants and format the 11 plus 11 results
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$REPORT" "${{ steps.source.outputs.run_id }}" "$GITHUB_REPOSITORY" > "$RUNNER_TEMP/comment.md" <<'PY'
+          import json
+          import math
+          from pathlib import Path
+          import shlex
+          import sys
+
+          report = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          run_id, repository = sys.argv[2:]
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(f"Evidence invariant failed: {message}")
+
+          def number(value, label):
+              require(isinstance(value, (int, float)) and not isinstance(value, bool)
+                      and math.isfinite(value), f"{label} is not finite numeric")
+              return value
+
+          require(report.get("status") == "succeeded", "experiment status is not succeeded")
+          corpus = report.get("corpus")
+          training = report.get("training")
+          provenance = report.get("provenance")
+          checkpoint = report.get("checkpoint")
+          semantic = report.get("semantic_retrieval")
+          grounded = report.get("grounded_dialogue")
+          require(isinstance(corpus, dict) and isinstance(training, dict) and isinstance(provenance, dict),
+                  "core report sections are missing")
+          output = corpus.get("output")
+          selection = corpus.get("selection")
+          require(isinstance(output, dict) and isinstance(selection, dict), "corpus output/selection are missing")
+          require(output.get("native_token_count") == 9_000_000, "native corpus is not exactly 9,000,000 tokens")
+          require(selection.get("minimum_tokens_per_output_record") == 2,
+                  "minimum record width is not two tokens")
+          require(selection.get("maximum_tokens_per_output_record") == 128,
+                  "maximum record width is not 128 tokens")
+          for field in ("non_ascii_bytes", "crlf_records", "overlong_records", "tokenizer_truncations"):
+              require(output.get(field) == 0, f"corpus output {field} is nonzero")
+          metrics = training.get("metrics")
+          require(isinstance(metrics, dict), "native training metrics are missing")
+          require(metrics.get("raw tokens") == 9_000_000, "native raw token metric differs from corpus")
+          require(metrics.get("active tokens") == 9_000_000, "native active token metric differs from corpus")
+          require(metrics.get("prototype updates") == 9_000_000,
+                  "not every real active token updated a prototype")
+          require(metrics.get("out-of-vocabulary tokens") == 0, "native OOV metric is nonzero")
+          for field in ("tokenizer truncations", "non-ASCII input bytes", "dropped overlong records"):
+              require(metrics.get(field) == 0, f"native metric {field} is nonzero")
+          seconds = number(training.get("train_process_wall_seconds"), "training seconds")
+          throughput = number(training.get("raw_training_tokens_per_second"), "training throughput")
+          require(seconds > 0 and throughput > 0, "training time/throughput must be positive")
+          require(isinstance(semantic, dict) and isinstance(semantic.get("results"), list)
+                  and len(semantic["results"]) == 11, "semantic result count is not eleven")
+          require(isinstance(grounded, dict) and isinstance(grounded.get("results"), list)
+                  and len(grounded["results"]) == 11, "grounded result count is not eleven")
+          require(all(item.get("grounded") is True for item in grounded["results"]),
+                  "one or more grounded retrievals abstained")
+          source = provenance.get("Turkish_Wikipedia_training_source")
+          faq = provenance.get("separate_grounded_dialogue_source")
+          require(isinstance(source, dict) and isinstance(faq, dict) and isinstance(checkpoint, dict),
+                  "provenance or checkpoint identity is missing")
+          normalization = corpus.get("normalization")
+          command = training.get("command")
+          require(isinstance(normalization, dict) and isinstance(command, list) and command,
+                  "normalization identity or training command is missing")
+          for identity, label in (
+              (source.get("license_file"), "training source license"),
+              (faq.get("license_file"), "FAQ license"),
+              (faq.get("dataset_file"), "FAQ dataset"),
+          ):
+              require(isinstance(identity, dict) and isinstance(identity.get("sha256"), str),
+                      f"{label} SHA-256 is missing")
+
+          def plain(value):
+              return str(value).replace("`", "\\`").replace("\r", " ").replace("\n", " ")
+
+          print(f"<!-- vegai-turkish-wikipedia-9m-evidence:{run_id} -->")
+          print("## Verified real Turkish Wikipedia 9M-native-token evidence")
+          print()
+          print(f"Source workflow: [{run_id}](https://github.com/{repository}/actions/runs/{run_id})")
+          print()
+          print("### Provenance and strict corpus gate")
+          print()
+          print(f"- Training source: `{plain(source['dataset_project_url'])}` at revision `{plain(source['dataset_project_revision'])}`; declared license `{plain(source['declared_license'])}`.")
+          print(f"- Training-source LICENSE SHA-256: `{plain(source['license_file']['sha256'])}`; downloaded archive SHA-256: `{plain(source['archive']['sha256'])}`; raw split SHA-256: `{plain(source['raw_training_split']['sha256'])}`.")
+          print(f"- Normalization: `{plain(normalization['id'])}`; vocabulary selection: `{plain(selection['method'])}`, `{selection['selected_vocabulary_size']:,}` active source tokens.")
+          print(f"- Normalized output: exactly **{output['native_token_count']:,}** native tokens in `{output['physical_lf_records']:,}` LF records; SHA-256 `{plain(output['sha256'])}`.")
+          print(f"- Record contract: {selection['minimum_tokens_per_output_record']}–{selection['maximum_tokens_per_output_record']} tokens; non-ASCII, CRLF, overlong-record, and tokenizer-truncation counters are all zero.")
+          print(f"- Separate grounded TSV source: `{plain(faq['dataset_project_url'])}` at revision `{plain(faq['dataset_project_revision'])}`; declared license `{plain(faq['declared_license'])}`.")
+          print(f"- FAQ LICENSE SHA-256: `{plain(faq['license_file']['sha256'])}`; FAQ dataset SHA-256: `{plain(faq['dataset_file']['sha256'])}`.")
+          print()
+          print("### Native Fortran training")
+          print()
+          print(f"- Checkpoint SHA-256: `{plain(checkpoint['sha256'])}`.")
+          print(f"- Train-child wall time: **{seconds:.6f} s**; raw native throughput: **{throughput:.3f} tokens/s**. This deliberately excludes retrieval, download, normalization, compilation, and CI overhead.")
+          print(f"- Context window: `{training.get('context_window')}`; OMP threads: `{training.get('omp_num_threads')}`.")
+          print(f"- Native metrics: raw tokens `{metrics['raw tokens']:,}`, active tokens `{metrics['active tokens']:,}`, prototype updates `{metrics['prototype updates']:,}`, OOV `{metrics['out-of-vocabulary tokens']}`.")
+          print(f"- RESONANT scope: {plain(training.get('resonant_epoch_feedback', 'not recorded'))}")
+          print("- Recorded training command:")
+          print("  ```text")
+          print(shlex.join(str(argument) for argument in command))
+          print("  ```")
+          print()
+          print("### 11 checkpoint semantic nearest-neighbour results")
+          print()
+          print("| # | query | nearest semantic neighbour | bipolar similarity |")
+          print("| ---: | --- | --- | ---: |")
+          for ordinal, item in enumerate(semantic["results"], start=1):
+              similarity = number(item.get("bipolar_similarity"), f"semantic[{ordinal}] similarity")
+              print(f"| {ordinal} | `{plain(item['query'])}` | `{plain(item['nearest_semantic_neighbour'])}` | {similarity:.5f} |")
+          print()
+          print("These are self-excluded nearest-neighbour values from the trained checkpoint, not generated answers or held-out semantic accuracy.")
+          print()
+          print("### 11 grounded TSV retrieval results")
+          print()
+          print("Each answer below is the exact ASCII-normalized answer field retrieved verbatim by `vegai_chat` from the separately versioned TSV; it is **not** free-form LLM generation.")
+          print()
+          for item in grounded["results"]:
+              ordinal = item["ordinal"]
+              best = number(item.get("best_bipolar_similarity"), f"grounded[{ordinal}] best similarity")
+              runner = number(item.get("runner_up_bipolar_similarity"), f"grounded[{ordinal}] runner-up similarity")
+              margin = number(item.get("grounding_margin"), f"grounded[{ordinal}] margin")
+              answer = str(item["answer"]).replace("```", "``\\`")
+              print(f"{ordinal}. **Prompt:** `{plain(item['prompt'])}`")
+              print(f"   - matched prompt: `{plain(item['matched_prompt'])}`")
+              print(f"   - similarity `{best:.5f}`; runner-up `{runner:.5f}`; margin `{margin:.5f}`; grounded `true`")
+              print(f"   - TSV source: {plain(item['source_url'])} (row `{plain(item['source_row'])}`)")
+              print("   - **Literal TSV answer:**")
+              print("     ```text")
+              print(answer)
+              print("     ```")
+          print()
+          print("> Scope: this proves the reported real-data native ingest/update/checkpoint/retrieval run only. It does not establish held-out Turkish NLP accuracy, factual correctness beyond the cited TSV, general language understanding, or general intelligence.")
+          PY
+
+      - name: Publish evidence to this pull request and workflow summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          marker="vegai-turkish-wikipedia-9m-evidence:${{ steps.source.outputs.run_id }}"
+          existing_comment=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" \
+            --paginate --jq ".[] | select(.body | contains(\"${marker}\")) | .id" | tail -n 1)
+          if [ -n "$existing_comment" ]; then
+            python3 - "$RUNNER_TEMP/comment.md" > "$RUNNER_TEMP/comment-patch.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          print(json.dumps({"body": Path(sys.argv[1]).read_text(encoding="utf-8")}))
+          PY
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing_comment}" \
+              --input "$RUNNER_TEMP/comment-patch.json" >/dev/null
+          else
+            gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/comment.md"
+          fi
+          cat "$RUNNER_TEMP/comment.md" >> "$GITHUB_STEP_SUMMARY"

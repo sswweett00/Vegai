@@ -1,0 +1,17 @@
+{
+  "schema_version": "vegai-lmm-routing-task/v1",
+  "id": "replace-with-task-id",
+  "domain": "coding",
+  "data_residency": "TR",
+  "minimum_safety_tier": 3,
+  "strategy": "single-best",
+  "minimum_independent_candidates": 1,
+  "required_modalities": ["text"],
+  "require_evidence": true,
+  "minimum_context_window_tokens": 32768,
+  "minimum_quality_lower_bound": 0.85,
+  "minimum_reliability_lower_bound": 0.8,
+  "minimum_safety_lower_bound": 0.9,
+  "max_p95_latency_ms": 1500,
+  "max_cost_microunits_per_1k_output_tokens": 5000
+}

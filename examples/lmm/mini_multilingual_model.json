@@ -1,0 +1,23 @@
+{
+  "schema_version": "vegai-lmm-model/v1",
+  "model_id": "synthetic-worker-contract",
+  "engine": "worker",
+  "context_window_tokens": 1024,
+  "max_output_tokens": 256,
+  "message_overhead_tokens": 4,
+  "reply_primer_tokens": 2,
+  "capabilities": {
+    "text": true,
+    "image": true,
+    "audio": true,
+    "video": true
+  },
+  "tokenizer": {
+    "kind": "utf8-byte"
+  },
+  "artifacts": [],
+  "prompt_format": "chatml-v1",
+  "source": "Vegai repository-authored synthetic worker contract fixture",
+  "license": "MIT",
+  "revision": "fixture-v1"
+}

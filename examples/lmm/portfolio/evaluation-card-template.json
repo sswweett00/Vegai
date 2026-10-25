@@ -1,0 +1,20 @@
+{
+  "schema_version": "vegai-lmm-evaluation-card/v1",
+  "id": "replace-with-evaluation-card-id",
+  "cost_unit": "replace-with-one-comparable-cost-unit",
+  "model_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "quality_report_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "measurements": [
+    {
+      "domain": "coding",
+      "suite_id": "replace-with-governed-heldout-suite-id",
+      "suite_report_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "cases": 1,
+      "quality_lower_bound": 0.85,
+      "reliability_lower_bound": 0.8,
+      "safety_lower_bound": 0.9,
+      "p95_latency_ms": 1500,
+      "cost_microunits_per_1k_output_tokens": 5000
+    }
+  ]
+}

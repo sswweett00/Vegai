@@ -1,0 +1,672 @@
+name: Fortran verification
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install GNU Fortran toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gfortran cmake ninja-build
+
+      - name: Install training-data and Unicode-subword dependencies
+        run: python3 -m pip install --disable-pip-version-check -r requirements-dataio.txt -r requirements-lmm.txt
+
+      - name: Configure checked OpenMP build
+        run: |
+          cmake -S . -B build-ci -G Ninja \
+            -DVEGAI_ENABLE_OPENMP=ON \
+            -DVEGAI_CPU_TARGET=portable \
+            -DVEGAI_BUILD_TESTS=ON \
+            -DVEGAI_ENABLE_LEGACY_PYTHON_TESTS=ON \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_Fortran_FLAGS='-std=f2023 -fcheck=all -fbacktrace -ffpe-trap=invalid,zero,overflow'
+
+      - name: Compile
+        run: |
+          set +e
+          cmake --build build-ci --parallel > compile-output.txt 2>&1
+          exit_code=$?
+          if [ "$exit_code" -eq 0 ]; then
+            tail -n 80 compile-output.txt
+          else
+            # Avoid losing the actual compiler error to GitHub's log-size
+            # truncation when parallel builds also emit legacy warnings.
+            grep -Ein 'fatal error|error:|warning:|ninja: build stopped' compile-output.txt | tail -n 160 || true
+            detail=$(grep -Ein 'fatal error|error:|ninja: build stopped' compile-output.txt | tail -n 12 | tr '\n' ' ' | cut -c1-1900)
+            if [ -z "$detail" ]; then
+              detail=$(tail -n 24 compile-output.txt | tr '\n' ' ' | cut -c1-1900)
+            fi
+            echo "::error title=Fortran compile diagnostic::$detail"
+          fi
+          exit "$exit_code"
+
+      - name: Run native Fortran property and integration tests (including direct attested-pretraining verification)
+        run: ctest --test-dir build-ci --output-on-failure
+
+      - name: Surface native test diagnostics on failure
+        if: failure()
+        run: |
+          set -euo pipefail
+          log_file=$(find build-ci -name LastTest.log -type f -print -quit)
+          if [ -n "$log_file" ]; then
+            detail=$(grep -Ein 'fail|error|assert|checks:' "$log_file" | tail -n 40 | tr '\n' ' ' | cut -c1-1900 || true)
+            if [ -z "$detail" ]; then
+              detail=$(tail -n 140 "$log_file" | tr '\n' ' ' | cut -c1-1900)
+            fi
+          else
+            detail="CTest failed without a LastTest.log diagnostic"
+          fi
+          echo "::error title=Fortran property test diagnostic::$detail"
+
+      - name: Run executable end-to-end verification
+        run: |
+          set +e
+          OMP_NUM_THREADS=2 ./build-ci/hds_engine > demo-output.txt 2>&1
+          exit_code=$?
+          cat demo-output.txt
+          {
+            echo '## HDS executable verification output'
+            echo '```text'
+            cat demo-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$exit_code" -ne 0 ]; then
+            detail=$(tail -n 4 demo-output.txt | tr '\n' ' ' | cut -c1-240)
+            if [ -z "$detail" ]; then
+              detail="hds_engine failed before emitting output"
+            fi
+            echo "::error file=app/main.f90,line=1,title=HDS demo diagnostic::$detail"
+          fi
+          exit "$exit_code"
+
+      - name: Validate sample corpus manifests and ingest contracts
+        run: |
+          python3 tools/corpus_manifest.py examples/corpus/toy_hdc_corpus.txt \
+            --output "${RUNNER_TEMP}/toy-manifest.json" \
+            --source 'repository smoke fixture' --license MIT \
+            --retrieved-at 'source-controlled fixture' --preprocessing none --strict-contract
+          python3 -m json.tool "${RUNNER_TEMP}/toy-manifest.json" > /dev/null
+          python3 tools/verify_example_corpus.py
+
+      - name: Verify streaming training-data formats and production adapter
+        run: python3 tools/verify_training_data_io.py
+
+      - name: Run HDC pretraining CLI smoke test
+        run: |
+          set -euo pipefail
+          checkpoint="${RUNNER_TEMP}/vegai-smoke.vgai"
+          ./build-ci/vegai_pretrain train examples/corpus/toy_hdc_corpus.txt "$checkpoint" \
+            --max-vocab 64 --min-frequency 2 --window 2 --epochs 1 --query king
+          active_vocab="${RUNNER_TEMP}/vegai-smoke-active-vocabulary.tsv"
+          ./build-ci/vegai_pretrain inspect "$checkpoint" --query dog --active-vocabulary-file "$active_vocab"
+          test -s "$active_vocab"
+          awk -F '\t' 'NF != 2 || $1 !~ /^[a-z0-9_\047]+$/ || $2 !~ /^[1-9][0-9]*$/ { exit 1 }' "$active_vocab"
+          ./build-ci/vegai_pretrain resume examples/corpus/toy_hdc_corpus.txt "$checkpoint" \
+            --epochs 1 --query queen
+
+      - name: Run native causal Turkish next-token train/evaluate/generate smoke test
+        run: |
+          set -uo pipefail
+          causal_output="${RUNNER_TEMP}/causal-smoke.txt"
+          checkpoint="${RUNNER_TEMP}/vegai-causal-smoke.vclm"
+          set +e
+          {
+            ./build-ci/vegai_causal_lm train examples/corpus/mini_turkish_causal_utf8.txt "$checkpoint" \
+              --max-vocab 1026 --top-successors 4 --trigram-buckets 32 --trigram-ways 2 --min-estimated-frequency 1
+            test -s "$checkpoint"
+            ./build-ci/vegai_causal_lm evaluate "$checkpoint" examples/corpus/mini_turkish_causal_utf8.txt
+            ./build-ci/vegai_causal_lm generate "$checkpoint" "Türkiye'nin başkenti" \
+              --tokens 16 --temperature 0.80 --seed 7
+          } > "$causal_output" 2>&1
+          causal_status=$?
+          set -e
+          cat "$causal_output"
+          if [ "$causal_status" -ne 0 ]; then
+            detail=$(tail -n 30 "$causal_output" | tr '\n' ' ' | cut -c1-1900)
+            echo "::error title=Native causal LM smoke diagnostic::$detail"
+            exit "$causal_status"
+          fi
+          grep -q '"phase":"train"' "$causal_output"
+          grep -q '"phase":"evaluate"' "$causal_output"
+          grep -q '^CAUSAL_RESPONSE: ' "$causal_output"
+
+      - name: Run native neural subword/retention/decoder mathematical-invariant smoke test
+        run: |
+          set -euo pipefail
+          ./build-ci/vegai_neural_lm self-test | tee "${RUNNER_TEMP}/neural-self-test.txt"
+          ./build-ci/vegai_neural_lm plan | tee "${RUNNER_TEMP}/neural-plan.txt"
+          grep -q '"bpe_roundtrip":true' "${RUNNER_TEMP}/neural-self-test.txt"
+          grep -q '"causal_chunk_equivalence":true' "${RUNNER_TEMP}/neural-self-test.txt"
+          grep -q '"calibration_non_worse":true' "${RUNNER_TEMP}/neural-self-test.txt"
+
+      - name: Run native neural teacher-forced checkpoint smoke test
+        run: |
+          set -euo pipefail
+          run_neural() {
+            local label="$1"
+            shift
+            local output="${RUNNER_TEMP}/${label}.txt"
+            set +e
+            "$@" > "$output" 2>&1
+            local exit_code=$?
+            set -e
+            cat "$output"
+            if [ "$exit_code" -ne 0 ]; then
+              detail=$(tail -n 30 "$output" | tr '\n' ' ' | cut -c1-1900)
+              echo "::error title=Native neural smoke diagnostic (${label})::$detail"
+              exit "$exit_code"
+            fi
+          }
+          run_neural neural-pretrain-smoke ./build-ci/vegai_neural_pretrain smoke
+          grep -q '"nll_improved":true' "${RUNNER_TEMP}/neural-pretrain-smoke.txt"
+          grep -q '"checkpoint_exact":true' "${RUNNER_TEMP}/neural-pretrain-smoke.txt"
+          neural_fixture="examples/neural_pretraining/mini_turkish_byte_bpe.txt"
+          test "$(wc -c < "$neural_fixture")" = 444
+          printf '%s  %s\n' '131a8c6d817ca073e88fbaaad97e1400806516d8bf3a114f76e565a0527d14b4' "$neural_fixture" | sha256sum -c -
+          bpe_path="${RUNNER_TEMP}/neural-smoke.bpe"
+          run_neural bpe-train-smoke ./build-ci/vegai_neural_pretrain tokenizer-train "$neural_fixture" "$bpe_path" 300
+          grep -q '"schema_version":"vegai-byte-bpe-train/v1"' "${RUNNER_TEMP}/bpe-train-smoke.txt"
+          test -s "$bpe_path"
+          neural_checkpoint="${RUNNER_TEMP}/neural-generation-smoke.vgnr"
+          run_neural neural-train-chunk-1 ./build-ci/vegai_neural_pretrain train-chunk "$neural_fixture" "$neural_checkpoint" "$bpe_path" 4
+          run_neural neural-train-chunk-2 ./build-ci/vegai_neural_pretrain train-chunk "$neural_fixture" "$neural_checkpoint" "$bpe_path" 4
+          grep -q '"source_records_completed":8' "${RUNNER_TEMP}/neural-train-chunk-2.txt"
+          run_neural neural-training-plan ./build-ci/vegai_neural_pretrain plan "$neural_checkpoint" "$bpe_path"
+          grep -q '"schema_version":"vegai-neural-training-resource-plan/v1"' "${RUNNER_TEMP}/neural-training-plan.txt"
+          run_neural neural-generate-smoke ./build-ci/vegai_neural_pretrain generate "$neural_checkpoint" "$bpe_path" "Trabzon" 8 7
+          run_neural neural-generate-repeat ./build-ci/vegai_neural_pretrain generate "$neural_checkpoint" "$bpe_path" "Trabzon" 8 7
+          cmp "${RUNNER_TEMP}/neural-generate-smoke.txt" "${RUNNER_TEMP}/neural-generate-repeat.txt"
+          grep -q '"mode":"causal-byte-bpe-retention-calibrated/v1"' "${RUNNER_TEMP}/neural-generate-smoke.txt"
+          grep -q '^NEURAL_GENERATION_END$' "${RUNNER_TEMP}/neural-generate-smoke.txt"
+
+      - name: Verify exact-byte COSMOS causal evidence controller contracts without downloading data
+        run: python3 tools/verify_cosmos_turkish_9gb.py
+
+      - name: Run independent Python reference verification
+        run: python3 tools/verify_reference.py
+
+      - name: Report portable host compatibility and resource plan
+        run: |
+          # Native control plane performs no shell/Python inventory call. RAM
+          # and storage values here are explicit CI fixture inputs, not a host
+          # discovery claim.
+          ./build-ci/vegai_control profile --format json \
+            --output "${RUNNER_TEMP}/fortran-native-profile.json"
+          ./build-ci/vegai_control resource-plan examples/corpus/mini_turkish_ascii_pretrain.txt \
+            --checkpoint "${RUNNER_TEMP}/fortran-resource-plan.vgai" --max-vocab 128 \
+            --available-memory-bytes 8589934592 --available-storage-bytes 8589934592 \
+            --require-ready --format json --output "${RUNNER_TEMP}/fortran-resource-plan.json"
+          ./build-ci/vegai_control attest examples/corpus/toy_hdc_corpus.txt "${RUNNER_TEMP}/vegai-smoke.vgai" \
+            --format json --output "${RUNNER_TEMP}/fortran-native-attestation.json"
+          python3 tools/hardware_compatibility.py --format json --require-recognized-os \
+            --output "${RUNNER_TEMP}/hardware-profile.json" > /dev/null
+          python3 tools/training_resource_plan.py \
+            --corpus examples/corpus/mini_turkish_ascii_pretrain.txt \
+            --checkpoint "${RUNNER_TEMP}/resource-plan.vgai" --max-vocab 128 \
+            --format json --output "${RUNNER_TEMP}/training-resource-plan.json" --require-ready > /dev/null
+          python3 tools/verify_hardware_compatibility.py
+          python3 tools/verify_training_resource_plan.py
+          python3 tools/verify_openvino_provider.py
+          python3 tools/verify_openvino_context_worker.py
+
+      - name: Verify optional OpenVINO context-provider bridge
+        run: |
+          python3 -m pip install --disable-pip-version-check -r requirements-openvino.txt
+          set +e
+          {
+            python3 tools/verify_openvino_provider.py
+            python3 tools/verify_openvino_context_worker.py
+            python3 tools/verify_openvino_context_provider.py --pretrain-bin ./build-ci/vegai_pretrain \
+              --report "${RUNNER_TEMP}/openvino-context-provider.json"
+          } > openvino-bridge-output.txt 2>&1
+          exit_code=$?
+          cat openvino-bridge-output.txt
+          if [ "$exit_code" -ne 0 ]; then
+            detail=$(tail -n 24 openvino-bridge-output.txt | tr '\n' ' ' | cut -c1-1900)
+            echo "::error title=OpenVINO context-provider diagnostic::$detail"
+            exit "$exit_code"
+          fi
+          python3 - "${RUNNER_TEMP}/openvino-context-provider.json" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as source:
+              report = json.load(source)
+          message = (
+              f"runtime={report['runtime']}; "
+              f"cpu_train_seconds={report['cpu_reference_train_seconds']:.6f}; "
+              f"native_cpu_bypass_train_seconds={report['native_cpu_bypass_train_seconds']:.6f}; "
+              f"native_cpu_bypass_to_cpu_time_ratio={report['native_cpu_bypass_to_cpu_time_ratio']:.4f}x; "
+              f"openvino_context_provider_train_seconds={report['openvino_context_provider_train_seconds']:.6f}; "
+              f"openvino_to_cpu_time_ratio={report['openvino_to_cpu_time_ratio']:.4f}x; "
+              f"resident_worker_sessions={report['openvino_resident_worker_sessions']}; "
+              f"worker_requests={report['openvino_worker_requests']}; "
+              f"dispatched_contexts={report['openvino_dispatched_contexts']}; "
+              f"checkpoint_bytes_identical={report['checkpoint_byte_identical']}"
+          )
+          with open(sys.argv[2], "a", encoding="utf-8") as summary:
+              print("## OpenVINO CPU context-provider bridge", file=summary)
+              print(file=summary)
+              print(
+                  "Each value is one complete `vegai_pretrain train` child process. Corpus fixture creation, "
+                  "checkpoint byte comparison, and Python harness work are excluded. The native-CPU bypass is the "
+                  "production CPU policy; the strict CPU-plugin arm is a correctness/overhead observation, not an "
+                  "Intel GPU/NPU acceleration claim.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("```text", file=summary)
+              print(message, file=summary)
+              print("```", file=summary)
+          print(f"::notice title=OpenVINO context-provider bridge::{message}")
+          PY
+
+      - name: Compile portable and host-native GNU Make binaries
+        run: |
+          make clean-all
+          make all
+          make native
+
+      - name: Compare portable/native pretraining binaries and semantic cohesion
+        run: |
+          set -euo pipefail
+          profile_report="${RUNNER_TEMP}/pretraining-build-profile-comparison.json"
+          mode_report="${RUNNER_TEMP}/pretraining-mode-comparison.json"
+          python3 tools/compare_pretraining_build_profiles.py \
+            --portable-pretrain-bin ./build/vegai_pretrain \
+            --native-pretrain-bin ./build-native/vegai_pretrain \
+            --repetitions 3 --omp-threads 1 --output "$profile_report" > /dev/null
+          python3 tools/compare_pretraining_modes.py \
+            --pretrain-bin ./build/vegai_pretrain \
+            --repetitions 3 --omp-threads 1 --output "$mode_report" > /dev/null
+          python3 - "$profile_report" "$mode_report" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as source:
+              build_profile = json.load(source)
+          with open(sys.argv[2], encoding="utf-8") as source:
+              report = json.load(source)
+          speed = report["speed"]
+          quality = report["quality"]
+          comparison = report["comparison"]
+          fused = report["fused_kernel"]
+          long_context = report["long_context_diagnostic"]
+          long_speed = long_context["speed"]
+          long_quality = long_context["quality"]
+          hardware = build_profile["hardware"]
+          portable = build_profile["portable"]
+          native = build_profile["native"]
+          message = (
+              f"cpu={hardware['cpu']['model']}; "
+              f"os={hardware['host']['operating_system']} {hardware['host']['operating_system_release']}; "
+              f"portable_seconds={portable['median_seconds']:.6f}; "
+              f"native_seconds={native['median_seconds']:.6f}; "
+              f"native_speedup={build_profile['native_speedup_vs_portable']:.4f}x; "
+              f"portable_native_bytes_identical={build_profile['checkpoint_byte_identical']}; "
+              f"legacy_seconds={speed['legacy']['median_seconds']:.6f}; "
+              f"positional_seconds={speed['positional']['median_seconds']:.6f}; "
+              f"fused_hybrid_seconds={speed['hybrid']['median_seconds']:.6f}; "
+              f"reference_hybrid_seconds={fused['reference']['median_seconds']:.6f}; "
+              f"fused_speedup={comparison['fused_hybrid_speedup_vs_reference']:.4f}x; "
+              f"checkpoint_bytes_identical={fused['checkpoint_byte_identical']}; "
+              f"base_hybrid_similarity={quality['hybrid']['mean_top1_similarity']:.6f}; "
+              f"resonant_seconds={speed['resonant']['median_seconds']:.6f}; "
+              f"resonant_token_per_second={speed['resonant']['training_tokens_per_second']:.3f}; "
+              f"resonant_speedup_vs_hybrid={comparison['resonant_speedup_vs_hybrid']:.4f}x; "
+              f"base_resonant_similarity={quality['resonant']['mean_top1_similarity']:.6f}; "
+              f"resonant_similarity_gain="
+              f"{comparison['resonant_mean_top1_similarity_gain_vs_hybrid']:.6f}; "
+              f"long_hybrid_similarity={long_quality['hybrid']['mean_top1_similarity']:.6f}; "
+              f"long_hierarchical_similarity={long_quality['hierarchical']['mean_top1_similarity']:.6f}; "
+              f"hierarchical_similarity_gain="
+              f"{comparison['hierarchical_long_record_mean_top1_similarity_gain_vs_hybrid']:.6f}; "
+              f"long_coherent_similarity={long_quality['coherent']['mean_top1_similarity']:.6f}; "
+              f"coherent_similarity_gain="
+              f"{comparison['coherent_long_record_mean_top1_similarity_gain_vs_hybrid']:.6f}"
+          )
+          with open(sys.argv[3], "a", encoding="utf-8") as summary:
+              print("## Optimized pretraining comparison", file=summary)
+              print(file=summary)
+              print(
+                  "Each timing sample covers one `vegai_pretrain train` process only; compilation, CI setup, "
+                  "fixture construction, inspection, and Python harness work are excluded.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("### Portable/native build-profile comparison", file=summary)
+              print(file=summary)
+              print(
+                  f"Host: `{hardware['cpu']['model']}` on `{hardware['host']['operating_system']} "
+                  f"{hardware['host']['operating_system_release']}` / `{hardware['host']['architecture']}`. "
+                  f"GPU adapters inventoried: {len(hardware['gpu_adapters'])}; "
+                  f"NPU adapters inventoried: {len(hardware['npu_adapters'])}; "
+                  "GPU/NPU compute used: no.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("| Build profile | Median seconds | Training token/s | Checkpoint bytes |", file=summary)
+              print("|---|---:|---:|---:|", file=summary)
+              print(
+                  f"| portable (no host ISA) | {portable['median_seconds']:.6f} | "
+                  f"{portable['training_tokens_per_second']:.3f} | identical to native |",
+                  file=summary,
+              )
+              print(
+                  f"| native (host tuned) | {native['median_seconds']:.6f} | "
+                  f"{native['training_tokens_per_second']:.3f} | "
+                  f"{build_profile['checkpoint_byte_identical']} |",
+                  file=summary,
+              )
+              print(
+                  f"Portable/native speed ratio: **{build_profile['native_speedup_vs_portable']:.4f}×**. "
+                  "This is one-host evidence, not a cross-CPU throughput claim.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("### Base controlled fixture", file=summary)
+              print(file=summary)
+              print("| Mode | Median seconds | Training token/s | Controlled Top-1 cluster | Mean Top-1 similarity |", file=summary)
+              print("|---|---:|---:|---:|---:|", file=summary)
+              for mode in ("legacy", "positional", "hybrid", "resonant"):
+                  print(
+                      f"| {mode} | {speed[mode]['median_seconds']:.6f} | "
+                      f"{speed[mode]['training_tokens_per_second']:.3f} | "
+                      f"{quality[mode]['same_cluster_top1_percent']:.3f}% | "
+                      f"{quality[mode]['mean_top1_similarity']:.6f} |",
+                      file=summary,
+                  )
+              print(file=summary)
+              print(
+                  f"Resonant mean-similarity delta vs hybrid: "
+                  f"**{comparison['resonant_mean_top1_similarity_gain_vs_hybrid']:+.6f}**; "
+                  "this is a controlled semantic-retrieval diagnostic, not a general-intelligence claim.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("### Bit-exact hybrid kernel comparison", file=summary)
+              print(file=summary)
+              print("| Implementation | Median seconds | Training token/s | Checkpoint bytes |", file=summary)
+              print("|---|---:|---:|---:|", file=summary)
+              print(
+                  f"| reference rotate-then-add | {fused['reference']['median_seconds']:.6f} | "
+                  f"{fused['reference']['training_tokens_per_second']:.3f} | identical to fused |",
+                  file=summary,
+              )
+              print(
+                  f"| fused SoA/pair kernel | {fused['fused']['median_seconds']:.6f} | "
+                  f"{fused['fused']['training_tokens_per_second']:.3f} | "
+                  f"{fused['checkpoint_byte_identical']} |",
+                  file=summary,
+              )
+              print(file=summary)
+              print(
+                  f"Fused/reference speed ratio: **{fused['fused_speedup_vs_reference']:.4f}×**. "
+                  "Byte equality is an exact semantic-regression condition, not just a retrieval comparison.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("### Long-record controlled hierarchy / coherent diagnostic", file=summary)
+              print(file=summary)
+              print(
+                  "This generated fixture has disjoint topical clusters and 16 active tokens per record; it is not a "
+                  "natural-language or production-quality benchmark.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("| Mode | Median seconds | Training token/s | Controlled Top-1 cluster | Mean Top-1 similarity |", file=summary)
+              print("|---|---:|---:|---:|---:|", file=summary)
+              for mode in ("hybrid", "hierarchical", "coherent"):
+                  print(
+                      f"| {mode} | {long_speed[mode]['median_seconds']:.6f} | "
+                      f"{long_speed[mode]['training_tokens_per_second']:.3f} | "
+                      f"{long_quality[mode]['same_cluster_top1_percent']:.3f}% | "
+                      f"{long_quality[mode]['mean_top1_similarity']:.6f} |",
+                      file=summary,
+                  )
+              print(file=summary)
+              print(
+                  f"Hierarchical mean-similarity delta vs hybrid: "
+                  f"**{long_context['hierarchical_mean_top1_similarity_gain_vs_hybrid']:+.6f}**; "
+                  f"coherent delta vs hybrid: "
+                  f"**{long_context['coherent_mean_top1_similarity_gain_vs_hybrid']:+.6f}**. "
+                  "Coherent acceptance is non-regression of same-cluster Top-1, not a required positive gain.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("```text", file=summary)
+              print(message, file=summary)
+              print("```", file=summary)
+          print(f"::notice title=Optimized pretraining comparison::{message}")
+          PY
+
+      - name: Compare baseline and v7 sampler-lineage pretraining timing
+        run: |
+          set -euo pipefail
+          baseline_source="${RUNNER_TEMP}/vegai-pretraining-baseline"
+          baseline_build="${RUNNER_TEMP}/vegai-pretraining-baseline-build"
+          revision_report="${RUNNER_TEMP}/pretraining-revision-comparison.json"
+          cleanup_baseline() {
+            git worktree remove --force "$baseline_source" || true
+          }
+          trap cleanup_baseline EXIT
+          # This fixed pre-optimization commit is deliberately built with the
+          # same portable Make profile as the checked-out candidate.  Only the
+          # train child processes below are timed by the Python harness.
+          git fetch --no-tags --depth=1 origin e34fd22e485807108dd85957d869a2d880325dca
+          git worktree add --detach "$baseline_source" FETCH_HEAD
+          make -C "$baseline_source" pretrain BUILD_DIR="$baseline_build"
+          # v7 changes the persisted exact-mask algorithm intentionally. The
+          # benchmark retains self-determinism but records an explicit lineage
+          # transition rather than mislabeling cross-version timing as byte-equal.
+          python3 tools/compare_pretraining_revisions.py \
+            --before-pretrain-bin "$baseline_build/vegai_pretrain" \
+            --after-pretrain-bin ./build/vegai_pretrain --repetitions 3 \
+            --checkpoint-contract versioned-algorithm-transition \
+            --output "$revision_report" > /dev/null
+          python3 - "$revision_report" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as source:
+              report = json.load(source)
+          hardware = report["hardware"]
+          checkpoint_contract = report["checkpoint_contract"]
+          with open(sys.argv[2], "a", encoding="utf-8") as summary:
+              print("## Same-run deterministic pretraining lineage comparison", file=summary)
+              print(file=summary)
+              print(
+                  "The fixed `e34fd22` baseline and this candidate were built with the same portable profile on "
+                  "this runner. Each sample covers one complete `vegai_pretrain train` process; compilation, fixture "
+                  "creation, checkpoint comparison, and harness work are excluded.",
+                  file=summary,
+              )
+              if checkpoint_contract == "versioned-algorithm-transition":
+                  print(
+                      "This run intentionally crosses the v5/v6 → v7 exact-mask sampler lineage. "
+                      "Each side is self-deterministic, but the timing ratio is descriptive only and is not a "
+                      "semantic-equivalence speedup claim.",
+                      file=summary,
+                  )
+              print(file=summary)
+              print(
+                  f"Host: `{hardware['cpu']['model']}` on `{hardware['host']['operating_system']} "
+                  f"{hardware['host']['operating_system_release']}`; OMP_NUM_THREADS=2.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("| Controlled workload | Before median s | After median s | Before token/s | After token/s | After/before runtime | Checkpoint contract |", file=summary)
+              print("|---|---:|---:|---:|---:|---:|---|", file=summary)
+              for workload in report["workloads"]:
+                  before = workload["before"]
+                  after = workload["after"]
+                  checkpoint_relation = workload["checkpoint_relation"]
+                  legacy_resume = workload["legacy_resume_compatibility"]
+                  if legacy_resume is not None:
+                      checkpoint_relation += "; baseline-resume-byte-identical=" + str(
+                          legacy_resume["resumed_checkpoint_byte_identical_to_baseline"]
+                      )
+                  print(
+                      f"| {workload['name']} | {before['median_seconds']:.6f} | "
+                      f"{after['median_seconds']:.6f} | {before['training_tokens_per_second']:.3f} | "
+                      f"{after['training_tokens_per_second']:.3f} | "
+                      f"{workload['after_runtime_ratio_vs_before']:.4f}× | "
+                      f"{checkpoint_relation} |",
+                      file=summary,
+                  )
+              print(file=summary)
+              print(
+                  "These are intentionally bottleneck-focused synthetic records, not a universal natural-corpus "
+                  "throughput claim. Byte equality remains mandatory unless the report names an explicit reviewed "
+                  "versioned algorithm transition.",
+                  file=summary,
+              )
+          message = "; ".join(
+              f"{workload['name']}: before={workload['before']['median_seconds']:.6f}s; "
+              f"after={workload['after']['median_seconds']:.6f}s; "
+              f"runtime_ratio={workload['after_runtime_ratio_vs_before']:.4f}x; "
+              f"checkpoint_relation={workload['checkpoint_relation']}"
+              for workload in report["workloads"]
+          )
+          print(f"::notice title=Same-run pretraining lineage comparison::{message}")
+          PY
+
+      - name: Compare deterministic single and multicore context construction
+        run: |
+          set -euo pipefail
+          thread_report="${RUNNER_TEMP}/pretraining-thread-comparison.json"
+          python3 tools/compare_pretraining_threads.py \
+            --pretrain-bin ./build/vegai_pretrain --parallel-threads 2 --repetitions 3 \
+            --output "$thread_report" > /dev/null
+          python3 - "$thread_report" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as source:
+              report = json.load(source)
+          hardware = report["hardware"]
+          single = report["single_thread"]
+          parallel = report["parallel"]
+          workload = report["workload"]
+          message = (
+              f"cpu={hardware['cpu']['model']}; "
+              f"single_seconds={single['median_seconds']:.6f}; "
+              f"parallel_seconds={parallel['median_seconds']:.6f}; "
+              f"threads={parallel['omp_threads']}; "
+              f"single_to_parallel_speedup={report['single_to_parallel_speedup']:.4f}x; "
+              f"checkpoint_bytes_identical={report['checkpoint_byte_identical']}"
+          )
+          with open(sys.argv[2], "a", encoding="utf-8") as summary:
+              print("## Deterministic multicore context construction", file=summary)
+              print(file=summary)
+              print(
+                  "Each timing sample covers one `vegai_pretrain train` process only. The workload has "
+                  f"{workload['tokens_per_record']} tokens/record and uses source-ordered commits; fixture creation, "
+                  "compilation, byte comparison, and harness work are excluded.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("| OpenMP threads | Median seconds | Training token/s | Checkpoint bytes |", file=summary)
+              print("|---:|---:|---:|---:|", file=summary)
+              print(
+                  f"| {single['omp_threads']} | {single['median_seconds']:.6f} | "
+                  f"{single['training_tokens_per_second']:.3f} | identical |",
+                  file=summary,
+              )
+              print(
+                  f"| {parallel['omp_threads']} | {parallel['median_seconds']:.6f} | "
+                  f"{parallel['training_tokens_per_second']:.3f} | {report['checkpoint_byte_identical']} |",
+                  file=summary,
+              )
+              print(file=summary)
+              print(
+                  f"Same-host single/parallel ratio: **{report['single_to_parallel_speedup']:.4f}×**. "
+                  "It is a host/workload observation, not a general core-scaling guarantee.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("```text", file=summary)
+              print(message, file=summary)
+              print("```", file=summary)
+          print(f"::notice title=Deterministic multicore pretraining::{message}")
+          PY
+
+      - name: Compare exact vocabulary lookup-cache execution paths
+        run: |
+          set -euo pipefail
+          cache_report="${RUNNER_TEMP}/pretraining-lookup-cache-comparison.json"
+          python3 tools/compare_pretraining_lookup_cache.py \
+            --pretrain-bin ./build/vegai_pretrain --repetitions 3 --output "$cache_report" > /dev/null
+          python3 - "$cache_report" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as source:
+              report = json.load(source)
+          hardware = report["hardware"]
+          without_cache = report["without_cache"]
+          with_cache = report["with_cache"]
+          workload = report["workload"]
+          message = (
+              f"cpu={hardware['cpu']['model']}; "
+              f"without_cache_seconds={without_cache['median_seconds']:.6f}; "
+              f"with_cache_seconds={with_cache['median_seconds']:.6f}; "
+              f"cache_speedup_vs_no_cache={report['cache_speedup_vs_no_cache']:.4f}x; "
+              f"cache_hits={with_cache['cache_hits_per_run']}; "
+              f"cache_misses={with_cache['cache_misses_per_run']}; "
+              f"checkpoint_bytes_identical={report['checkpoint_byte_identical']}"
+          )
+          with open(sys.argv[2], "a", encoding="utf-8") as summary:
+              print("## Exact vocabulary lookup-cache comparison", file=summary)
+              print(file=summary)
+              print(
+                  "Each measurement is one complete `vegai_pretrain train` child process only; compilation, fixture "
+                  "creation, checkpoint comparison, and harness work are excluded. The controlled fixture repeats a "
+                  "fixed-width token set with one canonical hash-table start and distinct cache indices; it is not a natural-corpus claim.",
+                  file=summary,
+              )
+              print(file=summary)
+              print(
+                  f"Host: `{hardware['cpu']['model']}`; records={workload['records']}; "
+                  f"tokens/record={workload['tokens_per_record']}; epochs={workload['epochs']}; "
+                  f"training tokens/run={workload['training_tokens_per_run']}.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("| Lookup path | Median seconds | Training token/s | Checkpoint bytes |", file=summary)
+              print("|---|---:|---:|---:|", file=summary)
+              print(
+                  f"| canonical hash lookup | {without_cache['median_seconds']:.6f} | "
+                  f"{without_cache['training_tokens_per_second']:.3f} | identical to cache |",
+                  file=summary,
+              )
+              print(
+                  f"| exact-token direct-map cache | {with_cache['median_seconds']:.6f} | "
+                  f"{with_cache['training_tokens_per_second']:.3f} | {report['checkpoint_byte_identical']} |",
+                  file=summary,
+              )
+              print(file=summary)
+              print(
+                  f"Same-host cache/no-cache ratio: **{report['cache_speedup_vs_no_cache']:.4f}×**. "
+                  "No minimum speedup is enforced; byte-identical checkpoints and exact-token cache telemetry are the "
+                  "correctness gates.",
+                  file=summary,
+              )
+              print(file=summary)
+              print("```text", file=summary)
+              print(message, file=summary)
+              print("```", file=summary)
+          print(f"::notice title=Exact vocabulary lookup cache::{message}")
+          PY

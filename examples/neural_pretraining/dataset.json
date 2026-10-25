@@ -1,0 +1,17 @@
+{
+  "schema_version": "vegai-neural-pretraining-fixture/v1",
+  "purpose": "Native byte-BPE / neural teacher-forced pipeline smoke fixture only",
+  "license": "MIT",
+  "provenance": "Repository-authored short Turkish sentences; not scraped, not a benchmark, and not a language-quality dataset.",
+  "record_framing": "UTF-8 text; one line is one bounded training record; terminal LF is framing and is not passed to the current line adapter.",
+  "files": [
+    {
+      "path": "mini_turkish_byte_bpe.txt",
+      "bytes": 444,
+      "sha256": "131a8c6d817ca073e88fbaaad97e1400806516d8bf3a114f76e565a0527d14b4",
+      "records": 8,
+      "encoding": "UTF-8"
+    }
+  ],
+  "quality_boundary": "A successful run validates codec/trainer/checkpoint/generation plumbing. It does not establish Turkish fluency, factuality, safety, instruction following, or generalization."
+}

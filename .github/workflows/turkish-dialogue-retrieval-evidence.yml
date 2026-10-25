@@ -1,0 +1,266 @@
+name: Real licensed Turkish dialogue retrieval evidence
+
+on:
+  # Keep this real-data job scoped to changes that can alter the corpus package,
+  # native dialogue path, evaluator, calibration protocol, or its evidence.
+  # It runs from the PR so the branch implementation is what is measured.
+  pull_request:
+    paths:
+      - '.github/workflows/turkish-dialogue-retrieval-evidence.yml'
+      - 'tools/build_turkish_dialogue_retrieval_corpus.py'
+      - 'tools/dialogue_evaluation.py'
+      - 'tools/calibrate_dialogue_abstention_policy.py'
+      - 'tools/verify_native_dialogue_evaluator.py'
+      - 'tools/verify_dialogue_abstention_calibration.py'
+      - 'src/turkish_text.f90'
+      - 'src/dialogue_retrieval.f90'
+      - 'src/hdc_pretraining.f90'
+      - 'app/chat.f90'
+      - 'app/dialogue_eval.f90'
+      - 'app/pretrain.f90'
+      - 'CMakeLists.txt'
+      - 'Makefile'
+      - 'docs/TURKISH_DIALOGUE_DATA_GOVERNANCE.md'
+      - 'docs/DIALOGUE_RETRIEVAL.md'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  # Preserve completed evidence artifacts. A later code revision must make its
+  # own run rather than cancelling an in-progress licensed-source measurement.
+  group: turkish-dialogue-retrieval-evidence-${{ github.event.pull_request.number }}-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  evidence:
+    name: Native Turkish dialogue retrieval train and held-out evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out Vegai source
+        uses: actions/checkout@v4
+
+      - name: Install GNU Fortran toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gfortran
+
+      - name: Compile portable native Fortran training, chat, and batch evaluation executables
+        run: make pretrain chat dialogue-eval BUILD_DIR=build-turkish-dialogue-evidence
+
+      - name: Retrieve and verify pinned licensed Turkish dialogue source
+        run: |
+          set -euo pipefail
+          source_dir="${RUNNER_TEMP}/turkish-daily-dialogues-5k"
+          git init --quiet "$source_dir"
+          git -C "$source_dir" remote add origin https://github.com/3nesdeniz/turkish-daily-dialogues-5k.git
+          git -C "$source_dir" fetch --quiet --depth 1 origin ccd9f05c2f97684bbd9a55d818528da9dfb6bd5a
+          git -C "$source_dir" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$source_dir" rev-parse HEAD)" = "ccd9f05c2f97684bbd9a55d818528da9dfb6bd5a"
+          test -f "$source_dir/LICENSE"
+          (cd "$source_dir" && sha256sum --check SHA256SUMS)
+          echo "TURKISH_DIALOGUE_SOURCE_DIR=$source_dir" >> "$GITHUB_ENV"
+
+      - name: Build immutable source-hashed native dialogue package
+        run: |
+          set -euo pipefail
+          package_dir="${RUNNER_TEMP}/vegai-turkish-dialogue-package"
+          python3 tools/build_turkish_dialogue_retrieval_corpus.py \
+            --train-jsonl "$TURKISH_DIALOGUE_SOURCE_DIR/data/train.jsonl" \
+            --validation-jsonl "$TURKISH_DIALOGUE_SOURCE_DIR/data/validation.jsonl" \
+            --test-jsonl "$TURKISH_DIALOGUE_SOURCE_DIR/data/test.jsonl" \
+            --output-dir "$package_dir" \
+            --source-repository https://github.com/3nesdeniz/turkish-daily-dialogues-5k \
+            --source-revision ccd9f05c2f97684bbd9a55d818528da9dfb6bd5a \
+            --source-license CC-BY-4.0 \
+            --attribution 'Turkish Daily Dialogues 5K by Enes Deniz, CC BY 4.0' \
+            --source-nature synthetic-ai-assisted-deterministic \
+            --minimum-content-disjoint-abstention-cases 128 | tee "$RUNNER_TEMP/package-build.json"
+          echo "TURKISH_DIALOGUE_PACKAGE_DIR=$package_dir" >> "$GITHUB_ENV"
+
+      - name: Train native HDC checkpoint on the package train split
+        run: |
+          set -euo pipefail
+          checkpoint="${RUNNER_TEMP}/turkish-dialogue-retrieval.vgai"
+          OMP_NUM_THREADS=2 ./build-turkish-dialogue-evidence/vegai_pretrain train \
+            "$TURKISH_DIALOGUE_PACKAGE_DIR/pretrain_train_ascii.txt" "$checkpoint" \
+            --max-vocab 4096 --min-frequency 1 --window 4 --position-shift 73 \
+            --context-mode resonant --epochs 2 --strict --parallel-context-build --parallel-min-contexts 32 \
+            | tee "$RUNNER_TEMP/native-train.txt"
+          test -s "$checkpoint"
+          echo "TURKISH_DIALOGUE_CHECKPOINT=$checkpoint" >> "$GITHUB_ENV"
+
+      - name: Run literal UTF-8 retrieval smoke
+        run: |
+          set -euo pipefail
+          prompt=$(python3 - "$TURKISH_DIALOGUE_PACKAGE_DIR/knowledge_train.tsv" <<'PY'
+          import sys
+          from pathlib import Path
+          first = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()[0]
+          print(first.split("\t", 1)[0])
+          PY
+          )
+          ./build-turkish-dialogue-evidence/vegai_chat ask \
+            "$TURKISH_DIALOGUE_CHECKPOINT" "$TURKISH_DIALOGUE_PACKAGE_DIR/knowledge_train.tsv" \
+            --prompt "$prompt" --max-entries 5000 --history-turns 0 \
+            --min-similarity 0.99 --min-margin 0.00 \
+            >"$RUNNER_TEMP/utf8-literal-retrieval.txt" 2>&1
+          cat "$RUNNER_TEMP/utf8-literal-retrieval.txt"
+
+      - name: Calibrate hybrid abstention policy on source-disjoint validation only
+        run: |
+          set -euo pipefail
+          # Test TSV is intentionally absent from this command. The policy is
+          # selected only from source-disjoint validation false-grounding rates.
+          python3 tools/calibrate_dialogue_abstention_policy.py \
+            --evaluator-bin ./build-turkish-dialogue-evidence/vegai_dialogue_eval \
+            --checkpoint "$TURKISH_DIALOGUE_CHECKPOINT" \
+            --knowledge "$TURKISH_DIALOGUE_PACKAGE_DIR/knowledge_train.tsv" \
+            --train-evaluation "$TURKISH_DIALOGUE_PACKAGE_DIR/train_exact_retrieval_contract.tsv" \
+            --validation-evaluation "$TURKISH_DIALOGUE_PACKAGE_DIR/validation_source_disjoint_abstention.tsv" \
+            --report-directory "$RUNNER_TEMP/dialogue-validation-calibration-reports" \
+            --output "$RUNNER_TEMP/dialogue-validation-calibration.json" \
+            --score-candidate 0.65 --score-candidate 0.70 --score-candidate 0.75 --score-candidate 0.80 \
+            --score-candidate 0.85 --score-candidate 0.90 --score-candidate 0.95 --score-candidate 0.99 \
+            --score-candidate 1.00 \
+            --hybrid-margin-floor 0.03 --maximum-validation-false-grounded-rate 0.01 \
+            --minimum-train-exact-accuracy 1.0 --max-entries 5000 \
+            --max-train-cases 5000 --max-validation-cases 2000 \
+            --min-similarity -1.0 --min-margin 0.00 \
+            --semantic-weight 0.25 --lexical-weight 0.75 \
+            | tee "$RUNNER_TEMP/dialogue-validation-calibration.txt"
+          python3 -m json.tool "$RUNNER_TEMP/dialogue-validation-calibration.json" >/dev/null
+
+      - name: Measure full train contract and frozen source-disjoint test safety
+        run: |
+          set -euo pipefail
+          selected_score=$(python3 - "$RUNNER_TEMP/dialogue-validation-calibration.json" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              print(json.load(handle)["selected_policy"]["minimum_hybrid_score"])
+          PY
+          )
+          export SELECTED_HYBRID_SCORE="$selected_score"
+          evaluator=./build-turkish-dialogue-evidence/vegai_dialogue_eval
+          common=(
+            --max-entries 5000 --min-similarity -1.0 --min-margin 0.00
+            --semantic-weight 0.25 --lexical-weight 0.75 --min-hybrid-margin 0.03
+          )
+          # The train contract uses the calibrated score directly. The prior
+          # strictest-score contract produced by calibration is also retained.
+          "$evaluator" evaluate "$TURKISH_DIALOGUE_CHECKPOINT" "$TURKISH_DIALOGUE_PACKAGE_DIR/knowledge_train.tsv" \
+            "$TURKISH_DIALOGUE_PACKAGE_DIR/train_exact_retrieval_contract.tsv" \
+            --max-cases 5000 "${common[@]}" --min-hybrid-score "$selected_score" \
+            >"$RUNNER_TEMP/train-exact-selected-policy-report.json"
+          # This is a predeclared baseline comparison, not a selection input.
+          "$evaluator" evaluate "$TURKISH_DIALOGUE_CHECKPOINT" "$TURKISH_DIALOGUE_PACKAGE_DIR/knowledge_train.tsv" \
+            "$TURKISH_DIALOGUE_PACKAGE_DIR/test_source_disjoint_abstention.tsv" \
+            --max-cases 2000 "${common[@]}" --min-hybrid-score 0.65 \
+            >"$RUNNER_TEMP/test-source-disjoint-baseline-report.json"
+          # The test split is first used here, after validation-only selection.
+          "$evaluator" evaluate "$TURKISH_DIALOGUE_CHECKPOINT" "$TURKISH_DIALOGUE_PACKAGE_DIR/knowledge_train.tsv" \
+            "$TURKISH_DIALOGUE_PACKAGE_DIR/test_source_disjoint_abstention.tsv" \
+            --max-cases 2000 "${common[@]}" --min-hybrid-score "$selected_score" \
+            >"$RUNNER_TEMP/test-source-disjoint-selected-policy-report.json"
+          python3 - "$RUNNER_TEMP/test-source-disjoint-baseline-report.json" \
+            "$RUNNER_TEMP/test-source-disjoint-selected-policy-report.json" <<'PY'
+          import json
+          import sys
+          baseline, selected = (json.load(open(path, encoding="utf-8"))["metrics"] for path in sys.argv[1:])
+          if selected["false_grounded_cases"] > baseline["false_grounded_cases"]:
+              raise SystemExit("selected score increased frozen-test false grounding; refusing to publish a regression")
+          PY
+          for report in "$RUNNER_TEMP"/*-report.json; do python3 -m json.tool "$report" >/dev/null; done
+
+      - name: Render artifact-derived evidence summary
+        env:
+          RUN_ID: ${{ github.run_id }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 - "$TURKISH_DIALOGUE_PACKAGE_DIR/manifest.json" \
+            "$RUNNER_TEMP/dialogue-validation-calibration.json" \
+            "$RUNNER_TEMP/train-exact-selected-policy-report.json" \
+            "$RUNNER_TEMP/test-source-disjoint-baseline-report.json" \
+            "$RUNNER_TEMP/test-source-disjoint-selected-policy-report.json" \
+            "$RUNNER_TEMP/turkish-dialogue-evidence-summary.md" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          manifest_path, calibration_path, train_path, baseline_path, selected_path, output_path = map(Path, sys.argv[1:])
+          package = json.loads(manifest_path.read_text(encoding="utf-8"))
+          calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
+          train = json.loads(train_path.read_text(encoding="utf-8"))["metrics"]
+          baseline = json.loads(baseline_path.read_text(encoding="utf-8"))["metrics"]
+          selected = json.loads(selected_path.read_text(encoding="utf-8"))["metrics"]
+          counts = package["counts"]
+          source = package["source"]
+          policy = calibration["selected_policy"]
+          family = calibration["policy_family"]
+
+          def ratio(numerator, denominator):
+              return None if denominator == 0 else numerator / denominator
+
+          def metrics_line(metrics):
+              expected = metrics["expected_abstain_cases"]
+              rendered = ratio(metrics["true_abstain_cases"], expected)
+              nonfabrication = ratio(
+                  metrics["true_abstain_cases"] + metrics["oov_rejected_abstain_cases"], expected
+              )
+              return (
+                  f"rendered true abstain `{metrics['true_abstain_cases']}`, "
+                  f"OOV safe rejections `{metrics['oov_rejected_abstain_cases']}`, "
+                  f"false grounded `{metrics['false_grounded_cases']}`, "
+                  f"rendered abstain recall `{rendered}`, "
+                  f"non-fabrication recall including OOV rejections `{nonfabrication}`"
+              )
+
+          train_expected = train["expected_grounded_cases"]
+          train_accuracy = ratio(train["correct_grounded_prompt_cases"], train_expected)
+          train_precision = ratio(train["correct_grounded_prompt_cases"], train["actual_grounded_cases"])
+          text = f"""## Native licensed Turkish dialogue retrieval evidence
+
+          - Evidence run: `{os.environ['RUN_ID']}` at commit `{os.environ['COMMIT']}`
+          - Source: `{source['repository']}` @ `{source['revision']}`, declared `{source['license']}`; **{source['synthetic_or_human_status']}**
+          - Package: `{counts['train_knowledge_rows_unique_canonical_prompt']}` unique train TSV rows, `{counts['train_pretraining_records']}` native ASCII training records, `{counts['validation_abstention_cases']}` content-disjoint validation prompts, and `{counts['test_abstention_cases']}` frozen content-disjoint test prompts.
+          - Content-leakage filter: excluded `{counts['validation_train_canonical_prompt_overlap_excluded']}` validation prompts matching a train canonical key; excluded `{counts['test_train_canonical_prompt_overlap_excluded']}` test prompts matching train and `{counts['test_validation_calibration_canonical_prompt_overlap_excluded']}` matching selected validation canonical prompts. These rows are not mislabeled as unsafe false groundings.
+          - Native stateless full train exact-key contract (`{train_expected}` cases): grounded-prompt accuracy `{train_accuracy}`, precision `{train_precision}`, correct prompts `{train['correct_grounded_prompt_cases']}`, false abstentions `{train['false_abstain_cases']}`. This is literal TSV retrieval, **not generalization**.
+          - Policy selection used **validation only**: semantic weight `{family['semantic_weight']}`, lexical weight `{family['lexical_weight']}`, hybrid margin floor `{family['minimum_hybrid_margin']}`, validation false-grounding cap `{family['maximum_validation_false_grounded_rate']}`, selected lowest safe hybrid score floor `{policy['minimum_hybrid_score']}`. Test data was not a selection input.
+          - Frozen full test predeclared baseline (score floor `0.65`): {metrics_line(baseline)}.
+          - Frozen full test selected validation-calibrated policy (score floor `{policy['minimum_hybrid_score']}`): {metrics_line(selected)}.
+
+          The before/after comparison is a source-disjoint retrieval **abstention/leakage-safety** measurement only. It does not establish unseen-answer relevance, factual truth, human naturalness, or free-form generation. The source is explicitly synthetic AI-assisted dialogue. Full source identities, package manifest, native reports, and validation-only calibration decision are attached to this run.
+          """
+          output_path.write_text(text.replace("          ", ""), encoding="utf-8")
+          PY
+          cat "$RUNNER_TEMP/turkish-dialogue-evidence-summary.md"
+
+      - name: Upload provenance and evaluation evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: turkish-dialogue-retrieval-evidence-${{ github.run_id }}
+          retention-days: 30
+          path: |
+            ${{ runner.temp }}/vegai-turkish-dialogue-package/manifest.json
+            ${{ runner.temp }}/package-build.json
+            ${{ runner.temp }}/native-train.txt
+            ${{ runner.temp }}/utf8-literal-retrieval.txt
+            ${{ runner.temp }}/dialogue-validation-calibration.json
+            ${{ runner.temp }}/dialogue-validation-calibration.txt
+            ${{ runner.temp }}/dialogue-validation-calibration-reports
+            ${{ runner.temp }}/train-exact-selected-policy-report.json
+            ${{ runner.temp }}/test-source-disjoint-baseline-report.json
+            ${{ runner.temp }}/test-source-disjoint-selected-policy-report.json
+            ${{ runner.temp }}/turkish-dialogue-evidence-summary.md
+          if-no-files-found: error
+
+      - name: Publish summary to this pull request
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr comment ${{ github.event.pull_request.number }} --body-file "$RUNNER_TEMP/turkish-dialogue-evidence-summary.md"

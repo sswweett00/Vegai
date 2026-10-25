@@ -1,0 +1,30 @@
+{
+  "declared_provenance": {
+    "license": "MIT",
+    "preprocessing": "ASCII-safe Turkish transliteration; deterministic cluster rotations",
+    "retrieved_at": "source-controlled fixture",
+    "source": "Vegai repository-authored synthetic fixture"
+  },
+  "input": {
+    "bytes": 6544,
+    "path": "examples/corpus/mini_turkish_ascii_pretrain.txt",
+    "physical_lf_records": 128,
+    "sha256": "886f754c1cf65676c5d35837cc323b9c14f467a5b8e7f0be7db2097328faa362"
+  },
+  "preflight": {
+    "accepted_tokens": 1024,
+    "crlf_records": 0,
+    "dropped_tokens": 0,
+    "maximum_record_bytes": 58,
+    "non_ascii_bytes": 0,
+    "overlong_records": 0,
+    "records_with_tokenizer_truncation": 0
+  },
+  "schema": "vegai-corpus-manifest/v1",
+  "vegai_ascii_ingest_contract": {
+    "max_line_bytes": 8192,
+    "max_tokens_per_line": 1024,
+    "token_bytes": "A-Z a-z 0-9 underscore apostrophe; ASCII lowercase",
+    "token_length_bytes": 48
+  }
+}
