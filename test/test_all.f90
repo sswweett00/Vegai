@@ -20,6 +20,7 @@ program test_all
    use text_tokenizer, only: TOKEN_LEN, MAX_LINE_CHARS, MAX_TOKENS_PER_LINE, tokenize_ascii_line
    use subword_bpe
    use neural_retention_decoder
+   use neural_pretraining
    use calibrated_decoder
    use vocabulary
    use test_support
@@ -581,11 +582,14 @@ contains
       type(neural_decoder_state_t) :: full_state, chunked_state
       type(neural_decoder_config_t) :: config
       type(neural_resource_plan_t) :: plan
+      type(neural_train_config_t) :: train_config
+      type(neural_train_state_t) :: train_state
+      type(neural_train_metrics_t) :: before_train, after_train, update_metrics
       type(decoding_policy_t) :: policy
       type(temperature_calibration_t) :: calibration
       character(len=64) :: source, decoded
       integer(int32) :: encoded(64), encoded_count, decoded_bytes, status, first_merge, second_merge, index
-      integer(int32) :: history(8), selected, targets(4)
+      integer(int32) :: history(8), selected, targets(4), train_tokens(24)
       integer(int64) :: random_state
       real(real32) :: hidden_full(16), hidden_chunked(16), logits_full(64), logits_chunked(64)
       real(real64) :: raw_logits(4), probabilities(4), heldout_logits(3, 4)
@@ -641,6 +645,31 @@ contains
       call assert_true(plan%parameter_count > 0_int64 .and. plan%per_stream_state_bytes_real32 > 0_int64 .and. &
                        plan%approximate_forward_flops_per_token > 0_int64, &
                        'neural resource plan exposes finite positive costs')
+
+      ! The implemented training scope is intentionally narrow but real: exact
+      ! cross-entropy updates of the tied output embedding matrix. This asserts
+      ! a measurable toy loss reduction without claiming full BPTT quality.
+      do index = 1_int32, size(train_tokens, kind=int32), 2_int32
+         train_tokens(index) = 1_int32
+         train_tokens(index + 1_int32) = 2_int32
+      end do
+      train_config = neural_train_config_t(learning_rate=0.050_real64, gradient_clip_norm=4.0_real64, &
+                                           embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32)
+      call neural_train_state_init(train_state)
+      call neural_train_metrics_reset(before_train)
+      call neural_evaluate_token_sequence(model, train_tokens, size(train_tokens, kind=int32), train_config, before_train, status)
+      call assert_i32_equal(status, NPT_OK, 'tied-output trainer evaluates initial NLL')
+      do index = 1_int32, 50_int32
+         call neural_train_metrics_reset(update_metrics)
+         call neural_train_token_sequence(model, train_tokens, size(train_tokens, kind=int32), train_config, train_state, &
+                                          update_metrics, status)
+         call assert_i32_equal(status, NPT_OK, 'tied-output trainer update succeeds')
+      end do
+      call neural_train_metrics_reset(after_train)
+      call neural_evaluate_token_sequence(model, train_tokens, size(train_tokens, kind=int32), train_config, after_train, status)
+      call assert_i32_equal(status, NPT_OK, 'tied-output trainer evaluates post-update NLL')
+      call assert_true(after_train%mean_nll < before_train%mean_nll .and. train_state%updates_completed > 0_int64, &
+                       'teacher-forced tied-output update improves deterministic toy NLL')
 
       raw_logits = [7.0_real64, 2.0_real64, 1.0_real64, 0.0_real64]
       history = [1_int32, 2_int32, 1_int32, 2_int32, 0_int32, 0_int32, 0_int32, 0_int32]

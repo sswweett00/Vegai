@@ -144,6 +144,13 @@ jobs:
           grep -q '"causal_chunk_equivalence":true' "${RUNNER_TEMP}/neural-self-test.txt"
           grep -q '"calibration_non_worse":true' "${RUNNER_TEMP}/neural-self-test.txt"
 
+      - name: Run native neural teacher-forced checkpoint smoke test
+        run: |
+          set -euo pipefail
+          ./build-ci/vegai_neural_pretrain smoke | tee "${RUNNER_TEMP}/neural-pretrain-smoke.txt"
+          grep -q '"nll_improved":true' "${RUNNER_TEMP}/neural-pretrain-smoke.txt"
+          grep -q '"checkpoint_exact":true' "${RUNNER_TEMP}/neural-pretrain-smoke.txt"
+
       - name: Verify exact-byte COSMOS causal evidence controller contracts without downloading data
         run: python3 tools/verify_cosmos_turkish_9gb.py
 

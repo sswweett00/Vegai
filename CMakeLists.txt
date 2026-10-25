@@ -28,6 +28,7 @@ add_library(vegai_hds STATIC
     src/subword_bpe.f90
     src/calibrated_decoder.f90
     src/neural_retention_decoder.f90
+    src/neural_pretraining.f90
     src/causal_ngram_lm.f90
     src/vocabulary.f90
     src/symbolic_memory.f90
@@ -117,6 +118,11 @@ target_link_libraries(vegai_causal_lm PRIVATE vegai_hds)
 # intentionally distinct from both HDC pretraining and the bounded n-gram LM.
 add_executable(vegai_neural_lm app/neural_lm.f90)
 target_link_libraries(vegai_neural_lm PRIVATE vegai_hds)
+
+# Native, explicitly scoped teacher-forced neural adaptation and checkpoint
+# utility. Its output-adapter scope is intentionally not labeled full BPTT.
+add_executable(vegai_neural_pretrain app/neural_pretrain.f90)
+target_link_libraries(vegai_neural_pretrain PRIVATE vegai_hds)
 
 # Raw-byte field inspection remains separate from text-token pretraining.  It
 # exposes finite representation checks only and has no generative surface.

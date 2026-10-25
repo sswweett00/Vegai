@@ -26,6 +26,11 @@ module subword_bpe
    integer(int32), parameter, public :: BPE_ERR_UNKNOWN_TOKEN = -803_int32
    integer(int32), parameter, public :: BPE_ERR_OUTPUT = -804_int32
    integer(int32), parameter, public :: BPE_ERR_DUPLICATE = -805_int32
+   integer(int32), parameter, public :: BPE_ERR_IO = -806_int32
+   integer(int32), parameter, public :: BPE_ERR_FORMAT = -807_int32
+
+   character(len=8), parameter :: BPE_FILE_MAGIC = 'VGBPE001'
+   integer(int32), parameter :: BPE_FILE_VERSION = 1_int32
 
    integer(int32), parameter, public :: BPE_BASE_VOCABULARY = 256_int32
    integer(int32), parameter, public :: BPE_MAX_INPUT_BYTES = 8192_int32
@@ -46,7 +51,7 @@ module subword_bpe
 
    public :: bpe_init, bpe_destroy, bpe_is_initialized, bpe_add_merge
    public :: bpe_encode, bpe_decode, bpe_model_footprint_bytes
-   public :: bpe_base_token_for_byte
+   public :: bpe_base_token_for_byte, bpe_save, bpe_load
 
 contains
 
@@ -352,5 +357,105 @@ contains
       bytes = bytes + 8_int64 * int(size(model%hash_keys), int64)
       bytes = bytes + 4_int64 * int(size(model%hash_slots), int64)
    end function bpe_model_footprint_bytes
+
+
+   ! The merge list is serialized rather than raw hash-table storage. On load
+   ! the collision-safe index is rebuilt through bpe_add_merge, so hash-table
+   ! capacity/layout changes cannot alter codec semantics. Stream-unformatted
+   ! files are a same-compiler-family artifact format, not a cross-ABI claim.
+   subroutine bpe_save(model, path, status)
+      type(bpe_model_t), intent(in) :: model
+      character(len=*), intent(in) :: path
+      integer(int32), intent(out) :: status
+      integer :: unit, io_status, write_status
+      integer(int32) :: merge_slot
+
+      status = BPE_OK
+      if (.not. bpe_is_initialized(model) .or. len_trim(path) == 0) then
+         status = BPE_ERR_INVALID_ARGUMENT
+         return
+      end if
+      open(newunit=unit, file=trim(path), status='replace', action='write', access='stream', &
+           form='unformatted', iostat=io_status)
+      if (io_status /= 0) then
+         status = BPE_ERR_IO
+         return
+      end if
+      write(unit, iostat=io_status) BPE_FILE_MAGIC
+      if (io_status == 0) write(unit, iostat=io_status) BPE_FILE_VERSION
+      if (io_status == 0) write(unit, iostat=io_status) model%maximum_merges
+      if (io_status == 0) write(unit, iostat=io_status) model%merge_count
+      do merge_slot = 1_int32, model%merge_count
+         if (io_status /= 0) exit
+         write(unit, iostat=io_status) model%left(merge_slot), model%right(merge_slot)
+      end do
+      write_status = io_status
+      close(unit, iostat=io_status)
+      if (write_status /= 0 .or. io_status /= 0) status = BPE_ERR_IO
+   end subroutine bpe_save
+
+   subroutine bpe_load(model, path, status)
+      type(bpe_model_t), intent(inout) :: model
+      character(len=*), intent(in) :: path
+      integer(int32), intent(out) :: status
+      character(len=8) :: magic
+      integer :: unit, io_status
+      integer(int32) :: version, maximum_merges, merge_count, merge_slot
+      integer(int32) :: left_token, right_token, result_token
+
+      call bpe_destroy(model)
+      status = BPE_OK
+      if (len_trim(path) == 0) then
+         status = BPE_ERR_INVALID_ARGUMENT
+         return
+      end if
+      open(newunit=unit, file=trim(path), status='old', action='read', access='stream', &
+           form='unformatted', iostat=io_status)
+      if (io_status /= 0) then
+         status = BPE_ERR_IO
+         return
+      end if
+      read(unit, iostat=io_status) magic
+      if (io_status == 0) read(unit, iostat=io_status) version
+      if (io_status == 0) read(unit, iostat=io_status) maximum_merges
+      if (io_status == 0) read(unit, iostat=io_status) merge_count
+      if (io_status /= 0) then
+         close(unit)
+         status = BPE_ERR_IO
+         return
+      end if
+      if (magic /= BPE_FILE_MAGIC .or. version /= BPE_FILE_VERSION .or. maximum_merges <= 0_int32 .or. &
+          merge_count < 0_int32 .or. merge_count > maximum_merges) then
+         close(unit)
+         status = BPE_ERR_FORMAT
+         return
+      end if
+      call bpe_init(model, maximum_merges, status)
+      if (status /= BPE_OK) then
+         close(unit)
+         return
+      end if
+      do merge_slot = 1_int32, merge_count
+         read(unit, iostat=io_status) left_token, right_token
+         if (io_status /= 0) then
+            close(unit)
+            call bpe_destroy(model)
+            status = BPE_ERR_IO
+            return
+         end if
+         call bpe_add_merge(model, left_token, right_token, result_token, status)
+         if (status /= BPE_OK .or. result_token /= BPE_BASE_VOCABULARY + merge_slot) then
+            close(unit)
+            call bpe_destroy(model)
+            status = BPE_ERR_FORMAT
+            return
+         end if
+      end do
+      close(unit, iostat=io_status)
+      if (io_status /= 0) then
+         call bpe_destroy(model)
+         status = BPE_ERR_IO
+      end if
+   end subroutine bpe_load
 
 end module subword_bpe
