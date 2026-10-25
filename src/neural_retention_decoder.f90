@@ -89,6 +89,7 @@ module neural_retention_decoder
    public :: neural_decoder_init, neural_decoder_destroy, neural_decoder_is_ready
    public :: neural_decoder_state_init, neural_decoder_state_destroy, neural_decoder_state_reset
    public :: neural_decoder_state_is_ready, neural_decoder_step, neural_decoder_plan
+   public :: neural_decoder_config_is_valid
 
 contains
 
