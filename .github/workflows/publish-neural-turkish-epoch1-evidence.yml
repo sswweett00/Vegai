@@ -1,0 +1,109 @@
+name: Publish neural Turkish epoch-1 evidence
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/publish-neural-turkish-epoch1-evidence.yml
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request to comment on
+        required: true
+      head_ref:
+        description: Head branch of that pull request
+        required: true
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+
+jobs:
+  publish:
+    # Consumes only a completed same-repository artifact; never checks out or
+    # executes PR source code with its write-capable token.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    name: Extract neural Turkish epoch-1 evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref || inputs.head_ref }}
+      PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+    steps:
+      - name: Locate latest successful evidence run
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_run=$(gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/neural-turkish-epoch1-evidence.yml/runs" \
+            -f branch="${HEAD_REF}" -f status=success -f per_page=20 \
+            --jq '.workflow_runs[0].id')
+          [[ "$source_run" =~ ^[0-9]+$ ]] || {
+            echo "No successful neural Turkish epoch-1 evidence run for ${HEAD_REF}." >&2
+            exit 1
+          }
+          artifact_name=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${source_run}/artifacts" \
+            --jq '.artifacts[] | select(.expired == false and (.name | startswith("neural-turkish-epoch1-"))) | .name' \
+            | head -n 1)
+          [ -n "$artifact_name" ] || {
+            echo "The successful evidence run has no artifact." >&2
+            exit 1
+          }
+          echo "run_id=$source_run" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+
+      - name: Download evidence artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/vegai-neural-tr-epoch1-evidence"
+          mkdir -p "$evidence_dir"
+          gh run download "${{ steps.source.outputs.run_id }}" --repo "$GITHUB_REPOSITORY" \
+            --name "${{ steps.source.outputs.artifact_name }}" --dir "$evidence_dir"
+          echo "EVIDENCE_DIR=$evidence_dir" >> "$GITHUB_ENV"
+          find "$evidence_dir" -type f | sort
+
+      - name: Post evidence comment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          root = Path(os.environ["EVIDENCE_DIR"])
+          results = next(root.rglob("RESULTS.md"), None)
+          evidence_path = next(root.rglob("evidence.json"), None)
+          if results is None or evidence_path is None:
+              raise SystemExit("artifact is missing RESULTS.md or evidence.json")
+          evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+          body_md = results.read_text(encoding="utf-8")
+          epoch = evidence["training_epoch"]
+          header = (
+              "<!-- vegai-neural-turkish-epoch1-evidence -->\n"
+              f"## Neural Turkish epoch-1 evidence (run {os.environ.get('SOURCE_RUN', '')})\n\n"
+              f"- Source run: {os.environ.get('SOURCE_RUN_URL', '')}\n"
+              f"- Artifact: `{os.environ.get('ARTIFACT_NAME', '')}`\n"
+              f"- Head: `{os.environ.get('HEAD_REF', '')}`\n"
+              f"- Measured prediction throughput: **{epoch['prediction_tokens_per_second']:.3f} token/s** "
+              f"over {epoch['prediction_tokens']:,} tokens in {epoch['epoch_wall_seconds']:.1f}s\n\n"
+          )
+          body = header + body_md
+          if len(body) > 60000:
+              body = body[:60000] + "\n\n*(truncated for comment limits; full text in artifact)*\n"
+          body_path = Path(os.environ["RUNNER_TEMP"]) / "evidence-comment.md"
+          body_path.write_text(body, encoding="utf-8")
+          subprocess.run(
+              ["gh", "pr", "comment", os.environ["PR_NUMBER"], "--repo", os.environ["GITHUB_REPOSITORY"],
+               "--body-file", str(body_path)],
+              check=True,
+          )
+          PY
+        env:
+          SOURCE_RUN: ${{ steps.source.outputs.run_id }}
+          SOURCE_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ steps.source.outputs.run_id }}
+          ARTIFACT_NAME: ${{ steps.source.outputs.artifact_name }}
