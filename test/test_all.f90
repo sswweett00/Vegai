@@ -19,6 +19,7 @@ program test_all
                                    quality_report_t, quality_case_file_load, quality_gate_evaluate
    use text_tokenizer, only: TOKEN_LEN, MAX_LINE_CHARS, MAX_TOKENS_PER_LINE, tokenize_ascii_line
    use subword_bpe
+   use subword_bpe_training
    use neural_retention_decoder
    use neural_pretraining
    use calibrated_decoder
@@ -577,9 +578,11 @@ contains
    end subroutine test_tokenless_signal_field
 
    subroutine test_neural_causal_design()
-      type(bpe_model_t) :: bpe
+      type(bpe_model_t) :: bpe, trained_bpe
+      type(bpe_training_config_t) :: tokenizer_train_config
+      type(bpe_training_metrics_t) :: tokenizer_train_metrics
       type(neural_decoder_t) :: model
-      type(neural_decoder_state_t) :: full_state, chunked_state
+      type(neural_decoder_state_t) :: full_state, chunked_state, prefix_left, prefix_right, stability_state
       type(neural_decoder_config_t) :: config
       type(neural_resource_plan_t) :: plan
       type(neural_train_config_t) :: train_config
@@ -589,8 +592,9 @@ contains
       type(temperature_calibration_t) :: calibration
       character(len=64) :: source, decoded
       integer(int32) :: encoded(64), encoded_count, decoded_bytes, status, first_merge, second_merge, index
-      integer(int32) :: history(8), selected, targets(4), train_tokens(24)
-      integer(int64) :: random_state
+      integer(int32) :: history(8), selected, selected_again, targets(4), train_tokens(24)
+      integer(int64) :: random_state, random_state_again
+      integer :: unit, io_status
       real(real32) :: hidden_full(16), hidden_chunked(16), logits_full(64), logits_chunked(64)
       real(real64) :: raw_logits(4), probabilities(4), heldout_logits(3, 4)
 
@@ -613,6 +617,29 @@ contains
       else
          call assert_true(.false., 'byte-BPE output unexpectedly empty')
       end if
+
+      ! The corpus learner is deterministic, collision-checked, and bounded:
+      ! train two merges on a disposable tiny corpus, then retain a lossless
+      ! byte codec regardless of learned merge coverage.
+      open(newunit=unit, file='test_neural_bpe_train.txt', status='replace', action='write', iostat=io_status)
+      call assert_true(io_status == 0, 'temporary BPE training corpus opens')
+      if (io_status == 0) then
+         write(unit, '(A)') 'aaaa aa'
+         write(unit, '(A)') 'aaaa aa'
+         close(unit)
+      end if
+      call bpe_init(trained_bpe, 2_int32, status)
+      call assert_i32_equal(status, BPE_OK, 'trainable byte-BPE model initializes')
+      tokenizer_train_config = bpe_training_config_t(target_vocabulary_size=258_int32, &
+                                                      minimum_pair_frequency=2_int64, pair_table_capacity=101_int32)
+      call bpe_training_metrics_reset(tokenizer_train_metrics)
+      call bpe_train_utf8_file(trained_bpe, 'test_neural_bpe_train.txt', tokenizer_train_config, tokenizer_train_metrics, status)
+      call assert_i32_equal(status, BPET_OK, 'exact-rescan byte-BPE learner succeeds')
+      call assert_true(trained_bpe%token_count == 258_int32 .and. tokenizer_train_metrics%merges_added == 2_int64 .and. &
+                       tokenizer_train_metrics%corpus_passes == 2_int64, &
+                       'byte-BPE learner reaches deterministic requested merge budget')
+      open(newunit=unit, file='test_neural_bpe_train.txt', status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
 
       config = neural_decoder_config_t(vocabulary_size=64_int32, width=16_int32, heads=2_int32, &
                                       local_window=4_int32, ffn_width=32_int32)
@@ -640,6 +667,39 @@ contains
                        'causal logits are invariant to chunk boundaries')
       call assert_true(all(ieee_is_finite(full_state%retention_numerator)) .and. all(ieee_is_finite(logits_full)), &
                        'positive-feature retention state and logits remain finite')
+
+      ! Two streams share an identical prefix and diverge only after the saved
+      ! prefix output. Their prefix logits must agree before either suffix is
+      ! appended: this is the executable no-future-leakage contract.
+      call neural_decoder_state_init(prefix_left, model, status)
+      call assert_i32_equal(status, NRD_OK, 'left causal prefix state initializes')
+      call neural_decoder_state_init(prefix_right, model, status)
+      call assert_i32_equal(status, NRD_OK, 'right causal prefix state initializes')
+      call neural_decoder_step(model, prefix_left, 1_int32, hidden_full, logits_full, status)
+      call assert_i32_equal(status, NRD_OK, 'left causal prefix first token succeeds')
+      call neural_decoder_step(model, prefix_right, 1_int32, hidden_chunked, logits_chunked, status)
+      call assert_i32_equal(status, NRD_OK, 'right causal prefix first token succeeds')
+      call neural_decoder_step(model, prefix_left, 2_int32, hidden_full, logits_full, status)
+      call assert_i32_equal(status, NRD_OK, 'left causal prefix second token succeeds')
+      call neural_decoder_step(model, prefix_right, 2_int32, hidden_chunked, logits_chunked, status)
+      call assert_i32_equal(status, NRD_OK, 'right causal prefix second token succeeds')
+      call assert_true(maxval(abs(logits_full - logits_chunked)) == 0.0_real32, &
+                       'identical causal prefix is independent of future suffix choice')
+      call neural_decoder_step(model, prefix_left, 3_int32, hidden_full, logits_full, status)
+      call assert_i32_equal(status, NRD_OK, 'left divergent future token succeeds')
+      call neural_decoder_step(model, prefix_right, 63_int32, hidden_chunked, logits_chunked, status)
+      call assert_i32_equal(status, NRD_OK, 'right divergent future token succeeds')
+      call neural_decoder_state_init(stability_state, model, status)
+      call assert_i32_equal(status, NRD_OK, 'long-context stability state initializes')
+      do index = 1_int32, 512_int32
+         call neural_decoder_step(model, stability_state, modulo(index - 1_int32, 64_int32) + 1_int32, &
+                                  hidden_full, logits_full, status)
+         call assert_i32_equal(status, NRD_OK, 'bounded retention long-context step succeeds')
+      end do
+      call assert_true(all(ieee_is_finite(stability_state%retention_numerator)) .and. &
+                       all(ieee_is_finite(stability_state%retention_normalizer)) .and. &
+                       maxval(abs(stability_state%retention_numerator)) < 1.0e6_real32, &
+                       'decayed positive retention remains finite under a long deterministic stream')
       call neural_decoder_plan(config, plan, status)
       call assert_i32_equal(status, NRD_OK, 'neural resource planner succeeds')
       call assert_true(plan%parameter_count > 0_int64 .and. plan%per_stream_state_bytes_real32 > 0_int64 .and. &
@@ -682,7 +742,11 @@ contains
       random_state = 91_int64
       call decoder_select(probabilities, policy, random_state, selected, status)
       call assert_i32_equal(status, DECODER_OK, 'calibrated decoder selection succeeds')
-      call assert_true(selected /= 1_int32, 'repetition-aware decoder cannot select masked repeated ngram')
+      random_state_again = 91_int64
+      call decoder_select(probabilities, policy, random_state_again, selected_again, status)
+      call assert_i32_equal(status, DECODER_OK, 'same-seed calibrated decoder selection succeeds')
+      call assert_true(selected /= 1_int32 .and. selected == selected_again .and. random_state == random_state_again, &
+                       'repetition-aware sampling is deterministic and honors masked ngrams')
 
       heldout_logits(:, 1) = [2.0_real64, 0.0_real64, -1.0_real64]
       heldout_logits(:, 2) = [1.5_real64, 0.0_real64, -1.0_real64]
@@ -695,8 +759,12 @@ contains
                        'temperature calibration retains non-worse held-out NLL')
 
       call bpe_destroy(bpe)
+      call bpe_destroy(trained_bpe)
       call neural_decoder_state_destroy(full_state)
       call neural_decoder_state_destroy(chunked_state)
+      call neural_decoder_state_destroy(prefix_left)
+      call neural_decoder_state_destroy(prefix_right)
+      call neural_decoder_state_destroy(stability_state)
       call neural_decoder_destroy(model)
    end subroutine test_neural_causal_design
 

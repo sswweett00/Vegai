@@ -236,6 +236,84 @@ contains
       end if
    end subroutine lookup_merge
 
+   ! Min-heap entries are intentionally allowed to become stale after a
+   ! neighboring merge. Validation at pop time rechecks the current linked
+   ! pair. That removes O(n) compaction and repeated global pair scans while
+   ! retaining the standard lowest-rank, leftmost-tie BPE merge semantics.
+   subroutine heap_push(positions, ranks, heap_count, position, rank)
+      integer(int32), intent(inout) :: positions(:), ranks(:)
+      integer(int32), intent(inout) :: heap_count
+      integer(int32), intent(in) :: position, rank
+      integer(int32) :: child, parent, saved_position, saved_rank
+
+      heap_count = heap_count + 1_int32
+      child = heap_count
+      positions(child) = position
+      ranks(child) = rank
+      do while (child > 1_int32)
+         parent = child / 2_int32
+         if (ranks(parent) < ranks(child) .or. &
+             (ranks(parent) == ranks(child) .and. positions(parent) <= positions(child))) exit
+         saved_position = positions(parent)
+         saved_rank = ranks(parent)
+         positions(parent) = positions(child)
+         ranks(parent) = ranks(child)
+         positions(child) = saved_position
+         ranks(child) = saved_rank
+         child = parent
+      end do
+   end subroutine heap_push
+
+   subroutine heap_pop(positions, ranks, heap_count, position, rank)
+      integer(int32), intent(inout) :: positions(:), ranks(:)
+      integer(int32), intent(inout) :: heap_count
+      integer(int32), intent(out) :: position, rank
+      integer(int32) :: parent, child, selected, saved_position, saved_rank
+
+      position = 0_int32
+      rank = huge(0_int32)
+      if (heap_count <= 0_int32) return
+      position = positions(1)
+      rank = ranks(1)
+      positions(1) = positions(heap_count)
+      ranks(1) = ranks(heap_count)
+      heap_count = heap_count - 1_int32
+      parent = 1_int32
+      do while (2_int32 * parent <= heap_count)
+         child = 2_int32 * parent
+         selected = child
+         if (child + 1_int32 <= heap_count) then
+            if (ranks(child + 1_int32) < ranks(child) .or. &
+                (ranks(child + 1_int32) == ranks(child) .and. positions(child + 1_int32) < positions(child))) then
+               selected = child + 1_int32
+            end if
+         end if
+         if (ranks(parent) < ranks(selected) .or. &
+             (ranks(parent) == ranks(selected) .and. positions(parent) <= positions(selected))) exit
+         saved_position = positions(parent)
+         saved_rank = ranks(parent)
+         positions(parent) = positions(selected)
+         ranks(parent) = ranks(selected)
+         positions(selected) = saved_position
+         ranks(selected) = saved_rank
+         parent = selected
+      end do
+   end subroutine heap_pop
+
+   subroutine push_pair_if_merge(model, symbols, left_position, right_position, heap_positions, heap_ranks, heap_count)
+      type(bpe_model_t), intent(in) :: model
+      integer(int32), intent(in) :: symbols(:)
+      integer(int32), intent(in) :: left_position, right_position
+      integer(int32), intent(inout) :: heap_positions(:), heap_ranks(:)
+      integer(int32), intent(inout) :: heap_count
+      integer(int32) :: merged_token, merge_rank
+      logical :: found
+
+      if (left_position <= 0_int32 .or. right_position <= 0_int32) return
+      call lookup_merge(model, symbols(left_position), symbols(right_position), merged_token, merge_rank, found)
+      if (found) call heap_push(heap_positions, heap_ranks, heap_count, left_position, merge_rank)
+   end subroutine push_pair_if_merge
+
    subroutine bpe_encode(model, input, input_bytes, tokens, token_count, status)
       type(bpe_model_t), intent(in) :: model
       character(len=*), intent(in) :: input
@@ -243,8 +321,11 @@ contains
       integer(int32), intent(out) :: tokens(:)
       integer(int32), intent(out) :: token_count
       integer(int32), intent(out) :: status
-      integer(int32) :: work(BPE_MAX_INPUT_BYTES)
-      integer(int32) :: count, position, best_position, best_rank, candidate_rank, candidate_token, index
+      integer(int32) :: symbols(BPE_MAX_INPUT_BYTES), previous(BPE_MAX_INPUT_BYTES), following(BPE_MAX_INPUT_BYTES)
+      logical :: active(BPE_MAX_INPUT_BYTES)
+      integer(int32) :: heap_positions(3 * BPE_MAX_INPUT_BYTES), heap_ranks(3 * BPE_MAX_INPUT_BYTES)
+      integer(int32) :: heap_count, count, position, right_position, next_position
+      integer(int32) :: popped_position, popped_rank, candidate_rank, candidate_token, output_position
       logical :: found
 
       tokens = 0_int32
@@ -257,39 +338,53 @@ contains
       end if
       if (input_bytes == 0_int32) return
       count = input_bytes
+      active = .false.
+      previous = 0_int32
+      following = 0_int32
+      heap_count = 0_int32
       do position = 1_int32, count
-         work(position) = bpe_base_token_for_byte(int(iachar(input(position:position)), int32))
+         symbols(position) = bpe_base_token_for_byte(int(iachar(input(position:position)), int32))
+         active(position) = .true.
+         if (position > 1_int32) previous(position) = position - 1_int32
+         if (position < count) following(position) = position + 1_int32
       end do
-      do while (count > 1_int32)
-         best_position = 0_int32
-         best_rank = huge(0_int32)
-         candidate_token = 0_int32
-         do position = 1_int32, count - 1_int32
-            call lookup_merge(model, work(position), work(position + 1_int32), candidate_token, candidate_rank, found)
-            if (found) then
-               if (candidate_rank < best_rank) then
-                  best_rank = candidate_rank
-                  best_position = position
-               end if
-            end if
-         end do
-         if (best_position == 0_int32) exit
-         call lookup_merge(model, work(best_position), work(best_position + 1_int32), candidate_token, candidate_rank, found)
-         if (.not. found) then
-            status = BPE_ERR_UNKNOWN_TOKEN
-            return
-         end if
-         work(best_position) = candidate_token
-         do index = best_position + 1_int32, count - 1_int32
-            work(index) = work(index + 1_int32)
-         end do
+      do position = 1_int32, count - 1_int32
+         call push_pair_if_merge(model, symbols, position, position + 1_int32, heap_positions, heap_ranks, heap_count)
+      end do
+      do while (heap_count > 0_int32)
+         call heap_pop(heap_positions, heap_ranks, heap_count, popped_position, popped_rank)
+         if (popped_position <= 0_int32 .or. .not. active(popped_position)) cycle
+         right_position = following(popped_position)
+         if (right_position <= 0_int32 .or. .not. active(right_position)) cycle
+         call lookup_merge(model, symbols(popped_position), symbols(right_position), candidate_token, candidate_rank, found)
+         if (.not. found .or. candidate_rank /= popped_rank) cycle
+         symbols(popped_position) = candidate_token
+         active(right_position) = .false.
+         next_position = following(right_position)
+         following(popped_position) = next_position
+         if (next_position > 0_int32) previous(next_position) = popped_position
+         previous(right_position) = 0_int32
+         following(right_position) = 0_int32
          count = count - 1_int32
+         if (previous(popped_position) > 0_int32) then
+            call push_pair_if_merge(model, symbols, previous(popped_position), popped_position, &
+                                    heap_positions, heap_ranks, heap_count)
+         end if
+         if (next_position > 0_int32) then
+            call push_pair_if_merge(model, symbols, popped_position, next_position, heap_positions, heap_ranks, heap_count)
+         end if
       end do
       if (count > size(tokens, kind=int32)) then
          status = BPE_ERR_OUTPUT
          return
       end if
-      tokens(:count) = work(:count)
+      output_position = 1_int32
+      position = 1_int32
+      do while (position > 0_int32)
+         tokens(output_position) = symbols(position)
+         output_position = output_position + 1_int32
+         position = following(position)
+      end do
       token_count = count
    end subroutine bpe_encode
 

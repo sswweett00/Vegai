@@ -3,6 +3,7 @@
 program vegai_neural_pretrain
    use, intrinsic :: iso_fortran_env, only: int32, int64, real32, real64, output_unit, error_unit
    use subword_bpe
+   use subword_bpe_training
    use neural_retention_decoder
    use neural_pretraining
    implicit none
@@ -16,6 +17,8 @@ program vegai_neural_pretrain
    select case (trim(command))
    case ('smoke')
       call run_smoke()
+   case ('tokenizer-train')
+      call run_tokenizer_train()
    case ('train')
       call run_train(.false.)
    case ('resume')
@@ -137,6 +140,50 @@ contains
       if (io_status == 0) close(unit, status='delete')
    end subroutine run_smoke
 
+   subroutine run_tokenizer_train()
+      type(bpe_model_t) :: bpe
+      type(bpe_training_config_t) :: tokenizer_config
+      type(bpe_training_metrics_t) :: tokenizer_metrics
+      character(len=1024) :: corpus_path, tokenizer_path, target_text, frequency_text
+      integer(int32) :: status, target_vocabulary, minimum_frequency, parse_status
+      integer(int32) :: maximum_merges
+
+      if (command_argument_count() < 4) call usage_and_stop()
+      call get_command_argument(2, corpus_path)
+      call get_command_argument(3, tokenizer_path)
+      call get_command_argument(4, target_text)
+      read(target_text, *, iostat=parse_status) target_vocabulary
+      if (parse_status /= 0 .or. target_vocabulary < BPE_BASE_VOCABULARY) call usage_and_stop()
+      minimum_frequency = 2_int32
+      if (command_argument_count() >= 5) then
+         call get_command_argument(5, frequency_text)
+         read(frequency_text, *, iostat=parse_status) minimum_frequency
+         if (parse_status /= 0 .or. minimum_frequency <= 0_int32) call usage_and_stop()
+      end if
+      maximum_merges = max(1_int32, target_vocabulary - BPE_BASE_VOCABULARY)
+      call bpe_init(bpe, maximum_merges, status)
+      call require_ok(status, 'tokenizer model initialization')
+      tokenizer_config = bpe_training_config_t(target_vocabulary_size=target_vocabulary, &
+                                               minimum_pair_frequency=int(minimum_frequency, int64))
+      call bpe_training_metrics_reset(tokenizer_metrics)
+      call bpe_train_utf8_file(bpe, trim(corpus_path), tokenizer_config, tokenizer_metrics, status)
+      if (status /= BPET_OK) then
+         write(error_unit, '(A,I0)') 'vegai_neural_pretrain: tokenizer training failed status=', status
+         error stop 1
+      end if
+      call bpe_save(bpe, trim(tokenizer_path), status)
+      call require_ok(status, 'trained tokenizer save')
+      write(output_unit, '(A)') 'BPE_TRAIN_JSON: {'// &
+         '"schema_version":"vegai-byte-bpe-train/v1",'// &
+         '"target_vocabulary_size":'//trim(i32_text(target_vocabulary))//','// &
+         '"actual_vocabulary_size":'//trim(i32_text(bpe%token_count))//','// &
+         '"merges_added":'//trim(i64_text(tokenizer_metrics%merges_added))//','// &
+         '"corpus_passes":'//trim(i64_text(tokenizer_metrics%corpus_passes))//','// &
+         '"records_scanned":'//trim(i64_text(tokenizer_metrics%records_scanned))//','// &
+         '"exhausted_before_target":'//logical_json(tokenizer_metrics%exhausted_before_target)//'}'
+      call bpe_destroy(bpe)
+   end subroutine run_tokenizer_train
+
    subroutine run_train(resume)
       logical, intent(in) :: resume
       type(bpe_model_t) :: bpe
@@ -147,6 +194,7 @@ contains
       type(neural_train_metrics_t) :: metrics
       character(len=1024) :: corpus_path, checkpoint_path, tokenizer_path, epochs_text
       integer(int32) :: status, epochs, epoch, parse_status
+      logical :: tokenizer_exists
 
       if (command_argument_count() < 4) call usage_and_stop()
       call get_command_argument(2, corpus_path)
@@ -164,8 +212,14 @@ contains
          call neural_checkpoint_load(trim(checkpoint_path), bpe, model, train_config, train_state, status)
          call require_ok(status, 'resume neural checkpoint load')
       else
-         call bpe_init(bpe, 16_int32, status)
-         call require_ok(status, 'new byte tokenizer initialization')
+         inquire(file=trim(tokenizer_path), exist=tokenizer_exists)
+         if (tokenizer_exists) then
+            call bpe_load(bpe, trim(tokenizer_path), status)
+            call require_ok(status, 'prebuilt tokenizer load')
+         else
+            call bpe_init(bpe, 16_int32, status)
+            call require_ok(status, 'new byte-fallback tokenizer initialization')
+         end if
          decoder_config = neural_decoder_config_t(vocabulary_size=bpe%token_count, width=64_int32, heads=4_int32, &
                                                   local_window=32_int32, ffn_width=256_int32)
          call neural_decoder_init(model, decoder_config, 20261025_int64, status)
@@ -221,6 +275,17 @@ contains
       write(rendered, '(ES24.16E3)') value
    end function r64_text
 
+   function logical_json(value) result(rendered)
+      logical, intent(in) :: value
+      character(len=5) :: rendered
+
+      if (value) then
+         rendered = 'true '
+      else
+         rendered = 'false'
+      end if
+   end function logical_json
+
    subroutine usage_and_stop()
       call print_help()
       error stop 2
@@ -229,6 +294,7 @@ contains
    subroutine print_help()
       write(output_unit, '(A)') 'Usage:'
       write(output_unit, '(A)') '  vegai_neural_pretrain smoke'
+      write(output_unit, '(A)') '  vegai_neural_pretrain tokenizer-train CORPUS TOKENIZER TARGET_VOCAB [MIN_PAIR_FREQUENCY]'
       write(output_unit, '(A)') '  vegai_neural_pretrain train  CORPUS CHECKPOINT TOKENIZER [EPOCHS]'
       write(output_unit, '(A)') '  vegai_neural_pretrain resume CORPUS CHECKPOINT TOKENIZER [EPOCHS]'
       write(output_unit, '(A)') 'The current trainer updates only tied output embeddings; it is not full BPTT.'

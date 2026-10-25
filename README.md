@@ -38,6 +38,14 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
   [COSMOS_TURKISH_9GB_CAUSAL_EXPERIMENT.md](docs/COSMOS_TURKISH_9GB_CAUSAL_EXPERIMENT.md)'dedir; tamamlanan
   gerçek 9 GB run'ın zayıf ama dürüst output/metric kaydı
   [COSMOS_TURKISH_9GB_RESULTS.md](docs/COSMOS_TURKISH_9GB_RESULTS.md)'dedir;
+- HDC/n-gram yolundan ayrı, lossless byte-BPE, bounded local attention +
+  decayed positive-feature retention, repetition-aware calibrated decoding ve
+  açıkça **tied-output-head-only** teacher-forced adapter eğitimi/checkpoint
+  içeren native `vegai_neural_lm` / `vegai_neural_pretrain` yolu; causal,
+  chunk-equivalent, finite-state, codec, decoder ve checkpoint invariant'leri
+  executable testlerle kapsanır. Bu henüz full-BPTT, Turkish quality veya
+  accelerator throughput iddiası değildir; matematiksel/resource sınırlar
+  [NEURAL_CAUSAL_SYSTEM.md](docs/NEURAL_CAUSAL_SYSTEM.md)'dedir;
 - operator-owned held-out semantic-neighbour annotation/policy ile gerçek
   checkpoint inspect ABI'sini ölçen, HMAC-redacted report/provenance üreten ve
   optional production release'i fail-closed durduran pretraining quality gate;
@@ -177,6 +185,8 @@ make test
 make run
 make pretrain
 make causal-lm
+make neural-lm
+make neural-pretrain
 make field
 make chat
 
@@ -184,6 +194,14 @@ make chat
 ./build/vegai_causal_lm train examples/corpus/mini_turkish_causal_utf8.txt /tmp/mini.vclm \
   --max-vocab 1026 --top-successors 4 --trigram-buckets 32 --trigram-ways 2 --min-estimated-frequency 1
 ./build/vegai_causal_lm generate /tmp/mini.vclm "Türkiye'nin başkenti" --tokens 16 --temperature 0.80 --seed 7
+
+# Native neural invariant / checkpoint smoke. Bu output'lar küçük sentetik
+# testtir; Turkish assistant quality veya full-BPTT sonucu değildir.
+./build/vegai_neural_lm self-test
+./build/vegai_neural_pretrain smoke
+# Deterministic byte-BPE merge artifact oluşturup onu yeni neural run'a bağla:
+./build/vegai_neural_pretrain tokenizer-train examples/corpus/mini_turkish_causal_utf8.txt /tmp/mini.bpe 264
+./build/vegai_neural_pretrain train examples/corpus/mini_turkish_causal_utf8.txt /tmp/mini.vgnr /tmp/mini.bpe 1
 
 # Varsayılan native control-plane doğrulaması: Python interpreter çağırmaz.
 # Fortran property testleri + profile + gerçek train/checkpoint/load smoke.

@@ -157,6 +157,11 @@ jobs:
           ./build-ci/vegai_neural_pretrain smoke | tee "${RUNNER_TEMP}/neural-pretrain-smoke.txt"
           grep -q '"nll_improved":true' "${RUNNER_TEMP}/neural-pretrain-smoke.txt"
           grep -q '"checkpoint_exact":true' "${RUNNER_TEMP}/neural-pretrain-smoke.txt"
+          bpe_path="${RUNNER_TEMP}/neural-smoke.bpe"
+          ./build-ci/vegai_neural_pretrain tokenizer-train examples/corpus/mini_turkish_causal_utf8.txt "$bpe_path" 264 \
+            | tee "${RUNNER_TEMP}/bpe-train-smoke.txt"
+          grep -q '"schema_version":"vegai-byte-bpe-train/v1"' "${RUNNER_TEMP}/bpe-train-smoke.txt"
+          test -s "$bpe_path"
 
       - name: Verify exact-byte COSMOS causal evidence controller contracts without downloading data
         run: python3 tools/verify_cosmos_turkish_9gb.py

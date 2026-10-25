@@ -26,6 +26,7 @@ add_library(vegai_hds STATIC
     src/tokenless_field.f90
     src/text_tokenizer.f90
     src/subword_bpe.f90
+    src/subword_bpe_training.f90
     src/calibrated_decoder.f90
     src/neural_retention_decoder.f90
     src/neural_pretraining.f90
