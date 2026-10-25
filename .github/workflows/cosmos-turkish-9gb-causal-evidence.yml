@@ -2,9 +2,21 @@ name: Real 9 GB COSMOS Turkish causal pretraining evidence
 
 on:
   workflow_dispatch:
+  # The workflow lives on the PR branch.  This tightly scoped push event is
+  # what permits one real evidence run before the workflow reaches main;
+  # ordinary documentation/implementation pushes do not re-spend 9 GB.
+  push:
+    branches: [arena/4f78773c-vegai]
+    paths:
+      - '.github/workflows/cosmos-turkish-9gb-causal-evidence.yml'
+      - 'app/causal_lm.f90'
+      - 'src/causal_ngram_lm.f90'
+      - 'tools/run_cosmos_turkish_9gb.py'
+      - 'requirements-cosmos-9gb.txt'
 
 permissions:
   contents: read
+  pull-requests: write
 
 # Never cancel an evidence run: a completed failure artifact is needed to show
 # whether provenance, size, quality, or native training controls rejected it.
@@ -120,6 +132,55 @@ jobs:
                   file=summary,
               )
           PY
+
+      - name: Publish completed immutable evidence to the open PR
+        if: always() && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          result="${VEGAI_COSMOS_RUN_DIR}/result.json"
+          [ -f "$result" ] || exit 0
+          pr=$(gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/pulls" \
+            -f state=open -f head="${GITHUB_REPOSITORY_OWNER}:$GITHUB_REF_NAME" -f per_page=1 \
+            --jq '.[0].number // empty')
+          [ -n "$pr" ] || exit 0
+          python3 - "$result" "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" > "${RUNNER_TEMP}/cosmos-pr-comment.md" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          result = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          run_url = sys.argv[2]
+          dataset = result["dataset"]
+          corpus = result["corpus"]
+          native = result["native"]
+          train = corpus["train"]
+          heldout = corpus["heldout"]
+          training = native["training"]
+          report = training["native_train_report"]
+          evaluation = native["heldout_evaluation"]["report"]
+          print("<!-- vegai-cosmos-9gb-causal-evidence -->")
+          print("## Real 9 GB COSMOS Turkish causal-pretraining evidence")
+          print()
+          print(f"Workflow: {run_url}")
+          print()
+          print(f"- Source: `{dataset['repository']}` at `{dataset['resolved_revision']}`")
+          print(f"- Dataset-card licence: `{dataset['declared_license']}`; card SHA-256 `{dataset['dataset_card_sha256']}`")
+          print(f"- Exact train: `{train['bytes']}` bytes; SHA-256 `{train['sha256']}`")
+          print(f"- Source-document-disjoint held-out: `{heldout['bytes']}` bytes; SHA-256 `{heldout['sha256']}`")
+          print(f"- Native causal update: exactly `{training['exact_epochs']}` epoch; `{training['native_training_epoch_wall_seconds']}` s; `{report['raw_tokens']}` raw tokens; `{training['raw_training_tokens_per_second']}` raw token/s")
+          print(f"- Held-out next-token sketch metric: Top-1 `{evaluation['top1_accuracy']}`, successor coverage `{evaluation['successor_coverage']}`, eligible transitions `{evaluation['eligible_transitions']}`")
+          print()
+          print("### Actual native continuations")
+          for item in native["generated_prompt_responses"]:
+              print(f"- **Prompt:** {item['prompt']}")
+              print(f"  **Response:** {item['response']}")
+          print()
+          print("Boundary: these are bounded causal n-gram continuations, not claims of factual correctness, instruction following, neural-LLM equivalence, or general intelligence.")
+          PY
+          gh pr comment "$pr" --body-file "${RUNNER_TEMP}/cosmos-pr-comment.md"
 
       - name: Upload auditable lineage without uploading 9 GB source text
         if: always()
