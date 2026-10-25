@@ -102,6 +102,13 @@ def main() -> int:
                         ("user", "Kütüphane kartı nereden alınır?"),
                         ("assistant", "Danışmaya kimliğinizle başvurabilirsiniz."),
                     ],
+                )
+                + record(
+                    "validation-002", "validation",
+                    [
+                        ("user", "Öğrenci kaydı nasıl yapılır?"),
+                        ("assistant", "Bu row train key ile aynı olduğu için abstention evidence'a girmemelidir."),
+                    ],
                 ),
                 encoding="utf-8", newline="\n",
             )
@@ -111,6 +118,20 @@ def main() -> int:
                     [
                         ("user", "Otobüs saatlerini nasıl öğrenebilirim?"),
                         ("assistant", "Belediyenin uygulamasını kontrol edin."),
+                    ],
+                )
+                + record(
+                    "test-002", "test",
+                    [
+                        ("user", "Ders programını nereden görürüm?"),
+                        ("assistant", "Bu row train key ile aynı olduğu için test evidence'a girmemelidir."),
+                    ],
+                )
+                + record(
+                    "test-003", "test",
+                    [
+                        ("user", "Kütüphane kartı nereden alınır?"),
+                        ("assistant", "Bu row calibration key ile aynı olduğu için test evidence'a girmemelidir."),
                     ],
                 ),
                 encoding="utf-8", newline="\n",
@@ -131,8 +152,11 @@ def main() -> int:
                     and counts["train_exact_retrieval_evidence_sample_cases"] == 3
                     and counts["test_source_disjoint_abstention_evidence_sample_cases"] == 1,
                     "non-held-out/source-disjoint bounded evidence sample counts are wrong")
-            require(counts["validation_abstention_cases"] == 1 and counts["test_abstention_cases"] == 1,
-                    "source-disjoint abstention cases are wrong")
+            require(counts["validation_abstention_cases"] == 1 and counts["test_abstention_cases"] == 1
+                    and counts["validation_train_canonical_prompt_overlap_excluded"] == 1
+                    and counts["test_train_canonical_prompt_overlap_excluded"] == 1
+                    and counts["test_validation_calibration_canonical_prompt_overlap_excluded"] == 1,
+                    "content-disjoint source abstention cases/overlap accounting are wrong")
             knowledge = (output / "knowledge_train.tsv").read_text(encoding="utf-8")
             require("Öğrenci kaydı nasıl yapılır?\tÖnce öğrenci işleri birimine başvurun." in knowledge,
                     "UTF-8 literal response row was not preserved")
@@ -169,8 +193,10 @@ def main() -> int:
             require(len(validation_cases) == 1 and validation_cases[0]["schema_version"] == EVALUATION_SCHEMA
                     and validation_cases[0]["expected_prompt"] is None,
                     "validation output does not make the abstention-only label explicit")
-            require(manifest["split_isolation"]["all_source_conversation_ids_unique_across_train_validation_test"] is True,
-                    "manifest does not bind source split isolation")
+            require(manifest["split_isolation"]["all_source_conversation_ids_unique_across_train_validation_test"] is True
+                    and manifest["split_isolation"]["validation_abstention_prompts_disjoint_from_train_canonical_prompts"] is True
+                    and manifest["split_isolation"]["test_abstention_prompts_disjoint_from_train_and_validation_calibration_canonical_prompts"] is True,
+                    "manifest does not bind source/content split isolation")
             require("generation_claim" in manifest["native_runtime_contract"]
                     and manifest["native_runtime_contract"]["generation_claim"] == "none; this package supports grounded retrieval only",
                     "builder overclaimed generative capability")

@@ -108,9 +108,15 @@ dolayısıyla proje generative model oldu” gibi yanlış bir sonucu engeller.
 
 ## Split ve evaluation anlamı
 
-Source'un scenario-family split'i source ID düzeyinde korunur. Train TSV'de
-validation/test response'u bulunmaz. Bu nedenle generated validation/test
-JSONL case'leri `expected_prompt: null` taşır:
+Source'un scenario-family split'i source ID düzeyinde korunur; ancak bu tek
+başına abstention evidence için yeterli değildir. Builder, native Türkçe ASCII
+projection'ı altında train key ile aynı canonical prompt'u validation'dan;
+train veya seçilmiş validation calibration prompt'u ile aynı olanı testten
+çıkarır ve manifest'te overlap/dedup sayılarını yazar. Bu filtre olmadan
+source-ID farklı olsa bile template tekrarının meşru retrieval'ı yanlışlıkla
+`false grounded` sayılabilirdi. Train TSV'de validation/test response'u
+bulunmaz. Filtre sonrası validation/test JSONL case'leri `expected_prompt: null`
+taşır:
 
 - doğru `grounded: false` sonucu **source-disjoint rendered abstention** başarısıdır;
 - checkpoint'te hiç active token yoksa native CLI fail-closed OOV rejection

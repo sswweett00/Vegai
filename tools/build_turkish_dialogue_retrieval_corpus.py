@@ -293,16 +293,35 @@ def render_train_exact_retrieval_evaluation(knowledge: bytes) -> bytes:
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
-def render_abstention_evaluation(split_name: str, pairs: Sequence[tuple[str, int, str, str]]) -> bytes:
-    """Render source-disjoint prompts with explicit null expected grounding."""
+def render_abstention_evaluation(
+    split_name: str,
+    pairs: Sequence[tuple[str, int, str, str]],
+    prohibited_canonical_prompts: set[str],
+) -> tuple[bytes, set[str], int, int]:
+    """Render content-disjoint prompts with explicit null expected grounding.
+
+    Conversation-ID separation alone is not enough for an abstention safety
+    set: an identically native-canonicalized held-out prompt can legitimately
+    retrieve an existing train TSV key. Such rows cannot be labelled as unsafe
+    false grounding. Exclude them before calibration/test measurement, and
+    record their count rather than quietly treating template leakage as model
+    behaviour. Canonical prompt uniqueness also avoids weighting duplicated
+    source wording repeatedly.
+    """
     lines: list[str] = []
-    seen_prompts: set[str] = set()
+    selected_canonical_prompts: set[str] = set()
+    seen_canonical_prompts: set[str] = set()
+    prohibited_overlap_excluded = 0
+    duplicate_canonical_dropped = 0
     for conversation_id, turn_number, prompt, _ in pairs:
-        # Exact duplicate held-out prompts add no test information and make
-        # case count unstable across a source's harmless repeated renderings.
-        if prompt in seen_prompts:
+        canonical_prompt = canonicalize_for_native(prompt)
+        if canonical_prompt in seen_canonical_prompts:
+            duplicate_canonical_dropped += 1
             continue
-        seen_prompts.add(prompt)
+        seen_canonical_prompts.add(canonical_prompt)
+        if canonical_prompt in prohibited_canonical_prompts:
+            prohibited_overlap_excluded += 1
+            continue
         case = {
             "schema_version": EVALUATION_SCHEMA,
             "id": f"{split_name}:{conversation_id}:turn:{turn_number}",
@@ -310,8 +329,14 @@ def render_abstention_evaluation(split_name: str, pairs: Sequence[tuple[str, int
             "expected_prompt": None,
         }
         lines.append(json.dumps(case, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-    require(lines, f"{split_name} source produces no abstention evaluation cases")
-    return ("\n".join(lines) + "\n").encode("utf-8")
+        selected_canonical_prompts.add(canonical_prompt)
+    require(lines, f"{split_name} source produces no content-disjoint abstention evaluation cases")
+    return (
+        ("\n".join(lines) + "\n").encode("utf-8"),
+        selected_canonical_prompts,
+        prohibited_overlap_excluded,
+        duplicate_canonical_dropped,
+    )
 
 
 def render_native_evaluation_tsv(evaluation: bytes) -> bytes:
@@ -393,8 +418,28 @@ def build_package(arguments: argparse.Namespace) -> dict[str, object]:
     knowledge, unique_rows, duplicates = render_knowledge_train(train_pairs)
     pretraining, pretraining_records, skipped_records = render_pretraining_ascii(train_pairs)
     train_exact_evaluation = render_train_exact_retrieval_evaluation(knowledge)
-    validation_evaluation = render_abstention_evaluation("validation", validation_pairs)
-    test_evaluation = render_abstention_evaluation("test", test_pairs)
+    train_canonical_prompts = {
+        canonicalize_for_native(line.partition("\t")[0])
+        for line in knowledge.decode("utf-8").splitlines()
+    }
+    require(len(train_canonical_prompts) == unique_rows,
+            "internal error: knowledge renderer did not make canonical train prompts unique")
+    validation_evaluation, validation_canonical_prompts, validation_train_overlap_excluded, validation_duplicates = (
+        render_abstention_evaluation("validation", validation_pairs, train_canonical_prompts)
+    )
+    test_prohibited_canonical_prompts = train_canonical_prompts | validation_canonical_prompts
+    test_evaluation, test_canonical_prompts, test_overlap_excluded, test_duplicates = render_abstention_evaluation(
+        "test", test_pairs, test_prohibited_canonical_prompts
+    )
+    require(not (validation_canonical_prompts & train_canonical_prompts),
+            "internal error: validation abstention set is not train-content-disjoint")
+    require(not (test_canonical_prompts & test_prohibited_canonical_prompts),
+            "internal error: test abstention set is not train/calibration-content-disjoint")
+    train_test_overlap_excluded = len({canonicalize_for_native(prompt) for _, _, prompt, _ in test_pairs}
+                                      & train_canonical_prompts)
+    test_validation_overlap_excluded = test_overlap_excluded - train_test_overlap_excluded
+    require(test_validation_overlap_excluded >= 0,
+            "internal error: test overlap accounting is inconsistent")
     train_exact_sample = deterministic_evidence_sample(train_exact_evaluation, arguments.evidence_sample_cases)
     test_abstention_sample = deterministic_evidence_sample(test_evaluation, arguments.evidence_sample_cases)
     train_exact_native_evaluation = render_native_evaluation_tsv(train_exact_evaluation)
@@ -455,9 +500,11 @@ def build_package(arguments: argparse.Namespace) -> dict[str, object]:
                 "files": source_identities,
             },
             "split_isolation": {
-                "unit": "conversation_id",
+                "unit": "conversation_id plus native canonical prompt projection for abstention evidence",
                 "all_source_conversation_ids_unique_across_train_validation_test": True,
                 "validation_and_test_outputs_are_explicit_source_disjoint_abstention_sets": True,
+                "validation_abstention_prompts_disjoint_from_train_canonical_prompts": True,
+                "test_abstention_prompts_disjoint_from_train_and_validation_calibration_canonical_prompts": True,
                 "warning": (
                     "null expected prompts measure unsafe false grounding and correct abstention only; "
                     "they are not labels for unseen answer correctness"
@@ -476,7 +523,12 @@ def build_package(arguments: argparse.Namespace) -> dict[str, object]:
                 "validation_pairs_raw": len(validation_pairs),
                 "test_pairs_raw": len(test_pairs),
                 "validation_abstention_cases": validation_evaluation.count(b"\n"),
+                "validation_train_canonical_prompt_overlap_excluded": validation_train_overlap_excluded,
+                "validation_duplicate_canonical_prompts_dropped": validation_duplicates,
                 "test_abstention_cases": test_evaluation.count(b"\n"),
+                "test_train_canonical_prompt_overlap_excluded": train_test_overlap_excluded,
+                "test_validation_calibration_canonical_prompt_overlap_excluded": test_validation_overlap_excluded,
+                "test_duplicate_canonical_prompts_dropped": test_duplicates,
             },
             "outputs": outputs,
         }

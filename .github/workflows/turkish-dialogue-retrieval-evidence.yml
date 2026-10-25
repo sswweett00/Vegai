@@ -123,6 +123,7 @@ jobs:
             --output "$RUNNER_TEMP/dialogue-validation-calibration.json" \
             --score-candidate 0.65 --score-candidate 0.70 --score-candidate 0.75 --score-candidate 0.80 \
             --score-candidate 0.85 --score-candidate 0.90 --score-candidate 0.95 --score-candidate 0.99 \
+            --score-candidate 1.00 \
             --hybrid-margin-floor 0.03 --maximum-validation-false-grounded-rate 0.01 \
             --minimum-train-exact-accuracy 1.0 --max-entries 5000 \
             --max-train-cases 5000 --max-validation-cases 2000 \
@@ -225,7 +226,8 @@ jobs:
 
           - Evidence run: `{os.environ['RUN_ID']}` at commit `{os.environ['COMMIT']}`
           - Source: `{source['repository']}` @ `{source['revision']}`, declared `{source['license']}`; **{source['synthetic_or_human_status']}**
-          - Package: `{counts['train_knowledge_rows_unique_canonical_prompt']}` unique train TSV rows, `{counts['train_pretraining_records']}` native ASCII training records, `{counts['validation_abstention_cases']}` source-disjoint validation prompts, and `{counts['test_abstention_cases']}` frozen source-disjoint test prompts.
+          - Package: `{counts['train_knowledge_rows_unique_canonical_prompt']}` unique train TSV rows, `{counts['train_pretraining_records']}` native ASCII training records, `{counts['validation_abstention_cases']}` content-disjoint validation prompts, and `{counts['test_abstention_cases']}` frozen content-disjoint test prompts.
+          - Content-leakage filter: excluded `{counts['validation_train_canonical_prompt_overlap_excluded']}` validation prompts matching a train canonical key; excluded `{counts['test_train_canonical_prompt_overlap_excluded']}` test prompts matching train and `{counts['test_validation_calibration_canonical_prompt_overlap_excluded']}` matching selected validation canonical prompts. These rows are not mislabeled as unsafe false groundings.
           - Native stateless full train exact-key contract (`{train_expected}` cases): grounded-prompt accuracy `{train_accuracy}`, precision `{train_precision}`, correct prompts `{train['correct_grounded_prompt_cases']}`, false abstentions `{train['false_abstain_cases']}`. This is literal TSV retrieval, **not generalization**.
           - Policy selection used **validation only**: semantic weight `{family['semantic_weight']}`, lexical weight `{family['lexical_weight']}`, hybrid margin floor `{family['minimum_hybrid_margin']}`, validation false-grounding cap `{family['maximum_validation_false_grounded_rate']}`, selected lowest safe hybrid score floor `{policy['minimum_hybrid_score']}`. Test data was not a selection input.
           - Frozen full test predeclared baseline (score floor `0.65`): {metrics_line(baseline)}.
