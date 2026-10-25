@@ -31,6 +31,11 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 - iki-pass vocabulary, allocation-free ASCII ingest, streaming positional-context
   Hebbian öğrenme, checkpoint/resume telemetry ve SHA-256 journal'lı continual
   shard pretraining içeren HDC/VSA corpus pipeline;
+- HDC/retrieval yolundan ayrı, UTF-8 Türkçe token'larını koruyan native
+  `vegai_causal_lm` bounded bigram+trigram heavy-hitter next-token modeli;
+  gerçek continuation üretir ancak neural LLM, factual asistan veya genel zekâ
+  olarak sunulmaz; 9 GB gerçek COSMOS evidence sözleşmesi
+  [COSMOS_TURKISH_9GB_CAUSAL_EXPERIMENT.md](docs/COSMOS_TURKISH_9GB_CAUSAL_EXPERIMENT.md)'dedir;
 - operator-owned held-out semantic-neighbour annotation/policy ile gerçek
   checkpoint inspect ABI'sini ölçen, HMAC-redacted report/provenance üreten ve
   optional production release'i fail-closed durduran pretraining quality gate;
@@ -169,8 +174,14 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 make test
 make run
 make pretrain
+make causal-lm
 make field
 make chat
+
+# Gerçek causal next-token smoke (mini fixture yalnız ABI testidir):
+./build/vegai_causal_lm train examples/corpus/mini_turkish_causal_utf8.txt /tmp/mini.vclm \
+  --max-vocab 1026 --top-successors 4 --trigram-buckets 32 --trigram-ways 2 --min-estimated-frequency 1
+./build/vegai_causal_lm generate /tmp/mini.vclm "Türkiye'nin başkenti" --tokens 16 --temperature 0.80 --seed 7
 
 # Varsayılan native control-plane doğrulaması: Python interpreter çağırmaz.
 # Fortran property testleri + profile + gerçek train/checkpoint/load smoke.

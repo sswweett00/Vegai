@@ -1,0 +1,143 @@
+name: Real 9 GB COSMOS Turkish causal pretraining evidence
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never cancel an evidence run: a completed failure artifact is needed to show
+# whether provenance, size, quality, or native training controls rejected it.
+concurrency:
+  group: cosmos-turkish-9gb-causal-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  one-real-epoch:
+    name: One native causal epoch on exact 9 GB Turkish COSMOS text
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install GNU Fortran toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gfortran
+
+      - name: Install source adapters
+        run: python3 -m pip install --disable-pip-version-check -r requirements-cosmos-9gb.txt
+
+      - name: Compile native causal model
+        run: make causal-lm BUILD_DIR=build-cosmos
+
+      - name: Allocate ignored runtime directory and report capacity
+        run: |
+          run_dir="${RUNNER_TEMP}/vegai-cosmos-turkish-9gb"
+          mkdir -p "$run_dir"
+          echo "VEGAI_COSMOS_RUN_DIR=$run_dir" >> "$GITHUB_ENV"
+          df -h "${RUNNER_TEMP}"
+
+      - name: Build exact source-disjoint corpora and run exactly one native epoch
+        run: |
+          set -euo pipefail
+          # The controller resolves an immutable dataset revision, checks its
+          # CC-BY-4.0 card, deduplicates/filters source-derived UTF-8 records,
+          # and fails if it cannot emit exactly 9,000,000,000 train bytes plus
+          # a separate source-document-disjoint held-out corpus.  It launches
+          # one, and only one, causal `train` child.
+          python3 tools/run_cosmos_turkish_9gb.py \
+            --causal-bin "${GITHUB_WORKSPACE}/build-cosmos/vegai_causal_lm" \
+            --run-dir "${VEGAI_COSMOS_RUN_DIR}" \
+            --max-vocab 65538 --top-successors 12 \
+            --trigram-buckets 131072 --trigram-ways 4 --min-estimated-frequency 2 \
+            --train-timeout-seconds 14400 --evaluation-timeout-seconds 1800 \
+            --generation-timeout-seconds 120 --generation-tokens 48 --temperature 0.80 --seed 20261025 \
+            | tee "${RUNNER_TEMP}/vegai-cosmos-turkish-9gb-controller.stdout.json"
+
+      - name: Publish provenance, quality boundary, and real generated responses
+        if: always()
+        run: |
+          python3 - "${VEGAI_COSMOS_RUN_DIR}/result.json" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          result_path = Path(sys.argv[1])
+          summary_path = Path(sys.argv[2])
+          with summary_path.open("a", encoding="utf-8") as summary:
+              print("## Real 9 GB Turkish COSMOS causal-pretraining evidence", file=summary)
+              print(file=summary)
+              if not result_path.is_file():
+                  print("No completed result was published. Inspect failure.json and workflow logs; no success claim is valid.", file=summary)
+                  raise SystemExit(0)
+              result = json.loads(result_path.read_text(encoding="utf-8"))
+              print(f"Status: `{result.get('status')}`", file=summary)
+              dataset = result.get("dataset", {})
+              corpus = result.get("corpus", {})
+              native = result.get("native", {})
+              train = corpus.get("train", {})
+              heldout = corpus.get("heldout", {})
+              print(f"- Source: `{dataset.get('repository')}` at `{dataset.get('resolved_revision')}`", file=summary)
+              print(f"- Dataset-card licence: `{dataset.get('declared_license')}`; card SHA-256 `{dataset.get('dataset_card_sha256')}`", file=summary)
+              print(f"- Exact train bytes: `{train.get('bytes')}`; SHA-256 `{train.get('sha256')}`", file=summary)
+              print(f"- Exact source-document-disjoint held-out bytes: `{heldout.get('bytes')}`; SHA-256 `{heldout.get('sha256')}`", file=summary)
+              training = native.get("training", {})
+              report = training.get("native_train_report", {})
+              print("### Native training-only timing", file=summary)
+              print(file=summary)
+              print("| exact epochs | native causal update seconds | raw tokens | raw token/s |", file=summary)
+              print("|---:|---:|---:|---:|", file=summary)
+              print(
+                  f"| {training.get('exact_epochs')} | {training.get('native_training_epoch_wall_seconds')} | "
+                  f"{report.get('raw_tokens')} | {training.get('raw_training_tokens_per_second')} |",
+                  file=summary,
+              )
+              print(file=summary)
+              print(training.get('timing_scope', ''), file=summary)
+              evaluation = native.get("heldout_evaluation", {}).get("report", {})
+              print("### Frozen source-document-disjoint held-out causal metric", file=summary)
+              print(file=summary)
+              print("| eligible transitions | top-1 accuracy | bounded-successor coverage | trigram context hits | bigram context hits |", file=summary)
+              print("|---:|---:|---:|---:|---:|", file=summary)
+              print(
+                  f"| {evaluation.get('eligible_transitions')} | {evaluation.get('top1_accuracy')} | "
+                  f"{evaluation.get('successor_coverage')} | {evaluation.get('trigram_context_hits')} | "
+                  f"{evaluation.get('bigram_context_hits')} |",
+                  file=summary,
+              )
+              print(file=summary)
+              print("### Actual native prompt/response continuations", file=summary)
+              print(file=summary)
+              for item in native.get("generated_prompt_responses", []):
+                  print(f"- **Prompt:** {item.get('prompt')}", file=summary)
+                  print(f"  **Response:** {item.get('response')}", file=summary)
+              print(file=summary)
+              print(
+                  "Interpretation boundary: these are stochastic continuations from a bounded causal n-gram sketch. "
+                  "They are not evidence of factual correctness, instruction following, general intelligence, or a neural LLM.",
+                  file=summary,
+              )
+          PY
+
+      - name: Upload auditable lineage without uploading 9 GB source text
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cosmos-turkish-9gb-causal-evidence-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/vegai-cosmos-turkish-9gb/result.json
+            ${{ runner.temp }}/vegai-cosmos-turkish-9gb/failure.json
+            ${{ runner.temp }}/vegai-cosmos-turkish-9gb/corpus-manifest.json
+            ${{ runner.temp }}/vegai-cosmos-turkish-9gb/dataset-card/README.md
+            ${{ runner.temp }}/vegai-cosmos-turkish-9gb/native-train.stdout.txt
+            ${{ runner.temp }}/vegai-cosmos-turkish-9gb/native-evaluate.stdout.txt
+            ${{ runner.temp }}/vegai-cosmos-turkish-9gb/cosmos-turkish-causal.vclm
+            ${{ runner.temp }}/vegai-cosmos-turkish-9gb-controller.stdout.json
+            !${{ runner.temp }}/vegai-cosmos-turkish-9gb/train-9gb.txt
+            !${{ runner.temp }}/vegai-cosmos-turkish-9gb/heldout-source-disjoint.txt
+            !${{ runner.temp }}/vegai-cosmos-turkish-9gb/dedup.sqlite3*
+            !${{ runner.temp }}/vegai-cosmos-turkish-9gb/download/**
+          if-no-files-found: warn
+          retention-days: 14

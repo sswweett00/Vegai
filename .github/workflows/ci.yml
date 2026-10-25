@@ -109,6 +109,25 @@ jobs:
           ./build-ci/vegai_pretrain resume examples/corpus/toy_hdc_corpus.txt "$checkpoint" \
             --epochs 1 --query queen
 
+      - name: Run native causal Turkish next-token train/evaluate/generate smoke test
+        run: |
+          set -euo pipefail
+          checkpoint="${RUNNER_TEMP}/vegai-causal-smoke.vclm"
+          ./build-ci/vegai_causal_lm train examples/corpus/mini_turkish_causal_utf8.txt "$checkpoint" \
+            --max-vocab 1026 --top-successors 4 --trigram-buckets 32 --trigram-ways 2 --min-estimated-frequency 1 \
+            | tee "${RUNNER_TEMP}/causal-train.txt"
+          test -s "$checkpoint"
+          grep -q '"phase":"train"' "${RUNNER_TEMP}/causal-train.txt"
+          ./build-ci/vegai_causal_lm evaluate "$checkpoint" examples/corpus/mini_turkish_causal_utf8.txt \
+            | tee "${RUNNER_TEMP}/causal-evaluate.txt"
+          grep -q '"phase":"evaluate"' "${RUNNER_TEMP}/causal-evaluate.txt"
+          ./build-ci/vegai_causal_lm generate "$checkpoint" "Türkiye'nin başkenti" \
+            --tokens 16 --temperature 0.80 --seed 7 | tee "${RUNNER_TEMP}/causal-generate.txt"
+          grep -q '^CAUSAL_RESPONSE: ' "${RUNNER_TEMP}/causal-generate.txt"
+
+      - name: Verify exact-byte COSMOS causal evidence controller contracts without downloading data
+        run: python3 tools/verify_cosmos_turkish_9gb.py
+
       - name: Run independent Python reference verification
         run: python3 tools/verify_reference.py
 

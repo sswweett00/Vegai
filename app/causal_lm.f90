@@ -12,8 +12,8 @@ program vegai_causal_lm
    type(causal_lm_evaluation_t) :: evaluation
    character(len=4096) :: completion
    integer(int32) :: status, max_tokens
-   integer(int64) :: seed
-   real(real64) :: temperature
+   integer(int64) :: seed, epoch_clock_start, epoch_clock_end, epoch_clock_rate, epoch_clock_max, epoch_clock_delta
+   real(real64) :: temperature, epoch_seconds
    integer :: argument_count
 
    argument_count = command_argument_count()
@@ -32,11 +32,25 @@ program vegai_causal_lm
       if (status /= CLM_OK) call fail('causal model allocation failed', status)
       call causal_lm_build_vocabulary(model, trim(corpus_path), vocabulary_metrics, status)
       if (status /= CLM_OK) call fail('causal vocabulary pass failed', status)
+      ! This timer is deliberately adjacent to the exactly-one causal update
+      ! pass. Vocabulary selection, checkpoint serialization, CLI startup,
+      ! compilation, corpus construction, held-out evaluation, and CI work are
+      ! all outside its scope.
+      call system_clock(count=epoch_clock_start, count_rate=epoch_clock_rate, count_max=epoch_clock_max)
+      if (epoch_clock_rate <= 0_int64) call fail('native training clock is unavailable', CLM_ERR_IO)
       call causal_lm_train_file(model, trim(corpus_path), training_metrics, status)
+      call system_clock(count=epoch_clock_end)
       if (status /= CLM_OK) call fail('causal training epoch failed', status)
+      if (epoch_clock_end >= epoch_clock_start) then
+         epoch_clock_delta = epoch_clock_end - epoch_clock_start
+      else
+         epoch_clock_delta = epoch_clock_max - epoch_clock_start + 1_int64 + epoch_clock_end
+      end if
+      epoch_seconds = real(epoch_clock_delta, real64) / real(epoch_clock_rate, real64)
+      if (epoch_seconds <= 0.0_real64) call fail('native training clock did not advance', CLM_ERR_IO)
       call causal_lm_save(model, trim(checkpoint_path), status)
       if (status /= CLM_OK) call fail('causal checkpoint save failed', status)
-      call print_train_report(config, vocabulary_metrics, training_metrics, causal_lm_model_bytes(model))
+      call print_train_report(config, vocabulary_metrics, training_metrics, causal_lm_model_bytes(model), epoch_seconds)
 
    case ('generate')
       if (argument_count < 3) call usage_and_stop()
@@ -69,11 +83,14 @@ program vegai_causal_lm
       call get_command_argument(2, checkpoint_path)
       call causal_lm_load(trim(checkpoint_path), model, status)
       if (status /= CLM_OK) call fail('causal checkpoint load failed', status)
-      write(output_unit, '(A,I0,A,I0,A,I0,A,I0,A,I0,A)') &
-         'CAUSAL_LM_JSON: {"schema_version":"vegai-causal-ngram-report/v1","active_vocabulary":', &
-         model%active_vocabulary, ',"max_vocabulary":', model%config%max_vocabulary, ',"successors_per_context":', &
-         model%config%successors_per_context, ',"trigram_buckets":', model%config%trigram_buckets, &
-         ',"trigram_ways":', model%config%trigram_ways, ',"model_bytes":', causal_lm_model_bytes(model), '}'
+      write(output_unit, '(A)') 'CAUSAL_LM_JSON: {'// &
+         '"schema_version":"vegai-causal-ngram-report/v1",'// &
+         '"active_vocabulary":'//trim(i32_text(model%active_vocabulary))//','// &
+         '"max_vocabulary":'//trim(i32_text(model%config%max_vocabulary))//','// &
+         '"successors_per_context":'//trim(i32_text(model%config%successors_per_context))//','// &
+         '"trigram_buckets":'//trim(i32_text(model%config%trigram_buckets))//','// &
+         '"trigram_ways":'//trim(i32_text(model%config%trigram_ways))//','// &
+         '"model_bytes":'//trim(i64_text(causal_lm_model_bytes(model)))//'}'
 
    case ('help', '--help', '-h')
       call print_help()
@@ -163,10 +180,11 @@ contains
       end if
    end subroutine parse_generate_options
 
-   subroutine print_train_report(train_config, vocabulary, training, model_bytes)
+   subroutine print_train_report(train_config, vocabulary, training, model_bytes, training_epoch_seconds)
       type(causal_lm_config_t), intent(in) :: train_config
       type(causal_lm_metrics_t), intent(in) :: vocabulary, training
       integer(int64), intent(in) :: model_bytes
+      real(real64), intent(in) :: training_epoch_seconds
 
       write(output_unit, '(A,I0)') 'vocabulary pass raw tokens: ', vocabulary%raw_tokens
       write(output_unit, '(A,I0)') 'active vocabulary: ', training%active_vocabulary
@@ -184,6 +202,7 @@ contains
          '"unknown_training_tokens":'//trim(i64_text(training%unknown_training_tokens))//','// &
          '"bigram_events":'//trim(i64_text(training%bigram_events))//','// &
          '"trigram_events":'//trim(i64_text(training%trigram_events))//','// &
+         '"training_epoch_wall_seconds":'//trim(real_text(training_epoch_seconds))//','// &
          '"active_vocabulary":'//trim(i32_text(int(training%active_vocabulary, int32)))//','// &
          '"max_vocabulary":'//trim(i32_text(train_config%max_vocabulary))//','// &
          '"successors_per_context":'//trim(i32_text(train_config%successors_per_context))//','// &

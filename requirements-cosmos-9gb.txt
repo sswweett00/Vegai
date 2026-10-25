@@ -1,0 +1,4 @@
+# Runtime dependencies for tools/run_cosmos_turkish_9gb.py only.
+# The native language-model train/generate/evaluate executable remains Fortran.
+huggingface_hub>=0.28.0,<1.0.0
+pyarrow>=17.0.0,<24.0.0
