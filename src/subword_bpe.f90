@@ -353,9 +353,13 @@ contains
       end do
       do while (heap_count > 0_int32)
          call heap_pop(heap_positions, heap_ranks, heap_count, popped_position, popped_rank)
-         if (popped_position <= 0_int32 .or. .not. active(popped_position)) cycle
+         ! Fortran does not guarantee short-circuit evaluation of `.or.`, so
+         ! guard zero sentinels before indexing the linked-list arrays.
+         if (popped_position <= 0_int32) cycle
+         if (.not. active(popped_position)) cycle
          right_position = following(popped_position)
-         if (right_position <= 0_int32 .or. .not. active(right_position)) cycle
+         if (right_position <= 0_int32) cycle
+         if (.not. active(right_position)) cycle
          call lookup_merge(model, symbols(popped_position), symbols(right_position), candidate_token, candidate_rank, found)
          if (.not. found .or. candidate_rank /= popped_rank) cycle
          symbols(popped_position) = candidate_token
