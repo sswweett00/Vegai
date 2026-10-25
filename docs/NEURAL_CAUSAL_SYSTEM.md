@@ -230,6 +230,8 @@ The implemented update is the trainable tied output head only. For softmax \(p\)
 
 `neural_pretraining` applies this update after each teacher-forced causal step, with explicit hidden-norm clipping and an explicit per-value embedding/bias envelope. Because `E` is tied, these output-head updates also affect later input embeddings; gradients through that later effect and through the causal core are intentionally not claimed.
 
+Training-system v2 wraps that exact gradient in a standard optimizer layer without widening the scope above: **AdamW** (bias-corrected first/second moments, decoupled weight decay on embeddings only) or the legacy SGD update; optional label smoothing (reported NLL is always the unsmoothed value); and a learning-rate schedule (constant, linear-warmup/inverse-square-root, or linear-warmup/cosine) that is a *pure function of the persisted update counter*. Checkpoint format **v3** serializes the optimizer/schedule configuration and the exact AdamW moments, so `full` and `chunk + checkpoint + chunk` streams remain bit-identical (executable test); v2 checkpoints still load with their original SGD semantics. Metrics now include perplexity and top-1/top-5 ranks of the true token under the pre-update distribution, and the CLI adds a no-update `evaluate` command, an `init-checkpoint` baseline command, explicit shape/hyperparameter options, and `tokenizer-train-fast` (an in-memory apply-merge learner proven merge-identical to the exact-rescan trainer by test). A governed real-Turkish epoch contract on top of these pieces lives in [`TURKISH_99B_NEURAL_PRETRAINING.md`](TURKISH_99B_NEURAL_PRETRAINING.md).
+
 A checkpoint can be sampled through the integrated causal surface:
 
 ```text
@@ -272,6 +274,8 @@ The native smoke test verifies only that a tiny synthetic alternating-token task
 | No-repeat masking and same-seed sampling | native property test |
 | Convex calibration non-worse supplied-set NLL | native property test |
 | Tied-output toy-loss update/checkpoint round trip | `vegai_neural_pretrain smoke` in Fortran CI |
+| AdamW moment checkpoint bit-identity (v3) + schedule anchors | native property tests in `test/test_all.f90` |
+| In-memory apply-merge ≡ exact-rescan merge sequence | native property test (same token ids on probe record) |
 | Byte-BPE → two checkpointed continuous chunks → deterministic generation wiring | native Fortran CI on the immutable eight-record fixture |
 | Actual Turkish quality/throughput benchmark | **Not yet established** |
 
