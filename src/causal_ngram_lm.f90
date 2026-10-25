@@ -810,10 +810,22 @@ contains
 
       evaluation%eligible_transitions = evaluation%eligible_transitions + 1_int64
       call find_trigram_context(model, previous_two, previous_one, bucket, way, found)
-      if (found .and. model%trigram_totals(way, bucket) > 0_int64) then
-         evaluation%trigram_context_hits = evaluation%trigram_context_hits + 1_int64
-         call select_best_successor(model%trigram_successors(:, way, bucket), model%trigram_counts(:, way, bucket), &
-                                    predicted, target, covered)
+      ! Fortran does not guarantee short-circuit evaluation of `.and.`.  Keep
+      ! the bounds-bearing `way` dereference inside a nested branch so a normal
+      ! cache miss (way=0) cannot access array element zero under checked builds.
+      if (found) then
+         if (model%trigram_totals(way, bucket) > 0_int64) then
+            evaluation%trigram_context_hits = evaluation%trigram_context_hits + 1_int64
+            call select_best_successor(model%trigram_successors(:, way, bucket), model%trigram_counts(:, way, bucket), &
+                                       predicted, target, covered)
+         else if (model%bigram_totals(previous_one) > 0_int64) then
+            evaluation%bigram_context_hits = evaluation%bigram_context_hits + 1_int64
+            call select_best_successor(model%bigram_successors(:, previous_one), model%bigram_counts(:, previous_one), &
+                                       predicted, target, covered)
+         else
+            predicted = 0_int32
+            covered = .false.
+         end if
       else if (model%bigram_totals(previous_one) > 0_int64) then
          evaluation%bigram_context_hits = evaluation%bigram_context_hits + 1_int64
          call select_best_successor(model%bigram_successors(:, previous_one), model%bigram_counts(:, previous_one), &
@@ -970,9 +982,18 @@ contains
       output_length = 0_int32
       do token_index = 1_int32, max_new_tokens
          call find_trigram_context(model, previous_two, previous_one, bucket, way, found)
-         if (found .and. model%trigram_totals(way, bucket) > 0_int64) then
-            call sample_successor(model%trigram_successors(:, way, bucket), model%trigram_counts(:, way, bucket), &
-                                  temperature, random_state, selected)
+         ! See evaluate_transition: a miss deliberately returns way=0, and
+         ! Fortran logical operators are not required to short-circuit.
+         if (found) then
+            if (model%trigram_totals(way, bucket) > 0_int64) then
+               call sample_successor(model%trigram_successors(:, way, bucket), model%trigram_counts(:, way, bucket), &
+                                     temperature, random_state, selected)
+            else if (model%bigram_totals(previous_one) > 0_int64) then
+               call sample_successor(model%bigram_successors(:, previous_one), model%bigram_counts(:, previous_one), &
+                                     temperature, random_state, selected)
+            else
+               exit
+            end if
          else if (model%bigram_totals(previous_one) > 0_int64) then
             call sample_successor(model%bigram_successors(:, previous_one), model%bigram_counts(:, previous_one), &
                                   temperature, random_state, selected)
