@@ -280,7 +280,8 @@ contains
    ! to the byte-BPE codec. The fixed record cap is an explicit bounded-I/O
    ! contract: records too large for the caller-provided token buffer are
    ! counted as truncations rather than silently partially trained.
-   subroutine neural_train_utf8_file(model, bpe, path, config, state, metrics, status, skip_source_records)
+   subroutine neural_train_utf8_file(model, bpe, path, config, state, metrics, status, skip_source_records, &
+                                      maximum_new_source_records)
       type(neural_decoder_t), intent(inout) :: model
       type(bpe_model_t), intent(in) :: bpe
       character(len=*), intent(in) :: path
@@ -291,19 +292,25 @@ contains
       ! Resume only after validating identical source provenance/order outside
       ! this low-level byte-stream routine.
       integer(int64), intent(in), optional :: skip_source_records
+      ! Stop after this many newly consumed source records. Together with the
+      ! explicit skip cursor this permits checkpointed continuous chunks.
+      integer(int64), intent(in), optional :: maximum_new_source_records
       character(len=FILE_LINE_BYTES) :: line
       integer(int32), allocatable :: tokens(:)
       integer(int32) :: token_count, bpe_status, line_bytes
-      integer(int64) :: skipped_source_records, source_record
+      integer(int64) :: skipped_source_records, source_record, source_records_this_call, source_record_limit
       integer :: unit, io_status, allocation_status
 
       status = NPT_OK
       skipped_source_records = 0_int64
+      source_record_limit = huge(0_int64)
       if (present(skip_source_records)) skipped_source_records = skip_source_records
+      if (present(maximum_new_source_records)) source_record_limit = maximum_new_source_records
       if (.not. state%ready) call neural_train_state_init(state)
       if (.not. neural_decoder_is_ready(model) .or. .not. bpe_is_initialized(bpe) .or. &
           .not. neural_train_config_is_valid(config) .or. len_trim(path) == 0 .or. &
-          skipped_source_records < 0_int64 .or. model%config%vocabulary_size < bpe%token_count) then
+          skipped_source_records < 0_int64 .or. source_record_limit < 1_int64 .or. &
+          model%config%vocabulary_size < bpe%token_count) then
          status = NPT_ERR_INVALID_ARGUMENT
          return
       end if
@@ -319,7 +326,9 @@ contains
          return
       end if
       source_record = 0_int64
+      source_records_this_call = 0_int64
       do
+         if (source_records_this_call >= source_record_limit) exit
          line = ''
          read(unit, '(A)', iostat=io_status) line
          if (io_status == iostat_end) exit
@@ -331,6 +340,7 @@ contains
          end if
          source_record = source_record + 1_int64
          if (source_record <= skipped_source_records) cycle
+         source_records_this_call = source_records_this_call + 1_int64
          state%source_records_completed = state%source_records_completed + 1_int64
          line_bytes = int(len_trim(line), int32)
          if (line_bytes < 2_int32) then
@@ -360,6 +370,12 @@ contains
             return
          end if
       end do
+      if (source_record < skipped_source_records) then
+         close(unit)
+         deallocate(tokens)
+         status = NPT_ERR_INCOMPATIBLE
+         return
+      end if
       close(unit, iostat=io_status)
       deallocate(tokens)
       if (io_status /= 0) status = NPT_ERR_IO

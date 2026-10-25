@@ -157,11 +157,27 @@ jobs:
           ./build-ci/vegai_neural_pretrain smoke | tee "${RUNNER_TEMP}/neural-pretrain-smoke.txt"
           grep -q '"nll_improved":true' "${RUNNER_TEMP}/neural-pretrain-smoke.txt"
           grep -q '"checkpoint_exact":true' "${RUNNER_TEMP}/neural-pretrain-smoke.txt"
+          neural_fixture="examples/neural_pretraining/mini_turkish_byte_bpe.txt"
+          test "$(wc -c < "$neural_fixture")" = 444
+          printf '%s  %s\n' '131a8c6d817ca073e88fbaaad97e1400806516d8bf3a114f76e565a0527d14b4' "$neural_fixture" | sha256sum -c -
           bpe_path="${RUNNER_TEMP}/neural-smoke.bpe"
-          ./build-ci/vegai_neural_pretrain tokenizer-train examples/corpus/mini_turkish_causal_utf8.txt "$bpe_path" 264 \
+          ./build-ci/vegai_neural_pretrain tokenizer-train "$neural_fixture" "$bpe_path" 300 \
             | tee "${RUNNER_TEMP}/bpe-train-smoke.txt"
           grep -q '"schema_version":"vegai-byte-bpe-train/v1"' "${RUNNER_TEMP}/bpe-train-smoke.txt"
           test -s "$bpe_path"
+          neural_checkpoint="${RUNNER_TEMP}/neural-generation-smoke.vgnr"
+          ./build-ci/vegai_neural_pretrain train-chunk "$neural_fixture" "$neural_checkpoint" "$bpe_path" 4 \
+            | tee "${RUNNER_TEMP}/neural-train-chunk-1.txt"
+          ./build-ci/vegai_neural_pretrain train-chunk "$neural_fixture" "$neural_checkpoint" "$bpe_path" 4 \
+            | tee "${RUNNER_TEMP}/neural-train-chunk-2.txt"
+          grep -q '"source_records_completed":8' "${RUNNER_TEMP}/neural-train-chunk-2.txt"
+          ./build-ci/vegai_neural_pretrain generate "$neural_checkpoint" "$bpe_path" "Trabzon" 8 7 \
+            | tee "${RUNNER_TEMP}/neural-generate-smoke.txt"
+          ./build-ci/vegai_neural_pretrain generate "$neural_checkpoint" "$bpe_path" "Trabzon" 8 7 \
+            > "${RUNNER_TEMP}/neural-generate-repeat.txt"
+          cmp "${RUNNER_TEMP}/neural-generate-smoke.txt" "${RUNNER_TEMP}/neural-generate-repeat.txt"
+          grep -q '"mode":"causal-byte-bpe-retention-calibrated/v1"' "${RUNNER_TEMP}/neural-generate-smoke.txt"
+          grep -q '^NEURAL_GENERATION_END$' "${RUNNER_TEMP}/neural-generate-smoke.txt"
 
       - name: Verify exact-byte COSMOS causal evidence controller contracts without downloading data
         run: python3 tools/verify_cosmos_turkish_9gb.py

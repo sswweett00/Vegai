@@ -230,6 +230,14 @@ The implemented update is the trainable tied output head only. For softmax \(p\)
 
 `neural_pretraining` applies this update after each teacher-forced causal step, with explicit hidden-norm clipping and an explicit per-value embedding/bias envelope. Because `E` is tied, these output-head updates also affect later input embeddings; gradients through that later effect and through the causal core are intentionally not claimed.
 
+A checkpoint can be sampled through the integrated causal surface:
+
+```text
+vegai_neural_pretrain generate CHECKPOINT TOKENIZER PROMPT [TOKENS] [SEED]
+```
+
+It runs prompt tokens strictly left-to-right through the bounded state, applies the calibrated repetition-aware distribution before sampling each token, and decodes generated BPE symbols byte-for-byte. This is an inference plumbing/invariant surface, not a claim that an unbenchmarked checkpoint produces useful Turkish text.
+
 Checkpoint payloads include every neural parameter, decoder configuration, tokenizer cardinality/merge count binding, trainer configuration, update counters, source-record cursor, and cumulative NLL. A tokenizer is stored separately with `bpe_save`. Exact continuation requires all of the following:
 
 1. same checkpoint ABI/compiler family;
@@ -239,9 +247,15 @@ Checkpoint payloads include every neural parameter, decoder configuration, token
 5. same training configuration;
 6. resume from the recorded source position when checkpointing mid-corpus.
 
-The library exposes an explicit `skip_source_records` argument for the last item. The default CLI `resume` is intentionally an epoch-boundary operation rather than silently assuming a path identifies byte-identical provenance.
+The library exposes explicit `skip_source_records` and `maximum_new_source_records` arguments for the last item. The corresponding checkpointed CLI is:
 
-The native smoke test verifies only that a tiny synthetic alternating-token task lowers its evaluation NLL and that save/load reproduces next-step logits/counters exactly. This is an optimizer/checkpoint integrity result, not Turkish language-quality evidence.
+```text
+vegai_neural_pretrain train-chunk CORPUS CHECKPOINT TOKENIZER NEW_RECORDS [START_RECORD]
+```
+
+Without an explicit `START_RECORD`, an existing checkpoint’s recorded source cursor is used. This permits deterministic bounded chunks but does **not** authenticate that a replacement file at the same path has identical bytes/order; the caller must attest that boundary. The default `resume` command remains intentionally an epoch-boundary operation rather than silently assuming a path identifies byte-identical provenance.
+
+The native smoke test verifies only that a tiny synthetic alternating-token task lowers its evaluation NLL and that save/load reproduces next-step logits/counters exactly. The repository also contains an MIT repository-authored, eight-record UTF-8 fixture at `examples/neural_pretraining/`; its byte count and SHA-256 are CI-checked before a byte-BPE → train → deterministic-generate plumbing smoke. Neither fixture is Turkish language-quality evidence.
 
 ---
 
@@ -258,6 +272,7 @@ The native smoke test verifies only that a tiny synthetic alternating-token task
 | No-repeat masking and same-seed sampling | native property test |
 | Convex calibration non-worse supplied-set NLL | native property test |
 | Tied-output toy-loss update/checkpoint round trip | `vegai_neural_pretrain smoke` in Fortran CI |
+| Byte-BPE → two checkpointed continuous chunks → deterministic generation wiring | native Fortran CI on the immutable eight-record fixture |
 | Actual Turkish quality/throughput benchmark | **Not yet established** |
 
 Run the locally available target when a Fortran compiler is present:

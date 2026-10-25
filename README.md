@@ -202,6 +202,7 @@ make chat
 # Deterministic byte-BPE merge artifact oluşturup onu yeni neural run'a bağla:
 ./build/vegai_neural_pretrain tokenizer-train examples/corpus/mini_turkish_causal_utf8.txt /tmp/mini.bpe 264
 ./build/vegai_neural_pretrain train examples/corpus/mini_turkish_causal_utf8.txt /tmp/mini.vgnr /tmp/mini.bpe 1
+./build/vegai_neural_pretrain generate /tmp/mini.vgnr /tmp/mini.bpe "Türkiye" 16 7
 
 # Varsayılan native control-plane doğrulaması: Python interpreter çağırmaz.
 # Fortran property testleri + profile + gerçek train/checkpoint/load smoke.

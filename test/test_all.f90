@@ -33,6 +33,7 @@ program test_all
    call test_resonator_network()
    call test_tokenless_signal_field()
    call test_neural_causal_design()
+   call test_neural_continuation_checkpoint()
    call test_text_ingest()
    call test_fortran_control()
    call test_fortran_integrity()
@@ -767,6 +768,77 @@ contains
       call neural_decoder_state_destroy(stability_state)
       call neural_decoder_destroy(model)
    end subroutine test_neural_causal_design
+
+   subroutine test_neural_continuation_checkpoint()
+      type(bpe_model_t) :: bpe
+      type(neural_decoder_t) :: full_model, split_model, restored_model
+      type(neural_decoder_config_t) :: decoder_config
+      type(neural_train_config_t) :: train_config, restored_config
+      type(neural_train_state_t) :: full_state, split_state, restored_state
+      type(neural_train_metrics_t) :: full_metrics, split_metrics, resumed_metrics
+      integer(int32) :: status
+      integer :: unit, io_status
+      character(len=*), parameter :: corpus_path = 'test_neural_continuation.txt'
+      character(len=*), parameter :: checkpoint_path = 'test_neural_continuation.vgnr'
+
+      ! This asserts the actual continuous contract: same source record order,
+      ! model bytes, trainer cursor, and tokenizer cardinality yield the same
+      ! result whether four records are trained at once or 2 + checkpoint + 2.
+      open(newunit=unit, file=corpus_path, status='replace', action='write', iostat=io_status)
+      call assert_true(io_status == 0, 'temporary continuous neural corpus opens')
+      if (io_status == 0) then
+         write(unit, '(A)') 'abababab'
+         write(unit, '(A)') 'babababa'
+         write(unit, '(A)') 'abababab'
+         write(unit, '(A)') 'babababa'
+         close(unit)
+      end if
+      call bpe_init(bpe, 1_int32, status)
+      call assert_i32_equal(status, BPE_OK, 'continuation byte tokenizer initializes')
+      decoder_config = neural_decoder_config_t(vocabulary_size=256_int32, width=16_int32, heads=2_int32, &
+                                               local_window=4_int32, ffn_width=32_int32)
+      train_config = neural_train_config_t(learning_rate=0.025_real64, gradient_clip_norm=4.0_real64, &
+                                           embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32)
+      call neural_decoder_init(full_model, decoder_config, 2468_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'full continuous model initializes')
+      call neural_decoder_init(split_model, decoder_config, 2468_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'split continuous model initializes')
+      call neural_train_state_init(full_state)
+      call neural_train_state_init(split_state)
+      call neural_train_metrics_reset(full_metrics)
+      call neural_train_utf8_file(full_model, bpe, corpus_path, train_config, full_state, full_metrics, status)
+      call assert_i32_equal(status, NPT_OK, 'one-pass continuous neural training succeeds')
+      call neural_train_metrics_reset(split_metrics)
+      call neural_train_utf8_file(split_model, bpe, corpus_path, train_config, split_state, split_metrics, status, &
+                                  maximum_new_source_records=2_int64)
+      call assert_i32_equal(status, NPT_OK, 'first bounded continuous chunk succeeds')
+      call assert_true(split_state%source_records_completed == 2_int64, 'first chunk publishes exact source cursor')
+      call neural_checkpoint_save(checkpoint_path, split_model, bpe, train_config, split_state, status)
+      call assert_i32_equal(status, NPT_OK, 'continuous chunk checkpoint saves')
+      call neural_checkpoint_load(checkpoint_path, bpe, restored_model, restored_config, restored_state, status)
+      call assert_i32_equal(status, NPT_OK, 'continuous chunk checkpoint loads')
+      call neural_train_metrics_reset(resumed_metrics)
+      call neural_train_utf8_file(restored_model, bpe, corpus_path, restored_config, restored_state, resumed_metrics, status, &
+                                  skip_source_records=restored_state%source_records_completed, &
+                                  maximum_new_source_records=2_int64)
+      call assert_i32_equal(status, NPT_OK, 'resumed bounded continuous chunk succeeds')
+      call assert_true(restored_state%source_records_completed == 4_int64 .and. &
+                       restored_state%updates_completed == full_state%updates_completed, &
+                       'resumed chunk restores and advances exact cursor/update state')
+      call assert_true(all(full_model%token_embedding == restored_model%token_embedding) .and. &
+                       all(full_model%output_bias == restored_model%output_bias) .and. &
+                       full_state%cumulative_nll == restored_state%cumulative_nll, &
+                       'same-source continuous checkpoint resume is bit-identical to one-pass update sequence')
+
+      call neural_decoder_destroy(full_model)
+      call neural_decoder_destroy(split_model)
+      call neural_decoder_destroy(restored_model)
+      call bpe_destroy(bpe)
+      open(newunit=unit, file=corpus_path, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+      open(newunit=unit, file=checkpoint_path, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+   end subroutine test_neural_continuation_checkpoint
 
    subroutine test_text_ingest()
       type(vocabulary_t) :: vocab
