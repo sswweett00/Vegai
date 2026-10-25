@@ -874,6 +874,11 @@ contains
          ! In hybrid mode the disclosed lexical evidence is intentionally part
          ! of grounding. The legacy semantic thresholds are not silently mixed
          ! into that different policy; callers set the explicit hybrid gates.
+         ! ``margin`` is the stable public active-ranking margin; a hybrid
+         ! winner can legitimately have lower raw semantic similarity than its
+         ! hybrid runner-up, so exposing that semantic difference as a grounding
+         ! margin would be negative and misleading.
+         answer%margin = answer%hybrid_margin
          if (answer%hybrid_score < index%config%minimum_hybrid_score .or. &
              answer%hybrid_margin < index%config%minimum_hybrid_margin) return
       else

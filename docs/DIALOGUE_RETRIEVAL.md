@@ -168,8 +168,11 @@ ile aktif grounding policy esiklerini yayinlar.
    exact adjacent bigram ve en az üç-character ortak-root sonrası bounded edit
    / ortak-prefix biçimbirim kanıtı hesaplanır. `semantic_weight` ile normalize edilen hybrid score,
    semantic score ve lexical score ayrı yayımlanır; ranking/gate yalnız
-   `--min-hybrid-score`/`--min-hybrid-margin` ile yapılır. Eski semantic
-   eşikler hibrit moda gizlice uygulanmaz.
+   `--min-hybrid-score`/`--min-hybrid-margin` ile yapılır. CLI'deki legacy
+   `grounding margin` her zaman aktif ranker margin'idir (hybrid modda
+   `hybrid grounding margin` ile aynıdır); bipolar runner candidate'ın raw
+   semantic skoru daha yüksek olabilir. Eski semantic eşikler hibrit moda
+   gizlice uygulanmaz.
 
 Bu prefix heuristic Türkçe morfoloji desteği sağlar; anlam eşdeğerliği, factual
 truth veya doğal dil anlayışı kanıtı değildir. Türkçe paraphrase/coverage
