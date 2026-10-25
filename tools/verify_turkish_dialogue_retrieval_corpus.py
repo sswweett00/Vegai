@@ -143,6 +143,23 @@ def main() -> int:
                            (output / "train_exact_retrieval_contract.jsonl").read_text(encoding="utf-8").splitlines()]
             require(len(exact_cases) == 3 and all(case["prompt"] == case["expected_prompt"] for case in exact_cases),
                     "train exact retrieval package contract is not explicitly scoped")
+            native_exact = (output / "train_exact_retrieval_contract.tsv").read_text(encoding="utf-8").splitlines()
+            native_validation = (output / "validation_source_disjoint_abstention.tsv").read_text(encoding="utf-8").splitlines()
+            native_test = (output / "test_source_disjoint_abstention.tsv").read_text(encoding="utf-8").splitlines()
+            require(len(native_exact) == 3 and all(row.count("\t") == 2 and row.rsplit("\t", 1)[1]
+                    for row in native_exact),
+                    "native exact-evaluation TSV does not preserve explicit expected prompts")
+            require(len(native_validation) == 1 and len(native_test) == 1
+                    and native_validation[0].count("\t") == 2 and native_test[0].count("\t") == 2
+                    and native_validation[0].endswith("\t") and native_test[0].endswith("\t"),
+                    "native source-disjoint TSV does not preserve empty expected-abstention fields")
+            for identity_name in (
+                "train_exact_retrieval_contract_native_tsv",
+                "validation_source_disjoint_abstention_native_tsv",
+                "test_source_disjoint_abstention_native_tsv",
+            ):
+                require(identity_name in manifest["outputs"],
+                        f"manifest lacks native batch evaluation output identity: {identity_name}")
             exact_sample = [json.loads(line) for line in
                             (output / "train_exact_retrieval_evidence_sample.jsonl").read_text(encoding="utf-8").splitlines()]
             require(len(exact_sample) == 3 and {case["id"] for case in exact_sample} == {case["id"] for case in exact_cases},

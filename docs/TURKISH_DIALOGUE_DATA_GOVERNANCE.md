@@ -90,15 +90,20 @@ Output package:
 | `knowledge_train.tsv` | yalnız train split'ten UTF-8 `prompt<TAB>literal response`; native `vegai_chat`'e yüklenir |
 | `pretrain_train_ascii.txt` | prompt ve response turn'lerinin strict ASCII projection'ı; native `vegai_pretrain` input'u |
 | `train_exact_retrieval_contract.jsonl` | train TSV key'lerinin literal lookup integrity suite'i; held-out/generalization metriği değildir |
-| `*_evidence_sample.jsonl` | full setten SHA-256-ranked deterministic bounded subset; evaluator prefix'i sessizce ölçmesin diye CI evidence için kullanılır |
-| `validation_source_disjoint_abstention.jsonl` | validation konuşmalarından `expected_prompt: null` seti |
-| `test_source_disjoint_abstention.jsonl` | frozen test konuşmalarından `expected_prompt: null` seti |
-| `manifest.json` | source/output identity, dedupe sayıları, split isolation ve açık non-generative scope |
+| `*_evidence_sample.jsonl` | full setten SHA-256-ranked deterministic bounded subset; per-process JSONL evaluator prefix'i sessizce ölçmesin diye legacy/CI evidence için saklanır |
+| `train_exact_retrieval_contract.tsv` | aynı exact contract'ın `id<TAB>prompt<TAB>expected prompt` native batch projection'ı |
+| `validation_source_disjoint_abstention.jsonl` / `.tsv` | validation konuşmalarından `expected_prompt: null` seti ve native batch projection'ı |
+| `test_source_disjoint_abstention.jsonl` / `.tsv` | frozen test konuşmalarından `expected_prompt: null` seti ve native batch projection'ı |
+| `manifest.json` | source/output identity, dedupe sayıları, split isolation ve açık non-generative scope; tüm native TSV projection hash'lerini de bağlar |
 
 Python builder yalnız data/package orchestration'dır. Eğitilen HDC checkpoint,
-UTF-8 query normalize/lexical hybrid retrieval ve response rendering
-`src/turkish_text.f90`, `src/dialogue_retrieval.f90`, `app/pretrain.f90` ve
-`app/chat.f90` içindeki native Fortran path'tedir. Bu ayrım “Python tool var,
+UTF-8 query normalize/lexical hybrid retrieval, response rendering ve çok-case
+batch ölçümü `src/turkish_text.f90`, `src/dialogue_retrieval.f90`,
+`app/pretrain.f90`, `app/chat.f90` ve `app/dialogue_eval.f90` içindeki native
+Fortran path'tedir. `vegai_dialogue_eval` checkpoint ve TSV index'ini yalnız
+bir kez yükler; strict `id<TAB>prompt<TAB>expected-prompt` stream'ini stateless
+çalıştırır ve raw prompt/response içermeyen count-only JSON raporu üretir. Boş
+üçüncü kolon explicit expected abstention'dır. Bu ayrım “Python tool var,
 dolayısıyla proje generative model oldu” gibi yanlış bir sonucu engeller.
 
 ## Split ve evaluation anlamı
@@ -126,9 +131,16 @@ Bir sistemin gerçekten ilgili cevabı seçebildiğini ölçmek için ayrıca:
 5. human Turkish naturalness/factuality değerlendirmesi
 
 gereklidir. `tools/dialogue_evaluation.py` UTF-8 held-out cases ile semantic ve
-hybrid policy'nin binary/checkpoint/KB/evaluation digest'lerini bağlar. Mevcut
-99M Wikipedia semantic score'larının zayıf olduğuna dair gerçek kanıt nedeniyle,
-threshold'lar bu frozen değerlendirme olmadan “iyileşme” diye sunulamaz.
+hybrid policy'nin binary/checkpoint/KB/evaluation digest'lerini bağlar.
+Buna ek olarak `tools/calibrate_dialogue_abstention_policy.py`, native
+`vegai_dialogue_eval` ile **yalnız validation TSV** üzerinde önceden ilan edilmiş
+score-floor adaylarını ölçer, leakage cap'ini geçen en düşük floor'u seçer ve
+strict train exact contract'ını en yüksek adayda doğrular. Test TSV CLI'a hiç
+verilmez; seçilen policy ancak sonra frozen test üzerinde bir kez ölçülür.
+Calibration kararı, report SHA-256'leriyle ayrı immutable JSON artifact'tır.
+Mevcut 99M Wikipedia semantic score'larının zayıf olduğuna dair gerçek kanıt
+nedeniyle, bu source-disjoint calibration/test ayrımı olmadan threshold'lar
+“iyileşme” diye sunulamaz.
 
 ## Gerçek run için güvenli başlangıç komutları
 
@@ -151,6 +163,24 @@ alınmalıdır):
 İkinci komuttaki response yalnız TSV'den gelir. Çıktıdaki `best bipolar
 similarity`, `best lexical similarity`, `hybrid grounding score`, runner-up ve
 margin birlikte saklanmalıdır; yalnız seçilmiş güzel örnekler raporlanmaz.
+
+Tam seti process-per-prompt yerine native batch ölçmek için:
+
+```bash
+./build/vegai_dialogue_eval evaluate /tmp/trdd5k.vgai \
+  /tmp/vegai-trdd5k-package/knowledge_train.tsv \
+  /tmp/vegai-trdd5k-package/validation_source_disjoint_abstention.tsv \
+  --max-entries 5000 --max-cases 2000 --min-similarity -1 --min-margin 0 \
+  --semantic-weight 0.25 --lexical-weight 0.75 \
+  --min-hybrid-score 0.80 --min-hybrid-margin 0.03 > /tmp/validation-report.json
+```
+
+Release pipeline bunun yerine `calibrate_dialogue_abstention_policy.py` kullanır:
+validation-only candidate raporlarını ve en yüksek score'daki full exact train
+contract'ı üretir; seçilmiş floor ile test setini **yalnız seçimin ardından**
+ölçer. `0.80` burada örnektir, yayınlanmış policy değeri değildir. Calibration
+false-grounding azaltımı, unseen response relevance veya sohbet doğallığı için
+kanıt sayılmaz.
 
 ## “Çok doğal sohbet”e geçiş kapısı
 

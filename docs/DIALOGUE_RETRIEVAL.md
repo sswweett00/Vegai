@@ -44,6 +44,14 @@ hyper_types + text_tokenizer + hdc_pretraining checkpoint
   grounded-prompt accuracy/precision/recall ve abstention metriklerini ölçer;
   checkpoint/KB/binary/source digest'lerini report'a bağlar ve explicit release
   threshold'larını gate eder.
+- `app/dialogue_eval.f90` / `vegai_dialogue_eval`: checkpoint ve knowledge TSV
+  index'ini bir kez yükleyen all-Fortran, stateless, strict three-column TSV
+  batch evaluator. Raw prompt/response yayınlamadan exact retrieval, rendered
+  abstention, false grounding ve OOV safe rejection count'larını JSON'a yazar.
+- `tools/calibrate_dialogue_abstention_policy.py`: native batch evaluator'ı
+  sadece validation source-disjoint setiyle çalıştırır; önceden ilan edilmiş
+  hybrid score floor'lar arasında leakage cap'ini geçen en düşük değeri seçer.
+  Frozen test set bu aracın girdisi değildir.
 
 Bu ayrim chat UX'ini training/continual journal/production control-plane'den
 ayri tutar. Dialogue index checkpoint'e yazilmaz; bilgi bankasinin versionu,
@@ -194,6 +202,40 @@ ister. Varsayilan daha esnek mod, en az `--min-known-tokens` active token varsa
 bilinmeyen filler token'lari sayar ve raporlar; cevap yine similarity/margin
 kapisindan gecmek zorundadir.
 
+## Native batch evidence ve validation-only calibration
+
+`vegai_dialogue_eval` yalnız retrieval davranışını ölçer; decoder çağırmaz,
+cevap üretmez ve raw evaluation metnini output'a yazmaz. Input satırı tam üç
+kolondur:
+
+```text
+case-id<TAB>prompt<TAB>expected-prompt
+```
+
+Boş `expected-prompt`, expected abstention'dır. Program `--max-cases` aşılırsa
+sessizce prefix ölçmez; nonzero exit ile fail eder. No-active-checkpoint-token
+sonucu rendered abstention sayılmaz: expected-null case için ayrı
+`oov_rejected_abstain_cases`, expected-grounded case için ayrı
+`oov_rejected_expected_grounded_cases` yazılır. Böylece OOV retleri gerçek
+rendered abstention ile karıştırılmaz.
+
+```bash
+./build/vegai_dialogue_eval evaluate /tmp/model.vgai knowledge.tsv validation.tsv \
+  --max-entries 5000 --max-cases 2000 --min-similarity -1 --min-margin 0 \
+  --semantic-weight .25 --lexical-weight .75 \
+  --min-hybrid-score .80 --min-hybrid-margin .03 > validation-native.json
+```
+
+Üretim evidence workflow'u doğrudan sabit `.80` kullanmaz. Önce
+`calibrate_dialogue_abstention_policy.py` validation TSV'de önceden ilan edilen
+floor listesini çalıştırır, strictest candidate'da train exact literal contract
+başarısını doğrular ve validation false-grounded-rate cap'ini geçen **en düşük**
+floor'u seçer. Düşük floor seçimi potansiyel retrieval coverage'ı gereksiz
+azaltmamak içindir; relevance kanıtı değildir. Calibration JSON'u checkpoint,
+KB, train/validation TSV ve native report hash'lerini bağlar. Frozen test TSV
+bu seçim aracına verilmez; seçimden sonra, önceden ilan edilmiş baseline ile
+tek ölçüm için kullanılır.
+
 ## Held-out kalite değerlendirmesi ve release gate
 
 Grounding eşiğini yalnız örnek prompt'a bakarak seçmek güvenilirlik kanıtı
@@ -257,7 +299,13 @@ CTest'teki `vegai_dialogue_retrieval` gerçek Fortran binary'leriyle:
   denetler;
 - `vegai_dialogue_evaluation`, real binaries ile held-out exact grounding,
   expected abstention, privacy-preserving report, malformed evaluation schema
-  ve intentionally failed release-gate davranisini denetler.
+  ve intentionally failed release-gate davranisini denetler;
+- `vegai_native_dialogue_evaluator`, gerçek Fortran train/checkpoint ve strict
+  TSV stream ile stateless batch count'larını, OOV'nin ayrı sayılmasını,
+  raw-text sızıntısı olmamasını ve `--max-cases` fail-closed davranışını;
+- `vegai_dialogue_abstention_calibration`, fake evaluator ABI ile test setini
+  girdi kabul etmeyen validation-only lowest-safe-floor seçim kuralını
+  denetler.
 
 Bu testler retrieval/data-contract dogrulamasidir. Held-out natural-language
 kalitesi, güvenlik veya factual accuracy icin versioned bilgi bankasi, source

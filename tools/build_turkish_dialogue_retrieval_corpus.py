@@ -21,6 +21,9 @@ The generated package contains:
   ``test_source_disjoint_abstention.jsonl``: frozen source-disjoint negative
   retrieval sets.  They measure false grounding/abstention behaviour only;
   they do not mislabel unseen responses as known correct answers;
+* corresponding strict three-column ``.tsv`` projections: bounded native
+  Fortran batch-evaluation inputs that preserve an empty expected-prompt field
+  for expected abstention without exposing a JSON parser to model runtime;
 * ``manifest.json``: source/output SHA-256 identities, counts, split isolation,
   transformation version, licence and attribution supplied by the operator.
 
@@ -45,7 +48,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 PACKAGE_SCHEMA = "vegai-turkish-dialogue-retrieval-package/v1"
 EVALUATION_SCHEMA = "vegai-dialogue-evaluation-case/v1"
-TRANSFORMATION = "turkish-dialogue-jsonl-to-native-retrieval/v1"
+TRANSFORMATION = "turkish-dialogue-jsonl-to-native-retrieval/v2"
 MAX_SOURCE_LINE_BYTES = 64 * 1024
 MAX_DIALOGUE_TEXT_BYTES = 1024
 MAX_DIALOGUE_TURNS = 64
@@ -311,6 +314,36 @@ def render_abstention_evaluation(split_name: str, pairs: Sequence[tuple[str, int
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
+def render_native_evaluation_tsv(evaluation: bytes) -> bytes:
+    """Render strict native ``id<TAB>prompt<TAB>expected-prompt`` cases.
+
+    JSONL remains the human/audit-facing contract. This bounded TSV projection
+    allows the all-Fortran batch evaluator to load the native checkpoint and
+    index once rather than spawning a chat process for every query. An empty
+    third column denotes the explicit expected-abstention label. The builder's
+    prior source validation rejects control characters, so no user text can
+    introduce an extra TSV field or physical record.
+    """
+    rows: list[str] = []
+    for raw_line in evaluation.decode("utf-8").splitlines():
+        case = json.loads(raw_line)
+        case_id = case["id"]
+        prompt = case["prompt"]
+        expected = case["expected_prompt"]
+        require(isinstance(case_id, str) and isinstance(prompt, str),
+                "internal error: evaluation case is missing string id/prompt")
+        require(expected is None or isinstance(expected, str),
+                "internal error: evaluation expected_prompt must be string or null")
+        require("\t" not in case_id and "\t" not in prompt and "\n" not in case_id and "\n" not in prompt,
+                "internal error: evaluation TSV projection has a delimiter in id/prompt")
+        if expected is not None:
+            require("\t" not in expected and "\n" not in expected,
+                    "internal error: evaluation TSV projection has a delimiter in expected prompt")
+        rows.append(f"{case_id}\t{prompt}\t{expected or ''}")
+    require(rows, "internal error: cannot render empty native evaluation TSV")
+    return ("\n".join(rows) + "\n").encode("utf-8")
+
+
 def deterministic_evidence_sample(evaluation: bytes, maximum_cases: int) -> bytes:
     """Select a fixed, source-order-independent bounded evidence subset.
 
@@ -364,6 +397,9 @@ def build_package(arguments: argparse.Namespace) -> dict[str, object]:
     test_evaluation = render_abstention_evaluation("test", test_pairs)
     train_exact_sample = deterministic_evidence_sample(train_exact_evaluation, arguments.evidence_sample_cases)
     test_abstention_sample = deterministic_evidence_sample(test_evaluation, arguments.evidence_sample_cases)
+    train_exact_native_evaluation = render_native_evaluation_tsv(train_exact_evaluation)
+    validation_native_evaluation = render_native_evaluation_tsv(validation_evaluation)
+    test_native_evaluation = render_native_evaluation_tsv(test_evaluation)
 
     staging_parent = output.parent
     staging_parent.mkdir(parents=True, exist_ok=True)
@@ -373,15 +409,21 @@ def build_package(arguments: argparse.Namespace) -> dict[str, object]:
         pretraining_path = staging / "pretrain_train_ascii.txt"
         train_exact_path = staging / "train_exact_retrieval_contract.jsonl"
         train_exact_sample_path = staging / "train_exact_retrieval_evidence_sample.jsonl"
+        train_exact_native_path = staging / "train_exact_retrieval_contract.tsv"
         validation_path = staging / "validation_source_disjoint_abstention.jsonl"
+        validation_native_path = staging / "validation_source_disjoint_abstention.tsv"
         test_path = staging / "test_source_disjoint_abstention.jsonl"
+        test_native_path = staging / "test_source_disjoint_abstention.tsv"
         test_sample_path = staging / "test_source_disjoint_abstention_evidence_sample.jsonl"
         write_bytes_atomic(knowledge_path, knowledge)
         write_bytes_atomic(pretraining_path, pretraining)
         write_bytes_atomic(train_exact_path, train_exact_evaluation)
         write_bytes_atomic(train_exact_sample_path, train_exact_sample)
+        write_bytes_atomic(train_exact_native_path, train_exact_native_evaluation)
         write_bytes_atomic(validation_path, validation_evaluation)
+        write_bytes_atomic(validation_native_path, validation_native_evaluation)
         write_bytes_atomic(test_path, test_evaluation)
+        write_bytes_atomic(test_native_path, test_native_evaluation)
         write_bytes_atomic(test_sample_path, test_abstention_sample)
 
         outputs = {
@@ -389,8 +431,11 @@ def build_package(arguments: argparse.Namespace) -> dict[str, object]:
             "pretrain_train_ascii": output_identity(pretraining_path),
             "train_exact_retrieval_contract": output_identity(train_exact_path),
             "train_exact_retrieval_evidence_sample": output_identity(train_exact_sample_path),
+            "train_exact_retrieval_contract_native_tsv": output_identity(train_exact_native_path),
             "validation_source_disjoint_abstention": output_identity(validation_path),
+            "validation_source_disjoint_abstention_native_tsv": output_identity(validation_native_path),
             "test_source_disjoint_abstention": output_identity(test_path),
+            "test_source_disjoint_abstention_native_tsv": output_identity(test_native_path),
             "test_source_disjoint_abstention_evidence_sample": output_identity(test_sample_path),
         }
         manifest: dict[str, object] = {

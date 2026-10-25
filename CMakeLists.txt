@@ -114,6 +114,11 @@ target_link_libraries(vegai_field PRIVATE vegai_hds)
 add_executable(vegai_chat app/chat.f90)
 target_link_libraries(vegai_chat PRIVATE vegai_hds)
 
+# Stateless native batch evaluator. It reads a strict bounded TSV contract and
+# keeps source-disjoint retrieval evidence out of process-per-prompt wrappers.
+add_executable(vegai_dialogue_eval app/dialogue_eval.f90)
+target_link_libraries(vegai_dialogue_eval PRIVATE vegai_hds)
+
 # Pure-Fortran control plane: portable compiler profile, explicit bounded
 # resource arithmetic, and a same-host native train/checkpoint smoke path.
 # It deliberately does not require Python or invoke OS-specific shell probes.
@@ -275,6 +280,17 @@ if(VEGAI_BUILD_TESTS)
                     --chat-bin $<TARGET_FILE:vegai_chat>
         )
         set_tests_properties(vegai_dialogue_evaluation PROPERTIES TIMEOUT 180)
+        add_test(
+            NAME vegai_native_dialogue_evaluator
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_native_dialogue_evaluator.py
+                    --pretrain-bin $<TARGET_FILE:vegai_pretrain>
+                    --native-eval-bin $<TARGET_FILE:vegai_dialogue_eval>
+        )
+        set_tests_properties(vegai_native_dialogue_evaluator PROPERTIES TIMEOUT 180)
+        add_test(
+            NAME vegai_dialogue_abstention_calibration
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_dialogue_abstention_calibration.py
+        )
         add_test(
             NAME vegai_turkish_dialogue_corpus
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_turkish_dialogue_retrieval_corpus.py

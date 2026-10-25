@@ -37,12 +37,14 @@ APP := app/main.f90
 PRETRAIN_APP := app/pretrain.f90
 FIELD_APP := app/field.f90
 CHAT_APP := app/chat.f90
+DIALOGUE_EVAL_APP := app/dialogue_eval.f90
 CONTROL_APP := app/control.f90
 TEST_SOURCES := test/test_support.f90 test/test_all.f90
 ENGINE := $(BUILD_DIR)/hds_engine
 PRETRAIN := $(BUILD_DIR)/vegai_pretrain
 FIELD := $(BUILD_DIR)/vegai_field
 CHAT := $(BUILD_DIR)/vegai_chat
+DIALOGUE_EVAL := $(BUILD_DIR)/vegai_dialogue_eval
 CONTROL := $(BUILD_DIR)/vegai_control
 TEST_BINARY := $(BUILD_DIR)/vegai_tests
 # Runtime-only exact-size benchmark artifacts are intentionally ignored by Git.
@@ -54,10 +56,10 @@ FIXTURE_9MIB_REPORT ?= pretraining-runs/synthetic_hdc_9mib.json
 # remain ignored. Prefer the dedicated GitHub workflow for CI-hosted evidence.
 CONTINUOUS_900_RUN_DIR ?= pretraining-runs/synthetic_900mb_then_90mb
 
-.PHONY: all engine pretrain field chat control test fortran-check portable-runtime-check run run-pretrain run-field run-chat run-control check field-check optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check turkish-dialogue-data-check quality-check continuous-quality-check attested-pretrain-check lookup-cache-compare fixture-9mib verify-fixture-9mib pretrain-9mib pretrain-900mb-continuous clean clean-all debug portable native portable-test native-test
+.PHONY: all engine pretrain field chat dialogue-eval control test fortran-check portable-runtime-check run run-pretrain run-field run-chat run-control check field-check optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check turkish-dialogue-data-check quality-check continuous-quality-check attested-pretrain-check lookup-cache-compare fixture-9mib verify-fixture-9mib pretrain-9mib pretrain-900mb-continuous clean clean-all debug portable native portable-test native-test
 
 # Default target: portable optimized GNU binaries without host-only ISA flags.
-all: engine pretrain field chat control
+all: engine pretrain field chat dialogue-eval control
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)/mod
@@ -81,6 +83,11 @@ chat: $(CHAT)
 
 $(CHAT): $(SOURCES) $(CHAT_APP) | $(BUILD_DIR)
 	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(SOURCES) $(CHAT_APP) -o $@ $(LDFLAGS)
+
+dialogue-eval: $(DIALOGUE_EVAL)
+
+$(DIALOGUE_EVAL): $(SOURCES) $(DIALOGUE_EVAL_APP) | $(BUILD_DIR)
+	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(SOURCES) $(DIALOGUE_EVAL_APP) -o $@ $(LDFLAGS)
 
 control: $(CONTROL)
 
@@ -192,10 +199,12 @@ release-registry-check:
 capability-check:
 	python3 tools/verify_capability_curriculum.py
 
-# Real binary integration check for held-out retrieval grounding/abstention,
-# strict evaluator schema, input provenance and an intentional failed gate.
-dialogue-check: $(PRETRAIN) $(CHAT)
+# Real binary integration checks for the privacy-oriented per-case evaluator
+# and the all-Fortran stateless batch evaluator used for calibrated evidence.
+dialogue-check: $(PRETRAIN) $(CHAT) $(DIALOGUE_EVAL)
 	python3 tools/verify_dialogue_evaluation.py --pretrain-bin $(PRETRAIN) --chat-bin $(CHAT)
+	python3 tools/verify_native_dialogue_evaluator.py --pretrain-bin $(PRETRAIN) --native-eval-bin $(DIALOGUE_EVAL)
+	python3 tools/verify_dialogue_abstention_calibration.py
 
 # Strict local-source data compiler contract: validates UTF-8 dialogue rows,
 # deterministic native ASCII projection, source-disjoint partitions, licence
