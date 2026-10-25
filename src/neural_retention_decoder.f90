@@ -93,22 +93,22 @@ module neural_retention_decoder
 
 contains
 
-   pure logical function config_is_valid(config)
+   pure logical function neural_decoder_config_is_valid(config)
       type(neural_decoder_config_t), intent(in) :: config
       integer(int32) :: head_width
 
       if (config%heads <= 0_int32) then
-         config_is_valid = .false.
+         neural_decoder_config_is_valid = .false.
          return
       end if
       head_width = config%width / config%heads
-      config_is_valid = config%vocabulary_size >= 2_int32 .and. config%width >= 2_int32 .and. &
+      neural_decoder_config_is_valid = config%vocabulary_size >= 2_int32 .and. config%width >= 2_int32 .and. &
                         modulo(config%width, config%heads) == 0_int32 .and. modulo(head_width, 2_int32) == 0_int32 .and. &
                         config%local_window >= 1_int32 .and. config%local_window <= 4096_int32 .and. &
                         config%ffn_width >= config%width .and. config%memory_decay > 0.0_real32 .and. &
                         config%memory_decay < 1.0_real32 .and. config%rms_epsilon > 0.0_real32 .and. &
                         config%rotary_period >= 16_int32
-   end function config_is_valid
+   end function neural_decoder_config_is_valid
 
    pure logical function neural_decoder_is_ready(model)
       type(neural_decoder_t), intent(in) :: model
@@ -201,7 +201,7 @@ contains
 
       call neural_decoder_destroy(model)
       status = NRD_OK
-      if (.not. config_is_valid(config)) then
+      if (.not. neural_decoder_config_is_valid(config)) then
          status = NRD_ERR_INVALID_ARGUMENT
          return
       end if
@@ -522,7 +522,7 @@ contains
 
       plan = neural_resource_plan_t()
       status = NRD_OK
-      if (.not. config_is_valid(config)) then
+      if (.not. neural_decoder_config_is_valid(config)) then
          status = NRD_ERR_INVALID_ARGUMENT
          return
       end if
