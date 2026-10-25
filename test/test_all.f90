@@ -872,10 +872,16 @@ contains
       call assert_true(restored_state%source_records_completed == 4_int64 .and. &
                        restored_state%updates_completed == full_state%updates_completed, &
                        'resumed chunk restores and advances exact cursor/update state')
-      call assert_true(all(full_model%token_embedding == restored_model%token_embedding) .and. &
-                       all(full_model%output_bias == restored_model%output_bias) .and. &
-                       full_state%cumulative_nll == restored_state%cumulative_nll, &
-                       'same-source continuous checkpoint resume is bit-identical to one-pass update sequence')
+      call assert_true(restored_model%config%memory_decay == decoder_config%memory_decay .and. &
+                       restored_model%config%rms_epsilon == decoder_config%rms_epsilon .and. &
+                       restored_model%config%rotary_period == decoder_config%rotary_period, &
+                       'checkpoint restores all causal-decoder configuration fields')
+      call assert_true(all(full_model%token_embedding == restored_model%token_embedding), &
+                       'same-source continuous checkpoint restores bit-identical tied embeddings')
+      call assert_true(all(full_model%output_bias == restored_model%output_bias), &
+                       'same-source continuous checkpoint restores bit-identical output bias')
+      call assert_true(full_state%cumulative_nll == restored_state%cumulative_nll, &
+                       'same-source continuous checkpoint restores bit-identical cumulative NLL')
 
       call neural_decoder_destroy(full_model)
       call neural_decoder_destroy(split_model)
