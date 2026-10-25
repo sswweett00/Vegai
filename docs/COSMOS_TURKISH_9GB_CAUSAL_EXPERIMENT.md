@@ -1,9 +1,10 @@
 # 9 GB COSMOS Türkçe Nedensel Ön-eğitim Protokolü
 
-> **Durum: çalıştırma bekliyor.** Bu belge bir sonuç veya kalite iddiası değildir.
-> `Real 9 GB COSMOS Turkish causal pretraining evidence` manuel iş akışı başarıyla
-> tamamlanmadan burada eğitim süresi, held-out metrik veya prompt/response sonucu
-> yazılamaz.
+> **Durum: bir gerçek run tamamlandı.** `Real 9 GB COSMOS Turkish causal
+> pretraining evidence` workflow'u 25 Ekim 2026'da başarıyla tamamlandı. Exact
+> provenance, timing, held-out metric ve düzenlenmemiş prompt/response çıktıları
+> [COSMOS_TURKISH_9GB_RESULTS.md](COSMOS_TURKISH_9GB_RESULTS.md)'dedir. Bu
+> protokol belgesi tek başına kalite iddiası değildir.
 
 ## Amaç ve önceki sınır
 

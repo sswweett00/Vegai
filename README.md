@@ -35,7 +35,9 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
   `vegai_causal_lm` bounded bigram+trigram heavy-hitter next-token modeli;
   gerçek continuation üretir ancak neural LLM, factual asistan veya genel zekâ
   olarak sunulmaz; 9 GB gerçek COSMOS evidence sözleşmesi
-  [COSMOS_TURKISH_9GB_CAUSAL_EXPERIMENT.md](docs/COSMOS_TURKISH_9GB_CAUSAL_EXPERIMENT.md)'dedir;
+  [COSMOS_TURKISH_9GB_CAUSAL_EXPERIMENT.md](docs/COSMOS_TURKISH_9GB_CAUSAL_EXPERIMENT.md)'dedir; tamamlanan
+  gerçek 9 GB run'ın zayıf ama dürüst output/metric kaydı
+  [COSMOS_TURKISH_9GB_RESULTS.md](docs/COSMOS_TURKISH_9GB_RESULTS.md)'dedir;
 - operator-owned held-out semantic-neighbour annotation/policy ile gerçek
   checkpoint inspect ABI'sini ölçen, HMAC-redacted report/provenance üreten ve
   optional production release'i fail-closed durduran pretraining quality gate;

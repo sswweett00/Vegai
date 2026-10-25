@@ -115,6 +115,9 @@ jobs:
           generations = native.get("generated_prompt_responses")
           require(isinstance(training, dict) and isinstance(checkpoint, dict) and isinstance(heldout_evaluation, dict) and isinstance(generations, list),
                   "native evidence incomplete")
+          checkpoint_digest = checkpoint.get("sha256")
+          require(isinstance(checkpoint_digest, str) and len(checkpoint_digest) == 64 and
+                  all(c in "0123456789abcdef" for c in checkpoint_digest), "checkpoint SHA-256 invalid")
           require(training.get("exact_epochs") == 1, "native train did not contain exactly one epoch")
           train_metric = training.get("native_train_report")
           require(isinstance(train_metric, dict) and train_metric.get("corpus_bytes") == 9_000_000_000,
@@ -145,10 +148,12 @@ jobs:
           print(f"- Dataset card: CC-BY-4.0; SHA-256 `{dataset.get('dataset_card_sha256')}`")
           print(f"- Exact train corpus: `{train['bytes']}` bytes; SHA-256 `{train['sha256']}`")
           print(f"- Source-document-disjoint held-out corpus: `{heldout['bytes']}` bytes; SHA-256 `{heldout['sha256']}`")
+          print(f"- Native checkpoint: `{checkpoint.get('bytes')}` bytes; SHA-256 `{checkpoint_digest}`")
           print()
           print("| native update epochs | native update seconds | raw tokens | raw token/s | held-out Top-1 | bounded successor coverage |")
           print("|---:|---:|---:|---:|---:|---:|")
           print(f"| 1 | {update_seconds} | {raw_tokens} | {throughput} | {top1} | {coverage} |")
+          print(f"Held-out eligible known-token transitions: `{evaluation['eligible_transitions']}`; trigram hits: `{evaluation.get('trigram_context_hits')}`; bigram hits: `{evaluation.get('bigram_context_hits')}`.")
           print()
           print("### Exact native prompt/response continuations")
           print()
