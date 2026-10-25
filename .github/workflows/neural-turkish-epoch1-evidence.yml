@@ -6,6 +6,16 @@ name: Neural Turkish epoch-1 evidence (99B program)
 # operator-sized, hash-bound slice.  99B tokens is the recorded program
 # target; this workflow never claims it as an achieved count.
 on:
+  # The workflow lives on the PR branch first; this tightly scoped push event
+  # permits the real evidence runs before the workflow reaches main (same
+  # pattern as the COSMOS 9 GB evidence workflow).  On push, parameters fall
+  # back to the env defaults below, so sizing changes are committed edits.
+  push:
+    branches: [arena/ab4cdda8-vegai]
+    paths:
+      - '.github/workflows/neural-turkish-epoch1-evidence.yml'
+      - 'tools/build_turkish_wiki_corpus.py'
+      - 'tools/run_neural_turkish_epoch1.py'
   workflow_dispatch:
     inputs:
       mode:
@@ -53,6 +63,23 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Resolve effective parameters (dispatch inputs or push defaults)
+        run: |
+          set -euo pipefail
+          # Phase control for push-triggered runs: edit the two literals in
+          # this step to move probe -> full with the probe-sized budget.
+          echo "VEGAI_MODE=${{ inputs.mode || 'probe' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_INPUT_BUDGET=${{ inputs.train_byte_budget || '0' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_INPUT_MAX_DOCS=${{ inputs.max_docs || '0' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_TOKENIZER_SAMPLE=${{ inputs.tokenizer_sample_bytes || '2000000' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_VOCAB=${{ inputs.vocab || '4096' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_WIDTH=${{ inputs.width || '96' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_HEADS=${{ inputs.heads || '4' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_WINDOW=${{ inputs.window || '48' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_FFN=${{ inputs.ffn || '384' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_LR=${{ inputs.lr || '0.003' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_MAX_EVAL=${{ inputs.max_eval_records || '0' }}" >> "$GITHUB_ENV"
+
       - name: Install GNU Fortran toolchain
         run: |
           sudo apt-get update
@@ -70,7 +97,7 @@ jobs:
       - name: Verify corpus/runner contracts (probe also runs a native micro epoch)
         run: |
           set -euo pipefail
-          if [ "${{ inputs.mode }}" = "probe" ]; then
+          if [ "${VEGAI_MODE}" = "probe" ]; then
             VEGAI_NEURAL_BIN="${GITHUB_WORKSPACE}/build-native/vegai_neural_pretrain" \
               python3 tools/verify_neural_turkish_epoch1.py
           else
@@ -83,9 +110,9 @@ jobs:
           run_root="${RUNNER_TEMP}/vegai-neural-tr-epoch1"
           mkdir -p "$run_root/corpus" "$run_root/run"
           echo "VEGAI_RUN_ROOT=$run_root" >> "$GITHUB_ENV"
-          max_docs="${{ inputs.max_docs }}"
-          budget="${{ inputs.train_byte_budget }}"
-          if [ "${{ inputs.mode }}" = "probe" ]; then
+          max_docs="${VEGAI_INPUT_MAX_DOCS}"
+          budget="${VEGAI_INPUT_BUDGET}"
+          if [ "${VEGAI_MODE}" = "probe" ]; then
             if [ "$max_docs" = "0" ]; then max_docs=6000; fi
             if [ "$budget" = "0" ]; then budget=3000000; fi
           else
@@ -124,7 +151,7 @@ jobs:
             --source-url "${VEGAI_DUMP_URL}" \
             --license "CC BY-SA 4.0" \
             --retrieved-at "${VEGAI_RETRIEVED_AT}" \
-            --tokenizer-sample-bytes "${{ inputs.tokenizer_sample_bytes }}" \
+            --tokenizer-sample-bytes "${VEGAI_TOKENIZER_SAMPLE}" \
             --train-byte-budget "${VEGAI_TRAIN_BUDGET}" \
             "${extra[@]}" | tee "${VEGAI_RUN_ROOT}/corpus-build.json"
           python3 -m json.tool "${VEGAI_RUN_ROOT}/corpus/manifest.json" | head -80
@@ -139,11 +166,11 @@ jobs:
             --neural-bin "${GITHUB_WORKSPACE}/build-native/vegai_neural_pretrain" \
             --corpus-dir "${VEGAI_RUN_ROOT}/corpus" \
             --run-dir "${VEGAI_RUN_ROOT}/run" \
-            --vocab "${{ inputs.vocab }}" \
-            --width "${{ inputs.width }}" --heads "${{ inputs.heads }}" \
-            --window "${{ inputs.window }}" --ffn "${{ inputs.ffn }}" \
-            --lr "${{ inputs.lr }}" \
-            --max-eval-records "${{ inputs.max_eval_records }}" \
+            --vocab "${VEGAI_VOCAB}" \
+            --width "${VEGAI_WIDTH}" --heads "${VEGAI_HEADS}" \
+            --window "${VEGAI_WINDOW}" --ffn "${VEGAI_FFN}" \
+            --lr "${VEGAI_LR}" \
+            --max-eval-records "${VEGAI_MAX_EVAL}" \
             | tee "${VEGAI_RUN_ROOT}/runner.json"
 
       - name: Publish results summary
@@ -162,7 +189,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: neural-turkish-epoch1-${{ inputs.mode }}-${{ github.run_id }}
+          name: neural-turkish-epoch1-${{ env.VEGAI_MODE }}-${{ github.run_id }}
           path: |
             ${{ env.VEGAI_RUN_ROOT }}/run/
             ${{ env.VEGAI_RUN_ROOT }}/corpus/manifest.json
