@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import io
 from dataclasses import dataclass
 import hashlib
 import json
@@ -234,28 +235,24 @@ def emit_selected_document(
     selected: frozenset[str],
     remaining: int,
 ) -> tuple[int, int, int]:
-    """Emit bounded contextual records without crossing filtered/page boundaries."""
-    emitted = 0
-    records = 0
-    selected_seen = 0
-    segment: list[str] = []
-    for token in tokens:
-        if token in selected:
-            segment.append(token)
-            selected_seen += 1
-            continue
-        if segment:
-            written, made = emit_segment(output, segment, remaining - emitted)
-            emitted += written
-            records += made
-            segment.clear()
-            if emitted == remaining:
-                return emitted, records, selected_seen
-    if segment and emitted < remaining:
-        written, made = emit_segment(output, segment, remaining - emitted)
-        emitted += written
-        records += made
-    return emitted, records, selected_seen
+    """Emit selected source tokens in page order, eliding only unavailable types.
+
+    Vocabulary selection is a model-capacity decision, not a source-text
+    boundary.  An omitted low-frequency form must not turn both adjacent real
+    selected terms into isolated records: that discarded 2,579,097 real
+    selected occurrences in the verified 262,144-type capacity scan and made
+    the 99M target unreachable despite 99,642,709 selected source occurrences.
+    Here non-selected forms are omitted *within the same source page*, exactly
+    as a filtered-token stream; no token is invented, duplicated, or carried
+    across an article/page boundary.  ``emit_segment`` still creates only
+    2–128-token native records and drops an unavoidable one-token page tail.
+    """
+    selected_stream = [token for token in tokens if token in selected]
+    written, records = emit_segment(output, selected_stream, remaining)
+    # Only terms that fit into valid emitted records are counted as consumed at
+    # a possible exact-target cutoff. This remains source-order exact rather
+    # than counting unused terms in the final page.
+    return written, records, written
 
 
 def prepare_corpus(
@@ -332,14 +329,19 @@ def prepare_corpus(
             "selected_vocabulary_size": vocabulary_size,
             "selected_vocabulary_file": selected_vocabulary_output.name,
             "selected_vocabulary_sha256": file_sha256_text(selected_vocabulary_output),
-            "filtered_token_is_record_boundary": True,
+            "filtered_token_policy": (
+                "unselected source types are omitted within their source page; retained selected types preserve "
+                "their original relative order and never cross a source-page boundary"
+            ),
+            "filtered_token_is_record_boundary": False,
             "page_is_record_boundary": True,
-            "contextless_singleton_segments_dropped": True,
+            "contextless_singleton_page_tails_dropped": True,
             "minimum_tokens_per_output_record": 2,
             "maximum_tokens_per_output_record": TOKENS_PER_RECORD,
+            "selected_train_occurrences_in_full_train_partition": selected_frequency_occurrences,
             "train_articles_consumed_until_target": train_articles_consumed,
             "train_normalized_tokens_considered_until_target": train_normalized_tokens_considered,
-            "selected_train_tokens_seen_until_target": selected_tokens_seen,
+            "selected_train_tokens_emitted_until_target": selected_tokens_seen,
         },
         "output": corpus_identity,
     }
@@ -361,15 +363,25 @@ def read_selected_tokens(path: Path) -> frozenset[str]:
 
 
 def active_segments(tokens: Sequence[str], active: frozenset[str]) -> Iterable[list[str]]:
-    segment: list[str] = []
-    for token in tokens:
-        if token in active:
-            segment.append(token)
-        elif segment:
-            yield segment
-            segment = []
-    if segment:
-        yield segment
+    """Yield the same page-local selected-token records native training sees.
+
+    This mirrors :func:`emit_selected_document` / ``emit_segment`` for held-out
+    evaluation: inactive types are elided within a page, records are capped at
+    the native 128-token bound, and one-token tails are not treated as model
+    contexts.  It therefore cannot accidentally measure associations across a
+    source-page boundary or across a native-record boundary that training did
+    not use.
+    """
+    selected_stream = [token for token in tokens if token in active]
+    cursor = 0
+    while cursor < len(selected_stream):
+        take = min(TOKENS_PER_RECORD, len(selected_stream) - cursor)
+        if take % 2 != 0:
+            take -= 1
+        if take < 2:
+            break
+        yield selected_stream[cursor : cursor + take]
+        cursor += take
 
 
 def select_quality_queries(active: Mapping[str, int], count: int = QUALITY_QUERY_COUNT) -> list[str]:
@@ -510,6 +522,10 @@ def heldout_cooccurrence_evaluation(
             ),
             "minimum_query_heldout_occurrences": QUALITY_MIN_QUERY_OCCURRENCES,
             "minimum_pair_count": QUALITY_MIN_ASSOCIATION_COUNT,
+            "selected_token_stream": (
+                "inactive types are elided only within a source page; 2–128-token records and page boundaries mirror "
+                "the exact native training corpus"
+            ),
             "ranking": "descending heldout pair_count / heldout neighbour occurrence count; then pair count; then token",
         },
         "heldout_source_statistics": {
@@ -880,6 +896,17 @@ def controller_smoke_test() -> None:
         require(stats["train_articles"] == 1 and stats["heldout_articles"] == 1, "partition smoke is not disjoint")
         ranked = selected_vocabulary(frequencies, 129)
         selected = frozenset(token for token, _ in ranked)
+        # A discarded type must not manufacture a source boundary between two
+        # retained source terms. The held-out evaluator uses the same record
+        # partition as corpus emission.
+        gap_output = io.StringIO()
+        gap_written, gap_records, gap_seen = emit_selected_document(
+            gap_output, ["aa", "notselected", "bb"], frozenset({"aa", "bb"}), 2
+        )
+        require((gap_written, gap_records, gap_seen, gap_output.getvalue()) == (2, 1, 2, "aa bb\n"),
+                "smoke filtered-token gap elision changed unexpectedly")
+        record_lengths = [len(segment) for segment in active_segments(["aa"] * 129, frozenset({"aa"}))]
+        require(record_lengths == [128], "smoke held-out record partition diverges from native emission")
         output = temporary / "smoke.txt"
         emitted = 0
         records = 0

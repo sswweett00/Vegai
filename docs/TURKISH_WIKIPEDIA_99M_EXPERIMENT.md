@@ -58,7 +58,11 @@ Native tokenizer ASCII olduğundan `tr-ascii-v1` projection uygulanır:
    seçilir. Doğrulanmış tam split-dump denemesinde 32,768 token yalnız
    78,608,116 emit edilebilir train token bıraktığı için 99M'e text tekrar
    etmeden ulaşamaz; daha yüksek fakat hâlâ bounded vocabulary gerçek source
-   formlarını tutar. Seçili olmayan token ve page sınırları context boundary'dir.
+   formlarını tutar. Seçili olmayan source token'lar aynı page içindeki selected
+   stream'den elenir (seçili token'ların kaynak sırası korunur); **page**
+   sınırları context boundary'dir. Böylece discarded nadir bir form iki gerçek
+   seçili komşuyu iki singleton record'a ayırmaz; hiçbir token üretilmez,
+   çoğaltılmaz veya page'ler arasında birleştirilmez.
 4. Her emitted record 2–128 token ve en çok 8,192 byte olmalıdır. Tek-token
    segmentler atılır; bu sayede `active tokens` yalnız lexical telemetry değil,
    contextual prototype-update sayısıyla aynı olur.
