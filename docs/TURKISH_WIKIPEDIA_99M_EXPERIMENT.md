@@ -54,8 +54,11 @@ Native tokenizer ASCII olduğundan `tr-ascii-v1` projection uygulanır:
    `ü/Ü → u/U`; tipografik apostrophe'lar ASCII apostrophe olur.
 2. Metin NFKD decomposition sonrası ASCII'ye project edilir, küçük harfe iner;
    48 byte üstü token truncate edilmez, atılır.
-3. Yalnız train partition üzerinde global frequency ile en sık 32,768 token
-   seçilir. Seçili olmayan token ve page sınırları context boundary'dir.
+3. Yalnız train partition üzerinde global frequency ile en sık 262,144 token
+   seçilir. Doğrulanmış tam split-dump denemesinde 32,768 token yalnız
+   78,608,116 emit edilebilir train token bıraktığı için 99M'e text tekrar
+   etmeden ulaşamaz; daha yüksek fakat hâlâ bounded vocabulary gerçek source
+   formlarını tutar. Seçili olmayan token ve page sınırları context boundary'dir.
 4. Her emitted record 2–128 token ve en çok 8,192 byte olmalıdır. Tek-token
    segmentler atılır; bu sayede `active tokens` yalnız lexical telemetry değil,
    contextual prototype-update sayısıyla aynı olur.
@@ -67,7 +70,7 @@ Native eğitim komutu şu yapıdadır:
 
 ```bash
 OMP_NUM_THREADS=4 ./vegai_pretrain train TURKISH_WIKIPEDIA_99M_ASCII.txt checkpoint.vgai \
-  --max-vocab 32768 --min-frequency 1 --window 2 --position-shift 41 \
+  --max-vocab 262144 --min-frequency 1 --window 2 --position-shift 41 \
   --context-mode resonant --epochs 2 --strict \
   --parallel-context-build --parallel-min-contexts 32
 ```

@@ -260,7 +260,7 @@ jobs:
             --source-manifest "${VEGAI_TURKISH_99M_DIR}/trwiki-source-manifest.json" \
             --faq-repo "${VEGAI_TURKISH_99M_DIR}/turkish-faq" \
             --run-dir "${VEGAI_TURKISH_99M_DIR}/experiment" \
-            --target-tokens 99000000 --vocabulary-size 32768 --epochs 2 --context-window 2 --omp-threads 4 \
+            --target-tokens 99000000 --vocabulary-size 262144 --epochs 2 --context-window 2 --omp-threads 4 \
             --train-timeout-seconds 18000 --inspect-timeout-seconds 600
 
       - name: Surface bounded experiment failure reason

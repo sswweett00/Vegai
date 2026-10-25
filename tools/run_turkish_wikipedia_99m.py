@@ -68,7 +68,11 @@ SCHEMA = "vegai-turkish-wikipedia-99m-experiment/v1"
 CORPUS_SCHEMA = "vegai-turkish-wikipedia-99m-corpus/v1"
 HELDOUT_SCHEMA = "vegai-turkish-wikipedia-heldout-cooccurrence/v1"
 TARGET_TOKENS = 99_000_000
-VOCABULARY_SIZE_DEFAULT = 32_768
+# Turkish is morphologically productive. The verified 32,768-type selection
+# retained only 78,608,116 train tokens in the complete official split dump,
+# so it cannot truthfully supply a 99M-token run. This higher, still bounded
+# capacity retains additional real source forms rather than replaying text.
+VOCABULARY_SIZE_DEFAULT = 262_144
 EPOCHS_DEFAULT = 2
 CONTEXT_WINDOW_DEFAULT = 2
 OMP_THREADS_DEFAULT = 4
@@ -297,9 +301,15 @@ def prepare_corpus(
     finally:
         if emitted_tokens != target_tokens and temporary.exists():
             temporary.unlink(missing_ok=True)
-    require(emitted_tokens == target_tokens,
-            f"selected real-source train tokens ended at {emitted_tokens:,}, below requested {target_tokens:,}; "
-            "do not repeat source material to fill the deficit")
+    selected_frequency_occurrences = sum(frequency for _token, frequency in ranked)
+    require(
+        emitted_tokens == target_tokens,
+        f"selected real-source train tokens ended at {emitted_tokens:,}, below requested {target_tokens:,}; "
+        f"selected vocabulary size={vocabulary_size:,}, raw selected train occurrences="
+        f"{selected_frequency_occurrences:,}, all normalized train occurrences="
+        f"{source_stats['train_normalized_token_occurrences']:,}, unique train types="
+        f"{source_stats['train_normalized_unique_tokens']:,}; do not repeat source material to fill the deficit",
+    )
     os.replace(temporary, output)
     atomic_text(selected_vocabulary_output, "".join(f"{token}\t{frequency}\n" for token, frequency in ranked))
     corpus_identity = validate_generated_corpus(output, target_tokens)
