@@ -247,7 +247,7 @@ contains
       real(real64), allocatable :: probabilities(:)
       integer :: allocation_status
       integer(int32) :: position, decoder_status, target
-      real(real64) :: loss, nll_before
+      real(real64) :: loss, sequence_nll
 
       status = NPT_OK
       if (.not. neural_decoder_is_ready(model) .or. .not. neural_train_config_is_valid(config) .or. &
@@ -266,7 +266,7 @@ contains
          status = NPT_ERR_ALLOCATION
          return
       end if
-      nll_before = metrics%cumulative_nll
+      sequence_nll = 0.0_real64
       call neural_decoder_state_init(decoder_state, model, decoder_status)
       if (decoder_status /= NRD_OK) then
          deallocate(hidden, logits, probabilities)
@@ -289,6 +289,7 @@ contains
          end if
          metrics%prediction_tokens = metrics%prediction_tokens + 1_int64
          metrics%cumulative_nll = metrics%cumulative_nll + loss
+         sequence_nll = sequence_nll + loss
          if (update_model) then
             call tied_output_update(model, hidden, probabilities, target, config, status)
             if (status /= NPT_OK) exit
@@ -305,7 +306,10 @@ contains
       if (update_model) then
          state%records_completed = state%records_completed + 1_int64
          state%tokens_seen = state%tokens_seen + int(token_count, int64)
-         state%cumulative_nll = state%cumulative_nll + (metrics%cumulative_nll - nll_before)
+         ! Keep the state reduction per record, independent of the caller's
+         ! cumulative reporting buffer, so checkpointed chunks preserve the
+         ! same floating-point addition order as one-pass training.
+         state%cumulative_nll = state%cumulative_nll + sequence_nll
          state%ready = .true.
       end if
    end subroutine process_token_sequence
