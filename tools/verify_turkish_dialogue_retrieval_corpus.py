@@ -48,6 +48,7 @@ def command(train: Path, validation: Path, test: Path, output: Path) -> list[str
         "--source-license", "CC-BY-4.0",
         "--attribution", "Synthetic Turkish dialogue fixture, CC BY 4.0",
         "--source-nature", "synthetic-test-only",
+        "--minimum-content-disjoint-abstention-cases", "1",
     ]
 
 
@@ -152,7 +153,8 @@ def main() -> int:
                     and counts["train_exact_retrieval_evidence_sample_cases"] == 3
                     and counts["test_source_disjoint_abstention_evidence_sample_cases"] == 1,
                     "non-held-out/source-disjoint bounded evidence sample counts are wrong")
-            require(counts["validation_abstention_cases"] == 1 and counts["test_abstention_cases"] == 1
+            require(counts["minimum_content_disjoint_abstention_cases_required"] == 1
+                    and counts["validation_abstention_cases"] == 1 and counts["test_abstention_cases"] == 1
                     and counts["validation_train_canonical_prompt_overlap_excluded"] == 1
                     and counts["test_train_canonical_prompt_overlap_excluded"] == 1
                     and counts["test_validation_calibration_canonical_prompt_overlap_excluded"] == 1,
@@ -200,6 +202,16 @@ def main() -> int:
             require("generation_claim" in manifest["native_runtime_contract"]
                     and manifest["native_runtime_contract"]["generation_claim"] == "none; this package supports grounded retrieval only",
                     "builder overclaimed generative capability")
+
+            # The normal production floor is deliberately higher than this
+            # tiny fixture. Content leakage may not silently leave a one-case
+            # calibration/test set merely because source IDs are disjoint.
+            insufficient = command(train, validation, test, temporary / "insufficient-package")
+            minimum_index = insufficient.index("--minimum-content-disjoint-abstention-cases")
+            del insufficient[minimum_index:minimum_index + 2]
+            insufficient_result = run(insufficient, expected=2)
+            require("canonical prompt leakage leaves too few" in insufficient_result.stdout,
+                    "builder accepted a content-filtered evidence set below its declared minimum")
 
             # An existing package is immutable: rerunning must not silently
             # replace hashes/data after an operator has reviewed the manifest.

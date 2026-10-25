@@ -48,7 +48,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 PACKAGE_SCHEMA = "vegai-turkish-dialogue-retrieval-package/v1"
 EVALUATION_SCHEMA = "vegai-dialogue-evaluation-case/v1"
-TRANSFORMATION = "turkish-dialogue-jsonl-to-native-retrieval/v2"
+TRANSFORMATION = "turkish-dialogue-jsonl-to-native-retrieval/v3"
 MAX_SOURCE_LINE_BYTES = 64 * 1024
 MAX_DIALOGUE_TEXT_BYTES = 1024
 MAX_DIALOGUE_TURNS = 64
@@ -404,6 +404,8 @@ def build_package(arguments: argparse.Namespace) -> dict[str, object]:
     require(bool(arguments.attribution.strip()), "--attribution must not be blank")
     require(bool(arguments.source_nature.strip()), "--source-nature must not be blank")
     require(arguments.evidence_sample_cases > 0, "--evidence-sample-cases must be positive")
+    require(arguments.minimum_content_disjoint_abstention_cases > 0,
+            "--minimum-content-disjoint-abstention-cases must be positive")
 
     source_identities = {
         "train": file_identity(arguments.train_jsonl, "train JSONL"),
@@ -440,6 +442,14 @@ def build_package(arguments: argparse.Namespace) -> dict[str, object]:
     test_validation_overlap_excluded = test_overlap_excluded - train_test_overlap_excluded
     require(test_validation_overlap_excluded >= 0,
             "internal error: test overlap accounting is inconsistent")
+    validation_content_disjoint_cases = validation_evaluation.count(b"\n")
+    test_content_disjoint_cases = test_evaluation.count(b"\n")
+    require(validation_content_disjoint_cases >= arguments.minimum_content_disjoint_abstention_cases,
+            "canonical prompt leakage leaves too few validation abstention cases: "
+            f"{validation_content_disjoint_cases} < required {arguments.minimum_content_disjoint_abstention_cases}")
+    require(test_content_disjoint_cases >= arguments.minimum_content_disjoint_abstention_cases,
+            "canonical prompt leakage leaves too few frozen test abstention cases: "
+            f"{test_content_disjoint_cases} < required {arguments.minimum_content_disjoint_abstention_cases}")
     train_exact_sample = deterministic_evidence_sample(train_exact_evaluation, arguments.evidence_sample_cases)
     test_abstention_sample = deterministic_evidence_sample(test_evaluation, arguments.evidence_sample_cases)
     train_exact_native_evaluation = render_native_evaluation_tsv(train_exact_evaluation)
@@ -517,15 +527,16 @@ def build_package(arguments: argparse.Namespace) -> dict[str, object]:
                 "train_pretraining_records": pretraining_records,
                 "train_exact_retrieval_contract_cases": train_exact_evaluation.count(b"\n"),
                 "evidence_sample_cases_requested": arguments.evidence_sample_cases,
+                "minimum_content_disjoint_abstention_cases_required": arguments.minimum_content_disjoint_abstention_cases,
                 "train_exact_retrieval_evidence_sample_cases": train_exact_sample.count(b"\n"),
                 "test_source_disjoint_abstention_evidence_sample_cases": test_abstention_sample.count(b"\n"),
                 "train_utterances_under_two_tokens_skipped": skipped_records,
                 "validation_pairs_raw": len(validation_pairs),
                 "test_pairs_raw": len(test_pairs),
-                "validation_abstention_cases": validation_evaluation.count(b"\n"),
+                "validation_abstention_cases": validation_content_disjoint_cases,
                 "validation_train_canonical_prompt_overlap_excluded": validation_train_overlap_excluded,
                 "validation_duplicate_canonical_prompts_dropped": validation_duplicates,
-                "test_abstention_cases": test_evaluation.count(b"\n"),
+                "test_abstention_cases": test_content_disjoint_cases,
                 "test_train_canonical_prompt_overlap_excluded": train_test_overlap_excluded,
                 "test_validation_calibration_canonical_prompt_overlap_excluded": test_validation_overlap_excluded,
                 "test_duplicate_canonical_prompts_dropped": test_duplicates,
@@ -557,6 +568,9 @@ def parse_arguments() -> argparse.Namespace:
                         help="e.g. synthetic-ai-assisted or human-authored; recorded rather than inferred")
     parser.add_argument("--evidence-sample-cases", type=int, default=DEFAULT_EVIDENCE_SAMPLE_CASES,
                         help="deterministic hash-ranked case count for bounded evaluator evidence files")
+    parser.add_argument("--minimum-content-disjoint-abstention-cases", type=int,
+                        default=DEFAULT_EVIDENCE_SAMPLE_CASES,
+                        help="fail publication if canonical leakage filtering leaves fewer validation or test abstention cases")
     return parser.parse_args()
 
 

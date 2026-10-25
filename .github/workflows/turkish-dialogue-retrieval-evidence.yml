@@ -76,7 +76,8 @@ jobs:
             --source-revision ccd9f05c2f97684bbd9a55d818528da9dfb6bd5a \
             --source-license CC-BY-4.0 \
             --attribution 'Turkish Daily Dialogues 5K by Enes Deniz, CC BY 4.0' \
-            --source-nature synthetic-ai-assisted-deterministic | tee "$RUNNER_TEMP/package-build.json"
+            --source-nature synthetic-ai-assisted-deterministic \
+            --minimum-content-disjoint-abstention-cases 128 | tee "$RUNNER_TEMP/package-build.json"
           echo "TURKISH_DIALOGUE_PACKAGE_DIR=$package_dir" >> "$GITHUB_ENV"
 
       - name: Train native HDC checkpoint on the package train split

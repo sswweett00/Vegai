@@ -112,9 +112,11 @@ Source'un scenario-family split'i source ID düzeyinde korunur; ancak bu tek
 başına abstention evidence için yeterli değildir. Builder, native Türkçe ASCII
 projection'ı altında train key ile aynı canonical prompt'u validation'dan;
 train veya seçilmiş validation calibration prompt'u ile aynı olanı testten
-çıkarır ve manifest'te overlap/dedup sayılarını yazar. Bu filtre olmadan
-source-ID farklı olsa bile template tekrarının meşru retrieval'ı yanlışlıkla
-`false grounded` sayılabilirdi. Train TSV'de validation/test response'u
+çıkarır ve manifest'te overlap/dedup sayılarını yazar. Varsayılan
+`--minimum-content-disjoint-abstention-cases 128` eşiği, filtrenin calibration
+veya frozen test'i anlamsız küçüklüğe indirmesi halinde immutable package
+yayınını fail-closed durdurur. Bu filtre olmadan source-ID farklı olsa bile
+template tekrarının meşru retrieval'ı yanlışlıkla `false grounded` sayılabilirdi. Train TSV'de validation/test response'u
 bulunmaz. Filtre sonrası validation/test JSONL case'leri `expected_prompt: null`
 taşır:
 
@@ -206,4 +208,6 @@ ayrı ayrı gerekir:
   tuning yapılmaması.
 
 Bunlar olmadan bu repo, retrieval kalitesini geliştirmiş olabilir ama “çok doğal
-free-form Türkçe sohbet eden generative model” olarak sunulamaz.
+free-form Türkçe sohbet eden generative model” olarak sunulamaz. Mevcut
+content-disjoint calibration run'ın gerçek sayıları ve bu sınırların somut
+örneği [TURKISH_DIALOGUE_RETRIEVAL_EVIDENCE.md](TURKISH_DIALOGUE_RETRIEVAL_EVIDENCE.md)'dedir.

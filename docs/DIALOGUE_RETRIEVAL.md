@@ -216,7 +216,9 @@ Boş `expected-prompt`, expected abstention'dır. Corpus builder bu setleri
 source-ID ayrımına ek olarak native canonical prompt projection'ında content
 disjoint yapar: train key ile aynı validation prompt ve train/selected
 validation ile aynı test prompt evidence'a girmez; manifest overlap sayılarını
-saklar. Program `--max-cases` aşılırsa sessizce prefix ölçmez; nonzero exit ile fail eder. No-active-checkpoint-token
+saklar. Varsayılan 128-case minimumu filtre sonrası validation veya test seti
+çok küçülürse package publication'ı durdurur. Program `--max-cases` aşılırsa
+sessizce prefix ölçmez; nonzero exit ile fail eder. No-active-checkpoint-token
 sonucu rendered abstention sayılmaz: expected-null case için ayrı
 `oov_rejected_abstain_cases`, expected-grounded case için ayrı
 `oov_rejected_expected_grounded_cases` yazılır. Böylece OOV retleri gerçek
