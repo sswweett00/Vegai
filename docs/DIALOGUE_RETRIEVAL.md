@@ -203,8 +203,13 @@ veya `--case-hmac-key-file` verildiğinde keyed HMAC-SHA-256 kimlikleri,
 checkpoint/KB/binary/evaluation-set digest'leri ve şu metrikleri yazar:
 
 - exact grounded-prompt accuracy, precision ve recall;
-- abstain precision/recall;
+- explicit rendered `grounded: false` için abstain precision/recall;
 - false grounding, wrong prompt ve false abstention sayıları;
+- source-disjoint negative set için optional `--allow-oov-rejections-for-expected-abstention`
+  kullanıldığında ayrı `oov_rejected_abstain_cases` ve
+  `nonfabrication_recall_including_oov_rejections`. Bu, rendered abstention
+  metriğine eklenmez; checkpoint'in prompt'u hiç encode edemediğini açıkça
+  raporlar.
 - explicit quality gate sonucu.
 
 Hassas held-out setlerde HMAC key'i repository/report dışında saklanır; report

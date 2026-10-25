@@ -88,6 +88,11 @@ class ChatObservation:
     similarity: float
     runner_up_similarity: float
     margin: float
+    # ``vegai_chat`` normally emits an explicit grounded:false response. A
+    # source-disjoint negative set can also contain a query with zero active
+    # checkpoint tokens; that is a distinct safe rejection, never silently
+    # relabelled as a rendered abstention.
+    execution_status: str = "completed"
 
 
 def require(condition: bool, message: str) -> None:
@@ -405,10 +410,28 @@ def run_case(arguments: argparse.Namespace, case: EvaluationCase) -> ChatObserva
     except OSError as error:
         raise DialogueEvaluationError(f"cannot launch vegai_chat for case {case.case_id!r}: {error}") from error
     if completed.returncode != 0:
+        # A source-disjoint negative case can be entirely outside a bounded
+        # checkpoint vocabulary. This is not a normal rendered abstention, but
+        # it is also not a fabricated grounding. Admit it only through an
+        # explicit policy switch and only for an expected-abstention case.
+        output = completed.stdout or ""
+        oov_rejection = "prompt has too few active checkpoint vocabulary tokens" in output
+        if (arguments.allow_oov_rejections_for_expected_abstention and case.expected_prompt is None and
+                completed.returncode == 1 and oov_rejection and "answer:" not in output):
+            return ChatObservation(
+                grounded=False,
+                matched_prompt=None,
+                known_tokens=0,
+                ignored_tokens=0,
+                candidates_examined=0,
+                similarity=-1.0,
+                runner_up_similarity=-1.0,
+                margin=-1.0,
+                execution_status="rejected-no-active-checkpoint-token",
+            )
         # The child may have emitted a TSV-sourced response before failing.
         # Bind diagnostics without copying held-out or operator-owned text into
         # an otherwise privacy-conscious release log.
-        output = completed.stdout or ""
         output_digest = hashlib.sha256(output.encode("utf-8")).hexdigest()
         raise DialogueEvaluationError(
             f"vegai_chat failed for case {case.case_id!r} with exit {completed.returncode}; "
@@ -423,6 +446,8 @@ def ratio(numerator: int, denominator: int) -> float | None:
 
 def classify(case: EvaluationCase, observed: ChatObservation) -> str:
     if case.expected_prompt is None:
+        if observed.execution_status == "rejected-no-active-checkpoint-token":
+            return "oov_rejected_abstain"
         return "true_abstain" if not observed.grounded else "false_grounded"
     if not observed.grounded:
         return "false_abstain"
@@ -446,6 +471,7 @@ def build_report(
         "false_abstain_cases": 0,
         "false_grounded_cases": 0,
         "true_abstain_cases": 0,
+        "oov_rejected_abstain_cases": 0,
     }
     results: list[dict[str, Any]] = []
     stream_digest = hmac.new(hmac_key, digestmod=hashlib.sha256) if hmac_key is not None else hashlib.sha256()
@@ -460,7 +486,11 @@ def build_report(
         if observed.grounded:
             metrics_count["actual_grounded_cases"] += 1
         else:
-            metrics_count["actual_abstain_cases"] += 1
+            # Keep an explicit grounded:false answer separate from a pre-query
+            # OOV rejection, so an abstention quality metric cannot be inflated
+            # by a checkpoint that simply cannot encode the prompt.
+            if observed.execution_status == "completed":
+                metrics_count["actual_abstain_cases"] += 1
         metrics_count[f"{outcome}_cases"] += 1
         results.append(
             {
@@ -468,6 +498,7 @@ def build_report(
                 "prompt_digest": text_digest(case.prompt, hmac_key),
                 "expected_prompt_digest": text_digest(case.expected_prompt, hmac_key),
                 "grounded": observed.grounded,
+                "execution_status": observed.execution_status,
                 "matched_prompt_digest": text_digest(observed.matched_prompt, hmac_key),
                 "outcome": outcome,
                 "query_known_tokens": observed.known_tokens,
@@ -494,6 +525,10 @@ def build_report(
     )
     metrics["abstain_recall"] = ratio(
         metrics_count["true_abstain_cases"], metrics_count["expected_abstain_cases"]
+    )
+    metrics["nonfabrication_recall_including_oov_rejections"] = ratio(
+        metrics_count["true_abstain_cases"] + metrics_count["oov_rejected_abstain_cases"],
+        metrics_count["expected_abstain_cases"],
     )
     metrics["grounded_coverage"] = ratio(metrics_count["actual_grounded_cases"], metrics_count["total_cases"])
 
@@ -523,6 +558,7 @@ def build_report(
             "history_turns": 0,
             "min_known_tokens": arguments.min_known_tokens,
             "require_all_known": arguments.require_all_known,
+            "allow_oov_rejections_for_expected_abstention": arguments.allow_oov_rejections_for_expected_abstention,
             "minimum_similarity": arguments.min_similarity,
             "minimum_margin": arguments.min_margin,
             "semantic_weight": arguments.semantic_weight,
@@ -629,6 +665,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--max-entries", type=int, default=4096, help="same bounded index capacity passed to vegai_chat")
     parser.add_argument("--min-known-tokens", type=int, default=1)
     parser.add_argument("--require-all-known", action="store_true")
+    parser.add_argument("--allow-oov-rejections-for-expected-abstention", action="store_true",
+                        help="record an expected-null native no-active-token rejection separately rather than fail evaluation")
     parser.add_argument("--min-similarity", type=float, default=0.05)
     parser.add_argument("--min-margin", type=float, default=0.01)
     parser.add_argument("--semantic-weight", type=float, default=1.0,

@@ -107,7 +107,11 @@ Source'un scenario-family split'i source ID düzeyinde korunur. Train TSV'de
 validation/test response'u bulunmaz. Bu nedenle generated validation/test
 JSONL case'leri `expected_prompt: null` taşır:
 
-- doğru `grounded: false` sonucu **source-disjoint abstention** başarısıdır;
+- doğru `grounded: false` sonucu **source-disjoint rendered abstention** başarısıdır;
+- checkpoint'te hiç active token yoksa native CLI fail-closed OOV rejection
+  verir. Evaluator'ın explicit `--allow-oov-rejections-for-expected-abstention`
+  modu bunu ayrı `oov_rejected_abstain_cases` olarak raporlar; rendered
+  abstention recall'a gizlice katmaz;
 - `grounded: true` sonucu aynı topic/kelime yüzünden yanlış grounding olabilir;
 - bunlar unseen assistant response'un “doğru cevabı” için label **değildir**.
 

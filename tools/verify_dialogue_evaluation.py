@@ -160,6 +160,32 @@ def main() -> int:
                     "privacy-preserving report copied a held-out prompt or answer")
             require("quality_gate" in passed.stdout, "evaluator did not render a report to stdout")
 
+            # A source-disjoint query can contain no active checkpoint token.
+            # The optional policy must report that safe native rejection
+            # separately, not inflate the rendered-abstention metric or abort
+            # the whole negative-set evaluation.
+            oov_abstention = workspace / "oov-abstention.jsonl"
+            oov_abstention.write_text(
+                json.dumps({"schema_version": CASE_SCHEMA, "id": "oov", "prompt": "tamamenbilinmeyen", "expected_prompt": None}) + "\n",
+                encoding="ascii", newline="\n",
+            )
+            oov_report = workspace / "oov-abstention-report.json"
+            run(
+                evaluator_command(
+                    chat, checkpoint, knowledge, oov_abstention, oov_report,
+                    "--allow-oov-rejections-for-expected-abstention",
+                )
+            )
+            oov_payload = json.loads(oov_report.read_text(encoding="utf-8"))
+            oov_metrics = oov_payload.get("metrics", {})
+            require(oov_metrics.get("oov_rejected_abstain_cases") == 1
+                    and oov_metrics.get("true_abstain_cases") == 0
+                    and oov_metrics.get("abstain_recall") == 0.0
+                    and oov_metrics.get("nonfabrication_recall_including_oov_rejections") == 1.0,
+                    "OOV negative case was not separately and honestly classified")
+            require(oov_payload.get("cases", [{}])[0].get("execution_status") == "rejected-no-active-checkpoint-token",
+                    "OOV negative case did not preserve its native execution status")
+
             unsafe_output = subprocess.run(
                 evaluator_command(chat, checkpoint, knowledge, evaluation, evaluation),
                 cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
