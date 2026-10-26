@@ -22,7 +22,6 @@ import time
 from typing import Any
 
 from lmm_contract import (
-    ASSET_SCHEMA,
     MAX_ASSET_CONTEXT_TOKENS,
     AssetRecord,
     AssetRegistry,

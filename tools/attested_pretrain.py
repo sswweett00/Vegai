@@ -36,7 +36,7 @@ import re
 import shutil
 import sys
 import tempfile
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 from corpus_manifest import DEFAULT_MAX_LINE_BYTES, DEFAULT_MAX_TOKENS_PER_LINE, DEFAULT_TOKEN_LENGTH, scan_corpus
 from run_9mib_pretraining import (

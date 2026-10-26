@@ -15,7 +15,6 @@ import contextlib
 import io
 import json
 from pathlib import Path
-import re
 import sys
 import tempfile
 

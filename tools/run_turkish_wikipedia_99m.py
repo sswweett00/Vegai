@@ -28,7 +28,6 @@ import io
 from dataclasses import dataclass
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
 import sys
@@ -37,7 +36,6 @@ import time
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 from run_turkish_wikipedia_9m import (
-    MAX_NATIVE_RECORD_BYTES,
     STOP_TOKENS,
     TOKEN_PATTERN,
     TOKENS_PER_RECORD,
@@ -49,7 +47,6 @@ from run_turkish_wikipedia_9m import (
     git_revision,
     license_identity,
     load_faq_candidates,
-    normalize_display_text,
     normalize_tokens,
     parse_active_vocabulary,
     parse_chat_result,

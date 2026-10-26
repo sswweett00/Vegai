@@ -276,6 +276,11 @@ contains
          cumulative = cumulative + top_probabilities(index)
          if (cumulative >= cutoff) exit
       end do
+      ! A completed DO loop leaves INDEX one past the last retained candidate.
+      ! Rounding can make the incremental sum fall a few ulps short of CUTOFF
+      ! even though it equals the total mass, so clamp here instead of letting
+      ! the sampling pass and the fallback read one element past the prefix.
+      if (index > selected_count) index = selected_count
       selected_count = index
       if (cumulative <= 0.0_real64) then
          status = DECODER_ERR_NO_SUPPORT
