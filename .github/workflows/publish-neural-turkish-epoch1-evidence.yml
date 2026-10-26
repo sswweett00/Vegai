@@ -1,5 +1,6 @@
 # Publishes the latest completed evidence run (success RESULTS.md or failure.json);
-# failures are first-class diagnostics here, not silently skipped.
+# failures are first-class diagnostics here, not silently skipped.  Re-trigger by
+# touching this file after a new evidence run completes.
 name: Publish neural Turkish epoch-1 evidence
 
 on:
