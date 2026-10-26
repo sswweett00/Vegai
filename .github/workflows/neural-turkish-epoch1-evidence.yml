@@ -1,0 +1,233 @@
+name: Neural Turkish epoch-1 evidence (99B program)
+
+# One real native neural pretraining epoch on a quality-filtered Turkish
+# Wikipedia corpus.  "probe" measures native throughput on a bounded slice;
+# "full" runs the whole-dump quality pipeline and trains epoch 1 on an
+# operator-sized, hash-bound slice.  99B tokens is the recorded program
+# target; this workflow never claims it as an achieved count.
+on:
+  # The workflow lives on the PR branch first; this tightly scoped push event
+  # permits the real evidence runs before the workflow reaches main (same
+  # pattern as the COSMOS 9 GB evidence workflow).  On push, parameters fall
+  # back to the env defaults below, so sizing changes are committed edits.
+  push:
+    branches: [arena/ab4cdda8-vegai]
+    paths:
+      - '.github/workflows/neural-turkish-epoch1-evidence.yml'
+      - 'tools/build_turkish_wiki_corpus.py'
+      - 'tools/run_neural_turkish_epoch1.py'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: probe = bounded throughput measurement; full = whole-dump pipeline + sized epoch slice
+        type: choice
+        options: [probe, full]
+        default: probe
+      train_byte_budget:
+        description: Epoch-1 train slice bytes (full mode requires > 0; probe defaults to 3000000)
+        default: "0"
+      max_docs:
+        description: Source document cap (0 = whole dump; probe defaults to 6000)
+        default: "0"
+      tokenizer_sample_bytes:
+        default: "2000000"
+      vocab:
+        default: "4096"
+      width:
+        default: "96"
+      heads:
+        default: "4"
+      window:
+        default: "48"
+      ffn:
+        default: "384"
+      lr:
+        default: "0.003"
+      schedule:
+        default: "cosine"
+      total_updates:
+        default: "52000000"
+      warmup_updates:
+        default: "4000"
+      max_eval_records:
+        description: Held-out evaluation record cap (0 = full held-out split)
+        default: "0"
+      chunks:
+        description: Train the one epoch in N checkpointed chunks (1 = single native call)
+        default: "1"
+      train_timeout_seconds:
+        description: Runner timeout per native train call (per chunk when chunks > 1)
+        default: "18000"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: neural-turkish-epoch1-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  epoch1:
+    name: One native neural epoch on real Turkish Wikipedia text
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Resolve effective parameters (dispatch inputs or push defaults)
+        run: |
+          set -euo pipefail
+          # Phase control for push-triggered runs: edit the literals in this
+          # step to move probe -> full with measured sizing.
+          # Phase: FULL (second attempt).  A/B history on the byte-identical
+          # probe slice (784,931 tokens): baseline 5125.051 token/s, failed
+          # full #1 (200 MB, old code) hit the 18000 s train-subprocess
+          # timeout, A/B #1 2275 / #2 3250 (scalar-chain and fork-wake
+          # regressions, quality held each time), A/B #3 6408.916 token/s
+          # with held-out NLL 7.781494 <= baseline 7.839114 (no quality
+          # loss).  Sizing applies the full-#1 lesson: plan at HALF the
+          # measured probe rate (~3200 token/s).  100 MB ~= 26.2M tokens
+          # (3.82 B/token) => ~68 min at measured rate, ~136 min at plan
+          # rate, inside the 350 min job even with the whole-dump corpus
+          # build.  Training runs in 10 checkpointed chunks so a timeout
+          # loses at most one chunk; cosine horizon = token estimate.
+          echo "VEGAI_MODE=${{ inputs.mode || 'full' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_INPUT_BUDGET=${{ inputs.train_byte_budget || '100000000' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_SCHEDULE=${{ inputs.schedule || 'cosine' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_TOTAL_UPDATES=${{ inputs.total_updates || '26200000' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_WARMUP=${{ inputs.warmup_updates || '4000' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_CHUNKS=${{ inputs.chunks || '10' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_TRAIN_TIMEOUT=${{ inputs.train_timeout_seconds || '2400' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_INPUT_MAX_DOCS=${{ inputs.max_docs || '0' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_TOKENIZER_SAMPLE=${{ inputs.tokenizer_sample_bytes || '2000000' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_VOCAB=${{ inputs.vocab || '4096' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_WIDTH=${{ inputs.width || '96' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_HEADS=${{ inputs.heads || '4' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_WINDOW=${{ inputs.window || '48' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_FFN=${{ inputs.ffn || '384' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_LR=${{ inputs.lr || '0.003' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_MAX_EVAL=${{ inputs.max_eval_records || '0' }}" >> "$GITHUB_ENV"
+
+      - name: Install GNU Fortran toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gfortran
+
+      - name: Build native binaries and run neural smoke gate
+        run: |
+          set -euo pipefail
+          make native
+          ./build-native/vegai_neural_pretrain smoke | tee neural-smoke.txt
+          grep -q '"nll_improved":true' neural-smoke.txt
+          grep -q '"checkpoint_exact":true' neural-smoke.txt
+          ./build-native/vegai_neural_lm self-test | tail -2
+
+      - name: Verify corpus/runner contracts (probe also runs a native micro epoch)
+        run: |
+          set -euo pipefail
+          if [ "${VEGAI_MODE}" = "probe" ]; then
+            VEGAI_NEURAL_BIN="${GITHUB_WORKSPACE}/build-native/vegai_neural_pretrain" \
+              python3 tools/verify_neural_turkish_epoch1.py
+          else
+            python3 tools/verify_neural_turkish_epoch1.py
+          fi
+
+      - name: Prepare run directories and sizing
+        run: |
+          set -euo pipefail
+          run_root="${RUNNER_TEMP}/vegai-neural-tr-epoch1"
+          mkdir -p "$run_root/corpus" "$run_root/run"
+          echo "VEGAI_RUN_ROOT=$run_root" >> "$GITHUB_ENV"
+          max_docs="${VEGAI_INPUT_MAX_DOCS}"
+          budget="${VEGAI_INPUT_BUDGET}"
+          if [ "${VEGAI_MODE}" = "probe" ]; then
+            if [ "$max_docs" = "0" ]; then max_docs=6000; fi
+            if [ "$budget" = "0" ]; then budget=3000000; fi
+          else
+            if [ "$budget" = "0" ]; then
+              echo "::error::full mode requires an explicit train_byte_budget sized from probe throughput"
+              exit 1
+            fi
+          fi
+          echo "VEGAI_MAX_DOCS=$max_docs" >> "$GITHUB_ENV"
+          echo "VEGAI_TRAIN_BUDGET=$budget" >> "$GITHUB_ENV"
+          df -h "${RUNNER_TEMP}"
+          nproc
+
+      - name: Download official Turkish Wikipedia dump
+        run: |
+          set -euo pipefail
+          dump_url="https://dumps.wikimedia.org/trwiki/latest/trwiki-latest-pages-articles-multistream.xml.bz2"
+          echo "VEGAI_DUMP_URL=$dump_url" >> "$GITHUB_ENV"
+          echo "VEGAI_RETRIEVED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+          curl --show-error --fail --location --retry 4 --retry-delay 10 --connect-timeout 30 \
+            --output "${VEGAI_RUN_ROOT}/dumpstatus.json" \
+            "https://dumps.wikimedia.org/trwiki/latest/dumpstatus.json" || true
+          curl --show-error --fail --location --retry 4 --retry-delay 10 --connect-timeout 30 \
+            --output "${VEGAI_RUN_ROOT}/trwiki-latest-pages-articles-multistream.xml.bz2" "$dump_url"
+          ls -lh "${VEGAI_RUN_ROOT}"
+          df -h "${RUNNER_TEMP}"
+
+      - name: Build quality-filtered corpus with provenance manifest
+        run: |
+          set -euo pipefail
+          extra=()
+          if [ "${VEGAI_MAX_DOCS}" != "0" ]; then extra+=(--max-docs "${VEGAI_MAX_DOCS}"); fi
+          /usr/bin/time -v python3 tools/build_turkish_wiki_corpus.py \
+            --wiki-xml-bz2 "${VEGAI_RUN_ROOT}/trwiki-latest-pages-articles-multistream.xml.bz2" \
+            --output-dir "${VEGAI_RUN_ROOT}/corpus" \
+            --source-url "${VEGAI_DUMP_URL}" \
+            --license "CC BY-SA 4.0" \
+            --retrieved-at "${VEGAI_RETRIEVED_AT}" \
+            --tokenizer-sample-bytes "${VEGAI_TOKENIZER_SAMPLE}" \
+            --train-byte-budget "${VEGAI_TRAIN_BUDGET}" \
+            "${extra[@]}" | tee "${VEGAI_RUN_ROOT}/corpus-build.json"
+          python3 -m json.tool "${VEGAI_RUN_ROOT}/corpus/manifest.json" | head -80
+          # The raw dump is not needed after the manifest hashed it.
+          rm -f "${VEGAI_RUN_ROOT}/trwiki-latest-pages-articles-multistream.xml.bz2"
+          df -h "${RUNNER_TEMP}"
+
+      - name: Run exactly one native epoch (tokenizer, baseline, train, held-out, prompt suite)
+        run: |
+          set -euo pipefail
+          python3 tools/run_neural_turkish_epoch1.py \
+            --neural-bin "${GITHUB_WORKSPACE}/build-native/vegai_neural_pretrain" \
+            --corpus-dir "${VEGAI_RUN_ROOT}/corpus" \
+            --run-dir "${VEGAI_RUN_ROOT}/run" \
+            --vocab "${VEGAI_VOCAB}" \
+            --width "${VEGAI_WIDTH}" --heads "${VEGAI_HEADS}" \
+            --window "${VEGAI_WINDOW}" --ffn "${VEGAI_FFN}" \
+            --lr "${VEGAI_LR}" \
+            --schedule "${VEGAI_SCHEDULE}" --total-updates "${VEGAI_TOTAL_UPDATES}" \
+            --warmup-updates "${VEGAI_WARMUP}" \
+            --chunks "${VEGAI_CHUNKS}" --train-timeout-seconds "${VEGAI_TRAIN_TIMEOUT}" \
+            --max-eval-records "${VEGAI_MAX_EVAL}" \
+            | tee "${VEGAI_RUN_ROOT}/runner.json"
+
+      - name: Publish results summary
+        if: always()
+        run: |
+          if [ -f "${VEGAI_RUN_ROOT}/run/RESULTS.md" ]; then
+            cat "${VEGAI_RUN_ROOT}/run/RESULTS.md" >> "$GITHUB_STEP_SUMMARY"
+          elif [ -f "${VEGAI_RUN_ROOT}/run/failure.json" ]; then
+            echo "## Neural Turkish epoch-1 run failed" >> "$GITHUB_STEP_SUMMARY"
+            cat "${VEGAI_RUN_ROOT}/run/failure.json" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## Neural Turkish epoch-1 run produced no result artifact" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload evidence artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: neural-turkish-epoch1-${{ env.VEGAI_MODE }}-${{ github.run_id }}
+          path: |
+            ${{ env.VEGAI_RUN_ROOT }}/run/
+            ${{ env.VEGAI_RUN_ROOT }}/corpus/manifest.json
+            ${{ env.VEGAI_RUN_ROOT }}/corpus-build.json
+            ${{ env.VEGAI_RUN_ROOT }}/runner.json
+            ${{ env.VEGAI_RUN_ROOT }}/dumpstatus.json
+            neural-smoke.txt
+          if-no-files-found: warn
+          retention-days: 30

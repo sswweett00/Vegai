@@ -619,7 +619,7 @@ contains
    end subroutine test_utf8_record_stream
 
    subroutine test_neural_causal_design()
-      type(bpe_model_t) :: bpe, trained_bpe
+      type(bpe_model_t) :: bpe, trained_bpe, fast_bpe
       type(bpe_training_config_t) :: tokenizer_train_config
       type(bpe_training_metrics_t) :: tokenizer_train_metrics
       type(neural_decoder_t) :: model
@@ -633,10 +633,12 @@ contains
       type(temperature_calibration_t) :: calibration
       character(len=64) :: source, decoded
       integer(int32) :: encoded(64), encoded_count, decoded_bytes, status, first_merge, second_merge, index
+      integer(int32) :: encoded_fast(64), encoded_fast_count
       integer(int32) :: history(8), selected, selected_again, targets(4), train_tokens(24)
       integer(int64) :: random_state, random_state_again
       integer :: unit, io_status
       real(real32) :: hidden_full(16), hidden_chunked(16), logits_full(64), logits_chunked(64)
+      real(real32) :: logits_reference(64)
       real(real64) :: raw_logits(4), probabilities(4), heldout_logits(3, 4)
 
       source = ''
@@ -679,6 +681,24 @@ contains
       call assert_true(trained_bpe%token_count == 258_int32 .and. tokenizer_train_metrics%merges_added == 2_int64 .and. &
                        tokenizer_train_metrics%corpus_passes == 2_int64, &
                        'byte-BPE learner reaches deterministic requested merge budget')
+      ! The in-memory apply-merge trainer must learn bit-identical merges:
+      ! same token count and the same token ids for a probe record.
+      call bpe_init(fast_bpe, 2_int32, status)
+      call assert_i32_equal(status, BPE_OK, 'in-memory byte-BPE model initializes')
+      call bpe_training_metrics_reset(tokenizer_train_metrics)
+      call bpe_train_utf8_file_in_memory(fast_bpe, 'test_neural_bpe_train.txt', tokenizer_train_config, &
+                                         tokenizer_train_metrics, status)
+      call assert_i32_equal(status, BPET_OK, 'in-memory apply-merge byte-BPE learner succeeds')
+      call assert_true(fast_bpe%token_count == trained_bpe%token_count .and. &
+                       tokenizer_train_metrics%merges_added == 2_int64, &
+                       'in-memory byte-BPE learner matches exact-rescan merge budget')
+      call bpe_encode(trained_bpe, 'aaaa aa', 7_int32, encoded, encoded_count, status)
+      call assert_i32_equal(status, BPE_OK, 'exact-rescan tokenizer encodes probe record')
+      call bpe_encode(fast_bpe, 'aaaa aa', 7_int32, encoded_fast, encoded_fast_count, status)
+      call assert_i32_equal(status, BPE_OK, 'in-memory tokenizer encodes probe record')
+      call assert_true(encoded_count == encoded_fast_count .and. &
+                       all(encoded(:encoded_count) == encoded_fast(:encoded_fast_count)), &
+                       'in-memory and exact-rescan tokenizers produce identical token ids')
       open(newunit=unit, file='test_neural_bpe_train.txt', status='old', iostat=io_status)
       if (io_status == 0) close(unit, status='delete')
 
@@ -741,6 +761,14 @@ contains
                        all(ieee_is_finite(stability_state%retention_normalizer)) .and. &
                        maxval(abs(stability_state%retention_numerator)) < 1.0e6_real32, &
                        'decayed positive retention remains finite under a long deterministic stream')
+      ! Speed-path equivalence gate: the streamed logits loop (which avoids
+      ! materializing transpose(token_embedding) per token) must agree with
+      ! the reference transpose-matmul definition to real32 reassociation
+      ! tolerance, including an identical argmax.
+      logits_reference = matmul(transpose(model%token_embedding), hidden_full) + model%output_bias
+      call assert_true(maxval(abs(logits_full - logits_reference)) < 1.0e-4_real32 .and. &
+                       maxloc(logits_full, dim=1) == maxloc(logits_reference, dim=1), &
+                       'streamed logits match the transpose-matmul reference within real32 tolerance')
       call neural_decoder_plan(config, plan, status)
       call assert_i32_equal(status, NRD_OK, 'neural resource planner succeeds')
       call assert_true(plan%parameter_count > 0_int64 .and. plan%per_stream_state_bytes_real32 > 0_int64 .and. &
@@ -771,6 +799,18 @@ contains
       call assert_i32_equal(status, NPT_OK, 'tied-output trainer evaluates post-update NLL')
       call assert_true(after_train%mean_nll < before_train%mean_nll .and. train_state%updates_completed > 0_int64, &
                        'teacher-forced tied-output update improves deterministic toy NLL')
+      call assert_true(after_train%top5_correct >= after_train%top1_correct .and. &
+                       after_train%top1_correct >= 0_int64, &
+                       'top-1/top-5 next-token counters are rank-consistent')
+      ! Schedule is a pure function of the persisted update counter:
+      ! linear warmup to the peak, then inverse-square-root decay.
+      train_config%learning_rate = 1.0_real64
+      train_config%lr_schedule = NPT_SCHEDULE_WARMUP_INVSQRT
+      train_config%warmup_updates = 100_int64
+      call assert_true(abs(neural_scheduled_learning_rate(train_config, 50_int64) - 0.5_real64) < 1.0e-12_real64 .and. &
+                       abs(neural_scheduled_learning_rate(train_config, 100_int64) - 1.0_real64) < 1.0e-12_real64 .and. &
+                       abs(neural_scheduled_learning_rate(train_config, 400_int64) - 0.5_real64) < 1.0e-12_real64, &
+                       'warmup/inverse-square-root schedule hits exact anchor rates')
 
       raw_logits = [7.0_real64, 2.0_real64, 1.0_real64, 0.0_real64]
       history = [1_int32, 2_int32, 1_int32, 2_int32, 0_int32, 0_int32, 0_int32, 0_int32]
@@ -801,6 +841,7 @@ contains
 
       call bpe_destroy(bpe)
       call bpe_destroy(trained_bpe)
+      call bpe_destroy(fast_bpe)
       call neural_decoder_state_destroy(full_state)
       call neural_decoder_state_destroy(chunked_state)
       call neural_decoder_state_destroy(prefix_left)
@@ -882,6 +923,16 @@ contains
                        'same-source continuous checkpoint restores bit-identical output bias')
       call assert_true(full_state%cumulative_nll == restored_state%cumulative_nll, &
                        'same-source continuous checkpoint restores bit-identical cumulative NLL')
+      ! With the default AdamW optimizer the v3 checkpoint must also carry
+      ! bit-identical moments, otherwise the resumed updates above could
+      ! not have reproduced the one-pass embeddings exactly.
+      call assert_true(allocated(full_state%adam_m_embedding) .and. allocated(restored_state%adam_m_embedding), &
+                       'AdamW moments are allocated and restored from the v3 checkpoint')
+      if (allocated(full_state%adam_m_embedding) .and. allocated(restored_state%adam_m_embedding)) then
+         call assert_true(all(full_state%adam_m_embedding == restored_state%adam_m_embedding) .and. &
+                          all(full_state%adam_v_embedding == restored_state%adam_v_embedding), &
+                          'v3 checkpoint restores bit-identical AdamW moments')
+      end if
 
       call neural_decoder_destroy(full_model)
       call neural_decoder_destroy(split_model)

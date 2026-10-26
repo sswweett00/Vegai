@@ -43,9 +43,16 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
   açıkça **tied-output-head-only** teacher-forced adapter eğitimi/checkpoint
   içeren native `vegai_neural_lm` / `vegai_neural_pretrain` yolu; causal,
   chunk-equivalent, finite-state, codec, decoder ve checkpoint invariant'leri
-  executable testlerle kapsanır. Bu henüz full-BPTT, Turkish quality veya
-  accelerator throughput iddiası değildir; matematiksel/resource sınırlar
-  [NEURAL_CAUSAL_SYSTEM.md](docs/NEURAL_CAUSAL_SYSTEM.md)'dedir;
+  executable testlerle kapsanır. Eğitim sistemi v2 bu yola AdamW + LR
+  schedule + label smoothing + top-1/top-5/perplexity metrikleri, momentleri
+  bit-birebir taşıyan checkpoint v3, exact-rescan ile merge-identik hızlı
+  in-memory BPE eğitici ve no-update `evaluate`/`init-checkpoint` yüzeyleri
+  ekler. Bu henüz full-BPTT, Turkish quality veya accelerator throughput
+  iddiası değildir; matematiksel/resource sınırlar
+  [NEURAL_CAUSAL_SYSTEM.md](docs/NEURAL_CAUSAL_SYSTEM.md)'dedir; gerçek
+  Türkçe Wikipedia üzerinde kalite-filtreli, hash-bağlı 1 epoch kanıt hattı
+  ve 99B programının dürüst ölçek sözleşmesi
+  [TURKISH_99B_NEURAL_PRETRAINING.md](docs/TURKISH_99B_NEURAL_PRETRAINING.md)'dedir;
 - operator-owned held-out semantic-neighbour annotation/policy ile gerçek
   checkpoint inspect ABI'sini ölçen, HMAC-redacted report/provenance üreten ve
   optional production release'i fail-closed durduran pretraining quality gate;

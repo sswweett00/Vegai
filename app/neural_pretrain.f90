@@ -12,6 +12,31 @@ program vegai_neural_pretrain
    character(len=32) :: command
    integer :: argument_count
 
+   ! Host-associated CLI options (training-system v2).  Defaults reproduce
+   ! the legacy model shape while switching new runs to the AdamW +
+   ! warmup/inverse-square-root schedule defaults of the trainer library.
+   integer(int32) :: opt_width = 64_int32
+   integer(int32) :: opt_heads = 4_int32
+   integer(int32) :: opt_window = 32_int32
+   integer(int32) :: opt_ffn = 256_int32
+   integer(int64) :: opt_seed = 20261025_int64
+   logical :: opt_lr_set = .false.
+   logical :: opt_dims_set = .false.
+   real(real64) :: opt_lr = 0.0_real64
+   real(real64) :: opt_weight_decay = 0.01_real64
+   real(real64) :: opt_beta1 = 0.9_real64
+   real(real64) :: opt_beta2 = 0.999_real64
+   real(real64) :: opt_adam_eps = 1.0e-8_real64
+   real(real64) :: opt_grad_clip = 4.0_real64
+   real(real64) :: opt_embedding_limit = 8.0_real64
+   real(real64) :: opt_label_smoothing = 0.0_real64
+   real(real64) :: opt_min_lr_ratio = 0.1_real64
+   integer(int32) :: opt_optimizer = NPT_OPTIMIZER_ADAMW
+   integer(int32) :: opt_schedule = NPT_SCHEDULE_WARMUP_INVSQRT
+   integer(int32) :: opt_max_tokens_per_record = 8192_int32
+   integer(int64) :: opt_warmup_updates = 1000_int64
+   integer(int64) :: opt_total_updates = 0_int64
+
    argument_count = command_argument_count()
    if (argument_count < 1) call usage_and_stop()
    call get_command_argument(1, command)
@@ -19,11 +44,17 @@ program vegai_neural_pretrain
    case ('smoke')
       call run_smoke()
    case ('tokenizer-train')
-      call run_tokenizer_train()
+      call run_tokenizer_train(.false.)
+   case ('tokenizer-train-fast')
+      call run_tokenizer_train(.true.)
    case ('train')
       call run_train(.false.)
    case ('resume')
       call run_train(.true.)
+   case ('init-checkpoint')
+      call run_init_checkpoint()
+   case ('evaluate')
+      call run_evaluate()
    case ('generate')
       call run_generate()
    case ('train-chunk')
@@ -57,6 +88,169 @@ contains
          error stop 1
       end if
    end subroutine require_true
+
+   logical function starts_with_dashes(text) result(is_option)
+      character(len=*), intent(in) :: text
+
+      is_option = len_trim(text) >= 2 .and. text(1:2) == '--'
+   end function starts_with_dashes
+
+   ! Parses trailing `--key value` pairs into the host option variables.
+   ! Unknown keys and malformed values are usage errors, never ignored.
+   subroutine parse_cli_options(first_index)
+      integer, intent(in) :: first_index
+      character(len=256) :: key, value
+      integer :: index, parse_status
+      integer(int32) :: int32_value
+      integer(int64) :: int64_value
+      real(real64) :: real_value
+
+      index = first_index
+      do while (index <= command_argument_count())
+         call get_command_argument(index, key)
+         if (.not. starts_with_dashes(key) .or. index + 1 > command_argument_count()) call usage_and_stop()
+         call get_command_argument(index + 1, value)
+         select case (trim(key))
+         case ('--width', '--heads', '--window', '--ffn', '--max-tokens-per-record')
+            read(value, *, iostat=parse_status) int32_value
+            if (parse_status /= 0) call usage_and_stop()
+            select case (trim(key))
+            case ('--width'); opt_width = int32_value; opt_dims_set = .true.
+            case ('--heads'); opt_heads = int32_value; opt_dims_set = .true.
+            case ('--window'); opt_window = int32_value; opt_dims_set = .true.
+            case ('--ffn'); opt_ffn = int32_value; opt_dims_set = .true.
+            case ('--max-tokens-per-record'); opt_max_tokens_per_record = int32_value
+            end select
+         case ('--seed', '--warmup-updates', '--total-updates')
+            read(value, *, iostat=parse_status) int64_value
+            if (parse_status /= 0) call usage_and_stop()
+            select case (trim(key))
+            case ('--seed'); opt_seed = int64_value
+            case ('--warmup-updates'); opt_warmup_updates = int64_value
+            case ('--total-updates'); opt_total_updates = int64_value
+            end select
+         case ('--lr', '--weight-decay', '--beta1', '--beta2', '--adam-eps', '--grad-clip', &
+               '--embedding-limit', '--label-smoothing', '--min-lr-ratio')
+            read(value, *, iostat=parse_status) real_value
+            if (parse_status /= 0) call usage_and_stop()
+            select case (trim(key))
+            case ('--lr'); opt_lr = real_value; opt_lr_set = .true.
+            case ('--weight-decay'); opt_weight_decay = real_value
+            case ('--beta1'); opt_beta1 = real_value
+            case ('--beta2'); opt_beta2 = real_value
+            case ('--adam-eps'); opt_adam_eps = real_value
+            case ('--grad-clip'); opt_grad_clip = real_value
+            case ('--embedding-limit'); opt_embedding_limit = real_value
+            case ('--label-smoothing'); opt_label_smoothing = real_value
+            case ('--min-lr-ratio'); opt_min_lr_ratio = real_value
+            end select
+         case ('--optimizer')
+            select case (trim(value))
+            case ('adamw'); opt_optimizer = NPT_OPTIMIZER_ADAMW
+            case ('sgd'); opt_optimizer = NPT_OPTIMIZER_SGD
+            case default; call usage_and_stop()
+            end select
+         case ('--schedule')
+            select case (trim(value))
+            case ('constant'); opt_schedule = NPT_SCHEDULE_CONSTANT
+            case ('invsqrt'); opt_schedule = NPT_SCHEDULE_WARMUP_INVSQRT
+            case ('cosine'); opt_schedule = NPT_SCHEDULE_WARMUP_COSINE
+            case default; call usage_and_stop()
+            end select
+         case default
+            call usage_and_stop()
+         end select
+         index = index + 2
+      end do
+   end subroutine parse_cli_options
+
+   subroutine build_train_config(train_config)
+      type(neural_train_config_t), intent(out) :: train_config
+      real(real64) :: peak_lr
+
+      if (opt_lr_set) then
+         peak_lr = opt_lr
+      else if (opt_optimizer == NPT_OPTIMIZER_ADAMW) then
+         peak_lr = 0.003_real64
+      else
+         peak_lr = 0.025_real64
+      end if
+      train_config = neural_train_config_t(learning_rate=peak_lr, gradient_clip_norm=opt_grad_clip, &
+                                           embedding_value_limit=opt_embedding_limit, &
+                                           maximum_tokens_per_record=opt_max_tokens_per_record, &
+                                           optimizer=opt_optimizer, adam_beta1=opt_beta1, adam_beta2=opt_beta2, &
+                                           adam_epsilon=opt_adam_eps, weight_decay=opt_weight_decay, &
+                                           label_smoothing=opt_label_smoothing, lr_schedule=opt_schedule, &
+                                           warmup_updates=opt_warmup_updates, total_updates=opt_total_updates, &
+                                           minimum_lr_ratio=opt_min_lr_ratio)
+   end subroutine build_train_config
+
+   subroutine build_decoder_config(decoder_config, vocabulary_size)
+      type(neural_decoder_config_t), intent(out) :: decoder_config
+      integer(int32), intent(in) :: vocabulary_size
+
+      decoder_config = neural_decoder_config_t(vocabulary_size=vocabulary_size, width=opt_width, heads=opt_heads, &
+                                               local_window=opt_window, ffn_width=opt_ffn)
+   end subroutine build_decoder_config
+
+   ! Overwrites the trainable-hyperparameter fields of a checkpoint-loaded
+   ! config with the CLI options.  Used only when the operator explicitly
+   ! passes options to resume/train-chunk; shape changes are rejected by
+   ! the callers before this is invoked.
+   subroutine apply_options_to_train_config(train_config)
+      type(neural_train_config_t), intent(inout) :: train_config
+      type(neural_train_config_t) :: fresh
+
+      call build_train_config(fresh)
+      train_config = fresh
+   end subroutine apply_options_to_train_config
+
+   function optimizer_name(optimizer) result(name)
+      integer(int32), intent(in) :: optimizer
+      character(len=6) :: name
+
+      if (optimizer == NPT_OPTIMIZER_ADAMW) then
+         name = 'adamw '
+      else
+         name = 'sgd   '
+      end if
+   end function optimizer_name
+
+   function schedule_name(schedule) result(name)
+      integer(int32), intent(in) :: schedule
+      character(len=9) :: name
+
+      select case (schedule)
+      case (NPT_SCHEDULE_WARMUP_INVSQRT)
+         name = 'invsqrt  '
+      case (NPT_SCHEDULE_WARMUP_COSINE)
+         name = 'cosine   '
+      case default
+         name = 'constant '
+      end select
+   end function schedule_name
+
+   function ratio_text(numerator, denominator) result(rendered)
+      integer(int64), intent(in) :: numerator, denominator
+      character(len=48) :: rendered
+
+      if (denominator > 0_int64) then
+         write(rendered, '(ES24.16E3)') real(numerator, real64) / real(denominator, real64)
+      else
+         write(rendered, '(ES24.16E3)') 0.0_real64
+      end if
+   end function ratio_text
+
+   function perplexity_text(mean_nll) result(rendered)
+      real(real64), intent(in) :: mean_nll
+      character(len=48) :: rendered
+
+      if (mean_nll < 700.0_real64) then
+         write(rendered, '(ES24.16E3)') exp(mean_nll)
+      else
+         rendered = 'null                                            '
+      end if
+   end function perplexity_text
 
    subroutine initialize_byte_model(model, bpe, status)
       type(neural_decoder_t), intent(inout) :: model
@@ -147,13 +341,16 @@ contains
       if (io_status == 0) close(unit, status='delete')
    end subroutine run_smoke
 
-   subroutine run_tokenizer_train()
+   subroutine run_tokenizer_train(in_memory)
+      logical, intent(in) :: in_memory
       type(bpe_model_t) :: bpe
       type(bpe_training_config_t) :: tokenizer_config
       type(bpe_training_metrics_t) :: tokenizer_metrics
-      character(len=1024) :: corpus_path, tokenizer_path, target_text, frequency_text
+      character(len=1024) :: corpus_path, tokenizer_path, target_text, frequency_text, capacity_text
       integer(int32) :: status, target_vocabulary, minimum_frequency, parse_status
       integer(int32) :: maximum_merges
+      integer(int64) :: maximum_tokens
+      integer(int64) :: clock_start, clock_end, clock_rate
 
       if (command_argument_count() < 4) call usage_and_stop()
       call get_command_argument(2, corpus_path)
@@ -172,22 +369,55 @@ contains
       call require_ok(status, 'tokenizer model initialization')
       tokenizer_config = bpe_training_config_t(target_vocabulary_size=target_vocabulary, &
                                                minimum_pair_frequency=int(minimum_frequency, int64))
+      if (in_memory) then
+         ! Diverse real text needs a larger exact pair table than the smoke
+         ! default; capacity only bounds memory, never merge choice.
+         tokenizer_config%pair_table_capacity = 1048583_int32
+         if (command_argument_count() >= 6) then
+            call get_command_argument(6, capacity_text)
+            read(capacity_text, *, iostat=parse_status) maximum_tokens
+            if (parse_status /= 0 .or. maximum_tokens < 2_int64) call usage_and_stop()
+            tokenizer_config%maximum_in_memory_tokens = maximum_tokens
+         end if
+      end if
       call bpe_training_metrics_reset(tokenizer_metrics)
-      call bpe_train_utf8_file(bpe, trim(corpus_path), tokenizer_config, tokenizer_metrics, status)
+      call system_clock(count=clock_start, count_rate=clock_rate)
+      if (in_memory) then
+         call bpe_train_utf8_file_in_memory(bpe, trim(corpus_path), tokenizer_config, tokenizer_metrics, status)
+      else
+         call bpe_train_utf8_file(bpe, trim(corpus_path), tokenizer_config, tokenizer_metrics, status)
+      end if
+      call system_clock(count=clock_end)
       if (status /= BPET_OK) then
          write(error_unit, '(A,I0)') 'vegai_neural_pretrain: tokenizer training failed status=', status
          error stop 1
       end if
       call bpe_save(bpe, trim(tokenizer_path), status)
       call require_ok(status, 'trained tokenizer save')
-      write(output_unit, '(A)') 'BPE_TRAIN_JSON: {'// &
-         '"schema_version":"vegai-byte-bpe-train/v1",'// &
-         '"target_vocabulary_size":'//trim(i32_text(target_vocabulary))//','// &
-         '"actual_vocabulary_size":'//trim(i32_text(bpe%token_count))//','// &
-         '"merges_added":'//trim(i64_text(tokenizer_metrics%merges_added))//','// &
-         '"corpus_passes":'//trim(i64_text(tokenizer_metrics%corpus_passes))//','// &
-         '"records_scanned":'//trim(i64_text(tokenizer_metrics%records_scanned))//','// &
-         '"exhausted_before_target":'//logical_json(tokenizer_metrics%exhausted_before_target)//'}'
+      if (in_memory) then
+         write(output_unit, '(A)') 'BPE_TRAIN_JSON: {'// &
+            '"schema_version":"vegai-byte-bpe-train-fast/v1",'// &
+            '"algorithm":"in-memory-apply-merge/v1",'// &
+            '"target_vocabulary_size":'//trim(i32_text(target_vocabulary))//','// &
+            '"actual_vocabulary_size":'//trim(i32_text(bpe%token_count))//','// &
+            '"merges_added":'//trim(i64_text(tokenizer_metrics%merges_added))//','// &
+            '"corpus_passes":'//trim(i64_text(tokenizer_metrics%corpus_passes))//','// &
+            '"records_scanned":'//trim(i64_text(tokenizer_metrics%records_scanned))//','// &
+            '"retained_input_bytes":'//trim(i64_text(tokenizer_metrics%retained_input_bytes))//','// &
+            '"oversized_records":'//trim(i64_text(tokenizer_metrics%oversized_records))//','// &
+            '"wall_seconds":'// &
+               trim(r64_text(real(clock_end - clock_start, real64) / real(max(1_int64, clock_rate), real64)))//','// &
+            '"exhausted_before_target":'//logical_json(tokenizer_metrics%exhausted_before_target)//'}'
+      else
+         write(output_unit, '(A)') 'BPE_TRAIN_JSON: {'// &
+            '"schema_version":"vegai-byte-bpe-train/v1",'// &
+            '"target_vocabulary_size":'//trim(i32_text(target_vocabulary))//','// &
+            '"actual_vocabulary_size":'//trim(i32_text(bpe%token_count))//','// &
+            '"merges_added":'//trim(i64_text(tokenizer_metrics%merges_added))//','// &
+            '"corpus_passes":'//trim(i64_text(tokenizer_metrics%corpus_passes))//','// &
+            '"records_scanned":'//trim(i64_text(tokenizer_metrics%records_scanned))//','// &
+            '"exhausted_before_target":'//logical_json(tokenizer_metrics%exhausted_before_target)//'}'
+      end if
       call bpe_destroy(bpe)
    end subroutine run_tokenizer_train
 
@@ -201,23 +431,43 @@ contains
       type(neural_train_metrics_t) :: metrics
       character(len=1024) :: corpus_path, checkpoint_path, tokenizer_path, epochs_text
       integer(int32) :: status, epochs, epoch, parse_status
-      logical :: tokenizer_exists
+      integer :: options_start
+      integer(int64) :: clock_start, clock_end, clock_rate
+      real(real64) :: epoch_seconds, tokens_per_second
+      logical :: tokenizer_exists, options_present
 
       if (command_argument_count() < 4) call usage_and_stop()
       call get_command_argument(2, corpus_path)
       call get_command_argument(3, checkpoint_path)
       call get_command_argument(4, tokenizer_path)
       epochs = 1_int32
+      options_start = 5
       if (command_argument_count() >= 5) then
          call get_command_argument(5, epochs_text)
-         read(epochs_text, *, iostat=parse_status) epochs
-         if (parse_status /= 0 .or. epochs <= 0_int32) call usage_and_stop()
+         if (starts_with_dashes(epochs_text)) then
+            options_start = 5
+         else
+            read(epochs_text, *, iostat=parse_status) epochs
+            if (parse_status /= 0 .or. epochs <= 0_int32) call usage_and_stop()
+            options_start = 6
+         end if
       end if
+      options_present = command_argument_count() >= options_start
+      if (options_present) call parse_cli_options(options_start)
       if (resume) then
          call bpe_load(bpe, trim(tokenizer_path), status)
          call require_ok(status, 'resume tokenizer load')
          call neural_checkpoint_load(trim(checkpoint_path), bpe, model, train_config, train_state, status)
          call require_ok(status, 'resume neural checkpoint load')
+         if (options_present) then
+            ! Hyperparameters may be re-specified at an epoch boundary, but
+            ! the serialized model shape can never change under a resume.
+            call require_true(.not. opt_dims_set .or. &
+                              (opt_width == model%config%width .and. opt_heads == model%config%heads .and. &
+                               opt_window == model%config%local_window .and. opt_ffn == model%config%ffn_width), &
+                              'resume options must not change checkpoint model dimensions')
+            call apply_options_to_train_config(train_config)
+         end if
       else
          inquire(file=trim(tokenizer_path), exist=tokenizer_exists)
          if (tokenizer_exists) then
@@ -227,11 +477,10 @@ contains
             call bpe_init(bpe, 16_int32, status)
             call require_ok(status, 'new byte-fallback tokenizer initialization')
          end if
-         decoder_config = neural_decoder_config_t(vocabulary_size=bpe%token_count, width=64_int32, heads=4_int32, &
-                                                  local_window=32_int32, ffn_width=256_int32)
-         call neural_decoder_init(model, decoder_config, 20261025_int64, status)
+         call build_decoder_config(decoder_config, bpe%token_count)
+         call neural_decoder_init(model, decoder_config, opt_seed, status)
          call require_ok(status, 'new neural model initialization')
-         train_config = neural_train_config_t(maximum_tokens_per_record=8192_int32)
+         call build_train_config(train_config)
          call neural_train_state_init(train_state)
       end if
       do epoch = 1_int32, epochs
@@ -239,14 +488,33 @@ contains
          ! This command resumes at an epoch boundary. A partially-consumed
          ! source needs its separately attested record cursor passed to the
          ! library API; we never silently infer provenance from a path.
+         call system_clock(count=clock_start, count_rate=clock_rate)
          call neural_train_utf8_file(model, bpe, trim(corpus_path), train_config, train_state, metrics, status)
+         call system_clock(count=clock_end)
          call require_ok(status, 'UTF-8 byte-BPE pretraining pass')
+         epoch_seconds = real(clock_end - clock_start, real64) / real(max(1_int64, clock_rate), real64)
+         tokens_per_second = 0.0_real64
+         if (epoch_seconds > 0.0_real64) then
+            tokens_per_second = real(metrics%prediction_tokens, real64) / epoch_seconds
+         end if
          write(output_unit, '(A)') 'NEURAL_PRETRAIN_EPOCH_JSON: {'// &
             '"epoch_in_invocation":'//trim(i32_text(epoch))//','// &
             '"mode":"tied-output-cross-entropy-adapter/v1",'// &
+            '"optimizer":"'//trim(optimizer_name(train_config%optimizer))//'",'// &
+            '"lr_schedule":"'//trim(schedule_name(train_config%lr_schedule))//'",'// &
+            '"peak_learning_rate":'//trim(r64_text(train_config%learning_rate))//','// &
+            '"final_learning_rate":'// &
+               trim(r64_text(neural_scheduled_learning_rate(train_config, &
+                             max(1_int64, train_state%updates_completed))))//','// &
+            '"label_smoothing":'//trim(r64_text(train_config%label_smoothing))//','// &
             '"eligible_records":'//trim(i64_text(metrics%records))//','// &
             '"prediction_tokens":'//trim(i64_text(metrics%prediction_tokens))//','// &
             '"mean_nll":'//trim(r64_text(metrics%mean_nll))//','// &
+            '"perplexity":'//trim(perplexity_text(metrics%mean_nll))//','// &
+            '"top1_accuracy":'//trim(ratio_text(metrics%top1_correct, metrics%prediction_tokens))//','// &
+            '"top5_accuracy":'//trim(ratio_text(metrics%top5_correct, metrics%prediction_tokens))//','// &
+            '"epoch_wall_seconds":'//trim(r64_text(epoch_seconds))//','// &
+            '"prediction_tokens_per_second":'//trim(r64_text(tokens_per_second))//','// &
             '"skipped_records":'//trim(i64_text(metrics%skipped_records))//','// &
             '"tokenizer_truncations":'//trim(i64_text(metrics%tokenizer_truncations))//'}'
       end do
@@ -259,10 +527,114 @@ contains
          '"tokenizer":"'//trim(tokenizer_path)//'",'// &
          '"records_completed":'//trim(i64_text(train_state%records_completed))//','// &
          '"source_records_completed":'//trim(i64_text(train_state%source_records_completed))//','// &
+         '"tokens_seen":'//trim(i64_text(train_state%tokens_seen))//','// &
          '"updates_completed":'//trim(i64_text(train_state%updates_completed))//'}'
       call neural_decoder_destroy(model)
       call bpe_destroy(bpe)
    end subroutine run_train
+
+   ! Creates an untrained checkpoint with the exact CLI configuration so an
+   ! operator can measure a held-out baseline before spending an epoch.
+   subroutine run_init_checkpoint()
+      type(bpe_model_t) :: bpe
+      type(neural_decoder_t) :: model
+      type(neural_decoder_config_t) :: decoder_config
+      type(neural_train_config_t) :: train_config
+      type(neural_train_state_t) :: train_state
+      character(len=1024) :: checkpoint_path, tokenizer_path
+      integer(int32) :: status
+      logical :: tokenizer_exists
+
+      if (command_argument_count() < 3) call usage_and_stop()
+      call get_command_argument(2, tokenizer_path)
+      call get_command_argument(3, checkpoint_path)
+      if (command_argument_count() >= 4) call parse_cli_options(4)
+      inquire(file=trim(tokenizer_path), exist=tokenizer_exists)
+      if (tokenizer_exists) then
+         call bpe_load(bpe, trim(tokenizer_path), status)
+         call require_ok(status, 'init tokenizer load')
+      else
+         call bpe_init(bpe, 16_int32, status)
+         call require_ok(status, 'init byte-fallback tokenizer initialization')
+         call bpe_save(bpe, trim(tokenizer_path), status)
+         call require_ok(status, 'init tokenizer save')
+      end if
+      call build_decoder_config(decoder_config, bpe%token_count)
+      call neural_decoder_init(model, decoder_config, opt_seed, status)
+      call require_ok(status, 'init neural model initialization')
+      call build_train_config(train_config)
+      call neural_train_state_init(train_state)
+      call neural_checkpoint_save(trim(checkpoint_path), model, bpe, train_config, train_state, status)
+      call require_ok(status, 'init neural checkpoint save')
+      write(output_unit, '(A)') 'NEURAL_INIT_JSON: {'// &
+         '"schema_version":"vegai-neural-init-checkpoint/v1",'// &
+         '"checkpoint":"'//trim(checkpoint_path)//'",'// &
+         '"tokenizer":"'//trim(tokenizer_path)//'",'// &
+         '"vocabulary_size":'//trim(i32_text(bpe%token_count))//','// &
+         '"width":'//trim(i32_text(decoder_config%width))//','// &
+         '"heads":'//trim(i32_text(decoder_config%heads))//','// &
+         '"local_window":'//trim(i32_text(decoder_config%local_window))//','// &
+         '"ffn_width":'//trim(i32_text(decoder_config%ffn_width))//','// &
+         '"optimizer":"'//trim(optimizer_name(train_config%optimizer))//'",'// &
+         '"lr_schedule":"'//trim(schedule_name(train_config%lr_schedule))//'",'// &
+         '"peak_learning_rate":'//trim(r64_text(train_config%learning_rate))//','// &
+         '"seed":'//trim(i64_text(opt_seed))//'}'
+      call neural_decoder_destroy(model)
+      call bpe_destroy(bpe)
+   end subroutine run_init_checkpoint
+
+   subroutine run_evaluate()
+      type(bpe_model_t) :: bpe
+      type(neural_decoder_t) :: model
+      type(neural_train_config_t) :: train_config
+      type(neural_train_state_t) :: train_state
+      type(neural_train_metrics_t) :: metrics
+      character(len=1024) :: checkpoint_path, tokenizer_path, corpus_path, limit_text
+      integer(int32) :: status, parse_status
+      integer(int64) :: record_limit, clock_start, clock_end, clock_rate
+      real(real64) :: wall_seconds, tokens_per_second
+
+      if (command_argument_count() < 4) call usage_and_stop()
+      call get_command_argument(2, checkpoint_path)
+      call get_command_argument(3, tokenizer_path)
+      call get_command_argument(4, corpus_path)
+      call bpe_load(bpe, trim(tokenizer_path), status)
+      call require_ok(status, 'evaluate tokenizer load')
+      call neural_checkpoint_load(trim(checkpoint_path), bpe, model, train_config, train_state, status)
+      call require_ok(status, 'evaluate neural checkpoint load')
+      call neural_train_metrics_reset(metrics)
+      call system_clock(count=clock_start, count_rate=clock_rate)
+      if (command_argument_count() >= 5) then
+         call get_command_argument(5, limit_text)
+         read(limit_text, *, iostat=parse_status) record_limit
+         if (parse_status /= 0 .or. record_limit < 1_int64) call usage_and_stop()
+         call neural_evaluate_utf8_file(model, bpe, trim(corpus_path), train_config, metrics, status, &
+                                        maximum_source_records=record_limit)
+      else
+         call neural_evaluate_utf8_file(model, bpe, trim(corpus_path), train_config, metrics, status)
+      end if
+      call system_clock(count=clock_end)
+      call require_ok(status, 'held-out UTF-8 evaluation pass')
+      wall_seconds = real(clock_end - clock_start, real64) / real(max(1_int64, clock_rate), real64)
+      tokens_per_second = 0.0_real64
+      if (wall_seconds > 0.0_real64) tokens_per_second = real(metrics%prediction_tokens, real64) / wall_seconds
+      write(output_unit, '(A)') 'NEURAL_EVALUATE_JSON: {'// &
+         '"schema_version":"vegai-neural-evaluate/v1",'// &
+         '"mode":"teacher-forced-no-update/v1",'// &
+         '"updates_completed_at_checkpoint":'//trim(i64_text(train_state%updates_completed))//','// &
+         '"eligible_records":'//trim(i64_text(metrics%records))//','// &
+         '"prediction_tokens":'//trim(i64_text(metrics%prediction_tokens))//','// &
+         '"mean_nll":'//trim(r64_text(metrics%mean_nll))//','// &
+         '"perplexity":'//trim(perplexity_text(metrics%mean_nll))//','// &
+         '"top1_accuracy":'//trim(ratio_text(metrics%top1_correct, metrics%prediction_tokens))//','// &
+         '"top5_accuracy":'//trim(ratio_text(metrics%top5_correct, metrics%prediction_tokens))//','// &
+         '"wall_seconds":'//trim(r64_text(wall_seconds))//','// &
+         '"prediction_tokens_per_second":'//trim(r64_text(tokens_per_second))//','// &
+         '"skipped_records":'//trim(i64_text(metrics%skipped_records))//','// &
+         '"tokenizer_truncations":'//trim(i64_text(metrics%tokenizer_truncations))//'}'
+      call neural_decoder_destroy(model)
+      call bpe_destroy(bpe)
+   end subroutine run_evaluate
 
    subroutine run_training_plan()
       type(bpe_model_t) :: bpe
@@ -289,6 +661,7 @@ contains
          '"decoder_state_bytes_real32":'//trim(i64_text(plan%decoder_state_bytes_real32))//','// &
          '"record_token_buffer_bytes":'//trim(i64_text(plan%record_token_buffer_bytes))//','// &
          '"per_step_working_bytes":'//trim(i64_text(plan%per_step_working_bytes))//','// &
+         '"optimizer_state_bytes_real64":'//trim(i64_text(plan%optimizer_state_bytes_real64))//','// &
          '"minimum_resident_bytes":'//trim(i64_text(plan%minimum_resident_bytes))//'}'
       call neural_decoder_destroy(model)
       call bpe_destroy(bpe)
@@ -307,7 +680,8 @@ contains
       character(len=1024) :: corpus_path, checkpoint_path, tokenizer_path, limit_text, start_text
       integer(int32) :: status, parse_status
       integer(int64) :: record_limit, start_record
-      logical :: checkpoint_exists, tokenizer_exists
+      integer :: options_start
+      logical :: checkpoint_exists, tokenizer_exists, options_present
 
       if (command_argument_count() < 5) call usage_and_stop()
       call get_command_argument(2, corpus_path)
@@ -316,13 +690,34 @@ contains
       call get_command_argument(5, limit_text)
       read(limit_text, *, iostat=parse_status) record_limit
       if (parse_status /= 0 .or. record_limit < 1_int64) call usage_and_stop()
+      options_start = 0
+      start_record = -1_int64
+      if (command_argument_count() >= 6) then
+         call get_command_argument(6, start_text)
+         if (starts_with_dashes(start_text)) then
+            options_start = 6
+         else
+            read(start_text, *, iostat=parse_status) start_record
+            if (parse_status /= 0 .or. start_record < 0_int64) call usage_and_stop()
+            options_start = 7
+         end if
+      end if
+      options_present = options_start > 0 .and. command_argument_count() >= options_start
+      if (options_present) call parse_cli_options(options_start)
       inquire(file=trim(checkpoint_path), exist=checkpoint_exists)
       if (checkpoint_exists) then
          call bpe_load(bpe, trim(tokenizer_path), status)
          call require_ok(status, 'continuous tokenizer load')
          call neural_checkpoint_load(trim(checkpoint_path), bpe, model, train_config, train_state, status)
          call require_ok(status, 'continuous checkpoint load')
-         start_record = train_state%source_records_completed
+         if (options_present) then
+            call require_true(.not. opt_dims_set .or. &
+                              (opt_width == model%config%width .and. opt_heads == model%config%heads .and. &
+                               opt_window == model%config%local_window .and. opt_ffn == model%config%ffn_width), &
+                              'train-chunk options must not change checkpoint model dimensions')
+            call apply_options_to_train_config(train_config)
+         end if
+         if (start_record < 0_int64) start_record = train_state%source_records_completed
       else
          inquire(file=trim(tokenizer_path), exist=tokenizer_exists)
          if (tokenizer_exists) then
@@ -332,18 +727,12 @@ contains
             call bpe_init(bpe, 16_int32, status)
             call require_ok(status, 'continuous byte-fallback tokenizer initialization')
          end if
-         decoder_config = neural_decoder_config_t(vocabulary_size=bpe%token_count, width=64_int32, heads=4_int32, &
-                                                  local_window=32_int32, ffn_width=256_int32)
-         call neural_decoder_init(model, decoder_config, 20261025_int64, status)
+         call build_decoder_config(decoder_config, bpe%token_count)
+         call neural_decoder_init(model, decoder_config, opt_seed, status)
          call require_ok(status, 'continuous neural model initialization')
-         train_config = neural_train_config_t(maximum_tokens_per_record=8192_int32)
+         call build_train_config(train_config)
          call neural_train_state_init(train_state)
-         start_record = 0_int64
-      end if
-      if (command_argument_count() >= 6) then
-         call get_command_argument(6, start_text)
-         read(start_text, *, iostat=parse_status) start_record
-         if (parse_status /= 0 .or. start_record < 0_int64) call usage_and_stop()
+         if (start_record < 0_int64) start_record = 0_int64
       end if
       call neural_train_metrics_reset(metrics)
       call neural_train_utf8_file(model, bpe, trim(corpus_path), train_config, train_state, metrics, status, &
@@ -360,6 +749,11 @@ contains
          '"new_source_record_limit":'//trim(i64_text(record_limit))//','// &
          '"source_records_completed":'//trim(i64_text(train_state%source_records_completed))//','// &
          '"eligible_records":'//trim(i64_text(metrics%records))//','// &
+         '"prediction_tokens":'//trim(i64_text(metrics%prediction_tokens))//','// &
+         '"mean_nll":'//trim(r64_text(metrics%mean_nll))//','// &
+         '"perplexity":'//trim(perplexity_text(metrics%mean_nll))//','// &
+         '"top1_accuracy":'//trim(ratio_text(metrics%top1_correct, metrics%prediction_tokens))//','// &
+         '"top5_accuracy":'//trim(ratio_text(metrics%top5_correct, metrics%prediction_tokens))//','// &
          '"updates_completed":'//trim(i64_text(train_state%updates_completed))//'}'
       call neural_decoder_destroy(model)
       call bpe_destroy(bpe)
@@ -495,11 +889,20 @@ contains
       write(output_unit, '(A)') 'Usage:'
       write(output_unit, '(A)') '  vegai_neural_pretrain smoke'
       write(output_unit, '(A)') '  vegai_neural_pretrain tokenizer-train CORPUS TOKENIZER TARGET_VOCAB [MIN_PAIR_FREQUENCY]'
-      write(output_unit, '(A)') '  vegai_neural_pretrain train  CORPUS CHECKPOINT TOKENIZER [EPOCHS]'
-      write(output_unit, '(A)') '  vegai_neural_pretrain resume CORPUS CHECKPOINT TOKENIZER [EPOCHS]'
+      write(output_unit, '(A)') '  vegai_neural_pretrain tokenizer-train-fast CORPUS TOKENIZER TARGET_VOCAB '// &
+                                '[MIN_PAIR_FREQUENCY] [MAX_IN_MEMORY_TOKENS]'
+      write(output_unit, '(A)') '  vegai_neural_pretrain train  CORPUS CHECKPOINT TOKENIZER [EPOCHS] [--key value ...]'
+      write(output_unit, '(A)') '  vegai_neural_pretrain resume CORPUS CHECKPOINT TOKENIZER [EPOCHS] [--key value ...]'
+      write(output_unit, '(A)') '  vegai_neural_pretrain init-checkpoint TOKENIZER CHECKPOINT [--key value ...]'
+      write(output_unit, '(A)') '  vegai_neural_pretrain evaluate CHECKPOINT TOKENIZER CORPUS [MAX_RECORDS]'
       write(output_unit, '(A)') '  vegai_neural_pretrain generate CHECKPOINT TOKENIZER PROMPT [TOKENS] [SEED]'
-      write(output_unit, '(A)') '  vegai_neural_pretrain train-chunk CORPUS CHECKPOINT TOKENIZER NEW_RECORDS [START_RECORD]'
+      write(output_unit, '(A)') '  vegai_neural_pretrain train-chunk CORPUS CHECKPOINT TOKENIZER NEW_RECORDS '// &
+                                '[START_RECORD] [--key value ...]'
       write(output_unit, '(A)') '  vegai_neural_pretrain plan CHECKPOINT TOKENIZER'
+      write(output_unit, '(A)') 'Options: --width --heads --window --ffn --seed --lr --optimizer adamw|sgd '// &
+                                '--schedule constant|invsqrt|cosine --warmup-updates --total-updates --min-lr-ratio'
+      write(output_unit, '(A)') '         --weight-decay --beta1 --beta2 --adam-eps --grad-clip --embedding-limit '// &
+                                '--label-smoothing --max-tokens-per-record'
       write(output_unit, '(A)') 'The current trainer updates only tied output embeddings; it is not full BPTT.'
    end subroutine print_help
 

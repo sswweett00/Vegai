@@ -230,6 +230,10 @@ The implemented update is the trainable tied output head only. For softmax \(p\)
 
 `neural_pretraining` applies this update after each teacher-forced causal step, with explicit hidden-norm clipping and an explicit per-value embedding/bias envelope. Because `E` is tied, these output-head updates also affect later input embeddings; gradients through that later effect and through the causal core are intentionally not claimed.
 
+Training throughput was tuned with measured, quality-gated A/Bs on a byte-identical slice (see `TURKISH_99B_NEURAL_PRETRAINING.md` §3.4): logits use the transpose-free vector-matrix form `matmul(hidden, E)`, softmax exponentials fill in parallel while the normalizer keeps its original summation order (bit-identical distribution), AdamW moment recurrences are bit-identical with only the proposal divisions folded into loop-invariant multipliers, and rotary/local-attention transcendental and dot-product work is computed once per step instead of per head or twice. Hand-written scalar logits loops and extra per-token OpenMP regions measured *slower* at production shapes (FMA-latency chains and fork-join wake latency) and were removed; the governed runner exports an active OpenMP wait policy for its dedicated train/evaluate processes. Net measured effect: 5125.051 → 6408.916 prediction tokens/s (+25.1%) with held-out NLL 7.839114 → 7.781494 (no quality loss; differences are floating-point trajectory noise, not a superiority claim).
+
+Training-system v2 wraps that exact gradient in a standard optimizer layer without widening the scope above: **AdamW** (bias-corrected first/second moments, decoupled weight decay on embeddings only) or the legacy SGD update; optional label smoothing (reported NLL is always the unsmoothed value); and a learning-rate schedule (constant, linear-warmup/inverse-square-root, or linear-warmup/cosine) that is a *pure function of the persisted update counter*. Checkpoint format **v3** serializes the optimizer/schedule configuration and the exact AdamW moments, so `full` and `chunk + checkpoint + chunk` streams remain bit-identical (executable test); v2 checkpoints still load with their original SGD semantics. Metrics now include perplexity and top-1/top-5 ranks of the true token under the pre-update distribution, and the CLI adds a no-update `evaluate` command, an `init-checkpoint` baseline command, explicit shape/hyperparameter options, and `tokenizer-train-fast` (an in-memory apply-merge learner proven merge-identical to the exact-rescan trainer by test). A governed real-Turkish epoch contract on top of these pieces lives in [`TURKISH_99B_NEURAL_PRETRAINING.md`](TURKISH_99B_NEURAL_PRETRAINING.md).
+
 A checkpoint can be sampled through the integrated causal surface:
 
 ```text
@@ -272,8 +276,12 @@ The native smoke test verifies only that a tiny synthetic alternating-token task
 | No-repeat masking and same-seed sampling | native property test |
 | Convex calibration non-worse supplied-set NLL | native property test |
 | Tied-output toy-loss update/checkpoint round trip | `vegai_neural_pretrain smoke` in Fortran CI |
+| AdamW moment checkpoint bit-identity (v3) + schedule anchors | native property tests in `test/test_all.f90` |
+| Streamed logits ≡ transpose-matmul reference (real32 tolerance, same argmax) | native property test in `test/test_all.f90` |
+| Chunked epoch ≡ single-call prediction-token consumption + full source coverage | `tools/verify_neural_turkish_epoch1.py` native micro runs |
+| In-memory apply-merge ≡ exact-rescan merge sequence | native property test (same token ids on probe record) |
 | Byte-BPE → two checkpointed continuous chunks → deterministic generation wiring | native Fortran CI on the immutable eight-record fixture |
-| Actual Turkish quality/throughput benchmark | **Not yet established** |
+| Actual Turkish quality/throughput benchmark | probe-scale evidence runs on real trwiki text (baseline + three A/Bs, `TURKISH_99B_NEURAL_PRETRAINING.md` §3.4); full-slice epoch evidence governed by the same workflow |
 
 Run the locally available target when a Fortran compiler is present:
 
