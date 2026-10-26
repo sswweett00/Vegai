@@ -229,6 +229,10 @@ contains
       call assert_i32_equal(status, HV_OK, 'exact-rate Hebbian update succeeds')
       call assert_i32_equal(hv_hamming(a, updated_a), 4096_int32, &
                             'exact-rate update selects exactly 25 percent when inputs differ')
+      call hv_hebbian_update_tenths_percent(a, ones, 6_int32, 31_int64, updated_a, status)
+      call assert_i32_equal(status, HV_OK, 'sub-percent fixed-point Hebbian update succeeds')
+      call assert_i32_equal(hv_hamming(a, updated_a), 98_int32, &
+                            '0.6 percent selects the exact rounded hypervector dimension count')
       call hv_hebbian_update_percent(a, ones, 101_int32, 31_int64, updated_b, status)
       call assert_i32_equal(status, HV_ERR_INVALID_ARGUMENT, 'invalid exact-rate update is rejected')
       call assert_hv_equal(updated_b, a, 'invalid exact-rate update preserves prototype output')
@@ -702,6 +706,12 @@ contains
       open(newunit=unit, file='test_neural_bpe_train.txt', status='old', iostat=io_status)
       if (io_status == 0) close(unit, status='delete')
 
+      config = neural_decoder_config_t()
+      call assert_i32_equal(config%local_window, 64_int32, 'neural decoder default local window matches the profile')
+      config = neural_decoder_config_t(vocabulary_size=4096_int32, width=96_int32, heads=4_int32, &
+                                       local_window=64_int32, ffn_width=384_int32)
+      call assert_true(neural_decoder_config_is_valid(config), &
+                       'requested 96/4/24-head, 64-window, 384-FFN architecture is valid')
       config = neural_decoder_config_t(vocabulary_size=64_int32, width=16_int32, heads=2_int32, &
                                       local_window=4_int32, ffn_width=32_int32)
       call neural_decoder_init(model, config, 20261025_int64, status)
@@ -782,7 +792,7 @@ contains
          train_tokens(index) = 1_int32
          train_tokens(index + 1_int32) = 2_int32
       end do
-      train_config = neural_train_config_t(learning_rate=0.050_real64, gradient_clip_norm=4.0_real64, &
+      train_config = neural_train_config_t(learning_rate=0.010_real64, gradient_clip_norm=4.0_real64, &
                                            embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32)
       call neural_train_state_init(train_state)
       call neural_train_metrics_reset(before_train)
@@ -880,7 +890,7 @@ contains
       decoder_config = neural_decoder_config_t(vocabulary_size=256_int32, width=16_int32, heads=2_int32, &
                                                local_window=4_int32, ffn_width=32_int32, memory_decay=0.91_real32, &
                                                rms_epsilon=2.0e-5_real32, rotary_period=4096_int32)
-      train_config = neural_train_config_t(learning_rate=0.025_real64, gradient_clip_norm=4.0_real64, &
+      train_config = neural_train_config_t(learning_rate=0.010_real64, gradient_clip_norm=4.0_real64, &
                                            embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32)
       call neural_training_resource_plan(decoder_config, bpe, train_config, resource_plan, status)
       call assert_i32_equal(status, NPT_OK, 'neural continuous resource plan succeeds')
@@ -923,15 +933,14 @@ contains
                        'same-source continuous checkpoint restores bit-identical output bias')
       call assert_true(full_state%cumulative_nll == restored_state%cumulative_nll, &
                        'same-source continuous checkpoint restores bit-identical cumulative NLL')
-      ! With the default AdamW optimizer the v3 checkpoint must also carry
-      ! bit-identical moments, otherwise the resumed updates above could
-      ! not have reproduced the one-pass embeddings exactly.
-      call assert_true(allocated(full_state%adam_m_embedding) .and. allocated(restored_state%adam_m_embedding), &
-                       'AdamW moments are allocated and restored from the v3 checkpoint')
-      if (allocated(full_state%adam_m_embedding) .and. allocated(restored_state%adam_m_embedding)) then
-         call assert_true(all(full_state%adam_m_embedding == restored_state%adam_m_embedding) .and. &
-                          all(full_state%adam_v_embedding == restored_state%adam_v_embedding), &
-                          'v3 checkpoint restores bit-identical AdamW moments')
+      ! The v4 checkpoint carries the single Apex momentum array needed to
+      ! reproduce uninterrupted updates bit-for-bit after resume.
+      call assert_true(allocated(full_state%apex_m_embedding) .and. &
+                       allocated(restored_state%apex_m_embedding), &
+                       'Apex momentum is allocated and restored from the v4 checkpoint')
+      if (allocated(full_state%apex_m_embedding) .and. allocated(restored_state%apex_m_embedding)) then
+         call assert_true(all(full_state%apex_m_embedding == restored_state%apex_m_embedding), &
+                          'v4 checkpoint restores bit-identical Apex momentum')
       end if
 
       call neural_decoder_destroy(full_model)
@@ -1176,6 +1185,7 @@ contains
       type(hdc_pretrain_model_t) :: context_serial_model, context_parallel_model
       type(hdc_pretrain_config_t) :: config, resumed_config, strict_config, legacy_config, positional_config, continuation_config
       type(hdc_pretrain_config_t) :: reference_config, hierarchical_config, local_only_config, coherent_config, debiased_config
+      type(hdc_pretrain_config_t) :: sampler_legacy_config
       type(hdc_pretrain_config_t) :: resonant_config
       type(hdc_pretrain_config_t) :: openvino_rejected_config, context_serial_config, context_parallel_config, cache_disabled_config
       type(pretrain_metrics_t) :: vocabulary_metrics, train_metrics, extension_metrics
@@ -1206,8 +1216,8 @@ contains
       config%context_window = 2_int32
       config%position_shift_bits = 41_int32
       config%epochs = 1_int32
-      config%initial_plasticity_percent = 25_int32
-      config%minimum_plasticity_percent = 1_int32
+      config%initial_plasticity_tenths_percent = 110_int32
+      config%minimum_plasticity_tenths_percent = 6_int32
       config%plasticity_decay_events = 4_int32
       call assert_i32_equal(config%context_mode, PT_CONTEXT_HIERARCHICAL, &
                             'hierarchical context encoder is the long-record quality default')
@@ -1459,7 +1469,7 @@ contains
 
       call pretrain_checkpoint_save(resonant_model, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'resonant checkpoint save succeeds')
-      call assert_checkpoint_header_version(CHECKPOINT_PATH, 8_int32, 'resonant')
+      call assert_checkpoint_header_version(CHECKPOINT_PATH, 9_int32, 'resonant fixed-point plasticity')
       call pretrain_checkpoint_load(CHECKPOINT_PATH, resonant_restored, status)
       call assert_i32_equal(status, PT_OK, 'resonant checkpoint load succeeds')
       call assert_i32_equal(resonant_restored%context_mode, PT_CONTEXT_RESONANT, &
@@ -1535,6 +1545,10 @@ contains
          close(unit)
       end if
       hierarchical_config = config
+      ! Keep this legacy-sampler continuation fixture on integral plasticity
+      ! values; checkpoint v6 deliberately retains its whole-percent wire unit.
+      hierarchical_config%initial_plasticity_tenths_percent = 250_int32
+      hierarchical_config%minimum_plasticity_tenths_percent = 10_int32
       hierarchical_config%max_vocabulary = 16_int32
       hierarchical_config%min_frequency = 1_int64
       hierarchical_config%epochs = 1_int32
@@ -1636,21 +1650,21 @@ contains
                        all(debiased_repeat_model%semantic_bits == debiased_repeat_hybrid_model%semantic_bits) .and. &
                        all(debiased_repeat_model%experience_count == debiased_repeat_hybrid_model%experience_count), &
                        'de-biased repetition suppression is bit-identical to local hybrid')
-      ! v7 binds the new unbiased exact-mask sampler to every newly-trained
-      ! encoder lineage. Reading the raw header prevents a future broad writer
-      ! version change from silently weakening this continuation contract.
+      ! v9 binds fixed-point plasticity units to every newly-trained modern
+      ! encoder lineage. Reading the raw header prevents a format change from
+      ! silently weakening the continuation contract.
       call pretrain_checkpoint_save(legacy_model, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'legacy checkpoint save succeeds')
-      call assert_checkpoint_header_version(CHECKPOINT_PATH, 7_int32, 'legacy')
+      call assert_checkpoint_header_version(CHECKPOINT_PATH, 9_int32, 'legacy')
       call pretrain_checkpoint_save(positional_model, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'positional checkpoint save succeeds')
-      call assert_checkpoint_header_version(CHECKPOINT_PATH, 7_int32, 'positional')
+      call assert_checkpoint_header_version(CHECKPOINT_PATH, 9_int32, 'positional')
       call pretrain_checkpoint_save(local_only_model, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'hybrid checkpoint save succeeds')
-      call assert_checkpoint_header_version(CHECKPOINT_PATH, 7_int32, 'hybrid')
+      call assert_checkpoint_header_version(CHECKPOINT_PATH, 9_int32, 'hybrid')
       call pretrain_checkpoint_save(hierarchical_model, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'hierarchical checkpoint save succeeds')
-      call assert_checkpoint_header_version(CHECKPOINT_PATH, 7_int32, 'hierarchical')
+      call assert_checkpoint_header_version(CHECKPOINT_PATH, 9_int32, 'hierarchical')
       call pretrain_checkpoint_load(CHECKPOINT_PATH, restored, status)
       call assert_i32_equal(status, PT_OK, 'hierarchical checkpoint load succeeds')
       call assert_i32_equal(restored%context_mode, PT_CONTEXT_HIERARCHICAL, &
@@ -1661,7 +1675,7 @@ contains
                             'coherent model retains its context-mode identity before checkpointing')
       call pretrain_checkpoint_save(coherent_model, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'coherent checkpoint save succeeds')
-      call assert_checkpoint_header_version(CHECKPOINT_PATH, 7_int32, 'coherent')
+      call assert_checkpoint_header_version(CHECKPOINT_PATH, 9_int32, 'coherent')
       call pretrain_checkpoint_load(CHECKPOINT_PATH, restored, status)
       call assert_i32_equal(status, PT_OK, 'coherent checkpoint load succeeds')
       call assert_i32_equal(restored%context_mode, PT_CONTEXT_COHERENT, &
@@ -1672,7 +1686,7 @@ contains
                             'de-biased model retains its context-mode identity before checkpointing')
       call pretrain_checkpoint_save(debiased_unique_model, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'de-biased checkpoint save succeeds')
-      call assert_checkpoint_header_version(CHECKPOINT_PATH, 7_int32, 'de-biased')
+      call assert_checkpoint_header_version(CHECKPOINT_PATH, 9_int32, 'de-biased')
       call pretrain_checkpoint_load(CHECKPOINT_PATH, restored, status)
       call assert_i32_equal(status, PT_OK, 'de-biased checkpoint load succeeds')
       call assert_i32_equal(restored%context_mode, PT_CONTEXT_DEBIASED, &
@@ -1689,6 +1703,13 @@ contains
       ! parser branch. Its continuation must keep the old mask stream while
       ! retaining the coherent context contract.
       coherent_model%plasticity_sampler = PT_PLASTICITY_SAMPLER_LEGACY
+      coherent_model%initial_plasticity_tenths_percent = 110_int32
+      coherent_model%minimum_plasticity_tenths_percent = 6_int32
+      call pretrain_checkpoint_save(coherent_model, CHECKPOINT_PATH, status)
+      call assert_i32_equal(status, PT_ERR_CHECKPOINT, &
+                            'legacy checkpoint refuses to truncate fractional plasticity units')
+      coherent_model%initial_plasticity_tenths_percent = 250_int32
+      coherent_model%minimum_plasticity_tenths_percent = 10_int32
       call pretrain_checkpoint_save(coherent_model, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'historical coherent checkpoint save succeeds')
       call assert_checkpoint_header_version(CHECKPOINT_PATH, 6_int32, 'historical coherent sampler')
@@ -1716,6 +1737,10 @@ contains
                             'checkpoint rebuild restores active vocabulary count')
       call assert_i32_equal(restored%context_mode, PT_CONTEXT_HIERARCHICAL, &
                             'checkpoint preserves default hierarchical encoder semantics')
+      call assert_i32_equal(restored%initial_plasticity_tenths_percent, 110_int32, &
+                            'checkpoint round-trip preserves 11.0 percent initial plasticity')
+      call assert_i32_equal(restored%minimum_plasticity_tenths_percent, 6_int32, &
+                            'checkpoint round-trip preserves exact 0.6 percent minimum plasticity')
       call assert_true(all(restored%base_bits == model_a%base_bits), 'checkpoint restores base hypervectors')
       call assert_true(all(restored%semantic_bits == model_a%semantic_bits), &
                        'checkpoint restores semantic hypervectors')
@@ -1767,10 +1792,14 @@ contains
       ! not silently switch to the new unbiased sampler and diverge after the
       ! first resumed update. The version-selected compatibility metadata keeps
       ! v5 as the on-disk identity of this synthetic legacy lineage.
-      call pretrain_build_vocabulary(sampler_legacy_model, CORPUS_PATH, config, vocabulary_metrics, status)
+      sampler_legacy_config = config
+      sampler_legacy_config%initial_plasticity_tenths_percent = 250_int32
+      sampler_legacy_config%minimum_plasticity_tenths_percent = 10_int32
+      call pretrain_build_vocabulary(sampler_legacy_model, CORPUS_PATH, sampler_legacy_config, &
+                                     vocabulary_metrics, status)
       call assert_i32_equal(status, PT_OK, 'legacy-sampler vocabulary pass succeeds')
       sampler_legacy_model%plasticity_sampler = PT_PLASTICITY_SAMPLER_LEGACY
-      call pretrain_train_file(sampler_legacy_model, CORPUS_PATH, config, train_metrics, status)
+      call pretrain_train_file(sampler_legacy_model, CORPUS_PATH, sampler_legacy_config, train_metrics, status)
       call assert_i32_equal(status, PT_OK, 'legacy-sampler initial epoch succeeds')
       call pretrain_checkpoint_save(sampler_legacy_model, CHECKPOINT_PATH, status)
       call assert_i32_equal(status, PT_OK, 'legacy-sampler checkpoint save succeeds')
@@ -1784,7 +1813,7 @@ contains
       call pretrain_config_from_model(sampler_legacy_restored, resumed_config, status)
       call assert_i32_equal(status, PT_OK, 'legacy-sampler resume configuration is available')
       resumed_config%epochs = 1_int32
-      call pretrain_train_file(sampler_legacy_model, CORPUS_PATH, config, train_metrics, status)
+      call pretrain_train_file(sampler_legacy_model, CORPUS_PATH, sampler_legacy_config, train_metrics, status)
       call assert_i32_equal(status, PT_OK, 'legacy-sampler uninterrupted second epoch succeeds')
       call pretrain_train_file(sampler_legacy_restored, CORPUS_PATH, resumed_config, train_metrics, status)
       call assert_i32_equal(status, PT_OK, 'legacy-sampler resumed second epoch succeeds')
@@ -2007,8 +2036,8 @@ contains
       training_config%context_window = 2_int32
       training_config%position_shift_bits = 41_int32
       training_config%epochs = 1_int32
-      training_config%initial_plasticity_percent = 25_int32
-      training_config%minimum_plasticity_percent = 1_int32
+      training_config%initial_plasticity_tenths_percent = 250_int32
+      training_config%minimum_plasticity_tenths_percent = 10_int32
       training_config%plasticity_decay_events = 8_int32
       training_config%strict_tokenization = .true.
       call pretrain_build_vocabulary(model, CORPUS_PATH, training_config, vocabulary_metrics, status)

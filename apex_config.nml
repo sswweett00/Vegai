@@ -1,0 +1,13 @@
+&apex
+  learning_rate = 0.03,
+  beta1 = 0.9,
+  beta2 = 0.5,
+  epsilon = 1.0e-8,
+  gamma = 0.5,
+  weight_decay = 0.0,
+  gradient_clip = 10.0,
+  warmup_updates = 10,
+  total_updates = 0,
+  scheduler_name = 'invsqrt',
+  minimum_lr_ratio = 0.1
+/

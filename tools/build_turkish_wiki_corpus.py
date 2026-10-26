@@ -14,7 +14,7 @@ target is reported as a target, never as an achieved count.  The builder
 * applies fail-closed Turkish quality filters with a full rejection funnel;
 * removes exact duplicate documents and exact duplicate paragraphs
   (>=120 normalized chars) across the whole stream;
-* splits train/held-out at the *document* level by a stable SHA-256 bucket
+* splits train/validation/held-out test at the *document* level by stable SHA-256 buckets
   before any tokenizer or model sees the text;
 * emits LF-framed records bounded for the native byte-BPE trainer
   (``BPE_MAX_INPUT_BYTES=8192``), a tokenizer sample, and an optional
@@ -38,10 +38,11 @@ import unicodedata
 import xml.etree.ElementTree as ET
 from typing import Any, Iterator
 
-SCHEMA = "vegai-turkish-wiki-corpus/v2"
+SCHEMA = "vegai-turkish-wiki-corpus/v4"
 TARGET_TOKENS_99B = 99_000_000_000
 SPLIT_MODULUS = 200
-SPLIT_HELDOUT_BUCKET = 0
+SPLIT_TEST_BUCKET = 0
+SPLIT_VALIDATION_BUCKET = 1
 PARAGRAPH_DEDUPE_MIN_CHARS = 120
 
 TURKISH_LETTERS = set(
@@ -81,6 +82,7 @@ class Funnel:
     duplicate_documents: int = 0
     duplicate_paragraphs: int = 0
     train_documents: int = 0
+    validation_documents: int = 0
     heldout_documents: int = 0
 
     def reject(self, reason: str) -> None:
@@ -94,8 +96,9 @@ class Funnel:
             "duplicate_documents": self.duplicate_documents,
             "duplicate_paragraphs": self.duplicate_paragraphs,
             "train_documents": self.train_documents,
+            "validation_documents": self.validation_documents,
             "heldout_documents": self.heldout_documents,
-            "accepted_documents": self.train_documents + self.heldout_documents,
+            "accepted_documents": self.train_documents + self.validation_documents + self.heldout_documents,
         }
 
 
@@ -106,9 +109,14 @@ def localname(tag: str) -> str:
 def iter_wiki_documents(path: Path) -> Iterator[Document]:
     """Stream namespace-tolerant MediaWiki export pages from a bz2 dump."""
     with bz2.open(path, "rb") as handle:
-        context = ET.iterparse(handle, events=("end",))
-        for _event, element in context:
-            if localname(element.tag) != "page":
+        context = ET.iterparse(handle, events=("start", "end"))
+        root: ET.Element | None = None
+        for event, element in context:
+            if root is None:
+                if event == "start":
+                    root = element
+                continue
+            if event != "end" or localname(element.tag) != "page":
                 continue
             title = ""
             page_id = ""
@@ -129,7 +137,11 @@ def iter_wiki_documents(path: Path) -> Iterator[Document]:
                     for grandchild in child:
                         if localname(grandchild.tag) == "text":
                             text = grandchild.text or ""
+            # Clearing the page alone leaves an empty child object attached to
+            # the root for every page in a multi-million-row dump. Clear the
+            # root's completed children as well to keep XML-tree memory bounded.
             element.clear()
+            root.clear()
             if is_redirect or namespace != "0":
                 continue
             if title and text:
@@ -278,10 +290,10 @@ def chunk_paragraph(paragraph: str, max_chars: int) -> list[str]:
     return chunks
 
 
-def is_heldout(document: Document) -> bool:
-    identity = f"vegai-trwiki-split-v1\0{document.page_id}\0{document.title}".encode("utf-8")
-    bucket = int.from_bytes(hashlib.sha256(identity).digest()[:8], "big") % SPLIT_MODULUS
-    return bucket == SPLIT_HELDOUT_BUCKET
+def split_bucket(document: Document) -> int:
+    """Stable source-document bucket; same title/page identity never crosses splits."""
+    identity = f"vegai-trwiki-split-v2\0{document.page_id}\0{document.title}".encode("utf-8")
+    return int.from_bytes(hashlib.sha256(identity).digest()[:8], "big") % SPLIT_MODULUS
 
 
 class HashedWriter:
@@ -320,21 +332,77 @@ def sha256_file(path: Path) -> str:
     return hasher.hexdigest()
 
 
+def write_byte_budget_slices(
+    source: Path, destinations: list[Path], budgets: list[int]
+) -> list[dict[str, Any]]:
+    """Write deterministic, evenly-spaced whole-record samples under byte caps.
+
+    Limited samples use two sequential passes to count records and select
+    evenly-spaced record midpoints across the entire training split. Multiple
+    outputs share both passes, avoiding a separate full-file scan per artifact.
+    Output order is retained; records are never split; memory is O(max record
+    size), independent of corpus size. A zero or corpus-sized budget copies the
+    complete file.
+    """
+    if not destinations or len(destinations) != len(budgets) or any(budget < 0 for budget in budgets):
+        raise CorpusError("one or more byte-budget destinations and non-negative budgets must correspond")
+    writers = [HashedWriter(path) for path in destinations]
+    source_bytes = source.stat().st_size
+    full_outputs = [budget <= 0 or budget >= source_bytes for budget in budgets]
+    needs_sampling = any(not full for full in full_outputs)
+    record_count = 0
+    if needs_sampling:
+        with source.open("rb") as handle:
+            record_count = sum(1 for _ in handle)
+
+    target_counts = [0] * len(budgets)
+    selected_indices = [0] * len(budgets)
+    next_targets = [0] * len(budgets)
+    used_bytes = [0] * len(budgets)
+    for index, budget in enumerate(budgets):
+        if not full_outputs[index] and record_count > 0:
+            target_counts[index] = min(
+                record_count,
+                max(1, (budget * record_count + source_bytes // 2) // source_bytes),
+            )
+            next_targets[index] = record_count // (2 * target_counts[index])
+
+    def write_raw(writer: HashedWriter, raw: bytes) -> None:
+        writer.handle.write(raw)
+        writer.hasher.update(raw)
+        writer.bytes_written += len(raw)
+        writer.records += 1
+        writer.approx_words += raw.count(b" ") + 1
+
+    try:
+        with source.open("rb") as handle:
+            for record_index, raw in enumerate(handle):
+                for index, writer in enumerate(writers):
+                    if full_outputs[index]:
+                        write_raw(writer, raw)
+                    elif record_index == next_targets[index]:
+                        if used_bytes[index] + len(raw) <= budgets[index]:
+                            write_raw(writer, raw)
+                            used_bytes[index] += len(raw)
+                        selected_indices[index] += 1
+                        if selected_indices[index] < target_counts[index]:
+                            next_targets[index] = (
+                                (2 * selected_indices[index] + 1) * record_count
+                            ) // (2 * target_counts[index])
+                if not any(full_outputs) and all(
+                    selected_indices[index] >= target_counts[index]
+                    for index in range(len(budgets))
+                    if target_counts[index] > 0
+                ):
+                    break
+    finally:
+        metadata = [writer.close() for writer in writers]
+    return metadata
+
+
 def write_byte_budget_slice(source: Path, destination: Path, budget: int) -> dict[str, Any]:
-    writer = HashedWriter(destination)
-    used = 0
-    with source.open("rb") as handle:
-        for raw in handle:
-            if budget > 0 and used + len(raw) > budget:
-                break
-            writer.handle.write(raw)
-            writer.hasher.update(raw)
-            writer.bytes_written += len(raw)
-            writer.records += 1
-            writer.approx_words += raw.count(b" ") + 1
-            used += len(raw)
-    result = writer.close()
-    return result
+    """Single-output compatibility wrapper for deterministic whole-record sampling."""
+    return write_byte_budget_slices(source, [destination], [budget])[0]
 
 
 def build_corpus(args: argparse.Namespace) -> dict[str, Any]:
@@ -373,12 +441,13 @@ def build_corpus(args: argparse.Namespace) -> dict[str, Any]:
     seen_documents: set[bytes] = set()
     seen_paragraphs: set[bytes] = set()
     train_writer = HashedWriter(output_dir / "train.txt")
+    validation_writer = HashedWriter(output_dir / "validation.txt")
     heldout_writer = HashedWriter(output_dir / "heldout.txt")
     try:
         for document in documents:
-            funnel.source_documents += 1
-            if args.max_docs and funnel.source_documents > args.max_docs:
+            if args.max_docs and funnel.source_documents >= args.max_docs:
                 break
+            funnel.source_documents += 1
             cleaned = clean_wikitext(document.text) if args.wiki_xml_bz2 else unicodedata.normalize("NFC", document.text)
             reason = quality_rejection_reason(cleaned, min_chars=args.min_chars, max_chars=args.max_chars)
             if reason is not None:
@@ -418,9 +487,13 @@ def build_corpus(args: argparse.Namespace) -> dict[str, Any]:
                 funnel.reject("no_usable_records")
                 continue
 
-            if is_heldout(document):
+            bucket = split_bucket(document)
+            if bucket == SPLIT_TEST_BUCKET:
                 funnel.heldout_documents += 1
                 writer = heldout_writer
+            elif bucket == SPLIT_VALIDATION_BUCKET:
+                funnel.validation_documents += 1
+                writer = validation_writer
             else:
                 funnel.train_documents += 1
                 writer = train_writer
@@ -428,16 +501,18 @@ def build_corpus(args: argparse.Namespace) -> dict[str, Any]:
                 writer.write_record(record)
     finally:
         train_meta = train_writer.close()
+        validation_meta = validation_writer.close()
         heldout_meta = heldout_writer.close()
 
     if train_meta["records"] == 0:
         raise CorpusError("quality pipeline accepted zero training records; refusing to publish an empty corpus")
+    if validation_meta["records"] == 0 or heldout_meta["records"] == 0:
+        raise CorpusError("document split produced empty validation or held-out test data; refusing an unevaluable corpus")
 
-    sample_meta = write_byte_budget_slice(
-        output_dir / "train.txt", output_dir / "tokenizer_sample.txt", args.tokenizer_sample_bytes
-    )
-    epoch_meta = write_byte_budget_slice(
-        output_dir / "train.txt", output_dir / "train_epoch.txt", args.train_byte_budget
+    sample_meta, epoch_meta = write_byte_budget_slices(
+        output_dir / "train.txt",
+        [output_dir / "tokenizer_sample.txt", output_dir / "train_epoch.txt"],
+        [args.tokenizer_sample_bytes, args.train_byte_budget],
     )
 
     manifest: dict[str, Any] = {
@@ -453,9 +528,13 @@ def build_corpus(args: argparse.Namespace) -> dict[str, Any]:
             ),
         },
         "split": {
-            "rule": "sha256(vegai-trwiki-split-v1|page_id|title) mod 200 == 0 -> heldout",
+            "rule": "sha256(vegai-trwiki-split-v2|page_id|title) mod 200: 0 -> heldout_test, 1 -> validation, 2..199 -> train",
             "level": "source-document",
-            "heldout_fraction_nominal": 1 / SPLIT_MODULUS,
+            "validation_fraction_nominal": 1 / SPLIT_MODULUS,
+            "heldout_test_fraction_nominal": 1 / SPLIT_MODULUS,
+            "train_fraction_nominal": (SPLIT_MODULUS - 2) / SPLIT_MODULUS,
+            "selection_uses": "validation only",
+            "final_reporting_uses": "heldout test only",
         },
         "filters": {
             "min_chars": args.min_chars,
@@ -469,12 +548,18 @@ def build_corpus(args: argparse.Namespace) -> dict[str, Any]:
         "funnel": funnel.as_dict(),
         "outputs": {
             "train": train_meta,
+            "validation": validation_meta,
             "heldout": heldout_meta,
             "tokenizer_sample": sample_meta,
             "train_epoch": epoch_meta,
         },
         "train_byte_budget": args.train_byte_budget,
         "tokenizer_sample_bytes": args.tokenizer_sample_bytes,
+        "byte_budget_selection": (
+            "deterministic evenly-spaced whole-record samples across the complete train split; "
+            "tokenizer and epoch artifacts share two streaming passes; source order retained; "
+            "strict byte caps; zero budget means full split"
+        ),
     }
     (output_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -494,7 +579,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--max-chars", type=int, default=400_000)
     parser.add_argument("--max-record-chars", type=int, default=3_600)
     parser.add_argument("--max-docs", type=int, default=0, help="0 = no limit (probe sizing only; recorded in manifest)")
-    parser.add_argument("--tokenizer-sample-bytes", type=int, default=2_000_000)
+    parser.add_argument("--tokenizer-sample-bytes", type=int, default=3_000_000)
     parser.add_argument("--train-byte-budget", type=int, default=0, help="0 = full train split as the epoch corpus")
     return parser.parse_args(argv)
 
@@ -502,6 +587,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(list(sys.argv[1:] if argv is None else argv))
     try:
+        if args.min_chars < 1 or args.max_chars < args.min_chars or args.max_record_chars < 1:
+            raise CorpusError("character bounds must be positive and max-chars >= min-chars")
+        if args.max_docs < 0 or args.tokenizer_sample_bytes < 1 or args.train_byte_budget < 0:
+            raise CorpusError("max-docs/train-byte-budget must be non-negative and tokenizer sample positive")
         manifest = build_corpus(args)
     except CorpusError as error:
         print(f"build_turkish_wiki_corpus: {error}", file=sys.stderr)

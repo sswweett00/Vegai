@@ -1,0 +1,25 @@
+# Declarative template for the planned comparative benchmark.
+# This file is not consumed by the current Fortran namelist loader.
+[apex]
+learning_rate = 0.02
+beta1 = 0.9
+beta2 = 0.5
+epsilon = 1e-8
+gamma = 0.5
+weight_decay = 0.0
+gradient_clip = 10.0
+scheduler = "constant"
+warmup_updates = 0
+total_updates = 0
+minimum_lr_ratio = 0.1
+
+[benchmark]
+max_steps = 1000
+wall_clock_seconds = 60.0
+tuning_trials_per_optimizer = 20
+seed_values = [1, 7, 19, 101, 2026]
+precisions = ["real64", "real32"]
+# Families are declarative only; the current Fortran pilot runs one quadratic.
+tasks = ["quadratic_kappa_1e2", "quadratic_kappa_1e6", "rosenbrock", "rastrigin", "logistic_dense", "logistic_sparse", "synthetic_mlp_2hidden", "synthetic_transformer_lm", "matrix_factorization_low_rank", "noisy_gradient"]
+optimizers = ["sgd", "momentum_sgd", "nesterov", "adagrad", "rmsprop", "adam", "adamw", "nadam", "radam", "lion", "adafactor", "lamb", "lars", "sophia", "shampoo", "muon", "prodigy", "schedule_free_adamw"]
+results_format = "csv"

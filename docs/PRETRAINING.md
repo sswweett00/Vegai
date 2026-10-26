@@ -139,13 +139,14 @@ bilinçli olarak CPU/OpenMP-only'dir; OpenVINO'ya sessiz fallback yoktur.
 - `majority_tie_seeded`, yeni modlarda word-parallel `hv_bitacc_t` binary
   population counter ve deterministic tie breaker kullanır. Bu, 16.384 bit
   üzerinde tek tek branch yerine packed XOR/AND carry ile çalışır.
-- Güncelleme gradient değildir. `hv_hebbian_update_percent`, seçilecek
-  **boyutların** cardinality'sini tam olarak belirler; eski prototype bitleri
-  seçilmeyen boyutlarda korunur. Context ve eski bit aynıysa nihai Hamming
-  değişiminin bundan küçük olması normaldir.
+- Güncelleme gradient değildir. `hv_hebbian_update_tenths_percent`, seçilecek
+  **boyutların** cardinality'sini yüzde puanının onda biri çözünürlüğünde sabit
+  nokta aritmetiğiyle belirler; eski prototype bitleri seçilmeyen boyutlarda
+  korunur. Context ve eski bit aynıysa nihai Hamming değişiminin bundan küçük
+  olması normaldir.
 - Schedule deneyim `e` için `e < D` initial, `D <= e < 4D` yaklaşık yarı,
   `4D <= e < 16D` yaklaşık çeyrek ve `e >= 16D` minimum oranını kullanır
-  (`D = plasticity_decay_events`). Varsayılan `25 → 13 → 7 → 1`dir.
+  (`D = plasticity_decay_events`). Varsayılan `%25.0 → %12.5 → %6.3 → %1.0`dir.
 
 Bu yapı aynı yerel bağlamda görülen token'ların prototype'larını korele
 edebilir. Ancak negation, uzun menzilli syntax, factual recall, generation veya
@@ -296,7 +297,7 @@ cmake --build build --parallel
 # Yeni iki-pass model
 ./build/vegai_pretrain train CORPUS.txt model.vgai \
   --max-vocab 50000 --min-frequency 3 --window 4 --position-shift 73 \
-  --context-mode hierarchical --epochs 3 --initial-plasticity 25 --minimum-plasticity 1 \
+  --context-mode hierarchical --epochs 3 --initial-plasticity 25.0 --minimum-plasticity 1.0 \
   --decay-events 32 --query token
 
 # Long-record global self-echo'yu cross-fold olarak azaltan CPU-only encoder.
@@ -348,8 +349,8 @@ cmake --build build --parallel
 | `--parallel-min-contexts N` | 32 | execution-only adaptive scheduler eşiği; N'den az eligible center içeren kısa record'lar team-launch/staging maliyetinden kaçınmak için serial hazırlanır |
 | `--serial-context-build` | kapalı | yalnız debug/regression için parallel context hazırlığını kapatır; checkpoint state değildir |
 | `--epochs N` | 1 | ikinci corpus geçişi sayısı |
-| `--initial-plasticity N` | 25 | başlangıç selected-dimension yüzdesi |
-| `--minimum-plasticity N` | 1 | schedule alt sınırı |
+| `--initial-plasticity PCT` | 25.0 | başlangıç selected-dimension yüzdesi; tam olarak bir ondalık basamak desteklenir |
+| `--minimum-plasticity PCT` | 1.0 | schedule alt sınırı; ör. `0.6` tam fixed-point olarak saklanır |
 | `--decay-events N` | 32 | token başına ilk schedule eşiği |
 | `--strict` | kapalı | drop/truncation durumunu hata yap |
 | `--reference-context-kernel` | kapalı | yalnız benchmark/regression için önceki rotate-then-add kernelini kullanır; varsayılan fused implementation ile checkpoint byte'ları bit-tam eşit olmalıdır |
@@ -578,26 +579,25 @@ frequency/active invariantları, rebuilt hash index ve payload checksum kontrol�
 yapar. Sürüm, sadece wire parser değil **gelecek Hebbian seçim algoritmasının
 continuation contract'i**dir:
 
-- Yeni `legacy`/`positional`/`hybrid`/`hierarchical`/`coherent`/`debiased`
-  context mode'ları **v7** header/checksum'ı ile yazmaya devam eder. v7,
-  exact-rate plasticity için unbiased Floyd/complement subset sampler'ını bağlar
-  ve `debiased` distinct-slot global-context semantiğinin ilk kabul edilen
-  continuation lineage'idir. Bu nedenle fresh `legacy` context mode'u bile
-  (isim benzerliğine rağmen) v7'dir; context encoder ile sampler lineage ayrı
-  kavramlardır.
-- `resonant` yalnız **v8** header/checksum'ı ile yazılır. v8 wire layout'u
-  değiştirmez fakat epoch-başı frozen semantic-context continuation contract'ini
-  bağlar; v7 writer'ın bu mode'u anlamadığı bir checkpoint'i sessizce üretmesi
-  önlenir. v8 reader v7 Floyd/complement sampler'ını da aynen sürdürür.
+- Modern Floyd/complement sampler kullanan yeni context mode checkpoint'leri
+  **v9** header/checksum'ıyla yazılır. v9, plasticity schedule değerlerini
+  yüzde puanının onda biri cinsinden saklar; böylece `0.6%` float yuvarlaması
+  olmadan ifade edilir. Exact-rate update, HV dimension sayısını sabit nokta
+  aritmetiğiyle en yakın tam bite yuvarlar.
+- v4-v8 checkpoint'leri okunabilir: eski whole-percent alanları bellekte
+  tenths-of-a-percent ölçeğine taşınır; checksum eski biçimde doğrulanır. v7
+  unbiased Floyd/complement sampler lineage'ini, v8 ise RESONANT epoch-başı
+  frozen semantic-context sözleşmesini taşır; yeni v9 bunların ikisini de
+  sürdürürken sadece plasticity alanlarının birimini günceller.
 - Reader v4, v5 ve v6'yı historical bounded-retry sampler lineage'i olarak
-  yükler. Böyle bir model tekrar kaydedildiğinde non-coherent ise v5, coherent
-  ise v6 yazar ve sonraki update'lerde historical stream'i sürdürür.
-- v7/v8 reader Floyd/complement lineage'ini sürdürür. Coherent payload v4 veya
-  v5 ise fail-closed reddedilir; v6+ coherent için geçerlidir. `debiased`
-  payload yalnız v7+ Floyd lineage'inde, `resonant` payload yalnız v8+ içinde
-  kabul edilir; synthetic veya forged legacy-sampler combination save/load
-  aşamasında fail-closed reddedilir. Böylece eski checkpoint yeni duplicate-
-  handling veya semantic-feedback trajectory'sine sessizce taşınmaz.
+  yükler. Bu eski sampler'lı checkpoint'ler tekrar kaydedildiğinde non-coherent
+  ise v5, coherent ise v6 biçimini ve whole-percent alanlarını korur; böylece
+  geçmiş deterministic continuation stream'i değişmez.
+- Coherent payload v4 veya v5 ise fail-closed reddedilir; v6+ coherent için
+  geçerlidir. `debiased` payload yalnız v7+ Floyd lineage'inde, `resonant`
+  payload yalnız v8+ içinde kabul edilir. Legacy sampler'a ait olmayan
+  fractional plasticity değeri eski checkpoint'e yazılmaya çalışılırsa kayıplı
+  dönüşüm yerine fail-closed reddedilir.
 
 `vegai_pretrain inspect`, `plasticity sampler` alanında `floyd-complement` veya
 `legacy-bounded-retry` yazar; operatör checkpoint lineage'ini context mode'dan
@@ -718,17 +718,17 @@ Native testler şunları kontrol eder:
 - ≥12 active-token controlled record üzerinde `hierarchical` replay
   determinismi, local-only hybrid'den ayrışması ve checkpoint round-trip'i;
 - aynı long-record fixture üzerinde `coherent`in hierarchy'den ayrışması,
-  fused/reference local-kernel eşitliği, kısa-record `hybrid` eşitliği ve v7
+  fused/reference local-kernel eşitliği, kısa-record `hybrid` eşitliği ve v9
   checkpoint round-trip'i; synthetic v5 ve coherent-v6 lineage'lerinin
   historical sampler ile uninterrupted run'a bit-tam resume edilmesi;
 - duplicate olmayan long record'da `debiased = hierarchical` bit eşitliği;
   raw uzun ama <12 distinct slotlu repeat record'da `debiased = hybrid` bit
-  eşitliği, distinct/suppressed telemetry, v7 checkpoint round-trip'i ve
+  eşitliği, distinct/suppressed telemetry, v9 checkpoint round-trip'i ve
   legacy sampler save rejection; ayrıca OpenVINO immutable ABI'sinin explicit
   `debiased` rejection'ı;
 - `resonant` ilk epoch'unun local `hybrid`le base/semantic/experience düzleminde
   bit-tam eşitliği, ikinci epoch'ta learned snapshot ile hybrid'den semantic
-  olarak ayrışması, fused/reference eşitliği, v8 checkpoint round-trip +
+  olarak ayrışması, fused/reference eşitliği, v9 checkpoint round-trip +
   uninterrupted/resumed third epoch byte eşitliği, snapshot telemetry/reservation
   ve OpenVINO ABI'sinin explicit rejection'ı;
 - cache açık/kapalı run'larının base/semantic/experience planes ve checkpoint

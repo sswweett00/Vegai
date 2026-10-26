@@ -123,7 +123,7 @@ düşer. CPU/OpenMP-only `resonant`, her shard-epoch başlamadan önce committed
 semantic plane'i dondurur; first epoch hybrid ile bit-tam aynıdır ve sonraki
 shard/epoch'larda learned feedback kullanır. Bu mode için capacity başına 2,048
 byte transient snapshot RAM'i planlanmalıdır. Yeni ordinary continual run'lar
-v7 checkpoint üretir; `resonant` run v8 üretir. v7 exact-mask sampler lineage'ini
+v9 checkpoint üretir; fixed-point plasticity alanları yüzde puanının onda birini saklar. Eski v4-v8 checkpoint'leri okunup kayıpsız v9'a migrate edilir. v7 exact-mask sampler lineage'ini
 ve debiased continuation contract'ini, v8 ise resonant feedback continuation
 contract'ini bağlar; policy/mode sonradan değiştirilemez. Historical v6 coherent
 checkpoint'ler okunur, ancak historical sampler lineage'iyle devam eder; bir

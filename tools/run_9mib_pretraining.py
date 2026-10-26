@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -36,12 +37,13 @@ import threading
 import time
 from typing import Any, Mapping, Sequence
 
+from hardware_compatibility import collect_hardware_profile
 from synthetic_pretraining_fixture import FixtureError, sha256_file, verify_fixture
 from training_resource_plan import ResourcePlanError, build_plan
 
 
 ROOT = Path(__file__).resolve().parent.parent
-SCHEMA = "vegai-9mib-pretraining-run/v1"
+SCHEMA = "vegai-9mib-pretraining-run/v2"
 MAX_TRAIN_STDOUT_BYTES = 1_000_000
 MAX_TRAIN_STDERR_BYTES = 1_000_000
 MAX_INSPECT_STDOUT_BYTES = 128 * 1024
@@ -309,6 +311,28 @@ def parse_training_metrics(stdout: bytes) -> dict[str, int]:
     return metrics
 
 
+def parse_openvino_execution(stdout: bytes) -> dict[str, Any]:
+    text = stdout.decode("utf-8", errors="strict")
+    matches = re.findall(
+        r"OpenVINO execution devices:\s*CPU=\s*([TF])\s+GPU=\s*([TF])\s+NPU=\s*([TF])",
+        text,
+    )
+    require(len(matches) == 1, "OpenVINO run did not report exactly one execution-device attestation")
+    cpu, gpu, npu = matches[0]
+    counts: dict[str, int] = {}
+    for key, label in (
+        ("dispatched_contexts", "OpenVINO-dispatched contexts"),
+        ("worker_sessions", "OpenVINO resident worker sessions"),
+        ("worker_requests", "OpenVINO worker requests"),
+        ("cpu_bypass_contexts", "OpenVINO native-CPU bypass contexts"),
+        ("cpu_fallback_contexts", "OpenVINO CPU-fallback contexts"),
+    ):
+        found = re.findall(rf"^\s*{re.escape(label)}:\s*(\d+)\s*$", text, flags=re.MULTILINE)
+        require(len(found) == 1, f"OpenVINO output must report exactly one {label!r} metric")
+        counts[key] = int(found[0])
+    return {"cpu": cpu == "T", "gpu": gpu == "T", "npu": npu == "T", **counts}
+
+
 def validate_training_metrics(metrics: Mapping[str, int], fixture: Mapping[str, Any], epochs: int) -> None:
     records = fixture["records"]
     expected_tokens = int(records["raw_tokens"]) * epochs
@@ -325,7 +349,7 @@ def validate_training_metrics(metrics: Mapping[str, int], fixture: Mapping[str, 
     require(metrics["dropped overlong records"] == 0, "fixture scanner unexpectedly dropped records")
 
 
-def preflight_plan(arguments: argparse.Namespace, corpus: Path, checkpoint: Path) -> dict[str, Any]:
+def preflight_plan(arguments: argparse.Namespace, corpus: Path, checkpoint: Path, omp_threads: int) -> dict[str, Any]:
     if arguments.skip_resource_preflight:
         return {
             "status": "skipped-by-explicit-operator-option",
@@ -336,7 +360,7 @@ def preflight_plan(arguments: argparse.Namespace, corpus: Path, checkpoint: Path
         checkpoint=checkpoint,
         max_vocab=arguments.max_vocab,
         context_mode=arguments.context_mode,
-        omp_threads=arguments.omp_threads,
+        omp_threads=omp_threads,
         reserve_fraction=arguments.reserve_fraction,
         require_accelerator=False,
     )
@@ -375,6 +399,42 @@ def child_metadata(result: BoundedProcessResult) -> dict[str, Any]:
     }
 
 
+def parse_percent_tenths(value: str) -> int:
+    """Parse a percentage with at most one decimal digit into tenths of a percent."""
+    token = value.strip()
+    whole, separator, fractional = token.partition(".")
+    if not whole.isdigit() or (separator and (len(fractional) != 1 or not fractional.isdigit())):
+        raise argparse.ArgumentTypeError("plasticity percentage must be an integer or have exactly one decimal digit")
+    try:
+        decimal_value = Decimal(token)
+    except (InvalidOperation, ValueError) as error:
+        raise argparse.ArgumentTypeError(f"invalid percentage: {value!r}") from error
+    if not decimal_value.is_finite() or decimal_value <= 0 or decimal_value > 100:
+        raise argparse.ArgumentTypeError("plasticity percentage must be in (0, 100]")
+    scaled = decimal_value * 10
+    if scaled != scaled.to_integral_value():
+        raise argparse.ArgumentTypeError("plasticity percentage supports at most one decimal digit")
+    return int(scaled)
+
+
+def format_percent_tenths(value: int) -> str:
+    return f"{value // 10}.{value % 10}"
+
+
+def resolve_omp_threads(requested: int | None) -> tuple[int, dict[str, Any]]:
+    profile = collect_hardware_profile()
+    topology = profile.get("cpu", {}).get("topology", {})
+    physical = topology.get("physical_cores")
+    logical = profile.get("cpu", {}).get("logical_processors")
+    require(isinstance(physical, int) and physical > 0,
+            "physical CPU core count is unavailable; refusing to substitute logical threads")
+    if isinstance(logical, int) and logical > 0:
+        physical = min(physical, logical)
+    resolved = physical if requested is None else min(requested, physical)
+    require(resolved > 0, "resolved OpenMP thread count is not positive")
+    return resolved, profile
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pretrain-bin", required=True, type=Path, help="compiled vegai_pretrain executable")
@@ -382,9 +442,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest", required=True, type=Path, help="fixture manifest bound to --corpus")
     parser.add_argument("--checkpoint", required=True, type=Path, help="new checkpoint path")
     parser.add_argument("--report", required=True, type=Path, help="new JSON attestation path")
-    parser.add_argument("--max-vocab", type=int, default=1024, help="vocabulary capacity supplied to train (default: 1024)")
-    parser.add_argument("--min-frequency", type=int, default=1, help="minimum token frequency supplied to train (default: 1)")
-    parser.add_argument("--window", type=int, default=2, help="context window supplied to train (default: 2)")
+    parser.add_argument("--max-vocab", type=int, default=32768, help="vocabulary capacity supplied to train (default: 32768)")
+    parser.add_argument("--min-frequency", type=int, default=3, help="minimum token frequency supplied to train (default: 3)")
+    parser.add_argument("--window", type=int, default=6, help="context window supplied to train (default: 6)")
     parser.add_argument("--position-shift", type=int, default=41, help="position shift supplied to train (default: 41)")
     parser.add_argument(
         "--context-mode",
@@ -392,11 +452,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="hierarchical",
         help="HDC context mode supplied to train (default: hierarchical)",
     )
-    parser.add_argument("--epochs", type=int, default=1, help="complete corpus epochs (default: 1)")
-    parser.add_argument("--initial-plasticity", type=int, default=25, help="initial Hebbian plasticity percent (default: 25)")
-    parser.add_argument("--minimum-plasticity", type=int, default=1, help="minimum Hebbian plasticity percent (default: 1)")
-    parser.add_argument("--decay-events", type=int, default=32, help="plasticity decay interval (default: 32)")
-    parser.add_argument("--omp-threads", type=int, default=2, help="OMP_NUM_THREADS for the one train child (default: 2)")
+    parser.add_argument("--epochs", type=int, default=2, help="complete corpus epochs (default: 2)")
+    parser.add_argument("--initial-plasticity", type=parse_percent_tenths, default=110, help="initial Hebbian plasticity percent (default: 11.0)")
+    parser.add_argument("--minimum-plasticity", type=parse_percent_tenths, default=6, help="minimum Hebbian plasticity percent (default: 0.6)")
+    parser.add_argument("--decay-events", type=int, default=3000, help="plasticity decay interval (default: 3000)")
+    parser.add_argument("--omp-threads", type=int, help="OMP_NUM_THREADS; defaults to detected physical core count")
+    parser.add_argument("--parallel-min-contexts", type=int, help="OpenMP context-batch threshold; defaults adaptively to CPU count")
+    parser.add_argument("--context-provider", choices=("cpu", "openvino"), default="cpu", help="CPU or OpenVINO execution provider")
+    parser.add_argument("--openvino-device", default="GPU", help="OpenVINO target device when context-provider=openvino")
+    parser.add_argument("--openvino-min-contexts", type=int, default=16, help="minimum updates to dispatch one record to OpenVINO")
+    parser.add_argument("--require-accelerator", action="store_true", help="fail if OpenVINO does not execute on an accelerator")
     parser.add_argument("--timeout-seconds", type=float, default=1200.0, help="hard train-child timeout (default: 1200)")
     parser.add_argument("--reserve-fraction", type=float, default=0.25, help="resource-plan reserve fraction (default: 0.25)")
     parser.add_argument("--skip-resource-preflight", action="store_true", help="record an explicit preflight bypass (for isolated contract tests only)")
@@ -410,10 +475,15 @@ def validate_arguments(arguments: argparse.Namespace) -> None:
     require(arguments.window > 0, "--window must be positive")
     require(arguments.position_shift > 0, "--position-shift must be positive")
     require(arguments.epochs > 0, "--epochs must be positive")
-    require(1 <= arguments.initial_plasticity <= 100, "--initial-plasticity must be in [1, 100]")
+    require(1 <= arguments.initial_plasticity <= 1000, "--initial-plasticity must be in [0.1, 100.0]")
     require(1 <= arguments.minimum_plasticity <= arguments.initial_plasticity, "plasticity bounds are invalid")
     require(arguments.decay_events > 0, "--decay-events must be positive")
-    require(arguments.omp_threads > 0, "--omp-threads must be positive")
+    require(arguments.omp_threads is None or arguments.omp_threads > 0, "--omp-threads must be positive when supplied")
+    require(arguments.parallel_min_contexts is None or arguments.parallel_min_contexts > 0,
+            "--parallel-min-contexts must be positive when supplied")
+    require(arguments.context_provider == "cpu" or arguments.context_provider == "openvino", "invalid context provider")
+    require(arguments.openvino_min_contexts > 0, "--openvino-min-contexts must be positive")
+    require(not arguments.require_accelerator or arguments.context_provider == "openvino", "--require-accelerator requires --context-provider openvino")
     require(0.0 <= arguments.reserve_fraction <= 4.0, "--reserve-fraction must be in [0, 4]")
     require(arguments.timeout_seconds > 0.0 and math.isfinite(arguments.timeout_seconds), "--timeout-seconds must be finite and positive")
 
@@ -453,10 +523,14 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     corpus_before = file_identity(corpus)
     manifest_before = file_identity(manifest)
     binary_identity = file_identity(binary)
-    resource_preflight = preflight_plan(arguments, corpus, checkpoint)
+    omp_threads, hardware_profile = resolve_omp_threads(arguments.omp_threads)
+    parallel_min_contexts = arguments.parallel_min_contexts
+    if parallel_min_contexts is None:
+        parallel_min_contexts = 16 if omp_threads > 1 else 32
+    resource_preflight = preflight_plan(arguments, corpus, checkpoint, omp_threads)
 
     environment = os.environ.copy()
-    environment["OMP_NUM_THREADS"] = str(arguments.omp_threads)
+    environment["OMP_NUM_THREADS"] = str(omp_threads)
     environment["OMP_PROC_BIND"] = "close"
     environment["OMP_PLACES"] = "cores"
     command = [
@@ -477,13 +551,29 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
         "--epochs",
         str(arguments.epochs),
         "--initial-plasticity",
-        str(arguments.initial_plasticity),
+        format_percent_tenths(arguments.initial_plasticity),
         "--minimum-plasticity",
-        str(arguments.minimum_plasticity),
+        format_percent_tenths(arguments.minimum_plasticity),
         "--decay-events",
         str(arguments.decay_events),
         "--strict",
+        "--parallel-min-contexts",
+        str(parallel_min_contexts),
+        "--context-provider",
+        arguments.context_provider,
     ]
+    if arguments.context_provider == "openvino":
+        command.extend(
+            [
+                "--openvino-worker", str(ROOT / "tools" / "openvino_context_worker.py"),
+                "--openvino-python", sys.executable,
+                "--openvino-device", arguments.openvino_device,
+                "--openvino-min-contexts", str(arguments.openvino_min_contexts),
+                "--openvino-work-dir", str(checkpoint.parent),
+            ]
+        )
+        if arguments.require_accelerator or arguments.openvino_device.strip().upper().startswith("GPU"):
+            command.append("--openvino-require-accelerator")
     result = run_bounded_child(
         command,
         environment=environment,
@@ -495,6 +585,15 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     require(result.returncode == 0, f"vegai_pretrain train exited with status {result.returncode}")
     metrics = parse_training_metrics(result.stdout)
     validate_training_metrics(metrics, fixture, arguments.epochs)
+    provider_devices: dict[str, Any] | None = None
+    if arguments.context_provider == "openvino":
+        provider_devices = parse_openvino_execution(result.stdout)
+        if arguments.openvino_device.strip().upper().startswith("GPU"):
+            require(provider_devices["gpu"], "GPU was requested but OpenVINO did not attest GPU execution")
+            require(provider_devices["dispatched_contexts"] > 0,
+                    "GPU was selected but no HDC contexts were attested as dispatched")
+            require(provider_devices["cpu_fallback_contexts"] == 0,
+                    "GPU run reported CPU fallback contexts despite accelerator-required mode")
     require(checkpoint.is_file() and checkpoint.stat().st_size > 0, "train command did not create a nonempty checkpoint")
     require(not checkpoint.is_symlink(), "train command produced a symlinked checkpoint")
     checkpoint_identity = file_identity(checkpoint)
@@ -523,6 +622,19 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
         raise PretrainingRunError("checkpoint inspection output is not valid UTF-8") from error
     require(f"query: {probe}" in inspect_text, "checkpoint inspection did not resolve the manifest probe")
     require("nearest semantic neighbour:" in inspect_text, "checkpoint inspection did not emit a nearest-neighbour result")
+    checkpoint_expectations = (
+        f"vocabulary capacity: {arguments.max_vocab}",
+        f"min frequency: {arguments.min_frequency}",
+        f"context window: {arguments.window}",
+        f"positional shift: {arguments.position_shift}",
+        f"context mode: {arguments.context_mode}",
+        f"initial Hebbian plasticity (%): {format_percent_tenths(arguments.initial_plasticity)}",
+        f"minimum Hebbian plasticity (%): {format_percent_tenths(arguments.minimum_plasticity)}",
+        f"plasticity decay events: {arguments.decay_events}",
+        f"completed epochs: {arguments.epochs}",
+    )
+    for expectation in checkpoint_expectations:
+        require(expectation in inspect_text, f"checkpoint inspect does not attest configured value: {expectation}")
 
     elapsed = result.child_wall_seconds
     require(elapsed > 0.0, "train child wall-clock duration is not positive")
@@ -543,6 +655,28 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
             "pretrain_binary": binary_identity,
         },
         "resource_preflight": resource_preflight,
+        "configuration": {
+            "max_vocab": arguments.max_vocab,
+            "min_frequency": arguments.min_frequency,
+            "window": arguments.window,
+            "position_shift": arguments.position_shift,
+            "context_mode": arguments.context_mode,
+            "epochs": arguments.epochs,
+            "initial_plasticity_percent": format_percent_tenths(arguments.initial_plasticity),
+            "minimum_plasticity_percent": format_percent_tenths(arguments.minimum_plasticity),
+            "plasticity_decay_events": arguments.decay_events,
+            "context_provider": arguments.context_provider,
+            "openvino_device": arguments.openvino_device if arguments.context_provider == "openvino" else None,
+            "openvino_min_contexts": arguments.openvino_min_contexts if arguments.context_provider == "openvino" else None,
+            "require_accelerator": arguments.require_accelerator or (
+                arguments.context_provider == "openvino" and arguments.openvino_device.strip().upper().startswith("GPU")
+            ),
+            "openvino_execution_devices": provider_devices,
+            "omp_threads": omp_threads,
+            "parallel_min_contexts": parallel_min_contexts,
+            "omp_thread_source": "requested" if arguments.omp_threads is not None else "detected-physical-core-count",
+            "hardware_profile": hardware_profile,
+        },
         "train": {
             "command": command,
             "environment": {

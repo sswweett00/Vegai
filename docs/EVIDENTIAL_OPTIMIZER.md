@@ -3,7 +3,7 @@
 ## Dürüst amaç
 
 `tools/evidential_optimizer.py`, Vegai'nin native HDC çekirdeğine sahte bir
-AdamW/Transformer implementasyonu eklemez. Bunun yerine gerçek bir AI sisteminin
+neural-training implementasyonu eklemez. Bunun yerine gerçek bir AI sisteminin
 **algoritma + optimizer + training contract + model artifact** adaylarını,
 ham held-out ölçüm kanıtından fail-closed olarak seçen bir meta-optimizer
 uygular.
@@ -19,10 +19,10 @@ sistemler olmadan doğrulanamaz. EPO'nun dar ve doğrulanabilir iddiası şudur:
 > algoritma/optimizer deployment kararı yayınlanmaz.
 
 EPO bir model eğitmez, prompt/cevap üretmez, metric uydurmaz veya high score
-bulmak için test setini kullanmaz. Gerçek neural optimizer (AdamW, Lion,
-Shampoo, Muon vb.), HDC update policy'si veya başka bir training programı dış
-sistemde kalır; onun immutable config/artifact hash'leri bu control plane'e
-bağlanır.
+bulmak için test setini kullanmaz. Gerçek model güncelleme algoritması ve HDC
+update policy'si bu control plane'in dışında kalır; immutable config/artifact
+hash'leri kanıt kaydına bağlanır. Native Vegai neural eğitiminde tek güncelleme
+sistemi Apex v2'dir.
 
 ## Neden meta-optimizer?
 

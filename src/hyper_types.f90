@@ -61,7 +61,7 @@ module hyper_types
    public :: hv_bitacc_reset, hv_bitacc_add, hv_bitacc_add_words
    public :: hv_bitacc_add_permuted_words, hv_bitacc_add_permuted_pair_words
    public :: hv_bitacc_add_permuted_mixed_pair_words, hv_bitacc_finalize
-   public :: hv_hebbian_update, hv_hebbian_update_percent
+   public :: hv_hebbian_update, hv_hebbian_update_percent, hv_hebbian_update_tenths_percent
    public :: hv_inject_noise_exact, hv_inject_noise_percent
 
    ! SplitMix64 constants are represented as BOZ values so their bit patterns
@@ -708,12 +708,7 @@ contains
       integer(int64), intent(in) :: plasticity_seed
       type(hv_t), intent(out) :: updated
       integer(int32), intent(out) :: status
-      ! Compatibility-only switch for pre-v7 pretraining checkpoints. New
-      ! callers must omit it and receive the unbiased Floyd/complement sampler.
       logical, intent(in), optional :: legacy_selection_mask
-      type(hv_t) :: plastic_mask
-      integer(int32) :: flip_count, word
-      logical :: use_legacy_selection_mask
 
       updated = prototype
       status = HV_OK
@@ -721,7 +716,34 @@ contains
          status = HV_ERR_INVALID_ARGUMENT
          return
       end if
-      flip_count = (HV_BITS * plasticity_percent + 50_int32) / 100_int32
+      call hv_hebbian_update_tenths_percent(prototype, new_state, 10_int32 * plasticity_percent, &
+                                            plasticity_seed, updated, status, legacy_selection_mask)
+   end subroutine hv_hebbian_update_percent
+
+   ! Fixed-point exact-rate plasticity. `plasticity_tenths_percent=6` means
+   ! 0.6%; integer arithmetic preserves deterministic tie-breaking and allows
+   ! sub-percent schedules without binary floating-point drift.
+   pure subroutine hv_hebbian_update_tenths_percent(prototype, new_state, plasticity_tenths_percent, &
+                                                    plasticity_seed, updated, status, legacy_selection_mask)
+      type(hv_t), intent(in) :: prototype, new_state
+      integer(int32), intent(in) :: plasticity_tenths_percent
+      integer(int64), intent(in) :: plasticity_seed
+      type(hv_t), intent(out) :: updated
+      integer(int32), intent(out) :: status
+      logical, intent(in), optional :: legacy_selection_mask
+      type(hv_t) :: plastic_mask
+      integer(int32) :: flip_count, word
+      integer(int64) :: rounded_flip_count
+      logical :: use_legacy_selection_mask
+
+      updated = prototype
+      status = HV_OK
+      if (plasticity_tenths_percent < 0_int32 .or. plasticity_tenths_percent > 1000_int32) then
+         status = HV_ERR_INVALID_ARGUMENT
+         return
+      end if
+      rounded_flip_count = (int(HV_BITS, int64) * int(plasticity_tenths_percent, int64) + 500_int64) / 1000_int64
+      flip_count = int(rounded_flip_count, int32)
       use_legacy_selection_mask = .false.
       if (present(legacy_selection_mask)) use_legacy_selection_mask = legacy_selection_mask
       if (use_legacy_selection_mask) then
@@ -736,7 +758,7 @@ contains
          updated%bits(word) = ior(iand(prototype%bits(word), not(plastic_mask%bits(word))), &
                                   iand(new_state%bits(word), plastic_mask%bits(word)))
       end do
-   end subroutine hv_hebbian_update_percent
+   end subroutine hv_hebbian_update_tenths_percent
 
    ! Draws a uniformly bounded position from the low 31 bits of one SplitMix
    ! word.  Rejection removes modulo bias for every bound up to HV_BITS while

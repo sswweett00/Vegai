@@ -91,13 +91,16 @@ module hdc_pretraining
    character(len=8), parameter :: CHECKPOINT_MAGIC = 'VGHDC001'
    ! v7 binds the unbiased Floyd/complement exact-mask sampler to a checkpoint
    ! lineage. v8 adds the RESONANT epoch-frozen semantic-context contract.
-   ! v4-v7 remain readable and explicitly retain their historical continuation
+   ! v4-v8 remain readable and explicitly retain their historical continuation
    ! behavior, so an old checkpoint never silently changes its future
    ! deterministic trajectory. The wire layout is stable; the version is an
    ! algorithm/continuation contract as well as a parser key.
    integer(int32), parameter :: CHECKPOINT_FLOYD_VERSION = 7_int32
    integer(int32), parameter :: CHECKPOINT_RESONANT_VERSION = 8_int32
-   integer(int32), parameter :: CHECKPOINT_VERSION = CHECKPOINT_RESONANT_VERSION
+   ! v9 stores Hebbian plasticity in tenths of a percentage point. Earlier
+   ! checkpoint versions store whole percentages and are migrated on load.
+   integer(int32), parameter :: CHECKPOINT_TENTHS_PLASTICITY_VERSION = 9_int32
+   integer(int32), parameter :: CHECKPOINT_VERSION = CHECKPOINT_TENTHS_PLASTICITY_VERSION
    integer(int32), parameter :: CHECKPOINT_PRE_COHERENT_VERSION = 5_int32
    integer(int32), parameter :: CHECKPOINT_COHERENT_LEGACY_VERSION = 6_int32
    integer(int32), parameter :: CHECKPOINT_MIN_VERSION = 4_int32
@@ -111,8 +114,9 @@ module hdc_pretraining
       integer(int32) :: position_shift_bits = 73_int32
       integer(int32) :: context_mode = PT_CONTEXT_HIERARCHICAL
       integer(int32) :: epochs = 1_int32
-      integer(int32) :: initial_plasticity_percent = 25_int32
-      integer(int32) :: minimum_plasticity_percent = 1_int32
+      ! Fixed-point unit: tenths of one percentage point (11.0% = 110).
+      integer(int32) :: initial_plasticity_tenths_percent = 250_int32
+      integer(int32) :: minimum_plasticity_tenths_percent = 10_int32
       integer(int32) :: plasticity_decay_events = 32_int32
       integer(int64) :: tie_seed = int(z'6A09E667F3BCC909', int64)
       logical :: strict_tokenization = .false.
@@ -234,8 +238,8 @@ module hdc_pretraining
       integer(int32) :: context_window = 0_int32
       integer(int32) :: position_shift_bits = 0_int32
       integer(int32) :: context_mode = 0_int32
-      integer(int32) :: initial_plasticity_percent = 0_int32
-      integer(int32) :: minimum_plasticity_percent = 0_int32
+      integer(int32) :: initial_plasticity_tenths_percent = 0_int32
+      integer(int32) :: minimum_plasticity_tenths_percent = 0_int32
       integer(int32) :: plasticity_decay_events = 0_int32
       ! Kept outside the historical wire layout; the checkpoint format version
       ! selects it on load and is selected from it on save.
@@ -375,8 +379,8 @@ contains
       model%context_window = 0_int32
       model%position_shift_bits = 0_int32
       model%context_mode = 0_int32
-      model%initial_plasticity_percent = 0_int32
-      model%minimum_plasticity_percent = 0_int32
+      model%initial_plasticity_tenths_percent = 0_int32
+      model%minimum_plasticity_tenths_percent = 0_int32
       model%plasticity_decay_events = 0_int32
       model%plasticity_sampler = PT_PLASTICITY_SAMPLER_FLOYD_COMPLEMENT
       model%tie_seed = 0_int64
@@ -441,10 +445,10 @@ contains
             return
          end if
       end if
-      if (config%initial_plasticity_percent <= 0_int32 .or. &
-          config%initial_plasticity_percent > 100_int32 .or. &
-          config%minimum_plasticity_percent <= 0_int32 .or. &
-          config%minimum_plasticity_percent > config%initial_plasticity_percent .or. &
+      if (config%initial_plasticity_tenths_percent <= 0_int32 .or. &
+          config%initial_plasticity_tenths_percent > 1000_int32 .or. &
+          config%minimum_plasticity_tenths_percent <= 0_int32 .or. &
+          config%minimum_plasticity_tenths_percent > config%initial_plasticity_tenths_percent .or. &
           config%plasticity_decay_events <= 0_int32) then
          status = PT_ERR_INVALID_ARGUMENT
          return
@@ -737,8 +741,8 @@ contains
       model%context_window = config%context_window
       model%position_shift_bits = config%position_shift_bits
       model%context_mode = config%context_mode
-      model%initial_plasticity_percent = config%initial_plasticity_percent
-      model%minimum_plasticity_percent = config%minimum_plasticity_percent
+      model%initial_plasticity_tenths_percent = config%initial_plasticity_tenths_percent
+      model%minimum_plasticity_tenths_percent = config%minimum_plasticity_tenths_percent
       model%plasticity_decay_events = config%plasticity_decay_events
       model%plasticity_sampler = PT_PLASTICITY_SAMPLER_FLOYD_COMPLEMENT
       model%tie_seed = config%tie_seed
@@ -803,8 +807,8 @@ contains
           config%context_window /= model%context_window .or. &
           config%position_shift_bits /= model%position_shift_bits .or. &
           config%context_mode /= model%context_mode .or. &
-          config%initial_plasticity_percent /= model%initial_plasticity_percent .or. &
-          config%minimum_plasticity_percent /= model%minimum_plasticity_percent .or. &
+          config%initial_plasticity_tenths_percent /= model%initial_plasticity_tenths_percent .or. &
+          config%minimum_plasticity_tenths_percent /= model%minimum_plasticity_tenths_percent .or. &
           config%plasticity_decay_events /= model%plasticity_decay_events .or. &
           config%tie_seed /= model%tie_seed) then
          status = PT_ERR_INCOMPATIBLE_CONFIG
@@ -888,25 +892,25 @@ contains
       deallocate(active_before_extension)
    end subroutine pretrain_extend_vocabulary
 
-   pure function scheduled_plasticity_percent(model, experiences) result(percent)
+   pure function scheduled_plasticity_tenths_percent(model, experiences) result(percent_tenths)
       type(hdc_pretrain_model_t), intent(in) :: model
       integer(int64), intent(in) :: experiences
-      integer(int32) :: percent
+      integer(int32) :: percent_tenths
       integer(int64) :: decay
 
       decay = int(model%plasticity_decay_events, int64)
       if (experiences < decay) then
-         percent = model%initial_plasticity_percent
+         percent_tenths = model%initial_plasticity_tenths_percent
       else if (experiences < 4_int64 * decay) then
-         percent = max(model%minimum_plasticity_percent, &
-                       (model%initial_plasticity_percent + 1_int32) / 2_int32)
+         percent_tenths = max(model%minimum_plasticity_tenths_percent, &
+                              (model%initial_plasticity_tenths_percent + 1_int32) / 2_int32)
       else if (experiences < 16_int64 * decay) then
-         percent = max(model%minimum_plasticity_percent, &
-                       (model%initial_plasticity_percent + 3_int32) / 4_int32)
+         percent_tenths = max(model%minimum_plasticity_tenths_percent, &
+                              (model%initial_plasticity_tenths_percent + 2_int32) / 4_int32)
       else
-         percent = model%minimum_plasticity_percent
+         percent_tenths = model%minimum_plasticity_tenths_percent
       end if
-   end function scheduled_plasticity_percent
+   end function scheduled_plasticity_tenths_percent
 
    ! A hierarchical record summary is built once per input line, then shared
    ! by all eligible centers on that line.  It is a bounded topical signal, not
@@ -2084,7 +2088,7 @@ contains
       type(pretrain_metrics_t), intent(inout) :: metrics
       integer(int32), intent(out) :: status
       type(hv_t) :: context, prototype, updated
-      integer(int32) :: update_status, plasticity_percent
+      integer(int32) :: update_status, plasticity_tenths_percent
       integer(int64) :: tie_seed
 
       status = PT_OK
@@ -2101,13 +2105,13 @@ contains
       context%bits = context_bits
       prototype%bits = model%semantic_bits(:, center_slot)
       tie_seed = ieor(vocab_seed_for_slot(model%vocabulary, center_slot), ishftc(experience_before, 19))
-      plasticity_percent = scheduled_plasticity_percent(model, experience_before)
+      plasticity_tenths_percent = scheduled_plasticity_tenths_percent(model, experience_before)
       if (model%plasticity_sampler /= PT_PLASTICITY_SAMPLER_LEGACY .and. &
           model%plasticity_sampler /= PT_PLASTICITY_SAMPLER_FLOYD_COMPLEMENT) then
          status = PT_ERR_HYPERVECTOR
          return
       end if
-      call hv_hebbian_update_percent(prototype, context, plasticity_percent, tie_seed, updated, update_status, &
+      call hv_hebbian_update_tenths_percent(prototype, context, plasticity_tenths_percent, tie_seed, updated, update_status, &
                                      legacy_selection_mask = &
                                      model%plasticity_sampler == PT_PLASTICITY_SAMPLER_LEGACY)
       if (update_status /= HV_OK) then
@@ -2454,8 +2458,8 @@ contains
           config%context_window /= model%context_window .or. &
           config%position_shift_bits /= model%position_shift_bits .or. &
           config%context_mode /= model%context_mode .or. &
-          config%initial_plasticity_percent /= model%initial_plasticity_percent .or. &
-          config%minimum_plasticity_percent /= model%minimum_plasticity_percent .or. &
+          config%initial_plasticity_tenths_percent /= model%initial_plasticity_tenths_percent .or. &
+          config%minimum_plasticity_tenths_percent /= model%minimum_plasticity_tenths_percent .or. &
           config%plasticity_decay_events /= model%plasticity_decay_events .or. &
           config%tie_seed /= model%tie_seed) then
          status = PT_ERR_INCOMPATIBLE_CONFIG
@@ -2628,8 +2632,8 @@ contains
       config%context_window = model%context_window
       config%position_shift_bits = model%position_shift_bits
       config%context_mode = model%context_mode
-      config%initial_plasticity_percent = model%initial_plasticity_percent
-      config%minimum_plasticity_percent = model%minimum_plasticity_percent
+      config%initial_plasticity_tenths_percent = model%initial_plasticity_tenths_percent
+      config%minimum_plasticity_tenths_percent = model%minimum_plasticity_tenths_percent
       config%plasticity_decay_events = model%plasticity_decay_events
       config%tie_seed = model%tie_seed
    end subroutine pretrain_config_from_model
@@ -2697,8 +2701,15 @@ contains
       checksum = checkpoint_mix(checksum, int(model%context_window, int64))
       checksum = checkpoint_mix(checksum, int(model%position_shift_bits, int64))
       checksum = checkpoint_mix(checksum, int(model%context_mode, int64))
-      checksum = checkpoint_mix(checksum, int(model%initial_plasticity_percent, int64))
-      checksum = checkpoint_mix(checksum, int(model%minimum_plasticity_percent, int64))
+      if (checkpoint_version >= CHECKPOINT_TENTHS_PLASTICITY_VERSION) then
+         checksum = checkpoint_mix(checksum, int(model%initial_plasticity_tenths_percent, int64))
+         checksum = checkpoint_mix(checksum, int(model%minimum_plasticity_tenths_percent, int64))
+      else
+         ! Preserve the historical checksum over whole-percent fields when
+         ! loading/writing legacy checkpoint versions.
+         checksum = checkpoint_mix(checksum, int(model%initial_plasticity_tenths_percent / 10_int32, int64))
+         checksum = checkpoint_mix(checksum, int(model%minimum_plasticity_tenths_percent / 10_int32, int64))
+      end if
       checksum = checkpoint_mix(checksum, int(model%plasticity_decay_events, int64))
       checksum = checkpoint_mix(checksum, model%tie_seed)
       checksum = checkpoint_mix(checksum, model%training_epochs_completed)
@@ -2734,18 +2745,13 @@ contains
       type(hdc_pretrain_model_t), intent(in) :: model
       integer(int32) :: format_version
 
-      ! Keep the result name distinct from CHECKPOINT_VERSION: Fortran names
-      ! are case-insensitive, so a same-spelling result would shadow the module
-      ! constant. Ordinary Floyd/complement modes retain their v7 writer to
-      ! preserve established checkpoint bytes. RESONANT alone writes v8 because
-      ! its frozen semantic-feedback continuation contract is new. A loaded
-      ! v4-v6 model writes its legacy version so future resumes retain its
-      ! original deterministic selection stream.
+      ! v9 changes only plasticity field units for modern Floyd/complement
+      ! checkpoints. Legacy samplers retain v4-v6 wire values and lineage so
+      ! their deterministic continuation behavior is not silently changed.
       format_version = 0_int32
       select case (model%plasticity_sampler)
       case (PT_PLASTICITY_SAMPLER_FLOYD_COMPLEMENT)
-         format_version = CHECKPOINT_FLOYD_VERSION
-         if (model%context_mode == PT_CONTEXT_RESONANT) format_version = CHECKPOINT_RESONANT_VERSION
+         format_version = CHECKPOINT_TENTHS_PLASTICITY_VERSION
       case (PT_PLASTICITY_SAMPLER_LEGACY)
          format_version = CHECKPOINT_PRE_COHERENT_VERSION
          if (model%context_mode == PT_CONTEXT_COHERENT) then
@@ -2781,6 +2787,14 @@ contains
          status = PT_ERR_CHECKPOINT
          return
       end if
+      if (model%plasticity_sampler == PT_PLASTICITY_SAMPLER_LEGACY .and. &
+          (mod(model%initial_plasticity_tenths_percent, 10_int32) /= 0_int32 .or. &
+           mod(model%minimum_plasticity_tenths_percent, 10_int32) /= 0_int32)) then
+         ! Historical v4-v6 fields have whole-percent resolution; do not
+         ! truncate a modern fractional schedule into a misleading checkpoint.
+         status = PT_ERR_CHECKPOINT
+         return
+      end if
 
       checkpoint_version = pretrain_checkpoint_write_version(model)
       open(newunit=unit, file=trim(checkpoint_path), status='replace', action='write', &
@@ -2793,9 +2807,17 @@ contains
       write(unit, iostat=io_status) CHECKPOINT_MAGIC, checkpoint_version
       if (io_status == 0) write(unit, iostat=io_status) model%vocabulary%capacity, &
          model%vocabulary%count, model%vocabulary%active_count, model%vocabulary%min_frequency
-      if (io_status == 0) write(unit, iostat=io_status) model%context_window, model%position_shift_bits, &
-         model%context_mode, model%initial_plasticity_percent, model%minimum_plasticity_percent, &
-         model%plasticity_decay_events, model%tie_seed
+      if (io_status == 0) then
+         if (checkpoint_version >= CHECKPOINT_TENTHS_PLASTICITY_VERSION) then
+            write(unit, iostat=io_status) model%context_window, model%position_shift_bits, &
+               model%context_mode, model%initial_plasticity_tenths_percent, &
+               model%minimum_plasticity_tenths_percent, model%plasticity_decay_events, model%tie_seed
+         else
+            write(unit, iostat=io_status) model%context_window, model%position_shift_bits, &
+               model%context_mode, model%initial_plasticity_tenths_percent / 10_int32, &
+               model%minimum_plasticity_tenths_percent / 10_int32, model%plasticity_decay_events, model%tie_seed
+         end if
+      end if
       if (io_status == 0) write(unit, iostat=io_status) model%training_epochs_completed
       if (io_status == 0) write(unit, iostat=io_status) model%totals%corpus_lines, model%totals%raw_tokens, &
          model%totals%active_tokens, model%totals%oov_tokens, model%totals%context_pairs, &
@@ -2878,8 +2900,19 @@ contains
       model%vocabulary%count = count
 
       read(unit, iostat=io_status) model%context_window, model%position_shift_bits, &
-         model%context_mode, model%initial_plasticity_percent, model%minimum_plasticity_percent, &
+         model%context_mode, model%initial_plasticity_tenths_percent, model%minimum_plasticity_tenths_percent, &
          model%plasticity_decay_events, model%tie_seed
+      if (io_status == 0 .and. version < CHECKPOINT_TENTHS_PLASTICITY_VERSION) then
+         if (model%initial_plasticity_tenths_percent < 1_int32 .or. &
+             model%initial_plasticity_tenths_percent > 100_int32 .or. &
+             model%minimum_plasticity_tenths_percent < 1_int32 .or. &
+             model%minimum_plasticity_tenths_percent > model%initial_plasticity_tenths_percent) then
+            io_status = 1
+         else
+            model%initial_plasticity_tenths_percent = 10_int32 * model%initial_plasticity_tenths_percent
+            model%minimum_plasticity_tenths_percent = 10_int32 * model%minimum_plasticity_tenths_percent
+         end if
+      end if
       if (io_status == 0) read(unit, iostat=io_status) model%training_epochs_completed
       if (io_status == 0) read(unit, iostat=io_status) model%totals%corpus_lines, model%totals%raw_tokens, &
          model%totals%active_tokens, model%totals%oov_tokens, model%totals%context_pairs, &
@@ -2901,8 +2934,8 @@ contains
       checkpoint_config%context_window = model%context_window
       checkpoint_config%position_shift_bits = model%position_shift_bits
       checkpoint_config%context_mode = model%context_mode
-      checkpoint_config%initial_plasticity_percent = model%initial_plasticity_percent
-      checkpoint_config%minimum_plasticity_percent = model%minimum_plasticity_percent
+      checkpoint_config%initial_plasticity_tenths_percent = model%initial_plasticity_tenths_percent
+      checkpoint_config%minimum_plasticity_tenths_percent = model%minimum_plasticity_tenths_percent
       checkpoint_config%plasticity_decay_events = model%plasticity_decay_events
       checkpoint_config%tie_seed = model%tie_seed
       if ((model%context_mode == PT_CONTEXT_COHERENT .and. &

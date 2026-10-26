@@ -2,6 +2,18 @@ name: Synthetic 9 MiB pretraining attestation
 
 on:
   workflow_dispatch:
+    inputs:
+      context_provider:
+        description: Context execution provider
+        type: choice
+        options: [cpu, openvino]
+        default: cpu
+        required: true
+      openvino_device:
+        description: OpenVINO device; GPU selection fails closed unless GPU dispatch is attested
+        type: string
+        default: GPU
+        required: false
   pull_request:
     branches: [main]
     paths:
@@ -41,7 +53,7 @@ concurrency:
 jobs:
   real-fortran-fixture-run:
     name: Real Fortran 9 MiB fixture run
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.context_provider == 'openvino' && startsWith(inputs.openvino_device, 'GPU') && fromJSON('["self-hosted", "linux", "x64", "gpu"]') || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - name: Check out source
@@ -51,6 +63,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes gfortran
+
+      - name: Install optional OpenVINO runtime for an explicitly selected provider
+        if: github.event_name == 'workflow_dispatch' && inputs.context_provider == 'openvino'
+        run: python3 -m pip install --disable-pip-version-check -r requirements-openvino.txt
 
       - name: Verify fixture and runner contracts before compilation
         run: python3 tools/verify_9mib_pretraining.py
@@ -80,14 +96,25 @@ jobs:
       - name: Preflight and run one real 9 MiB Fortran training child
         run: |
           set -euo pipefail
-          python3 tools/run_9mib_pretraining.py \
-            --pretrain-bin "${GITHUB_WORKSPACE}/build-9mib/vegai_pretrain" \
-            --corpus "${VEGAI_9MIB_RUN_DIR}/synthetic_hdc_9mib.txt" \
-            --manifest "${VEGAI_9MIB_RUN_DIR}/synthetic_hdc_9mib.manifest.json" \
-            --checkpoint "${VEGAI_9MIB_RUN_DIR}/synthetic_hdc_9mib.vgai" \
-            --report "${VEGAI_9MIB_RUN_DIR}/run-report.json" \
-            --max-vocab 1024 --min-frequency 1 --window 2 --position-shift 41 \
-            --context-mode hierarchical --epochs 1 --omp-threads 2 --timeout-seconds 1200 \
+          context_provider="${{ inputs.context_provider || 'cpu' }}"
+          args=(
+            --pretrain-bin "${GITHUB_WORKSPACE}/build-9mib/vegai_pretrain"
+            --corpus "${VEGAI_9MIB_RUN_DIR}/synthetic_hdc_9mib.txt"
+            --manifest "${VEGAI_9MIB_RUN_DIR}/synthetic_hdc_9mib.manifest.json"
+            --checkpoint "${VEGAI_9MIB_RUN_DIR}/synthetic_hdc_9mib.vgai"
+            --report "${VEGAI_9MIB_RUN_DIR}/run-report.json"
+            --max-vocab 32768 --min-frequency 3 --window 6 --position-shift 41
+            --context-mode hierarchical --epochs 2
+            --initial-plasticity 11.0 --minimum-plasticity 0.6 --decay-events 3000
+            --context-provider "$context_provider" --timeout-seconds 1200
+          )
+          if [[ "$context_provider" == openvino ]]; then
+            args+=(--openvino-device "${{ inputs.openvino_device || 'GPU' }}")
+            if [[ "${{ inputs.openvino_device || 'GPU' }}" == GPU* ]]; then
+              args+=(--require-accelerator)
+            fi
+          fi
+          python3 tools/run_9mib_pretraining.py "${args[@]}" \
             | tee "${VEGAI_9MIB_RUN_DIR}/runner-stdout.json"
 
       - name: Publish attested train-only timing summary
@@ -118,6 +145,15 @@ jobs:
               measurement = report["measurement"]
               checkpoint = report["checkpoint"]
               metrics = report["train"]["metrics"]
+              configuration = report["configuration"]
+              print("### Effective training configuration", file=summary)
+              print(file=summary)
+              print(f"- Vocab capacity/min-frequency/window: `{configuration['max_vocab']}` / `{configuration['min_frequency']}` / `{configuration['window']}`.", file=summary)
+              print(f"- Position shift/context mode/epochs: `{configuration['position_shift']}` / `{configuration['context_mode']}` / `{configuration['epochs']}`.", file=summary)
+              print(f"- Plasticity initial/minimum/decay events: `{configuration['initial_plasticity_percent']}%` / `{configuration['minimum_plasticity_percent']}%` / `{configuration['plasticity_decay_events']}`.", file=summary)
+              print(f"- Provider/device/OpenMP threads: `{configuration['context_provider']}` / `{configuration['openvino_device']}` / `{configuration['omp_threads']}` ({configuration['omp_thread_source']}); parallel batch threshold `{configuration['parallel_min_contexts']}`.", file=summary)
+              print(f"- Attested OpenVINO devices: `{configuration['openvino_execution_devices']}`.", file=summary)
+              print(file=summary)
               message = (
                   f"bytes={fixture['corpus']['bytes']}; "
                   f"corpus_sha256={fixture['corpus']['sha256']}; "
