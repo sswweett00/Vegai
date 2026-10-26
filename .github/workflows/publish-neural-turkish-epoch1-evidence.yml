@@ -1,4 +1,5 @@
-# Publishes the latest completed evidence run (success RESULTS.md or failure.json).
+# Publishes the latest completed evidence run (success RESULTS.md or failure.json);
+# failures are first-class diagnostics here, not silently skipped.
 name: Publish neural Turkish epoch-1 evidence
 
 on:
