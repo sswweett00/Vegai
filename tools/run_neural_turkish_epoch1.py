@@ -296,12 +296,18 @@ def main(argv: list[str] | None = None) -> int:
         init_report = parse_prefixed_json(stdout, "NEURAL_INIT_JSON:")
 
         heldout_path = str(corpus_dir / manifest["outputs"]["heldout"]["path"])
+        # Per-token OpenMP regions are microseconds apart; the default wait
+        # policy puts workers to sleep between them and wake latency then
+        # dominates (measured in probe A/Bs 40301975287/40305596215).  An
+        # active wait policy keeps the bounded thread team spinning for the
+        # duration of these dedicated training/evaluation processes.
+        omp_env = {"OMP_NUM_THREADS": str(os.cpu_count() or 2), "OMP_WAIT_POLICY": "ACTIVE"}
 
         def evaluate() -> dict[str, Any]:
             command = [binary, "evaluate", str(checkpoint_path), str(tokenizer_path), heldout_path]
             if args.max_eval_records:
                 command.append(str(args.max_eval_records))
-            text, _wall = run_child(command, timeout=args.evaluate_timeout_seconds)
+            text, _wall = run_child(command, timeout=args.evaluate_timeout_seconds, env_extra=omp_env)
             return parse_prefixed_json(text, "NEURAL_EVALUATE_JSON:")
 
         baseline = evaluate()
@@ -313,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
                 [binary, "train", epoch_file,
                  str(checkpoint_path), str(tokenizer_path), "1", *model_options],
                 timeout=args.train_timeout_seconds,
-                env_extra={"OMP_NUM_THREADS": str(os.cpu_count() or 2)},
+                env_extra=omp_env,
             )
             epoch_report = parse_prefixed_json(stdout, "NEURAL_PRETRAIN_EPOCH_JSON:")
             complete_report = parse_prefixed_json(stdout, "NEURAL_PRETRAIN_COMPLETE_JSON:")
@@ -338,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
                     [binary, "train-chunk", epoch_file,
                      str(checkpoint_path), str(tokenizer_path), str(chunk_records), *model_options],
                     timeout=args.train_timeout_seconds,
-                    env_extra={"OMP_NUM_THREADS": str(os.cpu_count() or 2)},
+                    env_extra=omp_env,
                 )
                 chunk = parse_prefixed_json(stdout, "NEURAL_PRETRAIN_CHUNK_JSON:")
                 chunk["controller_wall_seconds"] = chunk_wall

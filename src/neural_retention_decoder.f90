@@ -483,9 +483,8 @@ contains
       real(real32) :: global_context(model%head_width, model%config%heads), mixed_context(model%head_width, model%config%heads)
       real(real32) :: attention_vector(model%config%width), residual(model%config%width)
       real(real32) :: gate(model%config%ffn_width), value_gate(model%config%ffn_width), ffn_input(model%config%ffn_width)
-      integer(int32) :: head, component, offset, local_status, tail_start
+      integer(int32) :: head, component, offset, local_status
       real(real32) :: mixture
-      real(real32) :: part1, part2, part3, part4, part5, part6, part7, part8
 
       status = NRD_OK
       if (.not. neural_decoder_is_ready(model) .or. .not. neural_decoder_state_is_ready(state, model) .or. &
@@ -522,40 +521,18 @@ contains
          ffn_input(component) = stable_sigmoid(gate(component)) * tanh(value_gate(component))
       end do
       hidden = residual + matmul(model%ffn_output, ffn_input)
-      ! Logits stream the tied embedding columns directly, avoiding the
-      ! full transposed (width x vocabulary) copy that the earlier
-      ! matmul(transpose(...)) form materialized on every token.  Each
-      ! logit accumulates into eight independent partial sums combined in
-      ! a fixed order: a single sequential FMA chain is latency-bound
-      ! (measured 2275 vs 5125 token/s against the transposed baseline on
-      ! the identical probe slice, run 40301975287), while eight chains
-      ! saturate the FMA ports.  Every logit is still independent, so the
-      ! optional OpenMP loop is deterministic at any thread count, and the
-      ! value is the same embedding^T hidden + bias up to reassociation
-      ! (gated against the transpose-matmul reference in the test suite).
-      tail_start = model%config%width - modulo(model%config%width, 8_int32) + 1_int32
-      !$omp parallel do private(component, part1, part2, part3, part4, part5, part6, part7, part8) &
-      !$omp schedule(static) if(model%config%vocabulary_size >= 1024_int32)
-      do offset = 1_int32, model%config%vocabulary_size
-         part1 = 0.0_real32; part2 = 0.0_real32; part3 = 0.0_real32; part4 = 0.0_real32
-         part5 = 0.0_real32; part6 = 0.0_real32; part7 = 0.0_real32; part8 = 0.0_real32
-         do component = 1_int32, model%config%width - 7_int32, 8_int32
-            part1 = part1 + model%token_embedding(component, offset) * hidden(component)
-            part2 = part2 + model%token_embedding(component + 1_int32, offset) * hidden(component + 1_int32)
-            part3 = part3 + model%token_embedding(component + 2_int32, offset) * hidden(component + 2_int32)
-            part4 = part4 + model%token_embedding(component + 3_int32, offset) * hidden(component + 3_int32)
-            part5 = part5 + model%token_embedding(component + 4_int32, offset) * hidden(component + 4_int32)
-            part6 = part6 + model%token_embedding(component + 5_int32, offset) * hidden(component + 5_int32)
-            part7 = part7 + model%token_embedding(component + 6_int32, offset) * hidden(component + 6_int32)
-            part8 = part8 + model%token_embedding(component + 7_int32, offset) * hidden(component + 7_int32)
-         end do
-         do component = tail_start, model%config%width
-            part1 = part1 + model%token_embedding(component, offset) * hidden(component)
-         end do
-         logits(offset) = model%output_bias(offset) + &
-                          ((part1 + part2) + (part3 + part4)) + ((part5 + part6) + (part7 + part8))
-      end do
-      !$omp end parallel do
+      ! Logits use the vector-matrix matmul form hidden . E, which streams
+      ! the tied embedding without materializing a transposed copy (the
+      ! earlier matmul(transpose(E), hidden) allocated a full (vocabulary x
+      ! width) temporary every token) and stays inside the SIMD matmul
+      ! kernel with no extra OpenMP fork per token.  Hand-written column
+      ! loops were measured slower on the identical probe slice (2275 and
+      ! 3250 vs 5125 token/s for sequential and eight-partial-sum variants,
+      ! runs 40301975287/40305596215): scalar FMA chains plus per-token
+      ! fork-join wake-ups lose to the vectorized kernel.  The value is the
+      ! same embedding^T hidden + bias up to reassociation, gated against
+      ! the transpose-matmul reference in the test suite.
+      logits = matmul(hidden, model%token_embedding) + model%output_bias
       if (.not. all(ieee_is_finite(hidden)) .or. .not. all(ieee_is_finite(logits))) then
          status = NRD_ERR_NUMERIC
          return
