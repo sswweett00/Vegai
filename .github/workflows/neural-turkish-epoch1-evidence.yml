@@ -87,6 +87,9 @@ jobs:
           # held-out NLL/top-k compare like-for-like against the recorded
           # baseline (5125.051 token/s, held-out NLL 7.839114).  After the
           # A/B is read, literals move to full with measured sizing.
+          # A/B #1 (40301975287): quality held (NLL 7.796473) but a latency-
+          # bound logits chain ran 2275 token/s; A/B #2 re-measures after the
+          # eight-partial-sum fix on the same byte-identical slice.
           echo "VEGAI_MODE=${{ inputs.mode || 'probe' }}" >> "$GITHUB_ENV"
           echo "VEGAI_INPUT_BUDGET=${{ inputs.train_byte_budget || '3000000' }}" >> "$GITHUB_ENV"
           echo "VEGAI_SCHEDULE=${{ inputs.schedule || 'invsqrt' }}" >> "$GITHUB_ENV"
