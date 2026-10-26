@@ -295,9 +295,17 @@ contains
          return
       end if
       maximum = maxval(real(logits, real64))
-      normalizer = 0.0_real64
+      ! Exponentials are independent per token, so the optional parallel
+      ! fill stores bit-identical values; the normalizer then accumulates
+      ! in the same ascending order as the sequential form, keeping the
+      ! resulting distribution bit-identical at any thread count.
+      !$omp parallel do schedule(static) if(size(logits) >= 1024)
       do index = 1_int32, size(logits, kind=int32)
          probabilities(index) = exp(real(logits(index), real64) - maximum)
+      end do
+      !$omp end parallel do
+      normalizer = 0.0_real64
+      do index = 1_int32, size(logits, kind=int32)
          normalizer = normalizer + probabilities(index)
       end do
       if (.not. ieee_is_finite(normalizer) .or. normalizer <= tiny(1.0_real64)) then
@@ -413,13 +421,19 @@ contains
       real(real64) :: hidden_norm, clip_scale, residual, proposal, scale, rate
       real(real64) :: smooth_mass, gradient, beta1_pow, beta2_pow, adam_step_scale
       real(real64) :: m_hat_factor, decay_factor
+      real(real64) :: beta1, beta2, one_minus_beta1, one_minus_beta2, adam_epsilon, value_limit
+      real(real64) :: scaled_rate, inverse_step_scale, scaled_residual, m_value, v_value
 
       status = NPT_OK
       vocabulary_size = model%config%vocabulary_size
       width = model%config%width
+      ! Probabilities come only from stable_softmax, whose success contract
+      ! already guarantees a fully finite distribution; the former full
+      ! probability scan here cost O(vocabulary) per token for a condition
+      ! that cannot occur on any reachable path.  The hidden scan (O(width))
+      ! and the post-update target-column sentinel stay.
       if (target < 1_int32 .or. target > vocabulary_size .or. size(hidden, kind=int32) /= width .or. &
-          size(probabilities, kind=int32) /= vocabulary_size .or. .not. all(ieee_is_finite(hidden)) .or. &
-          .not. all(ieee_is_finite(probabilities))) then
+          size(probabilities, kind=int32) /= vocabulary_size .or. .not. all(ieee_is_finite(hidden))) then
          status = NPT_ERR_INVALID_ARGUMENT
          return
       end if
@@ -450,33 +464,46 @@ contains
             return
          end if
          decay_factor = 1.0_real64 - rate * config%weight_decay
+         ! Loop-invariant scalars.  The moment recurrences keep their exact
+         ! expressions (bit-identical states, so checkpoint continuation is
+         ! unaffected); only the proposal folds the two per-element
+         ! divisions into loop-invariant scaled_rate/inverse_step_scale
+         ! multipliers, a reassociation-level change bounded by real64 ulp
+         ! rounding and covered by the quality A/B in the evidence suite.
+         beta1 = config%adam_beta1
+         beta2 = config%adam_beta2
+         one_minus_beta1 = 1.0_real64 - beta1
+         one_minus_beta2 = 1.0_real64 - beta2
+         adam_epsilon = config%adam_epsilon
+         value_limit = config%embedding_value_limit
+         scaled_rate = rate / m_hat_factor
+         inverse_step_scale = 1.0_real64 / adam_step_scale
          ! Columns (and their moment columns) are disjoint, so the OpenMP
          ! loop below needs no reduction and preserves online token order.
-         !$omp parallel do private(residual, proposal, gradient, feature) schedule(static) &
-         !$omp& if(vocabulary_size >= 512_int32)
+         !$omp parallel do private(residual, proposal, gradient, scaled_residual, m_value, v_value, feature) &
+         !$omp schedule(static) if(vocabulary_size >= 512_int32)
          do token = 1_int32, vocabulary_size
             residual = probabilities(token) - smooth_mass
             if (token == target) residual = residual - (1.0_real64 - config%label_smoothing)
+            scaled_residual = residual * clip_scale
             do feature = 1_int32, width
-               gradient = residual * clip_scale * real(hidden(feature), real64)
-               state%adam_m_embedding(feature, token) = config%adam_beta1 * state%adam_m_embedding(feature, token) + &
-                                                        (1.0_real64 - config%adam_beta1) * gradient
-               state%adam_v_embedding(feature, token) = config%adam_beta2 * state%adam_v_embedding(feature, token) + &
-                                                        (1.0_real64 - config%adam_beta2) * gradient * gradient
+               gradient = scaled_residual * real(hidden(feature), real64)
+               m_value = beta1 * state%adam_m_embedding(feature, token) + one_minus_beta1 * gradient
+               v_value = beta2 * state%adam_v_embedding(feature, token) + one_minus_beta2 * gradient * gradient
+               state%adam_m_embedding(feature, token) = m_value
+               state%adam_v_embedding(feature, token) = v_value
                proposal = decay_factor * real(model%token_embedding(feature, token), real64) - &
-                          rate * (state%adam_m_embedding(feature, token) / m_hat_factor) / &
-                          (sqrt(state%adam_v_embedding(feature, token)) / adam_step_scale + config%adam_epsilon)
-               proposal = max(-config%embedding_value_limit, min(config%embedding_value_limit, proposal))
+                          scaled_rate * m_value / (sqrt(v_value) * inverse_step_scale + adam_epsilon)
+               proposal = max(-value_limit, min(value_limit, proposal))
                model%token_embedding(feature, token) = real(proposal, real32)
             end do
-            state%adam_m_bias(token) = config%adam_beta1 * state%adam_m_bias(token) + &
-                                       (1.0_real64 - config%adam_beta1) * residual
-            state%adam_v_bias(token) = config%adam_beta2 * state%adam_v_bias(token) + &
-                                       (1.0_real64 - config%adam_beta2) * residual * residual
+            m_value = beta1 * state%adam_m_bias(token) + one_minus_beta1 * residual
+            v_value = beta2 * state%adam_v_bias(token) + one_minus_beta2 * residual * residual
+            state%adam_m_bias(token) = m_value
+            state%adam_v_bias(token) = v_value
             proposal = real(model%output_bias(token), real64) - &
-                       rate * (state%adam_m_bias(token) / m_hat_factor) / &
-                       (sqrt(state%adam_v_bias(token)) / adam_step_scale + config%adam_epsilon)
-            proposal = max(-config%embedding_value_limit, min(config%embedding_value_limit, proposal))
+                       scaled_rate * m_value / (sqrt(v_value) * inverse_step_scale + adam_epsilon)
+            proposal = max(-value_limit, min(value_limit, proposal))
             model%output_bias(token) = real(proposal, real32)
          end do
          !$omp end parallel do

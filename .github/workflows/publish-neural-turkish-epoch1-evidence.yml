@@ -31,24 +31,27 @@ jobs:
       HEAD_REF: ${{ github.event.pull_request.head.ref || inputs.head_ref }}
       PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
     steps:
-      - name: Locate latest successful evidence run
+      - name: Locate latest completed evidence run
         id: source
         shell: bash
         run: |
           set -euo pipefail
+          # Latest COMPLETED run, success or failure: failed runs upload a
+          # failure.json that must be diagnosable through this same comment
+          # channel (artifact downloads are not reachable from every env).
           source_run=$(gh api --method GET \
             "repos/${GITHUB_REPOSITORY}/actions/workflows/neural-turkish-epoch1-evidence.yml/runs" \
-            -f branch="${HEAD_REF}" -f status=success -f per_page=20 \
+            -f branch="${HEAD_REF}" -f status=completed -f per_page=20 \
             --jq '.workflow_runs[0].id')
           [[ "$source_run" =~ ^[0-9]+$ ]] || {
-            echo "No successful neural Turkish epoch-1 evidence run for ${HEAD_REF}." >&2
+            echo "No completed neural Turkish epoch-1 evidence run for ${HEAD_REF}." >&2
             exit 1
           }
           artifact_name=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${source_run}/artifacts" \
             --jq '.artifacts[] | select(.expired == false and (.name | startswith("neural-turkish-epoch1-"))) | .name' \
             | head -n 1)
           [ -n "$artifact_name" ] || {
-            echo "The successful evidence run has no artifact." >&2
+            echo "The completed evidence run has no artifact." >&2
             exit 1
           }
           echo "run_id=$source_run" >> "$GITHUB_OUTPUT"
@@ -78,8 +81,29 @@ jobs:
           root = Path(os.environ["EVIDENCE_DIR"])
           results = next(root.rglob("RESULTS.md"), None)
           evidence_path = next(root.rglob("evidence.json"), None)
+          failure_path = next(root.rglob("failure.json"), None)
+          if failure_path is not None and evidence_path is None:
+              failure = json.loads(failure_path.read_text(encoding="utf-8"))
+              body = (
+                  "<!-- vegai-neural-turkish-epoch1-evidence -->\n"
+                  f"## Neural Turkish epoch-1 run FAILED (run {os.environ.get('SOURCE_RUN', '')})\n\n"
+                  f"- Source run: {os.environ.get('SOURCE_RUN_URL', '')}\n"
+                  f"- Artifact: `{os.environ.get('ARTIFACT_NAME', '')}`\n"
+                  f"- Head: `{os.environ.get('HEAD_REF', '')}`\n\n"
+                  "```json\n"
+                  + json.dumps(failure, ensure_ascii=False, indent=2)[:40000]
+                  + "\n```\n"
+              )
+              body_path = Path(os.environ["RUNNER_TEMP"]) / "evidence-comment.md"
+              body_path.write_text(body, encoding="utf-8")
+              subprocess.run(
+                  ["gh", "pr", "comment", os.environ["PR_NUMBER"], "--repo", os.environ["GITHUB_REPOSITORY"],
+                   "--body-file", str(body_path)],
+                  check=True,
+              )
+              raise SystemExit(0)
           if results is None or evidence_path is None:
-              raise SystemExit("artifact is missing RESULTS.md or evidence.json")
+              raise SystemExit("artifact is missing RESULTS.md or evidence.json (and has no failure.json)")
           evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
           body_md = results.read_text(encoding="utf-8")
           epoch = evidence["training_epoch"]

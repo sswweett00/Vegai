@@ -332,25 +332,35 @@ contains
       real(real32), intent(inout) :: query(:, :), key(:, :)
       integer(int64), intent(in) :: step
       integer(int32), intent(in) :: period
-      integer :: head, component
+      integer :: head, component, pair, pair_count
       integer(int64) :: reduced_step
-      real(real32) :: angle, frequency, cosine, sine, first, second
+      ! Angle depends only on the component pair, never on the head.  The
+      ! previous form recomputed exp/log/sin/cos identically for every head
+      ! on every step; these tables hold bit-identical values computed with
+      ! the same expressions exactly once.
+      real(real32) :: cosines(size(query, 1) / 2), sines(size(query, 1) / 2)
+      real(real32) :: angle, frequency, first, second
 
       reduced_step = modulo(step, int(period, int64))
+      pair_count = size(query, 1) / 2
+      do pair = 1, pair_count
+         component = 2 * pair - 1
+         frequency = exp(-log(10000.0_real32) * real(component - 1, real32) / real(size(query, 1), real32))
+         angle = real(reduced_step, real32) * frequency
+         cosines(pair) = cos(angle)
+         sines(pair) = sin(angle)
+      end do
       do head = 1, size(query, 2)
-         do component = 1, size(query, 1), 2
-            frequency = exp(-log(10000.0_real32) * real(component - 1, real32) / real(size(query, 1), real32))
-            angle = real(reduced_step, real32) * frequency
-            cosine = cos(angle)
-            sine = sin(angle)
+         do pair = 1, pair_count
+            component = 2 * pair - 1
             first = query(component, head)
             second = query(component + 1, head)
-            query(component, head) = cosine * first - sine * second
-            query(component + 1, head) = sine * first + cosine * second
+            query(component, head) = cosines(pair) * first - sines(pair) * second
+            query(component + 1, head) = sines(pair) * first + cosines(pair) * second
             first = key(component, head)
             second = key(component + 1, head)
-            key(component, head) = cosine * first - sine * second
-            key(component + 1, head) = sine * first + cosine * second
+            key(component, head) = cosines(pair) * first - sines(pair) * second
+            key(component + 1, head) = sines(pair) * first + cosines(pair) * second
          end do
       end do
    end subroutine apply_rotary
@@ -380,22 +390,29 @@ contains
       real(real32), intent(out) :: local_context(:, :)
       integer(int32) :: head, ordinal, position
       integer :: component
-      real(real32) :: maximum, score, normalizer, weight, scale
+      ! Scores are computed once and reused for the maximum and the weights;
+      ! the previous form evaluated every dot product twice per step.  The
+      ! cached values are bit-identical (same expressions, same order) and
+      ! the accumulation order is unchanged.  Index cache_count+1 holds the
+      ! score against the current key.
+      real(real32) :: scores(state%local_window + 1_int32)
+      real(real32) :: maximum, normalizer, weight, scale
 
       scale = 1.0_real32 / sqrt(real(size(query, 1), real32))
       local_context = 0.0_real32
       do head = 1_int32, state%heads
-         maximum = dot_product(query(:, head), key(:, head)) * scale
+         scores(state%cache_count + 1_int32) = dot_product(query(:, head), key(:, head)) * scale
+         maximum = scores(state%cache_count + 1_int32)
          do ordinal = 1_int32, state%cache_count
             position = cache_position(state, ordinal)
-            maximum = max(maximum, dot_product(query(:, head), state%local_keys(:, head, position)) * scale)
+            scores(ordinal) = dot_product(query(:, head), state%local_keys(:, head, position)) * scale
+            maximum = max(maximum, scores(ordinal))
          end do
-         normalizer = exp(dot_product(query(:, head), key(:, head)) * scale - maximum)
+         normalizer = exp(scores(state%cache_count + 1_int32) - maximum)
          local_context(:, head) = normalizer * value(:, head)
          do ordinal = 1_int32, state%cache_count
             position = cache_position(state, ordinal)
-            score = dot_product(query(:, head), state%local_keys(:, head, position)) * scale
-            weight = exp(score - maximum)
+            weight = exp(scores(ordinal) - maximum)
             normalizer = normalizer + weight
             local_context(:, head) = local_context(:, head) + weight * state%local_values(:, head, position)
          end do
@@ -504,7 +521,22 @@ contains
          ffn_input(component) = stable_sigmoid(gate(component)) * tanh(value_gate(component))
       end do
       hidden = residual + matmul(model%ffn_output, ffn_input)
-      logits = matmul(transpose(model%token_embedding), hidden) + model%output_bias
+      ! Logits stream the tied embedding columns directly.  The previous
+      ! form, matmul(transpose(token_embedding), hidden), materialized a
+      ! full transposed copy of the (width x vocabulary) matrix on every
+      ! token; at production shapes that copy dominated the step.  Each
+      ! logit is an independent sequential dot product over the contiguous
+      ! embedding column, so the optional OpenMP loop is deterministic
+      ! regardless of thread count and the arithmetic is the same
+      ! embedding^T hidden + bias definition (reassociation-level only).
+      !$omp parallel do private(component) schedule(static) if(model%config%vocabulary_size >= 1024_int32)
+      do offset = 1_int32, model%config%vocabulary_size
+         logits(offset) = model%output_bias(offset)
+         do component = 1_int32, model%config%width
+            logits(offset) = logits(offset) + model%token_embedding(component, offset) * hidden(component)
+         end do
+      end do
+      !$omp end parallel do
       if (.not. all(ieee_is_finite(hidden)) .or. .not. all(ieee_is_finite(logits))) then
          status = NRD_ERR_NUMERIC
          return

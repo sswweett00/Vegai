@@ -638,6 +638,7 @@ contains
       integer(int64) :: random_state, random_state_again
       integer :: unit, io_status
       real(real32) :: hidden_full(16), hidden_chunked(16), logits_full(64), logits_chunked(64)
+      real(real32) :: logits_reference(64)
       real(real64) :: raw_logits(4), probabilities(4), heldout_logits(3, 4)
 
       source = ''
@@ -760,6 +761,14 @@ contains
                        all(ieee_is_finite(stability_state%retention_normalizer)) .and. &
                        maxval(abs(stability_state%retention_numerator)) < 1.0e6_real32, &
                        'decayed positive retention remains finite under a long deterministic stream')
+      ! Speed-path equivalence gate: the streamed logits loop (which avoids
+      ! materializing transpose(token_embedding) per token) must agree with
+      ! the reference transpose-matmul definition to real32 reassociation
+      ! tolerance, including an identical argmax.
+      logits_reference = matmul(transpose(model%token_embedding), hidden_full) + model%output_bias
+      call assert_true(maxval(abs(logits_full - logits_reference)) < 1.0e-4_real32 .and. &
+                       maxloc(logits_full, dim=1) == maxloc(logits_reference, dim=1), &
+                       'streamed logits match the transpose-matmul reference within real32 tolerance')
       call neural_decoder_plan(config, plan, status)
       call assert_i32_equal(status, NRD_OK, 'neural resource planner succeeds')
       call assert_true(plan%parameter_count > 0_int64 .and. plan%per_stream_state_bytes_real32 > 0_int64 .and. &
