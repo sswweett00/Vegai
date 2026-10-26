@@ -122,6 +122,50 @@ program vegai_pretrain
 
 contains
 
+   function format_percent_tenths(percent_tenths) result(formatted)
+      integer(int32), intent(in) :: percent_tenths
+      character(len=16) :: formatted
+
+      write(formatted, '(I0,".",I1)') percent_tenths / 10_int32, mod(percent_tenths, 10_int32)
+   end function format_percent_tenths
+
+   subroutine parse_percent_tenths(text, percent_tenths, parse_status)
+      character(len=*), intent(in) :: text
+      integer(int32), intent(out) :: percent_tenths
+      integer(int32), intent(out) :: parse_status
+      character(len=512) :: token
+      integer :: dot_position, token_length, char_index, whole_percent, fractional_digit, io_status
+
+      percent_tenths = 0_int32
+      parse_status = PT_ERR_INVALID_ARGUMENT
+      token = trim(adjustl(text))
+      token_length = len_trim(token)
+      if (token_length < 1) return
+      dot_position = index(token, '.')
+      if (dot_position > 0) then
+         if (dot_position == 1 .or. dot_position /= token_length - 1) return
+         if (index(token(dot_position + 1:), '.') > 0) return
+      end if
+      do char_index = 1, token_length
+         if (char_index == dot_position) cycle
+         if (token(char_index:char_index) < '0' .or. token(char_index:char_index) > '9') return
+      end do
+      if (dot_position == 0) then
+         read(token(:token_length), *, iostat=io_status) whole_percent
+         fractional_digit = 0
+      else
+         read(token(:dot_position - 1), *, iostat=io_status) whole_percent
+         if (io_status /= 0) return
+         read(token(dot_position + 1:token_length), *, iostat=io_status) fractional_digit
+      end if
+      if (io_status /= 0) return
+      if (whole_percent < 0 .or. whole_percent > 100 .or. fractional_digit < 0 .or. fractional_digit > 9) return
+      if (whole_percent == 100 .and. fractional_digit /= 0) return
+      percent_tenths = int(whole_percent * 10 + fractional_digit, int32)
+      if (percent_tenths < 1_int32 .or. percent_tenths > 1000_int32) return
+      parse_status = PT_OK
+   end subroutine parse_percent_tenths
+
    subroutine parse_train_options(first_argument, last_argument, parsed_config, parsed_query, parse_status)
       integer, intent(in) :: first_argument, last_argument
       type(hdc_pretrain_config_t), intent(inout) :: parsed_config
@@ -215,9 +259,9 @@ contains
             case ('--epochs')
                read(value, *, iostat=io_status) parsed_config%epochs
             case ('--initial-plasticity')
-               read(value, *, iostat=io_status) parsed_config%initial_plasticity_percent
+               call parse_percent_tenths(value, parsed_config%initial_plasticity_tenths_percent, io_status)
             case ('--minimum-plasticity')
-               read(value, *, iostat=io_status) parsed_config%minimum_plasticity_percent
+               call parse_percent_tenths(value, parsed_config%minimum_plasticity_tenths_percent, io_status)
             case ('--decay-events')
                read(value, *, iostat=io_status) parsed_config%plasticity_decay_events
             case ('--query')
@@ -440,6 +484,15 @@ contains
 
       write(output_unit, '(A)') 'phase: streaming HDC context learning'
       write(output_unit, '(A,I0)') '  completed epochs: ', trained_model%training_epochs_completed
+      write(output_unit, '(A,I0)') '  vocabulary capacity: ', active_config%max_vocabulary
+      write(output_unit, '(A,I0)') '  minimum token frequency: ', active_config%min_frequency
+      write(output_unit, '(A,I0)') '  context window: ', active_config%context_window
+      write(output_unit, '(A,I0)') '  positional shift: ', active_config%position_shift_bits
+      write(output_unit, '(A,A)') '  initial Hebbian plasticity (%): ', &
+           trim(format_percent_tenths(active_config%initial_plasticity_tenths_percent))
+      write(output_unit, '(A,A)') '  minimum Hebbian plasticity (%): ', &
+           trim(format_percent_tenths(active_config%minimum_plasticity_tenths_percent))
+      write(output_unit, '(A,I0)') '  plasticity decay events: ', active_config%plasticity_decay_events
       write(output_unit, '(A,I0)') '  corpus lines: ', metrics%corpus_lines
       write(output_unit, '(A,I0)') '  raw tokens: ', metrics%raw_tokens
       write(output_unit, '(A,I0)') '  active tokens: ', metrics%active_tokens
@@ -497,6 +550,11 @@ contains
       write(output_unit, '(A,A)') '  context mode: ', trim(pretrain_context_mode_name(trained_model%context_mode))
       write(output_unit, '(A,A)') '  plasticity sampler: ', &
            trim(pretrain_plasticity_sampler_name(trained_model%plasticity_sampler))
+      write(output_unit, '(A,A)') '  initial Hebbian plasticity (%): ', &
+           trim(format_percent_tenths(trained_model%initial_plasticity_tenths_percent))
+      write(output_unit, '(A,A)') '  minimum Hebbian plasticity (%): ', &
+           trim(format_percent_tenths(trained_model%minimum_plasticity_tenths_percent))
+      write(output_unit, '(A,I0)') '  plasticity decay events: ', trained_model%plasticity_decay_events
       write(output_unit, '(A,I0)') '  completed epochs: ', trained_model%training_epochs_completed
       write(output_unit, '(A,I0)') '  total prototype updates: ', trained_model%totals%center_updates
       write(output_unit, '(A,I0)') '  estimated resident bytes: ', pretrain_model_footprint_bytes(trained_model)
@@ -628,7 +686,8 @@ contains
       write(output_unit, '(A)') '  debiased is CPU/OpenMP-only: unique-slot global topic; <12 distinct slots uses hybrid'
       write(output_unit, '(A)') '  resonant is CPU/OpenMP-only: frozen semantic neighbours per epoch; epoch one equals hybrid'
       write(output_unit, '(A)') '  continue first extends vocabulary from one immutable shard, then trains it'
-      write(output_unit, '(A)') '  --initial-plasticity N --minimum-plasticity N --decay-events N --strict --query TOKEN'
+      write(output_unit, '(A)') '  --initial-plasticity PCT --minimum-plasticity PCT --decay-events N --strict --query TOKEN'
+      write(output_unit, '(A)') '  Plasticity percentages accept one decimal place (for example 0.6). Defaults: 25.0 and 1.0.'
       write(output_unit, '(A)') '  --parallel-context-build (default) builds immutable per-record contexts with OpenMP when worthwhile'
       write(output_unit, '(A)') '  --parallel-min-contexts N launches OpenMP only at N record updates (default 32; execution-only)'
       write(output_unit, '(A)') '  --serial-context-build disables that execution-only parallel stage for diagnosis'

@@ -544,7 +544,7 @@ model ağırlığı içermez; yalnız operatorün kendi OpenVINO model package'i
 Bu entegrasyon aşağıdakileri otomatik olarak sağlamaz:
 
 - pretraining ile sıfırdan dev Transformer eğitimi;
-- autodiff, AdamW/Lion, distributed optimizer veya BF16/FP8 kernels;
+- autodiff, distributed neural training veya BF16/FP8 kernels;
 - model/data parallelism, collective recovery veya sharded checkpoint;
 - universal factual doğruluk, güvenlik alignment veya copyright/PII temizliği;
 - audio/video semantics veya visual reasoning; bunlar gerçek declared VLM/AV

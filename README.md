@@ -43,15 +43,16 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
   açıkça **tied-output-head-only** teacher-forced adapter eğitimi/checkpoint
   içeren native `vegai_neural_lm` / `vegai_neural_pretrain` yolu; causal,
   chunk-equivalent, finite-state, codec, decoder ve checkpoint invariant'leri
-  executable testlerle kapsanır. Eğitim sistemi v2 bu yola AdamW + LR
-  schedule + label smoothing + top-1/top-5/perplexity metrikleri, momentleri
-  bit-birebir taşıyan checkpoint v3, exact-rescan ile merge-identik hızlı
+  executable testlerle kapsanır. Apex v2 güncellemesi bu yola tek momentum
+  durumu, LR schedule + label smoothing + top-1/top-5/perplexity metrikleri,
+  durumu bit-birebir taşıyan checkpoint v4, exact-rescan ile merge-identik hızlı
   in-memory BPE eğitici ve no-update `evaluate`/`init-checkpoint` yüzeyleri
   ekler. Bu henüz full-BPTT, Turkish quality veya accelerator throughput
   iddiası değildir; matematiksel/resource sınırlar
   [NEURAL_CAUSAL_SYSTEM.md](docs/NEURAL_CAUSAL_SYSTEM.md)'dedir; gerçek
-  Türkçe Wikipedia üzerinde kalite-filtreli, hash-bağlı 1 epoch kanıt hattı
-  ve 99B programının dürüst ölçek sözleşmesi
+  Türkçe Wikipedia üzerinde doküman-bazlı train/validation/held-out-test split'i,
+  validation ile checkpoint seçimi ve seçim sonrası test raporu içeren kalite-filtreli,
+  hash-bağlı 1 epoch kanıt hattı ve 99B programının dürüst ölçek sözleşmesi
   [TURKISH_99B_NEURAL_PRETRAINING.md](docs/TURKISH_99B_NEURAL_PRETRAINING.md)'dedir;
 - operator-owned held-out semantic-neighbour annotation/policy ile gerçek
   checkpoint inspect ABI'sini ölçen, HMAC-redacted report/provenance üreten ve
@@ -194,6 +195,8 @@ make pretrain
 make causal-lm
 make neural-lm
 make neural-pretrain
+make apex-demo
+make apex-benchmark
 make field
 make chat
 
@@ -210,6 +213,10 @@ make chat
 ./build/vegai_neural_pretrain tokenizer-train examples/corpus/mini_turkish_causal_utf8.txt /tmp/mini.bpe 264
 ./build/vegai_neural_pretrain train examples/corpus/mini_turkish_causal_utf8.txt /tmp/mini.vgnr /tmp/mini.bpe 1
 ./build/vegai_neural_pretrain generate /tmp/mini.vgnr /tmp/mini.bpe "Türkiye" 16 7
+
+# Apex v2: namelist'ten hiperparametreleri okuyup karesel örneği optimize eder.
+./build/vegai_apex_demo apex_config.nml
+./build/vegai_apex_benchmark
 
 # Varsayılan native control-plane doğrulaması: Python interpreter çağırmaz.
 # Fortran property testleri + profile + gerçek train/checkpoint/load smoke.
@@ -264,6 +271,9 @@ make release-registry-check
 
 # Sınır denetimli hata ayıklama derlemesi
 make debug
+
+# Neural training corpus split + validation-selected checkpoint integration
+make neural-quality-check
 
 # Bağımsız cebirsel/reference doğrulama
 make check
@@ -463,6 +473,23 @@ fpm run --flag '-O3 -std=f2023 -fopenmp' --link-flag '-fopenmp'
 OpenMP isteğe bağlıdır: direktifleri desteklemeyen veya `-fopenmp` verilmeyen
 bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 
+## Apex v2 optimizasyon API'si
+
+Neural tied-output eğitim yolu ve bağımsız Apex API'si tek durumlu Apex güncellemesini kullanır. Yapılandırma `apex_config.nml` Fortran namelist dosyasından okunur; örnek program dosya yolunu argüman olarak alır:
+
+```sh
+make apex-demo
+./build/vegai_apex_demo apex_config.nml
+```
+
+Örnek, `apex_optimizer` modülünü ve `apex_optimizer_impl` submodule'ünü kullanır; karesel hedefte başlangıç ve son parametreleri yazdırır. Uygulama API'si `apex_config_t`, `apex_state_t`, `apex_error_t`, `apex_initialize`, `apex_optimize`, `apex_update`, `apex_get_parameters`, `apex_save` ve `apex_load` öğelerini sunar. Her operasyonun hata nesnesi kontrol edilmeli; optimizer seçimi/config anahtarı yoktur. Parametreler, tek momentum ve güncelleme sayacı stream biçiminde saklanır.
+
+`apex_config.nml` içindeki `beta2`, faz yanıtını belirler: aynı yön için kazanç `1 + 0.1 beta2`, yön değişimi için sönüm `beta2` olur; ikinci durum dizisi oluşturulmaz. `epsilon` ve `gamma` karekök içermeyen rasyonel limiter'de, `gradient_clip` norm kırpmada, `weight_decay` gömleme sönümünde kullanılır. `scheduler_name` seçenekleri `constant`, `invsqrt` ve `cosine`'dır. Bu deneysel güncelleme için evrensel yakınsama veya hız garantisi iddia edilmez.
+
+### Comparative benchmark durumu
+
+Benchmark sözleşmesi ve tek-konfigürasyonlu, beş-seed Apex quadratic smoke harness'i `bench/` altındadır. Fortran 2023 compiler kurulu bir hostta `make bench-apex-smoke` komutu `bench/results/baseline/apex_smoke.csv` üretir. Bu smoke koşusu rakip kıyaslaması değildir. Şu anda ölçülmüş comparative sonuç tablosu yoktur; Δ, güven aralığı, p-değeri ve Pareto durumu **N/M**'dir. Tam görev/method listesi ve yöntem `BENCHMARKS.md`, boş veri ve analiz durumu `GAP_ANALYSIS.md` ile `SIGNIFICANCE.md` içinde açıklanır. `apex_config.toml` benchmark/runtime ayarları için şablondur; mevcut native API yalnızca Fortran namelist `apex_config.nml` dosyasını parse eder.
+
 ## Mimari özeti
 
 | Katman | Dosya | Sorumluluk |
@@ -476,7 +503,7 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Rich training data I/O | `tools/training_data_io.py`, `tools/training_dataset.py` | JSONL/JSON/TXT/Parquet/Arrow schema boundary, streaming/batching, exact text dedupe, split/imbalance audit ve explicit strict-HDC projection |
 | Capability curriculum | `tools/capability_curriculum.py` | operator-defined metadata paths/tag/difficulty stage policy'si, SQLite exact-dedupe + split/annotation conflict gate'i, held-out/source coverage, strict text-only projection, immutable continuous ledger ve source+policy replay verification; hardcoded task data veya capability claim'i degil |
 | Evidential Pareto Optimizer | `tools/evidential_optimizer.py` | gerçek algorithm/optimizer config ve artifact hash'lerini repeated held-out bounded metric'lerle Bonferroni-Hoeffding confidence + robust Pareto gate üzerinden seçer; neural optimizer/runtime veya universal-best claim'i değil |
-| HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, hierarchical default + CPU-only coherent/debiased and epoch-frozen semantic-feedback resonant options, exact-token bounded lookup cache, deterministic OpenMP / optional OpenVINO immutable-context preparation + source-ordered CPU commit, v7 Floyd/complement and resonant-only v8 checkpoint lineage with v4–v7 deterministic-resume compatibility |
+| HDC pretraining | `src/hdc_pretraining.f90` | two-pass stream, hierarchical default + CPU-only coherent/debiased and epoch-frozen semantic-feedback resonant options, exact-token bounded lookup cache, deterministic OpenMP / optional OpenVINO immutable-context preparation + source-ordered CPU commit, v9 fixed-point-plasticity checkpoint lineage (tenths-of-percent) with lossless v4–v8 deterministic-resume compatibility |
 | Exact 9 MiB train attestation | `tools/synthetic_pretraining_fixture.py`, `tools/run_9mib_pretraining.py` | strict-ASCII deterministic topology fixture, streaming manifest/digest verification, resource preflight, bounded one-child train timing, checkpoint/inspect SHA lineage; structural fixture only, domain-quality evidence değil |
 | Direct-train attestation | `tools/attested_pretrain.py`, `tools/verify_attested_pretrain.py` | reviewed generic corpus-manifest/v1 binding, strict native ingest, exclusive output lock, checkpoint/report'un kendi final directory'sinde staged publication, train-only timing ve retraining yapmadan corpus/manifest/binary/checkpoint/inspect re-verification; signed adversarial attestation veya semantic-quality evidence değil |
 | Pretraining CLI | `app/pretrain.f90` | `train`, `resume`, `continue`, `inspect`, CPU/OpenVINO context-provider execution switch ve nearest semantic diagnostic |

@@ -11,6 +11,7 @@ separate GitHub Actions workflow.
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 import shutil
@@ -18,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 
+from run_9mib_pretraining import build_parser, format_percent_tenths, parse_percent_tenths
 from synthetic_pretraining_fixture import (
     DEFAULT_TARGET_BYTES,
     FixtureConfig,
@@ -41,6 +43,27 @@ class VerificationError(RuntimeError):
 def check(condition: bool, message: str) -> None:
     if not condition:
         raise VerificationError(message)
+
+
+def verify_parameter_configuration() -> None:
+    check(parse_percent_tenths("11") == 110, "integer plasticity percent must map to tenths exactly")
+    check(parse_percent_tenths("11.0") == 110, "decimal whole percentage must parse exactly")
+    check(parse_percent_tenths("0.6") == 6, "sub-percent minimum plasticity must parse exactly")
+    check(format_percent_tenths(6) == "0.6", "sub-percent report formatting must preserve one decimal")
+    try:
+        parse_percent_tenths("0.60")
+    except argparse.ArgumentTypeError:
+        pass
+    else:
+        raise VerificationError("plasticity parser must reject precision beyond one decimal place")
+    args = build_parser().parse_args(
+        ["--pretrain-bin", "bin", "--corpus", "corpus", "--manifest", "manifest", "--checkpoint", "ckpt", "--report", "report"]
+    )
+    check((args.max_vocab, args.min_frequency, args.window, args.epochs) == (32768, 3, 6, 2),
+          "canonical 9 MiB capacity/frequency/window/epoch settings changed")
+    check((args.initial_plasticity, args.minimum_plasticity, args.decay_events) == (110, 6, 3000),
+          "canonical fixed-point plasticity settings changed")
+    check(args.omp_threads is None, "OMP thread count must default to detected physical cores")
 
 
 def run_checked(command: list[str], *, expected_status: int = 0) -> subprocess.CompletedProcess[str]:
@@ -73,8 +96,17 @@ def write_fake_pretrain(path: Path, *, malformed_training_output: bool = False) 
         training_lines = """    print('phase: streaming HDC context learning')
     print(f'  completed epochs: {epochs}')"""
     script = f'''#!/usr/bin/env python3
+import json
 import pathlib
 import sys
+from decimal import Decimal
+
+def option(name, default):
+    return arguments[arguments.index(name) + 1] if name in arguments else default
+
+def percent(value):
+    tenths = int(Decimal(value) * 10)
+    return f"{{tenths // 10}}.{{tenths % 10}}"
 
 arguments = sys.argv[1:]
 if len(arguments) < 1:
@@ -86,11 +118,32 @@ if arguments[0] == "train":
     lines = corpus.read_bytes().splitlines()
     records = len(lines)
     tokens = sum(len(line.split()) for line in lines)
-    checkpoint.write_bytes(b"fake-checkpoint-v1\\n")
+    config = {{
+        "max_vocab": int(option("--max-vocab", 32768)),
+        "min_frequency": int(option("--min-frequency", 3)),
+        "window": int(option("--window", 6)),
+        "position_shift": int(option("--position-shift", 41)),
+        "context_mode": option("--context-mode", "hierarchical"),
+        "epochs": epochs,
+        "initial": percent(option("--initial-plasticity", "11.0")),
+        "minimum": percent(option("--minimum-plasticity", "0.6")),
+        "decay": int(option("--decay-events", 3000)),
+    }}
+    checkpoint.write_text(json.dumps(config), encoding="utf-8")
 {training_lines}
 elif arguments[0] == "inspect":
     probe = arguments[arguments.index("--query") + 1]
+    config = json.loads(pathlib.Path(arguments[1]).read_text(encoding="utf-8"))
     print("Vegai HDC pretraining checkpoint")
+    print(f"  vocabulary capacity: {{config['max_vocab']}}")
+    print(f"  min frequency: {{config['min_frequency']}}")
+    print(f"  context window: {{config['window']}}")
+    print(f"  positional shift: {{config['position_shift']}}")
+    print(f"  context mode: {{config['context_mode']}}")
+    print(f"  initial Hebbian plasticity (%): {{config['initial']}}")
+    print(f"  minimum Hebbian plasticity (%): {{config['minimum']}}")
+    print(f"  plasticity decay events: {{config['decay']}}")
+    print(f"  completed epochs: {{config['epochs']}}")
     print(f"query: {{probe}}")
     print("  nearest semantic neighbour: vgai9m_fixture_cluster_000_token_001")
     print("  bipolar similarity:  0.00000")
@@ -214,7 +267,7 @@ def verify_runner_contract(temp: Path) -> None:
     stdout_report = json.loads(runner.stdout)
     report_document = json.loads(report.read_text(encoding="utf-8"))
     check(stdout_report == report_document, "runner stdout and persisted report differ")
-    check(report_document["schema"] == "vegai-9mib-pretraining-run/v1", "runner report schema changed")
+    check(report_document["schema"] == "vegai-9mib-pretraining-run/v2", "runner report schema changed")
     check(report_document["status"] == "succeeded", "fake valid pretraining was not successful")
     check(report_document["fixture"]["verification"]["corpus"]["bytes"] == 256 * 1024, "report lost corpus identity")
     check(report_document["inputs"]["corpus"]["sha256"] == sha256_file(corpus), "report corpus hash is wrong")
@@ -231,6 +284,12 @@ def verify_runner_contract(temp: Path) -> None:
         "checkpoint inspection must be recorded outside measured train interval",
     )
     check(report_document["resource_preflight"]["status"] == "skipped-by-explicit-operator-option", "bypass was not explicit")
+    configuration = report_document["configuration"]
+    physical = configuration["hardware_profile"]["cpu"]["topology"]["physical_cores"]
+    check(1 <= configuration["omp_threads"] <= physical, "runner did not cap OpenMP threads to physical cores")
+    check(configuration["context_provider"] == "cpu", "default run must attest native CPU provider")
+    check(configuration["parallel_min_contexts"] == (16 if configuration["omp_threads"] > 1 else 32),
+          "adaptive OpenMP record-batch threshold does not match physical thread count")
 
     # Even with --overwrite, an output alias typo must be rejected before it
     # can remove the input corpus.
@@ -292,6 +351,7 @@ def verify_runner_contract(temp: Path) -> None:
 
 def main() -> int:
     try:
+        verify_parameter_configuration()
         with tempfile.TemporaryDirectory(prefix="vegai-9mib-contract-") as temporary:
             temp = Path(temporary)
             corpus, manifest, _ = verify_exact_fixture(temp)

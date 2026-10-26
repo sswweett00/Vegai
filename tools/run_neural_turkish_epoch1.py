@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Run exactly one native neural pretraining epoch on a governed Turkish corpus.
+"""Run one native neural pretraining epoch with validation checkpoint selection.
 
 Orchestrates only the native Fortran ``vegai_neural_pretrain`` binary:
 
-1. ``tokenizer-train-fast`` on the manifest's tokenizer sample;
-2. ``init-checkpoint`` + ``evaluate`` for the untrained held-out baseline;
+1. ``tokenizer-train-fast`` on the manifest's training-only tokenizer sample;
+2. ``init-checkpoint`` and an untrained no-update validation baseline;
 3. ``train`` for exactly **one epoch** over the manifest's ``train_epoch``
    slice (the slice definition and its hash are part of the evidence);
-4. ``evaluate`` on the frozen document-disjoint held-out split;
-5. ``generate`` for a fixed Turkish prompt suite, captured verbatim.
+4. select the initial or trained checkpoint by validation NLL only;
+5. evaluate the selected checkpoint once on the document-disjoint held-out test;
+6. ``generate`` from that selected checkpoint for a fixed prompt suite.
 
 The report distinguishes three numbers that are often conflated: tokens
 actually trained in this run, tokens accepted by the full corpus pipeline,
@@ -25,12 +26,13 @@ import json
 import math
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import time
 from typing import Any
 
-SCHEMA = "vegai-neural-turkish-epoch1/v1"
+SCHEMA = "vegai-neural-turkish-epoch1/v2"
 TARGET_TOKENS_99B = 99_000_000_000
 
 DEFAULT_PROMPTS = [
@@ -66,6 +68,28 @@ def parse_prefixed_json(stdout: str, prefix: str) -> dict[str, Any]:
         if line.startswith(prefix):
             return json.loads(line[len(prefix):].strip())
     raise RunError(f"missing {prefix} line in native output:\n{stdout[-2000:]}")
+
+
+def validation_improves(candidate: dict[str, Any], incumbent: dict[str, Any]) -> bool:
+    """Strict validation-NLL comparison; ties keep the simpler/earlier checkpoint."""
+    candidate_nll = float(candidate.get("mean_nll", float("nan")))
+    incumbent_nll = float(incumbent.get("mean_nll", float("nan")))
+    if not math.isfinite(candidate_nll) or not math.isfinite(incumbent_nll):
+        raise RunError("checkpoint selection requires finite validation NLL values")
+    return candidate_nll < incumbent_nll
+
+
+def atomic_copy(source: Path, destination: Path) -> None:
+    """Publish a selected checkpoint atomically without destroying the incumbent on copy failure."""
+    temporary = destination.with_name(destination.name + ".tmp")
+    try:
+        shutil.copy2(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def run_child(argv: list[str], timeout: int, env_extra: dict[str, str] | None = None) -> tuple[str, float]:
@@ -131,8 +155,7 @@ def render_results_md(evidence: dict[str, Any]) -> str:
     corpus = evidence["corpus"]
     funnel = corpus["manifest"]["funnel"]
     outputs = corpus["manifest"]["outputs"]
-    baseline = evidence["baseline_heldout"]
-    final = evidence["final_heldout"]
+    final = evidence["heldout_test"]
     epoch = evidence["training_epoch"]
     projection = evidence["scale_projection"]
     lines: list[str] = []
@@ -153,21 +176,30 @@ def render_results_md(evidence: dict[str, Any]) -> str:
                  f"ret: {funnel['rejected_total']:,}; yinelenen belge: {funnel['duplicate_documents']:,}; "
                  f"yinelenen paragraf: {funnel['duplicate_paragraphs']:,}")
     lines.append(f"- Ret hunisi: `{json.dumps(funnel['rejected'], ensure_ascii=False, sort_keys=True)}`")
-    for name in ("train", "heldout", "train_epoch", "tokenizer_sample"):
+    for name in ("train", "validation", "heldout", "train_epoch", "tokenizer_sample"):
         meta = outputs[name]
         lines.append(f"- `{meta['path']}`: {meta['bytes']:,} bayt, {meta['records']:,} kayıt, "
                      f"~{meta['approx_words']:,} kelime, SHA-256 `{meta['sha256']}`")
+    cfg = evidence["config"]
+    max_docs_text = f"{cfg['max_docs']:,}" if cfg["max_docs"] > 0 else "sınırsız"
+    train_budget_text = f"{cfg['train_byte_budget']:,} bayt" if cfg["train_byte_budget"] > 0 else "tüm train split'i"
+    lines.append(
+        f"- Veri sınırları: belge üst sınırı {max_docs_text}; epoch bütçesi {train_budget_text} "
+        f"(gerçek epoch dilimi {cfg['actual_train_epoch_bytes']:,} bayt); tokenizer örnek üst sınırı "
+        f"{cfg['tokenizer_sample_bytes']:,} bayt (gerçek örnek {cfg['actual_tokenizer_sample_bytes']:,} bayt)."
+    )
     lines.append("")
     lines.append("## Model ve eğitim (epoch = 1)")
     lines.append("")
-    cfg = evidence["config"]
     actual_vocab = evidence.get("tokenizer", {}).get("actual_vocabulary_size", cfg['vocab'])
     lines.append(
-        f"- Mimari: byte-BPE vocab {actual_vocab:,} (istenen {cfg['vocab']:,}), genişlik {cfg['width']}, başlık {cfg['heads']}, "
-        f"pencere {cfg['window']}, FFN {cfg['ffn']} (bağlı-çıktı katmanı eğitilir; dikkat/retention çekirdeği donuktur)"
+        f"- Mimari: byte-BPE vocab {actual_vocab:,} (istenen {cfg['vocab']:,}; minimum pair frequency "
+        f"{cfg['min_pair_frequency']}), width {cfg['width']}, attention heads {cfg['heads']} "
+        f"(head width {cfg['head_width']}), local window {cfg['window']}, FFN {cfg['ffn']} "
+        "(bağlı-çıktı katmanı eğitilir; dikkat/retention çekirdeği donuktur)"
     )
     lines.append(
-        f"- Optimize edici: {cfg['optimizer']}, tepe LR {cfg['lr']}, zamanlama {cfg['schedule']} "
+        f"- Optimize edici: {cfg['update_system']}, tepe LR {cfg['lr']}, zamanlama {cfg['schedule']} "
         f"(warmup {cfg['warmup_updates']:,}), label smoothing {cfg['label_smoothing']}, seed {cfg['seed']}"
     )
     lines.append(
@@ -180,14 +212,19 @@ def render_results_md(evidence: dict[str, Any]) -> str:
             f"- Eğitim {epoch['chunks']} checkpoint'li parçada koşuldu (aynı online sıra/config; "
             f"süre: {epoch['timing_basis']})")
     lines.append("")
-    lines.append("## Held-out sonuç (belge-düzeyinde ayrık, eğitimde görülmedi)")
+    lines.append(f"- Validation NLL: başlangıç {fmt(evidence['baseline_validation']['mean_nll'])}; "
+                 f"epoch 1 sonrası {fmt(evidence['epoch_validation']['mean_nll'])}; "
+                 f"seçilen checkpoint epoch {evidence['selected_epoch']} "
+                 "(0 = eğitimsiz başlangıç; NLL iyileşmezse daha kötü checkpoint seçilmez).")
     lines.append("")
-    lines.append("| Ölçüm | Eğitimsiz başlangıç | Epoch 1 sonrası |")
-    lines.append("|---|---:|---:|")
+    lines.append("## Held-out test sonucu (belge-düzeyinde ayrık, seçimde kullanılmadı)")
+    lines.append("")
+    lines.append("| Ölçüm | Validation-seçilmiş checkpoint (held-out test) |")
+    lines.append("|---|---:|")
     for label, key in (("Ortalama NLL", "mean_nll"), ("Perplexity", "perplexity"),
                        ("Top-1 doğruluk", "top1_accuracy"), ("Top-5 doğruluk", "top5_accuracy")):
-        lines.append(f"| {label} | {fmt(baseline.get(key))} | {fmt(final.get(key))} |")
-    lines.append(f"| Held-out tahmin tokenı | {baseline['prediction_tokens']:,} | {final['prediction_tokens']:,} |")
+        lines.append(f"| {label} | {fmt(final.get(key))} |")
+    lines.append(f"| Held-out tahmin tokenı | {final['prediction_tokens']:,} |")
     lines.append("")
     lines.append("## Prompt → Response (aynen, düzenlenmeden)")
     lines.append("")
@@ -220,7 +257,41 @@ def render_results_md(evidence: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def main(argv: list[str] | None = None) -> int:
+def validate_arguments(args: argparse.Namespace) -> None:
+    if args.vocab < 256 or args.min_pair_frequency < 1:
+        raise RunError("vocab must be at least the byte alphabet and minimum pair frequency positive")
+    if args.width < 2 or args.heads < 1 or args.width % args.heads != 0:
+        raise RunError("model width must be positive and divisible by the attention-head count")
+    head_width = args.width // args.heads
+    if head_width % 2 != 0:
+        raise RunError("per-head width must be even for the decoder's paired rotary features")
+    if args.window < 1 or args.window > 4096:
+        raise RunError("window must be in [1, 4096]")
+    if args.ffn < args.width:
+        raise RunError("FFN width must be at least model width")
+    if not math.isfinite(args.lr) or args.lr <= 0.0:
+        raise RunError("learning rate must be finite and positive")
+    if args.warmup_updates < 0 or args.total_updates < 0:
+        raise RunError("warmup and total updates must be non-negative")
+    if args.schedule == "cosine" and args.total_updates <= args.warmup_updates:
+        raise RunError("cosine schedule requires total updates greater than warmup updates")
+    if not math.isfinite(args.min_lr_ratio) or not 0.0 <= args.min_lr_ratio <= 1.0:
+        raise RunError("minimum LR ratio must be finite and in [0, 1]")
+    if not math.isfinite(args.label_smoothing) or not 0.0 <= args.label_smoothing < 0.5:
+        raise RunError("label smoothing must be finite and in [0, 0.5)")
+    if not math.isfinite(args.weight_decay) or args.weight_decay < 0.0:
+        raise RunError("weight decay must be finite and non-negative")
+    if args.chunks < 1 or args.max_eval_records < 0:
+        raise RunError("chunks must be positive and max-eval-records must be non-negative")
+    if args.generation_tokens < 1 or args.generation_tokens > 512:
+        raise RunError("generation-tokens must be in [1, 512]")
+    for label in ("tokenizer_timeout_seconds", "train_timeout_seconds",
+                  "evaluate_timeout_seconds", "generation_timeout_seconds"):
+        if getattr(args, label) <= 0:
+            raise RunError(f"{label.replace('_', '-')} must be positive")
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--neural-bin", required=True)
     parser.add_argument("--corpus-dir", required=True, help="directory written by build_turkish_wiki_corpus.py")
@@ -229,10 +300,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-pair-frequency", type=int, default=8)
     parser.add_argument("--width", type=int, default=96)
     parser.add_argument("--heads", type=int, default=4)
-    parser.add_argument("--window", type=int, default=48)
+    parser.add_argument("--window", type=int, default=64)
     parser.add_argument("--ffn", type=int, default=384)
-    parser.add_argument("--lr", type=float, default=0.003)
-    parser.add_argument("--optimizer", default="adamw", choices=("adamw", "sgd"))
+    parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--schedule", default="invsqrt", choices=("constant", "invsqrt", "cosine"))
     parser.add_argument("--warmup-updates", type=int, default=2000)
     parser.add_argument("--total-updates", type=int, default=0,
@@ -243,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=20261025)
     parser.add_argument("--generation-seed", type=int, default=7)
     parser.add_argument("--generation-tokens", type=int, default=32)
-    parser.add_argument("--max-eval-records", type=int, default=0, help="0 = full held-out split")
+    parser.add_argument("--max-eval-records", type=int, default=0, help="0 = full validation and held-out splits")
     parser.add_argument("--tokenizer-timeout-seconds", type=int, default=7200)
     parser.add_argument("--train-timeout-seconds", type=int, default=18000,
                         help="timeout per native train call (per chunk when --chunks > 1)")
@@ -254,7 +324,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--evaluate-timeout-seconds", type=int, default=7200)
     parser.add_argument("--generation-timeout-seconds", type=int, default=600)
     parser.add_argument("--prompts-file", help="optional UTF-8 file, one prompt per line")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     corpus_dir = Path(args.corpus_dir)
     run_dir = Path(args.run_dir)
@@ -262,19 +336,50 @@ def main(argv: list[str] | None = None) -> int:
     manifest_path = corpus_dir / "manifest.json"
     binary = str(Path(args.neural_bin).resolve())
     try:
+        validate_arguments(args)
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        for key in ("train", "heldout", "train_epoch", "tokenizer_sample"):
+        if manifest.get("schema") != "vegai-turkish-wiki-corpus/v4":
+            raise RunError("corpus manifest schema must provide the v4 stratified byte-budget sample and document-level split")
+        split = manifest.get("split", {})
+        expected_split_rule = (
+            "sha256(vegai-trwiki-split-v2|page_id|title) mod 200: "
+            "0 -> heldout_test, 1 -> validation, 2..199 -> train"
+        )
+        if split.get("level") != "source-document" or split.get("rule") != expected_split_rule or \
+                split.get("selection_uses") != "validation only" or \
+                split.get("final_reporting_uses") != "heldout test only":
+            raise RunError("corpus manifest does not attest the required document-level validation/test split")
+        corpus_root = corpus_dir.resolve()
+        output_paths: dict[str, Path] = {}
+        for key in ("train", "validation", "heldout", "train_epoch", "tokenizer_sample"):
             meta = manifest["outputs"][key]
-            actual = sha256_file(corpus_dir / meta["path"])
+            output_path = (corpus_root / meta["path"]).resolve()
+            if output_path.parent != corpus_root or not output_path.is_file():
+                raise RunError(f"corpus output {key} must be an existing direct child of the corpus directory")
+            output_paths[key] = output_path
+            actual = sha256_file(output_path)
             if actual["sha256"] != meta["sha256"] or actual["bytes"] != meta["bytes"]:
                 raise RunError(f"corpus output {key} does not match manifest hash/bytes")
+        train_meta = manifest["outputs"]["train"]
+        validation_meta = manifest["outputs"]["validation"]
+        heldout_meta = manifest["outputs"]["heldout"]
+        partitions = (train_meta, validation_meta, heldout_meta)
+        if any(int(meta["records"]) <= 0 for meta in partitions):
+            raise RunError("train, validation, and final held-out partitions must all contain records")
+        if len({meta["path"] for meta in partitions}) != 3:
+            raise RunError("train, validation, and final held-out paths must be distinct")
+        if len({meta["sha256"] for meta in partitions}) != 3:
+            raise RunError("train, validation, and final held-out partitions must have distinct content hashes")
+        if int(manifest["outputs"]["train_epoch"]["records"]) <= 0:
+            raise RunError("the configured training epoch slice is empty")
 
         tokenizer_path = run_dir / "tokenizer.bpe"
         checkpoint_path = run_dir / "checkpoint.vgnr"
+        best_checkpoint_path = run_dir / "best_checkpoint.vgnr"
         model_options = [
             "--width", str(args.width), "--heads", str(args.heads), "--window", str(args.window),
             "--ffn", str(args.ffn), "--seed", str(args.seed), "--lr", repr(args.lr),
-            "--optimizer", args.optimizer, "--schedule", args.schedule,
+            "--schedule", args.schedule,
             "--warmup-updates", str(args.warmup_updates),
             "--label-smoothing", repr(args.label_smoothing), "--weight-decay", repr(args.weight_decay),
             "--min-lr-ratio", repr(args.min_lr_ratio),
@@ -283,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
             model_options += ["--total-updates", str(args.total_updates)]
 
         stdout, tokenizer_wall = run_child(
-            [binary, "tokenizer-train-fast", str(corpus_dir / manifest["outputs"]["tokenizer_sample"]["path"]),
+            [binary, "tokenizer-train-fast", str(output_paths["tokenizer_sample"]),
              str(tokenizer_path), str(args.vocab), str(args.min_pair_frequency)],
             timeout=args.tokenizer_timeout_seconds,
         )
@@ -295,7 +400,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         init_report = parse_prefixed_json(stdout, "NEURAL_INIT_JSON:")
 
-        heldout_path = str(corpus_dir / manifest["outputs"]["heldout"]["path"])
+        validation_path = str(output_paths["validation"])
+        heldout_path = str(output_paths["heldout"])
         # Per-token OpenMP regions are microseconds apart; the default wait
         # policy puts workers to sleep between them and wake latency then
         # dominates (measured in probe A/Bs 40301975287/40305596215).  An
@@ -303,16 +409,24 @@ def main(argv: list[str] | None = None) -> int:
         # duration of these dedicated training/evaluation processes.
         omp_env = {"OMP_NUM_THREADS": str(os.cpu_count() or 2), "OMP_WAIT_POLICY": "ACTIVE"}
 
-        def evaluate() -> dict[str, Any]:
-            command = [binary, "evaluate", str(checkpoint_path), str(tokenizer_path), heldout_path]
+        def evaluate(selected_checkpoint: Path, corpus_path: str) -> dict[str, Any]:
+            command = [binary, "evaluate", str(selected_checkpoint), str(tokenizer_path), corpus_path]
             if args.max_eval_records:
                 command.append(str(args.max_eval_records))
             text, _wall = run_child(command, timeout=args.evaluate_timeout_seconds, env_extra=omp_env)
-            return parse_prefixed_json(text, "NEURAL_EVALUATE_JSON:")
+            report = parse_prefixed_json(text, "NEURAL_EVALUATE_JSON:")
+            if int(report.get("prediction_tokens", 0)) <= 0:
+                raise RunError(f"evaluation has no prediction tokens: {corpus_path}")
+            if not math.isfinite(float(report.get("mean_nll", float("nan")))):
+                raise RunError(f"evaluation mean NLL is non-finite: {corpus_path}")
+            return report
 
-        baseline = evaluate()
+        baseline_validation = evaluate(checkpoint_path, validation_path)
+        best_validation = baseline_validation
+        best_epoch = 0
+        atomic_copy(checkpoint_path, best_checkpoint_path)
 
-        epoch_file = str(corpus_dir / manifest["outputs"]["train_epoch"]["path"])
+        epoch_file = str(output_paths["train_epoch"])
         train_chunks: list[dict[str, Any]] = []
         if args.chunks <= 1:
             stdout, train_wall = run_child(
@@ -367,7 +481,7 @@ def main(argv: list[str] | None = None) -> int:
                 "mode": "tied-output-cross-entropy-adapter/v1",
                 "epoch_in_invocation": 1,
                 "chunks": len(train_chunks),
-                "optimizer": args.optimizer,
+                "update_system": "apex",
                 "schedule": args.schedule,
                 "learning_rate": args.lr,
                 "label_smoothing": args.label_smoothing,
@@ -394,7 +508,15 @@ def main(argv: list[str] | None = None) -> int:
         if int(epoch_report["epoch_in_invocation"]) != 1:
             raise RunError("native trainer did not report exactly epoch 1")
 
-        final = evaluate()
+        epoch_validation = evaluate(checkpoint_path, validation_path)
+        if validation_improves(epoch_validation, best_validation):
+            atomic_copy(checkpoint_path, best_checkpoint_path)
+            best_validation = epoch_validation
+            best_epoch = 1
+
+        # Held-out scores are never consulted by the selector; this final
+        # evaluation uses the checkpoint chosen solely on validation NLL.
+        final = evaluate(best_checkpoint_path, heldout_path)
 
         prompts = DEFAULT_PROMPTS
         if args.prompts_file:
@@ -402,7 +524,7 @@ def main(argv: list[str] | None = None) -> int:
         generations = []
         for index, prompt in enumerate(prompts):
             text, _wall = run_child(
-                [binary, "generate", str(checkpoint_path), str(tokenizer_path), prompt,
+                [binary, "generate", str(best_checkpoint_path), str(tokenizer_path), prompt,
                  str(args.generation_tokens), str(args.generation_seed + index)],
                 timeout=args.generation_timeout_seconds,
             )
@@ -425,14 +547,20 @@ def main(argv: list[str] | None = None) -> int:
                 "manifest": manifest,
             },
             "config": {
+                "max_docs": manifest["filters"]["max_docs"],
+                "train_byte_budget": manifest["train_byte_budget"],
+                "actual_train_epoch_bytes": manifest["outputs"]["train_epoch"]["bytes"],
+                "tokenizer_sample_bytes": manifest["tokenizer_sample_bytes"],
+                "actual_tokenizer_sample_bytes": manifest["outputs"]["tokenizer_sample"]["bytes"],
                 "vocab": args.vocab,
                 "min_pair_frequency": args.min_pair_frequency,
                 "width": args.width,
                 "heads": args.heads,
+                "head_width": args.width // args.heads,
                 "window": args.window,
                 "ffn": args.ffn,
                 "lr": args.lr,
-                "optimizer": args.optimizer,
+                "update_system": "apex",
                 "schedule": args.schedule,
                 "warmup_updates": args.warmup_updates,
                 "total_updates": args.total_updates,
@@ -445,13 +573,18 @@ def main(argv: list[str] | None = None) -> int:
             "tokenizer": {**tokenizer_report, "file": sha256_file(tokenizer_path),
                           "controller_wall_seconds": tokenizer_wall},
             "init": init_report,
-            "baseline_heldout": baseline,
+            "baseline_validation": baseline_validation,
+            "epoch_validation": epoch_validation,
+            "best_validation": best_validation,
+            "selected_epoch": best_epoch,
             "training_epoch": epoch_report,
             "training_chunks": train_chunks,
             "training_complete": complete_report,
             "training_controller_wall_seconds": train_wall,
-            "final_heldout": final,
-            "checkpoint": sha256_file(checkpoint_path),
+            "heldout_test": final,
+            "checkpoint": sha256_file(best_checkpoint_path),
+            "last_checkpoint": sha256_file(checkpoint_path),
+            "selected_checkpoint": str(best_checkpoint_path),
             "generations": generations,
             "scale_projection": project_99b(
                 float(epoch_report["prediction_tokens_per_second"]),
@@ -461,7 +594,8 @@ def main(argv: list[str] | None = None) -> int:
                 "Yalnız bağlı çıktı katmanı eğitilir; dikkat/retention/FFN parametreleri donuktur. Bu tam BPTT değildir.",
                 "Epoch korpusu, manifestte hash ile tanımlı train_epoch dilimidir; tam kabul edilen korpus daha büyüktür ve train-chunk ile devam edilebilir.",
                 "Üretimler nedensel devamdır; talimat takip, olgusal doğruluk veya genel Türkçe asistan kalitesi iddia edilmez.",
-                "Held-out ölçümü aynı dump içinden belge-ayrık bölmedir; bağımsız insan-anotasyonlu benchmark değildir.",
+                "Validation bölümü checkpoint seçimi için kullanılır; held-out test bölümü yalnız seçimden sonra raporlanır.",
+                "Held-out test aynı dump içinden belge-ayrık bölmedir; bağımsız insan-anotasyonlu benchmark değildir.",
                 "99B tamamlama süresi ölçülen hızdan aritmetik projeksiyondur; dağıtık GPU eğitimi bu repoda yoktur.",
             ],
         }

@@ -163,7 +163,7 @@ uygular:
    long record için global channel kapalıdır; aynı planes `hybrid` ile byte-tam
    eşit olmalıdır.
 
-Test ayrıca distinct/suppressed execution telemetry'yi, v7 checkpoint round-
+Test ayrıca distinct/suppressed execution telemetry'yi, v9 fixed-point checkpoint round-
 trip'ini, legacy sampler lineage rejection'ını ve unsupported OpenVINO ABI
 rejection'ını kontrol eder. Bu, controlled semantic quality gain değil;
 repetition politikasının tanımlı ve denetlenebilir olduğu kanıtıdır. Deployment
@@ -477,13 +477,13 @@ throughput iddiası olarak karşılaştırılmamalıdır.
 - `--reference-context-kernel` checkpoint formatına yazılmaz; yalnız benchmark
   ve regression oracle'dır. Aynı semantic config ile fused/reference checkpoint
   byte eşitliği bu nedenle zorunludur.
-- Checkpoint version sampler ve feedback lineage'ini de bağlar: ordinary fresh
-  mode'lar v7 header+checksum ile Floyd/complement exact-mask sampler'ını yazar;
-  `resonant` frozen-semantic feedback contract'i için v8 yazar. Reader v4/v5/v6'yı
-  historical bounded-retry sampler olarak kabul eder ve bu lineage yeniden
-  kaydedildiğinde v5 (non-coherent) veya v6 (coherent) sürdürülür. Coherent
-  semantic mode taşıyan v4/v5 ve resonant taşıyan pre-v8 payload fail-closed
-  reddedilir.
+- Checkpoint version sampler, feedback ve plasticity-unit lineage'ini de bağlar:
+  yeni modern Floyd/complement modeller tüm context mode'larında tenths-percent
+  fixed-point alanlarıyla v9 yazar. Reader v4-v8 whole-percent checkpoint'lerini
+  checksum'ı eski ölçekte doğrulayarak kayıpsız yükler; historical bounded-retry
+  sampler'lı modeller v5 (non-coherent) veya v6 (coherent) biçiminde devam eder.
+  Coherent semantic mode taşıyan v4/v5 ve resonant taşıyan pre-v8 payload
+  fail-closed reddedilir.
 - Hierarchical global signal satırda bir kez üretilir, yalnız ≥12 active token
   için etkinleşir ve local context accumulator kapasitesiyle bounded kalır;
   eşik altındaki record için topic accumulator kurulmaz. Coherent aynı eşikte

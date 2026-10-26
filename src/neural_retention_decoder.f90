@@ -15,11 +15,10 @@
 !  sequence length, while the local cache preserves exact causal softmax-style
 !  attention over a recent window.  No future K/V can enter either component.
 !
-!  This is an inference/invariant kernel, not yet a claim of a finished
-!  corpus-scale neural optimizer.  Its explicit dimensions, state equations,
-!  tied output head and resource plan establish the native ABI that an audited
-!  blockwise backprop/AdamW trainer must use rather than silently falling back
-!  to the older HDC or n-gram models.
+!  This is an inference/invariant kernel, not a claim of corpus-scale neural
+!  training quality. Its explicit dimensions, state equations, tied output
+!  head and resource plan establish the native ABI used by the bounded Apex
+!  training path; no HDC or n-gram fallback is implied.
 !==============================================================================
 module neural_retention_decoder
    use, intrinsic :: iso_fortran_env, only: int32, int64, real32, real64
@@ -37,7 +36,7 @@ module neural_retention_decoder
       integer(int32) :: vocabulary_size = 2048_int32
       integer(int32) :: width = 128_int32
       integer(int32) :: heads = 4_int32
-      integer(int32) :: local_window = 128_int32
+      integer(int32) :: local_window = 64_int32
       integer(int32) :: ffn_width = 384_int32
       real(real32) :: memory_decay = 0.985_real32
       real(real32) :: rms_epsilon = 1.0e-5_real32

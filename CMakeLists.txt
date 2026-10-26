@@ -4,6 +4,7 @@ project(VegaiHDS VERSION 0.1.0 LANGUAGES Fortran)
 
 option(VEGAI_ENABLE_OPENMP "Enable OpenMP parallel cleanup scans" ON)
 option(VEGAI_BUILD_TESTS "Build property and integration tests" ON)
+option(VEGAI_BUILD_BENCHMARKS "Build benchmark-only Apex smoke harness" OFF)
 option(VEGAI_ENABLE_LEGACY_PYTHON_TESTS
        "Enable migration-era Python integration/control-plane tests (not required by native Fortran runtime)" OFF)
 set(VEGAI_CPU_TARGET "portable" CACHE STRING
@@ -30,6 +31,8 @@ add_library(vegai_hds STATIC
     src/subword_bpe_training.f90
     src/calibrated_decoder.f90
     src/neural_retention_decoder.f90
+    src/apex_optimizer.f90
+    src/apex_optimizer_impl.f90
     src/neural_pretraining.f90
     src/causal_ngram_lm.f90
     src/vocabulary.f90
@@ -126,6 +129,135 @@ target_link_libraries(vegai_neural_lm PRIVATE vegai_hds)
 add_executable(vegai_neural_pretrain app/neural_pretrain.f90)
 target_link_libraries(vegai_neural_pretrain PRIVATE vegai_hds)
 
+add_executable(vegai_apex_demo app/apex_demo.f90)
+target_link_libraries(vegai_apex_demo PRIVATE vegai_hds)
+
+# The benchmark is a pure Fortran synthetic workload and has no POSIX dependency.
+add_executable(vegai_apex_benchmark app/apex_benchmark.f90)
+target_link_libraries(vegai_apex_benchmark PRIVATE vegai_hds)
+
+if(VEGAI_BUILD_BENCHMARKS)
+    add_executable(vegai_bench_apex_smoke
+        bench/bench_contracts.f90
+        bench/bench_apex_smoke.f90
+    )
+    target_link_libraries(vegai_bench_apex_smoke PRIVATE vegai_hds)
+    add_executable(vegai_bench_vector_baseline
+        bench/bench_contracts.f90
+        bench/ref/ref_vector_optimizers.f90
+        bench/bench_vector_baseline.f90
+    )
+    target_link_libraries(vegai_bench_vector_baseline PRIVATE vegai_hds)
+    add_executable(vegai_bench_phase1_baseline
+        bench/bench_contracts.f90
+        bench/bench_tasks.f90
+        bench/ref/ref_vector_optimizers.f90
+        bench/ref/ref_matrix_optimizers.f90
+        bench/bench_phase1_baseline.f90
+    )
+    target_link_libraries(vegai_bench_phase1_baseline PRIVATE vegai_hds)
+    if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(vegai_bench_phase1_baseline PRIVATE -Wall -Wextra -ffree-line-length-none)
+    endif()
+    add_custom_target(run_vegai_bench_phase1_baseline
+        COMMAND $<TARGET_FILE:vegai_bench_phase1_baseline>
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        DEPENDS vegai_bench_phase1_baseline
+        COMMENT "Run fixed-budget multi-task Phase 1 baseline")
+    add_executable(vegai_bench_phase2_search
+        bench/bench_contracts.f90
+        bench/bench_tasks.f90
+        bench/bench_tuning.f90
+        bench/ref/ref_vector_optimizers.f90
+        bench/ref/ref_matrix_optimizers.f90
+        bench/bench_phase2_search.f90
+    )
+    target_link_libraries(vegai_bench_phase2_search PRIVATE vegai_hds)
+    if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(vegai_bench_phase2_search PRIVATE -Wall -Wextra -ffree-line-length-none)
+    endif()
+    add_custom_target(run_vegai_bench_phase2_search
+        COMMAND $<TARGET_FILE:vegai_bench_phase2_search>
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        DEPENDS vegai_bench_phase2_search
+        COMMENT "Run validation-selected equal-budget hyperparameter search")
+    add_executable(vegai_bench_phase3_analysis
+        bench/bench_contracts.f90
+        bench/bench_tuning.f90
+        bench/bench_statistics.f90
+        bench/bench_phase3_analysis.f90
+    )
+    if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(vegai_bench_phase3_analysis PRIVATE -Wall -Wextra -ffree-line-length-none)
+    endif()
+    add_custom_target(run_vegai_bench_phase3_analysis
+        COMMAND $<TARGET_FILE:vegai_bench_phase3_analysis>
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        DEPENDS vegai_bench_phase3_analysis
+        COMMENT "Analyze paired tuning outcomes with bootstrap, Wilcoxon, Holm and Pareto")
+    if(VEGAI_BUILD_TESTS)
+        add_executable(vegai_bench_contract_tests
+            bench/bench_contracts.f90
+            bench/test_bench_contracts.f90
+        )
+        if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+            target_compile_options(vegai_bench_contract_tests PRIVATE -std=f2023 -Wall -Wextra -ffree-line-length-none)
+        endif()
+        add_test(NAME vegai_bench_contracts COMMAND vegai_bench_contract_tests)
+        add_executable(vegai_bench_task_tests
+            bench/bench_contracts.f90
+            bench/bench_tasks.f90
+            bench/test_bench_tasks.f90
+        )
+        if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+            target_compile_options(vegai_bench_task_tests PRIVATE -std=f2023 -Wall -Wextra -ffree-line-length-none)
+        endif()
+        add_test(NAME vegai_bench_tasks COMMAND vegai_bench_task_tests)
+        add_executable(vegai_bench_tuning_tests
+            bench/bench_contracts.f90
+            bench/bench_tuning.f90
+            bench/test_bench_tuning.f90
+        )
+        if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+            target_compile_options(vegai_bench_tuning_tests PRIVATE -std=f2023 -Wall -Wextra -ffree-line-length-none)
+        endif()
+        add_test(NAME vegai_bench_tuning COMMAND vegai_bench_tuning_tests)
+        add_executable(vegai_bench_statistics_tests
+            bench/bench_contracts.f90
+            bench/bench_statistics.f90
+            bench/test_bench_statistics.f90
+        )
+        if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+            target_compile_options(vegai_bench_statistics_tests PRIVATE -std=f2023 -Wall -Wextra -ffree-line-length-none)
+        endif()
+        add_test(NAME vegai_bench_statistics COMMAND vegai_bench_statistics_tests)
+        add_executable(vegai_bench_phase3_tests bench/test_bench_phase3_analysis.f90)
+        add_dependencies(vegai_bench_phase3_tests vegai_bench_phase3_analysis)
+        if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+            target_compile_options(vegai_bench_phase3_tests PRIVATE -std=f2023 -Wall -Wextra -ffree-line-length-none)
+        endif()
+        add_test(NAME vegai_bench_phase3_integration
+            COMMAND vegai_bench_phase3_tests $<TARGET_FILE:vegai_bench_phase3_analysis>)
+        set_tests_properties(vegai_bench_phase3_integration PROPERTIES WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        add_executable(vegai_bench_reference_tests
+            bench/ref/ref_vector_optimizers.f90
+            bench/ref/test_ref_vector_optimizers.f90
+        )
+        if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+            target_compile_options(vegai_bench_reference_tests PRIVATE -std=f2023 -Wall -Wextra -ffree-line-length-none)
+        endif()
+        add_test(NAME vegai_bench_references COMMAND vegai_bench_reference_tests)
+        add_executable(vegai_bench_matrix_reference_tests
+            bench/ref/ref_matrix_optimizers.f90
+            bench/ref/test_ref_matrix_optimizers.f90
+        )
+        if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+            target_compile_options(vegai_bench_matrix_reference_tests PRIVATE -std=f2023 -Wall -Wextra -ffree-line-length-none)
+        endif()
+        add_test(NAME vegai_bench_matrix_references COMMAND vegai_bench_matrix_reference_tests)
+    endif()
+endif()
+
 # Raw-byte field inspection remains separate from text-token pretraining.  It
 # exposes finite representation checks only and has no generative surface.
 add_executable(vegai_field app/field.f90)
@@ -163,6 +295,14 @@ if(VEGAI_BUILD_TESTS)
     endif()
 
     add_test(NAME vegai_fortran_properties COMMAND vegai_tests)
+
+    add_executable(vegai_apex_tests test/test_apex.f90)
+    target_link_libraries(vegai_apex_tests PRIVATE vegai_hds)
+    if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(vegai_apex_tests PRIVATE -ffree-line-length-none)
+    endif()
+    add_test(NAME vegai_apex_properties COMMAND vegai_apex_tests)
+
     # The default native control-plane contract contains no Python process:
     # profile/report rendering, bounded resource arithmetic, and a real
     # same-host vocabulary/train/checkpoint/load smoke all run in Fortran.

@@ -166,6 +166,79 @@ inspection, artifact upload ve CI queue/overhead'i içermeyen train-only
 karşılaştırılabilir bir hız iddiası değildir; production/domain kalite ölçümü
 de hiç değildir.
 
+## 26 Ekim 2026 tekrarı
+
+Aynı 9 MiB fixture ve aynı eğitim parametreleri, kaynak commit
+[`49a7a78`](https://github.com/sswweett00/Vegai/commit/49a7a78158ad8e26ebc81a99a4fb8ea25a2aec26)
+üzerinde [başarılı GitHub Actions koşusunda #40313477702](https://github.com/sswweett00/Vegai/actions/runs/40313477702)
+yeniden eğitildi. Job gerçek GNU Fortran binary derlemesini, fixture
+üretimi/doğrulamasını ve bir tam 9 MiB eğitim child'ını başarıyla tamamladı.
+Run attestation'ındaki ölçümler:
+
+- fixture: `9,437,184` byte; `15,942` fiziksel kayıt; `255,058` raw token;
+  corpus SHA-256 ve manifest SHA-256 yukarıdaki kayıtla aynı;
+- değişmeyen config: `max-vocab=1024`, `min-frequency=1`, `window=2`,
+  `position-shift=41`, `context-mode=hierarchical`, `epochs=1`,
+  `OMP_NUM_THREADS=2`;
+- train-child wall-clock: **`9.672994 s`**; attested raw throughput:
+  **`26,368.050 token/s`**;
+- checkpoint SHA-256:
+  `a09e5e55e9dcbac99fd65eff030dfe4f1e545b7fb4e86f3867c34711cd3b1ff2`;
+- GitHub artifact: `synthetic-9mib-pretraining-40313477702`,
+  `4,795,863` byte; archive digest
+  `e4e3e51e905739471af97812cb1265b6e42cf687eb6a2d119229dbddcd160744`;
+  artifact metadata expiry `2026-11-09`.
+
+İki başarılı koşunun aynı corpus ve checkpoint hash'lerini üretmesi içerik
+tekrar üretilebilirliğini doğrular. Süreler arasındaki yaklaşık `%6.0` fark
+(9.123744 s ve 9.672994 s) ayrı hosted-runner gözlemleridir; kontrollü
+performans karşılaştırması değildir. Bu run'ın GitHub annotation'ı ile artifact
+metadata'sı API'den doğrulanabildi; bu çalışma oturumunda artifact arşivini ve
+ayrıntılı JSON raporunu indirme isteği GitHub sonuç/blob host'unda EOF ile
+başarısız oldu. Bu nedenle compiler sürümü, runner donanımı/RAM, resource-plan
+sayısal çıktıları, binary/stdout/stderr hash'leri ve ordered-context-pair'ın
+tam sayısı bu kayda eklenmemiştir; tahmin edilmemelidir. Başarılı runner
+sözleşmesi yine de active token = raw token (`255,058`), OOV, truncation,
+non-ASCII ve dropped-overlong sayaçları `0`, tek epoch ve checkpoint
+`inspect` doğrulamasını zorunlu kılar.
+
+## Güncel deney profili: istenen parametreler
+
+`.github/workflows/pretraining-9mib.yml` ve `tools/run_9mib_pretraining.py`
+artık şu profili varsayılan olarak kullanır:
+
+- `max-vocab=32768`, `min-frequency=3`, `window=6`,
+  `position-shift=41`, `context-mode=hierarchical`, `epochs=2`;
+- initial plasticity `%11.0`, minimum `%0.6`, `decay-events=3000`;
+- OpenMP thread sayısı host envanterindeki **fiziksel çekirdek** sayısıdır;
+  fiziksel sayı belirlenemezse logical thread'e sessizce düşmek yerine runner
+  fail-closed olur. Context batch eşik değeri de adaptiftir: tek fiziksel çekirdekte
+  gereksiz takım kurulumunu önlemek için `32`, çok çekirdekte 16-token fixture
+  record'larını paralelleştirmek için `16`;
+- provider `cpu` varsayılandır. `workflow_dispatch` ile `openvino` seçilirse
+  GPU seçimi `--openvino-require-accelerator` ile fail-closed çalışır ve GPU
+  worker'ı `self-hosted, linux, x64, gpu` etiketli runner üzerinde bekler.
+  OpenVINO bu küçük, 16-token/record fixture için `openvino-min-contexts=16`
+  kullanır; CPU-native sonuç ile GPU sonuçları ayrı run report/checkpoint
+  hash'leriyle karşılaştırılabilir.
+
+Plasticity CLI tam bir ondalık yüzde puanı kabul eder; Fortran içinde tenths-
+percent fixed-point ve integer bit-count rounding kullanılır. Checkpoint v9 bu
+ölçeği taşır; eski v4-v8 whole-percent checkpoint'leri checksum doğrulaması
+sonrası tenths ölçeğine okuma sırasında kayıpsız çevrilir. Historical v4-v6
+sampler lineage'i aynı sürdürme sözleşmesiyle kaydedilmeye devam eder.
+Bu fixture'da token sıklıkları `238–260`, iki epoch'ta token başına en çok
+`520` update vardır; dolayısıyla `decay-events=3000` eşiğine ulaşılmaz ve bu
+koşunun etkin plasticity oranı boyunca `%11.0` kalır. `%0.6` alt sınırı doğru
+şekilde checkpoint/config'e bağlanır fakat bu özel run'da schedule tarafından
+henüz kullanılmaz.
+
+**Eğitim sonucu henüz güncellenmedi.** Bu sandbox'ta native `gfortran` ve GPU
+bulunmadığından yalnızca konfigürasyon/runner sözleşmeleri doğrulanabilir;
+CPU/GPU performans ve checkpoint karşılaştırması için workflow'un uygun hostta
+çalıştırılması gerekir. Önceki bölümlerdeki v7/v8 metrikleri bu yeni konfigürasyona
+ait değildir ve yeni koşu sonuçlarıymış gibi kullanılmamalıdır.
+
 ## Gerçek üretim corpus'una geçiş
 
 Lisansı, kaynak URL/kimliği, kullanım izni, hedef-domain tanımı ve held-out

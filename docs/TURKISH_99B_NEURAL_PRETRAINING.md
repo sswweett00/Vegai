@@ -53,16 +53,16 @@ veriyi **üreten ve her aşamasını sayan** bir boru hattı olarak tasarlandı.
 
 | Alan | Önce | Şimdi |
 |---|---|---|
-| Optimize edici | düz SGD, sabit LR 0.025 | **AdamW** (bias düzeltme, decoupled WD) + legacy SGD modu |
+| Güncelleme | önceki çok-durumlu yol | **Apex v2** tek momentum, faz uyumu ve rasyonel limiter |
 | LR zamanlama | yok | warmup + inverse-sqrt / warmup + cosine / constant; update-counter'ın saf fonksiyonu |
-| Düzenlileştirme | yalnız gradyan kırpma + değer zarfı | + **label smoothing** (NLL raporu daima gerçek), AdamW weight decay |
+| Düzenlileştirme | yalnız gradyan kırpma + değer zarfı | + **label smoothing** (NLL raporu daima gerçek), Apex ayrık ağırlık sönümü |
 | Metrik | mean NLL | + perplexity, **top-1/top-5**, epoch token/sn |
-| Checkpoint | v2, yalnız parametre+imleç | **v3**: optimizer config + Adam momentleri bit-birebir; v2 geri-uyumlu yükleme (SGD semantiği korunur) |
+| Checkpoint | önceki biçim | **v4**: Apex config + tek momentum bit-birebir; eski biçimler açıkça reddedilir |
 | Devam (resume) | moment yok | 2+checkpoint+2 ≡ one-pass **bit-birebir** (CI testi) |
 | Değerlendirme | sequence API | + `evaluate` CLI (no-update dosya değerlendirmesi), `init-checkpoint` (başlangıç taban çizgisi) |
 | BPE eğitimi | exact-rescan, O(merge × korpus) dosya geçişi | + `tokenizer-train-fast` in-memory apply-merge; exact-rescan ile **bit-birebir aynı merge'ler** (testli) |
 | Performans | kayıt başına state realloc; token başına tam-matris finite taraması | workspace yeniden kullanımı; finite-kanıtı matematiksel sınırla (tama tarama yok) |
-| CLI yapılandırma | sabit 64/4/32/256 | `--width/--heads/--window/--ffn/--lr/--optimizer/--schedule/...`; resume'da boyut değişimi reddedilir |
+| CLI yapılandırma | sabit 64/4/32/256 | `--width/--heads/--window/--ffn/--lr/--schedule/...`; Apex hiperparametreleri ve resume boyut doğrulaması |
 
 Kapsam değişmedi: yalnız bağlı çıktı katmanı eğitilir, çekirdek donuktur.
 Bu tam BPTT değildir ve öyle sunulmaz (bkz. `NEURAL_CAUSAL_SYSTEM.md`).
@@ -72,24 +72,36 @@ Bu tam BPTT değildir ve öyle sunulmaz (bkz. `NEURAL_CAUSAL_SYSTEM.md`).
 Resmî trwiki dump'ı → wikitext temizliği → Türkçe kalite filtreleri
 (alfabe oranı, fonksiyon-kelime aralığı, kelime uzunluğu, tekrar, liste
 benzerliği, doğrudan PII regex reddi) → exact belge ve paragraf dedupe →
-belge düzeyinde SHA-bucket train/held-out ayrımı → ≤3600 karakter kayıtlar
-→ SHA-256 bağlı `manifest.json` (her aşamanın sayısı ile). Aynı araç,
+belge düzeyinde SHA-bucket train/validation/held-out-test ayrımı (mod 200: bucket 0 test, 1 validation, 2–199 train) → ≤3600 karakter kayıtlar
+→ SHA-256 bağlı `manifest.json` (her aşamanın sayısı ile). Boş validation/test split'i fail-closed reddedilir. Aynı araç,
 ileride FineWeb-2/COSMOS gibi kaynaklar için `--text-dir` ve akış
 sözleşmesini koruyarak genişletilebilecek şekilde yazıldı.
 
 ### 3.3 Koşu ve kanıt (`tools/run_neural_turkish_epoch1.py`)
 
-Tokenizer → eğitimsiz baseline → **tam 1 epoch** → held-out → 10 promptluk
-üretim süiti → `evidence.json` + `RESULTS.md`. Her artefakt hash'lenir;
-prompt/response'lar düzenlenmeden yazılır.
+Tokenizer yalnız training split'inden öğrenilir → eğitimsiz validation baseline → **tam 1 epoch** → validation NLL ile başlangıç/eğitim checkpoint seçimi → seçilen checkpoint üzerinde held-out test → 10 promptluk üretim süiti → `evidence.json` + `RESULTS.md`. Held-out test seçim için kullanılmaz. Her artefakt hash'lenir; prompt/response'lar düzenlenmeden yazılır. Yerel corpus/selection sözleşmesi `make check`, native mini-run dahil uçtan uca kapı `make neural-quality-check` ile sınanır.
 
-### 3.4 Kalite-korumalı hız çalışması (ölçüm-güdümlü A/B)
+### 3.4 Varsayılan probe yapılandırması
+
+Yeni probe profili hem `workflow_dispatch` hem kaynak tetiklemeli varsayılanlarda
+aynıdır: `mode=probe`, en fazla 6.000 kaynak belge, 4.000.000 byte epoch
+sınırı, 3.000.000 byte tokenizer örneği, byte-BPE vocab 4.096 ve minimum pair
+frequency 8. Mimari `width=96`, `heads=4` (head width 24), `window=64` ve
+`FFN=384` kullanır. Pencere 64 decoder sınırı olan 4.096 içindedir; genişlik
+96, dört head'e tam bölünür ve 24'lük head width çift olduğundan rotary
+özellikleriyle uyumludur. Byte-bütçeli train ve tokenizer alt kümeleri train
+split'inin başından kesilmez: tüm split boyunca deterministik, eşit aralıklı
+whole-record örnekleme yapılır; kaynak sırası ve byte cap korunur. Böylece
+probe verisi kaynak sırasının ilk bölümüne aşırı bağlanmaz. Full mod ayrı ve
+açık operatör seçeneğidir; kendi train-byte bütçesi belirtilmelidir.
+
+### 3.5 Kalite-korumalı hız çalışması (ölçüm-güdümlü A/B)
 
 İlk full denemesi (run 40226479496, 200 MB dilim) native `train` çağrısının
 18000 sn alt-süreç timeout'una takılmasıyla başarısız oldu; tanı,
 publisher'ın PR'a taşıdığı `failure.json` ile kondu. Ardından hız, kaliteyi
 düşürmeden artırılmak üzere **bayt-özdeş** probe dilimi (SHA `5215e60c…`,
-784.931 tahmin tokenı, aynı held-out kümesi) üzerinde A/B ile ölçüldü:
+784.931 tahmin tokenı, aynı held-out kümesi) üzerinde A/B ile ölçüldü. Bu tarihsel A/B'ler v3 validation/test ayrımından önce yapılmıştır; held-out ölçümleri geliştirme kararlarını etkilemiş olabilir ve bağımsız final test kanıtı sayılmaz:
 
 | Koşu | Değişiklik | token/sn | Held-out NLL | Top-1 | Top-5 |
 |---|---|---:|---:|---:|---:|

@@ -12,12 +12,11 @@ program vegai_neural_pretrain
    character(len=32) :: command
    integer :: argument_count
 
-   ! Host-associated CLI options (training-system v2).  Defaults reproduce
-   ! the legacy model shape while switching new runs to the AdamW +
-   ! warmup/inverse-square-root schedule defaults of the trainer library.
+   ! Host-associated Apex training options. Defaults retain the existing
+   ! neural shape and use the Apex warmup/inverse-square-root schedule.
    integer(int32) :: opt_width = 64_int32
    integer(int32) :: opt_heads = 4_int32
-   integer(int32) :: opt_window = 32_int32
+   integer(int32) :: opt_window = 64_int32
    integer(int32) :: opt_ffn = 256_int32
    integer(int64) :: opt_seed = 20261025_int64
    logical :: opt_lr_set = .false.
@@ -25,13 +24,13 @@ program vegai_neural_pretrain
    real(real64) :: opt_lr = 0.0_real64
    real(real64) :: opt_weight_decay = 0.01_real64
    real(real64) :: opt_beta1 = 0.9_real64
-   real(real64) :: opt_beta2 = 0.999_real64
-   real(real64) :: opt_adam_eps = 1.0e-8_real64
+   real(real64) :: opt_beta2 = 0.5_real64
+   real(real64) :: opt_epsilon = 1.0e-8_real64
+   real(real64) :: opt_gamma = 0.5_real64
    real(real64) :: opt_grad_clip = 4.0_real64
    real(real64) :: opt_embedding_limit = 8.0_real64
    real(real64) :: opt_label_smoothing = 0.0_real64
    real(real64) :: opt_min_lr_ratio = 0.1_real64
-   integer(int32) :: opt_optimizer = NPT_OPTIMIZER_ADAMW
    integer(int32) :: opt_schedule = NPT_SCHEDULE_WARMUP_INVSQRT
    integer(int32) :: opt_max_tokens_per_record = 8192_int32
    integer(int64) :: opt_warmup_updates = 1000_int64
@@ -129,7 +128,7 @@ contains
             case ('--warmup-updates'); opt_warmup_updates = int64_value
             case ('--total-updates'); opt_total_updates = int64_value
             end select
-         case ('--lr', '--weight-decay', '--beta1', '--beta2', '--adam-eps', '--grad-clip', &
+         case ('--lr', '--weight-decay', '--beta1', '--beta2', '--epsilon', '--gamma', '--grad-clip', &
                '--embedding-limit', '--label-smoothing', '--min-lr-ratio')
             read(value, *, iostat=parse_status) real_value
             if (parse_status /= 0) call usage_and_stop()
@@ -138,17 +137,12 @@ contains
             case ('--weight-decay'); opt_weight_decay = real_value
             case ('--beta1'); opt_beta1 = real_value
             case ('--beta2'); opt_beta2 = real_value
-            case ('--adam-eps'); opt_adam_eps = real_value
+            case ('--epsilon'); opt_epsilon = real_value
+            case ('--gamma'); opt_gamma = real_value
             case ('--grad-clip'); opt_grad_clip = real_value
             case ('--embedding-limit'); opt_embedding_limit = real_value
             case ('--label-smoothing'); opt_label_smoothing = real_value
             case ('--min-lr-ratio'); opt_min_lr_ratio = real_value
-            end select
-         case ('--optimizer')
-            select case (trim(value))
-            case ('adamw'); opt_optimizer = NPT_OPTIMIZER_ADAMW
-            case ('sgd'); opt_optimizer = NPT_OPTIMIZER_SGD
-            case default; call usage_and_stop()
             end select
          case ('--schedule')
             select case (trim(value))
@@ -170,16 +164,14 @@ contains
 
       if (opt_lr_set) then
          peak_lr = opt_lr
-      else if (opt_optimizer == NPT_OPTIMIZER_ADAMW) then
-         peak_lr = 0.003_real64
       else
-         peak_lr = 0.025_real64
+         peak_lr = 0.01_real64
       end if
       train_config = neural_train_config_t(learning_rate=peak_lr, gradient_clip_norm=opt_grad_clip, &
                                            embedding_value_limit=opt_embedding_limit, &
                                            maximum_tokens_per_record=opt_max_tokens_per_record, &
-                                           optimizer=opt_optimizer, adam_beta1=opt_beta1, adam_beta2=opt_beta2, &
-                                           adam_epsilon=opt_adam_eps, weight_decay=opt_weight_decay, &
+                                           apex_beta1=opt_beta1, apex_beta2=opt_beta2, &
+                                           apex_epsilon=opt_epsilon, apex_gamma=opt_gamma, weight_decay=opt_weight_decay, &
                                            label_smoothing=opt_label_smoothing, lr_schedule=opt_schedule, &
                                            warmup_updates=opt_warmup_updates, total_updates=opt_total_updates, &
                                            minimum_lr_ratio=opt_min_lr_ratio)
@@ -204,17 +196,6 @@ contains
       call build_train_config(fresh)
       train_config = fresh
    end subroutine apply_options_to_train_config
-
-   function optimizer_name(optimizer) result(name)
-      integer(int32), intent(in) :: optimizer
-      character(len=6) :: name
-
-      if (optimizer == NPT_OPTIMIZER_ADAMW) then
-         name = 'adamw '
-      else
-         name = 'sgd   '
-      end if
-   end function optimizer_name
 
    function schedule_name(schedule) result(name)
       integer(int32), intent(in) :: schedule
@@ -284,7 +265,7 @@ contains
          tokens(index) = bpe_base_token_for_byte(int(iachar('a'), int32))
          tokens(index + 1_int32) = bpe_base_token_for_byte(int(iachar('b'), int32))
       end do
-      train_config = neural_train_config_t(learning_rate=0.050_real64, gradient_clip_norm=4.0_real64, &
+      train_config = neural_train_config_t(learning_rate=0.010_real64, gradient_clip_norm=4.0_real64, &
                                            embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32)
       call neural_train_state_init(train_state)
       call neural_train_metrics_reset(before)
@@ -500,7 +481,7 @@ contains
          write(output_unit, '(A)') 'NEURAL_PRETRAIN_EPOCH_JSON: {'// &
             '"epoch_in_invocation":'//trim(i32_text(epoch))//','// &
             '"mode":"tied-output-cross-entropy-adapter/v1",'// &
-            '"optimizer":"'//trim(optimizer_name(train_config%optimizer))//'",'// &
+            '"update_system":"apex",'// &
             '"lr_schedule":"'//trim(schedule_name(train_config%lr_schedule))//'",'// &
             '"peak_learning_rate":'//trim(r64_text(train_config%learning_rate))//','// &
             '"final_learning_rate":'// &
@@ -575,7 +556,7 @@ contains
          '"heads":'//trim(i32_text(decoder_config%heads))//','// &
          '"local_window":'//trim(i32_text(decoder_config%local_window))//','// &
          '"ffn_width":'//trim(i32_text(decoder_config%ffn_width))//','// &
-         '"optimizer":"'//trim(optimizer_name(train_config%optimizer))//'",'// &
+         '"update_system":"apex",'// &
          '"lr_schedule":"'//trim(schedule_name(train_config%lr_schedule))//'",'// &
          '"peak_learning_rate":'//trim(r64_text(train_config%learning_rate))//','// &
          '"seed":'//trim(i64_text(opt_seed))//'}'
@@ -661,7 +642,7 @@ contains
          '"decoder_state_bytes_real32":'//trim(i64_text(plan%decoder_state_bytes_real32))//','// &
          '"record_token_buffer_bytes":'//trim(i64_text(plan%record_token_buffer_bytes))//','// &
          '"per_step_working_bytes":'//trim(i64_text(plan%per_step_working_bytes))//','// &
-         '"optimizer_state_bytes_real64":'//trim(i64_text(plan%optimizer_state_bytes_real64))//','// &
+         '"apex_state_bytes_real64":'//trim(i64_text(plan%apex_state_bytes_real64))//','// &
          '"minimum_resident_bytes":'//trim(i64_text(plan%minimum_resident_bytes))//'}'
       call neural_decoder_destroy(model)
       call bpe_destroy(bpe)
@@ -899,9 +880,9 @@ contains
       write(output_unit, '(A)') '  vegai_neural_pretrain train-chunk CORPUS CHECKPOINT TOKENIZER NEW_RECORDS '// &
                                 '[START_RECORD] [--key value ...]'
       write(output_unit, '(A)') '  vegai_neural_pretrain plan CHECKPOINT TOKENIZER'
-      write(output_unit, '(A)') 'Options: --width --heads --window --ffn --seed --lr --optimizer adamw|sgd '// &
-                                '--schedule constant|invsqrt|cosine --warmup-updates --total-updates --min-lr-ratio'
-      write(output_unit, '(A)') '         --weight-decay --beta1 --beta2 --adam-eps --grad-clip --embedding-limit '// &
+      write(output_unit, '(A)') 'Options: --width --heads --window --ffn --seed --lr --schedule constant|invsqrt|cosine '// &
+                                '--warmup-updates --total-updates --min-lr-ratio'
+      write(output_unit, '(A)') '         --weight-decay --beta1 --beta2 --epsilon --gamma --grad-clip --embedding-limit '// &
                                 '--label-smoothing --max-tokens-per-record'
       write(output_unit, '(A)') 'The current trainer updates only tied output embeddings; it is not full BPTT.'
    end subroutine print_help

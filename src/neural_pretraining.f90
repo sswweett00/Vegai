@@ -10,12 +10,12 @@
 !  It is therefore a real, resumable neural training path, but it must not be
 !  represented as full back-propagation through local attention or retention.
 !  The narrow scope makes its gradient, memory bound, and resume semantics
-!  auditable and creates a stable native checkpoint boundary for later full
-!  BPTT/optimizer backends.
+!  auditable and creates a stable native checkpoint boundary for future
+!  gradient-model work outside this change.
 !
-!  Training-system v2 adds, inside that same auditable scope: AdamW with
-!  bit-exact checkpointed moments, warmup/inverse-square-root and
-!  warmup/cosine learning-rate schedules, label smoothing, top-1/top-5
+!  The current training path uses the single-state Apex update with
+!  checkpointed momentum, warmup/inverse-square-root and warmup/cosine
+!  learning-rate schedules, label smoothing, top-1/top-5
 !  next-token metrics, a no-update file evaluation path, and a reusable
 !  per-file workspace (the previous implementation reallocated the decoder
 !  state per record and scan-checked the full embedding matrix for
@@ -25,6 +25,8 @@
 module neural_pretraining
    use, intrinsic :: iso_fortran_env, only: int32, int64, real32, real64
    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+   use apex_optimizer, only: apex_config_t, apex_factors_t, apex_error_t, apex_make_factors, &
+                             apex_update_column, apex_update_scalar, APEX_OK
    use subword_bpe
    use utf8_record_stream
    use neural_retention_decoder
@@ -45,12 +47,6 @@ module neural_pretraining
    ! output-adapter update for full neural back-propagation.
    integer(int32), parameter, public :: NPT_TRAINABLE_TIED_OUTPUT = 1_int32
 
-   ! Optimizer identifiers for the tied-output update.  SGD is the legacy
-   ! v1 update (kept bit-reproducible for pre-v3 checkpoints); AdamW is the
-   ! training-system v2 default for newly constructed configurations.
-   integer(int32), parameter, public :: NPT_OPTIMIZER_SGD = 1_int32
-   integer(int32), parameter, public :: NPT_OPTIMIZER_ADAMW = 2_int32
-
    ! Learning-rate schedule identifiers.  The schedule is a pure function of
    ! the persisted update counter, so a checkpoint/resume boundary cannot
    ! change the effective learning rate of any update.
@@ -59,32 +55,26 @@ module neural_pretraining
    integer(int32), parameter, public :: NPT_SCHEDULE_WARMUP_COSINE = 2_int32
 
    character(len=8), parameter :: NEURAL_CHECKPOINT_MAGIC = 'VGNR0001'
-   ! v2 binds all decoder configuration fields (including retention decay,
-   ! numerical epsilon, and rotary period) to the serialized parameter state.
-   ! v3 additionally binds the optimizer/schedule configuration and the exact
-   ! AdamW first/second moments, so a resumed stream is bit-identical to the
-   ! one-pass stream.  Loading a v2 checkpoint restores the legacy SGD
-   ! configuration with no moments, preserving its original update semantics.
-   integer(int32), parameter :: NEURAL_CHECKPOINT_VERSION = 3_int32
-   integer(int32), parameter :: NEURAL_CHECKPOINT_VERSION_V2 = 2_int32
+   ! Version 4 stores the Apex configuration and its single momentum state.
+   ! Earlier checkpoint formats are intentionally rejected after this breaking
+   ! change; a resumed stream retains exact state and update-counter semantics.
+   integer(int32), parameter :: NEURAL_CHECKPOINT_VERSION = 4_int32
    integer(int32), parameter :: FILE_LINE_BYTES = 32768_int32
 
    type, public :: neural_train_config_t
       integer(int32) :: trainable_mode = NPT_TRAINABLE_TIED_OUTPUT
       ! Peak step size for the exact tied-output cross-entropy gradient.
-      real(real64) :: learning_rate = 0.025_real64
+      real(real64) :: learning_rate = 0.01_real64
       ! A conservative norm bound on the hidden vector used by the update.
       real(real64) :: gradient_clip_norm = 4.0_real64
       ! Per-value safety envelope for the mutable tied embedding matrix.
       real(real64) :: embedding_value_limit = 8.0_real64
       integer(int32) :: maximum_tokens_per_record = 8192_int32
-      ! Training-system v2 fields.  Defaults keep every pre-v2 named-arg
-      ! construction valid; the CLI sets schedule/horizon explicitly.
-      integer(int32) :: optimizer = NPT_OPTIMIZER_ADAMW
-      real(real64) :: adam_beta1 = 0.9_real64
-      real(real64) :: adam_beta2 = 0.999_real64
-      real(real64) :: adam_epsilon = 1.0e-8_real64
-      ! Decoupled AdamW weight decay, applied to embeddings only (not bias).
+      ! Apex phase-coherent update controls; beta2 sets gain/damping response.
+      real(real64) :: apex_beta1 = 0.9_real64
+      real(real64) :: apex_beta2 = 0.5_real64
+      real(real64) :: apex_epsilon = 1.0e-8_real64
+      real(real64) :: apex_gamma = 0.5_real64
       real(real64) :: weight_decay = 0.01_real64
       ! Label-smoothing mass in [0, 0.5).  Reported NLL stays unsmoothed.
       real(real64) :: label_smoothing = 0.0_real64
@@ -105,15 +95,9 @@ module neural_pretraining
       integer(int64) :: updates_completed = 0_int64
       integer(int64) :: tokens_seen = 0_int64
       real(real64) :: cumulative_nll = 0.0_real64
-      ! AdamW moments, lazily allocated at the shape of the first model that
-      ! updates through this state.  They are part of the v3 checkpoint so a
-      ! resumed run applies bit-identical updates to a one-pass run.  The
-      ! Adam step index is derived from updates_completed, never stored
-      ! separately, which makes counter/moment divergence impossible.
-      real(real64), allocatable :: adam_m_embedding(:, :)
-      real(real64), allocatable :: adam_v_embedding(:, :)
-      real(real64), allocatable :: adam_m_bias(:)
-      real(real64), allocatable :: adam_v_bias(:)
+      ! Single Apex momentum state, lazily allocated and serialized in v4.
+      real(real64), allocatable :: apex_m_embedding(:, :)
+      real(real64), allocatable :: apex_m_bias(:)
    end type neural_train_state_t
 
    type, public :: neural_train_metrics_t
@@ -138,8 +122,8 @@ module neural_pretraining
       integer(int64) :: decoder_state_bytes_real32 = 0_int64
       integer(int64) :: record_token_buffer_bytes = 0_int64
       integer(int64) :: per_step_working_bytes = 0_int64
-      ! real64 AdamW moments (zero for SGD): 2 x (width*vocabulary + vocab).
-      integer(int64) :: optimizer_state_bytes_real64 = 0_int64
+      ! One real64 Apex momentum array for embeddings and bias.
+      integer(int64) :: apex_state_bytes_real64 = 0_int64
       integer(int64) :: minimum_resident_bytes = 0_int64
    end type neural_training_resource_plan_t
 
@@ -171,20 +155,20 @@ contains
                                      ieee_is_finite(config%embedding_value_limit) .and. &
                                      config%embedding_value_limit > 0.0_real64 .and. &
                                      config%maximum_tokens_per_record >= 2_int32 .and. &
-                                     (config%optimizer == NPT_OPTIMIZER_SGD .or. &
-                                      config%optimizer == NPT_OPTIMIZER_ADAMW) .and. &
-                                     ieee_is_finite(config%adam_beta1) .and. config%adam_beta1 >= 0.0_real64 .and. &
-                                     config%adam_beta1 < 1.0_real64 .and. &
-                                     ieee_is_finite(config%adam_beta2) .and. config%adam_beta2 >= 0.0_real64 .and. &
-                                     config%adam_beta2 < 1.0_real64 .and. &
-                                     ieee_is_finite(config%adam_epsilon) .and. config%adam_epsilon > 0.0_real64 .and. &
+                                     ieee_is_finite(config%apex_beta1) .and. config%apex_beta1 >= 0.0_real64 .and. &
+                                     config%apex_beta1 < 1.0_real64 .and. &
+                                     ieee_is_finite(config%apex_beta2) .and. config%apex_beta2 >= 0.0_real64 .and. &
+                                     config%apex_beta2 < 1.0_real64 .and. &
+                                     ieee_is_finite(config%apex_epsilon) .and. config%apex_epsilon > 0.0_real64 .and. &
+                                     ieee_is_finite(config%apex_gamma) .and. config%apex_gamma >= 0.0_real64 .and. &
                                      ieee_is_finite(config%weight_decay) .and. config%weight_decay >= 0.0_real64 .and. &
                                      ieee_is_finite(config%label_smoothing) .and. &
                                      config%label_smoothing >= 0.0_real64 .and. config%label_smoothing < 0.5_real64 .and. &
                                      (config%lr_schedule == NPT_SCHEDULE_CONSTANT .or. &
                                       config%lr_schedule == NPT_SCHEDULE_WARMUP_INVSQRT .or. &
                                       config%lr_schedule == NPT_SCHEDULE_WARMUP_COSINE) .and. &
-                                     config%warmup_updates >= 0_int64 .and. &
+                                     config%warmup_updates >= 0_int64 .and. config%total_updates >= 0_int64 .and. &
+                                     ieee_is_finite(config%learning_rate * config%gradient_clip_norm) .and. &
                                      ieee_is_finite(config%minimum_lr_ratio) .and. &
                                      config%minimum_lr_ratio >= 0.0_real64 .and. config%minimum_lr_ratio <= 1.0_real64 .and. &
                                      (config%lr_schedule /= NPT_SCHEDULE_WARMUP_COSINE .or. &
@@ -272,29 +256,37 @@ contains
       ! vectors; trainer allocations: hidden, logits, and real64 softmax.
       plan%per_step_working_bytes = 4_int64 * (11_int64 * width + 3_int64 * ffn_width + vocabulary) + &
                                     8_int64 * vocabulary
-      plan%optimizer_state_bytes_real64 = 0_int64
-      if (train_config%optimizer == NPT_OPTIMIZER_ADAMW) then
-         plan%optimizer_state_bytes_real64 = 16_int64 * (width * vocabulary + vocabulary)
-      end if
+      plan%apex_state_bytes_real64 = 8_int64 * (width * vocabulary + vocabulary)
       plan%minimum_resident_bytes = plan%decoder_parameter_bytes_real32 + plan%tokenizer_bytes + &
                                     plan%decoder_state_bytes_real32 + plan%record_token_buffer_bytes + &
-                                    plan%per_step_working_bytes + plan%optimizer_state_bytes_real64
+                                    plan%per_step_working_bytes + plan%apex_state_bytes_real64
    end subroutine neural_training_resource_plan
 
    subroutine stable_softmax(logits, probabilities, status)
       real(real32), intent(in) :: logits(:)
       real(real64), intent(out) :: probabilities(:)
       integer(int32), intent(out) :: status
-      real(real64) :: maximum, normalizer
+      real(real64) :: maximum, normalizer, logit_value
       integer(int32) :: index
 
       status = NPT_OK
-      if (size(logits, kind=int32) <= 0_int32 .or. size(probabilities, kind=int32) /= size(logits, kind=int32) .or. &
-          .not. all(ieee_is_finite(logits))) then
+      if (size(logits, kind=int32) <= 0_int32 .or. size(probabilities, kind=int32) /= size(logits, kind=int32)) then
          status = NPT_ERR_NUMERICAL
          return
       end if
-      maximum = maxval(real(logits, real64))
+      ! Fuse the finite-value validation with the maximum search. The prior
+      ! ALL(IEEE_IS_FINITE(logits)) plus MAXVAL(REAL(logits, real64)) did two
+      ! complete passes and materialized a converted temporary over the whole
+      ! vocabulary before exponentiation.
+      maximum = -huge(1.0_real64)
+      do index = 1_int32, size(logits, kind=int32)
+         if (.not. ieee_is_finite(logits(index))) then
+            status = NPT_ERR_NUMERICAL
+            return
+         end if
+         logit_value = real(logits(index), real64)
+         maximum = max(maximum, logit_value)
+      end do
       ! Exponentials are independent per token, so the optional parallel
       ! fill stores bit-identical values; the normalizer then accumulates
       ! in the same ascending order as the sequential form, keeping the
@@ -313,50 +305,39 @@ contains
          return
       end if
       probabilities = probabilities / normalizer
-      if (.not. all(ieee_is_finite(probabilities))) status = NPT_ERR_NUMERICAL
+      ! Every numerator is exp(logit - maximum) with finite logits and hence
+      ! lies in [0, 1]; normalizer is finite and at least one, so this divide
+      ! cannot produce a non-finite probability. Avoid another vocabulary scan.
    end subroutine stable_softmax
 
-   subroutine ensure_optimizer_state(model, config, state, status)
+   subroutine ensure_apex_state(model, state, status)
       type(neural_decoder_t), intent(in) :: model
-      type(neural_train_config_t), intent(in) :: config
       type(neural_train_state_t), intent(inout) :: state
       integer(int32), intent(out) :: status
       integer :: allocation_status
 
       status = NPT_OK
-      if (config%optimizer /= NPT_OPTIMIZER_ADAMW) return
-      if (allocated(state%adam_m_embedding)) then
-         ! Sequential checks: Fortran does not guarantee short-circuit
-         ! evaluation, so never call size() on a maybe-unallocated array in
-         ! the same expression as its allocated() guard.
-         if (.not. allocated(state%adam_v_embedding)) status = NPT_ERR_INCOMPATIBLE
-         if (.not. allocated(state%adam_m_bias)) status = NPT_ERR_INCOMPATIBLE
-         if (.not. allocated(state%adam_v_bias)) status = NPT_ERR_INCOMPATIBLE
-         if (status == NPT_OK) then
-            if (size(state%adam_m_embedding, 1, kind=int32) /= model%config%width .or. &
-                size(state%adam_m_embedding, 2, kind=int32) /= model%config%vocabulary_size .or. &
-                size(state%adam_v_embedding, 1, kind=int32) /= model%config%width .or. &
-                size(state%adam_v_embedding, 2, kind=int32) /= model%config%vocabulary_size .or. &
-                size(state%adam_m_bias, kind=int32) /= model%config%vocabulary_size .or. &
-                size(state%adam_v_bias, kind=int32) /= model%config%vocabulary_size) then
-               status = NPT_ERR_INCOMPATIBLE
-            end if
+      if (allocated(state%apex_m_embedding)) then
+         if (.not. allocated(state%apex_m_bias)) then
+            status = NPT_ERR_INCOMPATIBLE
+            return
+         end if
+         if (size(state%apex_m_embedding, 1, kind=int32) /= model%config%width .or. &
+             size(state%apex_m_embedding, 2, kind=int32) /= model%config%vocabulary_size .or. &
+             size(state%apex_m_bias, kind=int32) /= model%config%vocabulary_size) then
+            status = NPT_ERR_INCOMPATIBLE
          end if
          return
       end if
-      allocate(state%adam_m_embedding(model%config%width, model%config%vocabulary_size), &
-               state%adam_v_embedding(model%config%width, model%config%vocabulary_size), &
-               state%adam_m_bias(model%config%vocabulary_size), &
-               state%adam_v_bias(model%config%vocabulary_size), stat=allocation_status)
+      allocate(state%apex_m_embedding(model%config%width, model%config%vocabulary_size), &
+               state%apex_m_bias(model%config%vocabulary_size), stat=allocation_status)
       if (allocation_status /= 0) then
          status = NPT_ERR_ALLOCATION
          return
       end if
-      state%adam_m_embedding = 0.0_real64
-      state%adam_v_embedding = 0.0_real64
-      state%adam_m_bias = 0.0_real64
-      state%adam_v_bias = 0.0_real64
-   end subroutine ensure_optimizer_state
+      state%apex_m_embedding = 0.0_real64
+      state%apex_m_bias = 0.0_real64
+   end subroutine ensure_apex_state
 
    subroutine workspace_ensure(workspace, model, status)
       type(neural_train_workspace_t), intent(inout) :: workspace
@@ -401,13 +382,9 @@ contains
    ! residual(v), where residual = softmax - smoothed_target.  The hidden
    ! vector is norm-clipped before forming the gradient (legacy semantics).
    !
-   ! Finiteness is now proven rather than re-scanned: every input is checked
-   ! finite, |clip_scale * h_i| <= gradient_clip_norm, |residual| <= 1, the
-   ! Adam denominator is >= epsilon > 0, moments are convex combinations of
-   ! bounded gradients, and every proposal is clamped to the embedding value
-   ! limit.  The previous implementation re-scanned the full V-by-d matrix
-   ! with ieee_is_finite after every single token, which cost as much as the
-   ! update itself; checkpoint save still verifies the full payload.
+   ! The Apex update uses one finite momentum state per trainable parameter.
+   ! Hidden-vector clipping bounds the embedding gradient; every weight remains
+   ! inside the configured value envelope and checkpoint payloads are verified.
    subroutine tied_output_update(model, hidden, probabilities, target, config, state, status)
       type(neural_decoder_t), intent(inout) :: model
       real(real32), intent(in) :: hidden(:)
@@ -416,13 +393,13 @@ contains
       type(neural_train_config_t), intent(in) :: config
       type(neural_train_state_t), intent(inout) :: state
       integer(int32), intent(out) :: status
-      integer(int32) :: vocabulary_size, width, token, feature
+      integer(int32) :: vocabulary_size, width, token
       integer(int64) :: update_index
-      real(real64) :: hidden_norm, clip_scale, residual, proposal, scale, rate
-      real(real64) :: smooth_mass, gradient, beta1_pow, beta2_pow, adam_step_scale
-      real(real64) :: m_hat_factor, decay_factor
-      real(real64) :: beta1, beta2, one_minus_beta1, one_minus_beta2, adam_epsilon, value_limit
-      real(real64) :: scaled_rate, inverse_step_scale, scaled_residual, m_value, v_value
+      real(real64) :: hidden_norm, clip_scale, residual, smooth_mass, scaled_residual
+      real(real64) :: value_limit
+      type(apex_config_t) :: apex_config
+      type(apex_factors_t) :: factors, bias_factors
+      type(apex_error_t) :: apex_error
 
       status = NPT_OK
       vocabulary_size = model%config%vocabulary_size
@@ -444,91 +421,49 @@ contains
       end if
       clip_scale = min(1.0_real64, config%gradient_clip_norm / max(hidden_norm, tiny(1.0_real64)))
       update_index = state%updates_completed + 1_int64
-      rate = neural_scheduled_learning_rate(config, update_index)
+      call ensure_apex_state(model, state, status)
+      if (status /= NPT_OK) return
+      apex_config%learning_rate = config%learning_rate
+      apex_config%beta1 = config%apex_beta1
+      apex_config%beta2 = config%apex_beta2
+      apex_config%epsilon = config%apex_epsilon
+      apex_config%gamma = config%apex_gamma
+      apex_config%weight_decay = config%weight_decay
+      apex_config%gradient_clip = config%gradient_clip_norm
+      apex_config%warmup_updates = config%warmup_updates
+      apex_config%total_updates = config%total_updates
+      apex_config%minimum_lr_ratio = config%minimum_lr_ratio
+      apex_config%scheduler = int(config%lr_schedule, kind(apex_config%scheduler))
+      call apex_make_factors(apex_config, update_index, factors, apex_error)
+      if (apex_error%code /= APEX_OK) then
+         status = NPT_ERR_NUMERICAL
+         return
+      end if
+      bias_factors = factors
+      bias_factors%decay_factor = 1.0_real64
+      value_limit = config%embedding_value_limit
       smooth_mass = config%label_smoothing / real(vocabulary_size, real64)
 
-      if (config%optimizer == NPT_OPTIMIZER_ADAMW) then
-         call ensure_optimizer_state(model, config, state, status)
-         if (status /= NPT_OK) return
-         beta1_pow = config%adam_beta1 ** real(update_index, real64)
-         beta2_pow = config%adam_beta2 ** real(update_index, real64)
-         ! Fold both bias corrections into the step: mhat/(sqrt(vhat)+eps)
-         ! equals sqrt(1-b2^t)/(1-b1^t) * m/(sqrt(v)+eps') only with a
-         ! rescaled epsilon, so keep the textbook form per element instead
-         ! and precompute just the two correction denominators here.
-         m_hat_factor = 1.0_real64 - beta1_pow
-         adam_step_scale = sqrt(max(0.0_real64, 1.0_real64 - beta2_pow))
-         if (.not. ieee_is_finite(m_hat_factor) .or. .not. ieee_is_finite(adam_step_scale) .or. &
-             m_hat_factor <= 0.0_real64) then
+      ! The embedding columns are disjoint across tokens. The single Apex
+      ! momentum recurrence is applied directly to each contiguous column.
+      !$omp parallel do private(residual, scaled_residual, apex_error) reduction(min:status) &
+      !$omp& schedule(static) if(vocabulary_size >= 512_int32)
+      do token = 1_int32, vocabulary_size
+         residual = probabilities(token) - smooth_mass
+         if (token == target) residual = residual - (1.0_real64 - config%label_smoothing)
+         scaled_residual = residual * clip_scale
+         call apex_update_column(model%token_embedding(:, token), hidden, state%apex_m_embedding(:, token), &
+                                 scaled_residual, factors, apex_error)
+         if (apex_error%code /= APEX_OK) then
             status = NPT_ERR_NUMERICAL
-            return
+            cycle
          end if
-         decay_factor = 1.0_real64 - rate * config%weight_decay
-         ! Loop-invariant scalars.  The moment recurrences keep their exact
-         ! expressions (bit-identical states, so checkpoint continuation is
-         ! unaffected); only the proposal folds the two per-element
-         ! divisions into loop-invariant scaled_rate/inverse_step_scale
-         ! multipliers, a reassociation-level change bounded by real64 ulp
-         ! rounding and covered by the quality A/B in the evidence suite.
-         beta1 = config%adam_beta1
-         beta2 = config%adam_beta2
-         one_minus_beta1 = 1.0_real64 - beta1
-         one_minus_beta2 = 1.0_real64 - beta2
-         adam_epsilon = config%adam_epsilon
-         value_limit = config%embedding_value_limit
-         scaled_rate = rate / m_hat_factor
-         inverse_step_scale = 1.0_real64 / adam_step_scale
-         ! Columns (and their moment columns) are disjoint, so the OpenMP
-         ! loop below needs no reduction and preserves online token order.
-         !$omp parallel do private(residual, proposal, gradient, scaled_residual, m_value, v_value, feature) &
-         !$omp schedule(static) if(vocabulary_size >= 512_int32)
-         do token = 1_int32, vocabulary_size
-            residual = probabilities(token) - smooth_mass
-            if (token == target) residual = residual - (1.0_real64 - config%label_smoothing)
-            scaled_residual = residual * clip_scale
-            do feature = 1_int32, width
-               gradient = scaled_residual * real(hidden(feature), real64)
-               m_value = beta1 * state%adam_m_embedding(feature, token) + one_minus_beta1 * gradient
-               v_value = beta2 * state%adam_v_embedding(feature, token) + one_minus_beta2 * gradient * gradient
-               state%adam_m_embedding(feature, token) = m_value
-               state%adam_v_embedding(feature, token) = v_value
-               proposal = decay_factor * real(model%token_embedding(feature, token), real64) - &
-                          scaled_rate * m_value / (sqrt(v_value) * inverse_step_scale + adam_epsilon)
-               proposal = max(-value_limit, min(value_limit, proposal))
-               model%token_embedding(feature, token) = real(proposal, real32)
-            end do
-            m_value = beta1 * state%adam_m_bias(token) + one_minus_beta1 * residual
-            v_value = beta2 * state%adam_v_bias(token) + one_minus_beta2 * residual * residual
-            state%adam_m_bias(token) = m_value
-            state%adam_v_bias(token) = v_value
-            proposal = real(model%output_bias(token), real64) - &
-                       scaled_rate * m_value / (sqrt(v_value) * inverse_step_scale + adam_epsilon)
-            proposal = max(-value_limit, min(value_limit, proposal))
-            model%output_bias(token) = real(proposal, real32)
-         end do
-         !$omp end parallel do
-      else
-         ! Legacy SGD update, preserved with its original operation order for
-         ! pre-v3 checkpoint reproducibility (scheduled rate only replaces
-         ! the constant peak; the constant schedule returns it unchanged).
-         scale = rate * clip_scale
-         !$omp parallel do private(residual, proposal, feature) schedule(static) if(vocabulary_size >= 512_int32)
-         do token = 1_int32, vocabulary_size
-            residual = probabilities(token) - smooth_mass
-            if (token == target) residual = residual - (1.0_real64 - config%label_smoothing)
-            !$omp simd private(proposal)
-            do feature = 1_int32, width
-               proposal = real(model%token_embedding(feature, token), real64) - &
-                          scale * residual * real(hidden(feature), real64)
-               proposal = max(-config%embedding_value_limit, min(config%embedding_value_limit, proposal))
-               model%token_embedding(feature, token) = real(proposal, real32)
-            end do
-            proposal = real(model%output_bias(token), real64) - scale * residual
-            proposal = max(-config%embedding_value_limit, min(config%embedding_value_limit, proposal))
-            model%output_bias(token) = real(proposal, real32)
-         end do
-         !$omp end parallel do
-      end if
+         model%token_embedding(:, token) = max(-value_limit, min(value_limit, model%token_embedding(:, token)))
+         call apex_update_scalar(model%output_bias(token), residual, state%apex_m_bias(token), bias_factors, apex_error)
+         if (apex_error%code /= APEX_OK) status = NPT_ERR_NUMERICAL
+      end do
+      !$omp end parallel do
+      if (status /= NPT_OK) return
       ! Cheap sentinel: the clamped target column must be finite; see the
       ! boundedness argument in the header comment for the full matrix.
       if (.not. all(ieee_is_finite(model%token_embedding(:, target))) .or. &
@@ -852,47 +787,36 @@ contains
                                 all(ieee_is_finite(model%global_mix_logit))
    end function model_payload_is_finite
 
-   pure logical function optimizer_state_is_present(state)
+   pure logical function apex_state_is_present(state)
       type(neural_train_state_t), intent(in) :: state
+      apex_state_is_present = allocated(state%apex_m_embedding) .and. allocated(state%apex_m_bias)
+   end function apex_state_is_present
 
-      optimizer_state_is_present = allocated(state%adam_m_embedding) .and. allocated(state%adam_v_embedding) .and. &
-                                   allocated(state%adam_m_bias) .and. allocated(state%adam_v_bias)
-   end function optimizer_state_is_present
-
-   pure logical function optimizer_state_is_finite(state)
+   pure logical function apex_state_is_finite(state)
       type(neural_train_state_t), intent(in) :: state
+      apex_state_is_finite = .true.
+      if (allocated(state%apex_m_embedding)) apex_state_is_finite = &
+         apex_state_is_finite .and. all(ieee_is_finite(state%apex_m_embedding))
+      if (allocated(state%apex_m_bias)) apex_state_is_finite = &
+         apex_state_is_finite .and. all(ieee_is_finite(state%apex_m_bias))
+   end function apex_state_is_finite
 
-      optimizer_state_is_finite = .true.
-      if (allocated(state%adam_m_embedding)) optimizer_state_is_finite = &
-         optimizer_state_is_finite .and. all(ieee_is_finite(state%adam_m_embedding))
-      if (allocated(state%adam_v_embedding)) optimizer_state_is_finite = &
-         optimizer_state_is_finite .and. all(ieee_is_finite(state%adam_v_embedding)) .and. &
-         all(state%adam_v_embedding >= 0.0_real64)
-      if (allocated(state%adam_m_bias)) optimizer_state_is_finite = &
-         optimizer_state_is_finite .and. all(ieee_is_finite(state%adam_m_bias))
-      if (allocated(state%adam_v_bias)) optimizer_state_is_finite = &
-         optimizer_state_is_finite .and. all(ieee_is_finite(state%adam_v_bias)) .and. &
-         all(state%adam_v_bias >= 0.0_real64)
-   end function optimizer_state_is_finite
-
-   pure logical function optimizer_state_matches(state, model)
+   pure logical function apex_state_matches(state, model)
       type(neural_train_state_t), intent(in) :: state
       type(neural_decoder_t), intent(in) :: model
-
-      optimizer_state_matches = .true.
-      if (allocated(state%adam_m_embedding)) then
-         if (.not. optimizer_state_is_present(state)) then
-            optimizer_state_matches = .false.
-         else if (size(state%adam_m_embedding, 1, kind=int32) /= model%config%width .or. &
-                  size(state%adam_m_embedding, 2, kind=int32) /= model%config%vocabulary_size .or. &
-                  size(state%adam_v_embedding, 1, kind=int32) /= model%config%width .or. &
-                  size(state%adam_v_embedding, 2, kind=int32) /= model%config%vocabulary_size .or. &
-                  size(state%adam_m_bias, kind=int32) /= model%config%vocabulary_size .or. &
-                  size(state%adam_v_bias, kind=int32) /= model%config%vocabulary_size) then
-            optimizer_state_matches = .false.
+      apex_state_matches = .true.
+      if (allocated(state%apex_m_embedding) .neqv. allocated(state%apex_m_bias)) then
+         apex_state_matches = .false.
+         return
+      end if
+      if (allocated(state%apex_m_embedding)) then
+         if (size(state%apex_m_embedding, 1, kind=int32) /= model%config%width .or. &
+             size(state%apex_m_embedding, 2, kind=int32) /= model%config%vocabulary_size .or. &
+             size(state%apex_m_bias, kind=int32) /= model%config%vocabulary_size) then
+            apex_state_matches = .false.
          end if
       end if
-   end function optimizer_state_matches
+   end function apex_state_matches
 
    ! Checkpoints include every mutable neural parameter and the update cursor.
    ! Exact continuation additionally requires replaying the same source records
@@ -911,7 +835,7 @@ contains
       if (len_trim(path) == 0 .or. .not. neural_decoder_is_ready(model) .or. .not. bpe_is_initialized(bpe) .or. &
           .not. neural_train_config_is_valid(config) .or. .not. state%ready .or. &
           model%config%vocabulary_size < bpe%token_count .or. .not. model_payload_is_finite(model) .or. &
-          .not. optimizer_state_is_finite(state) .or. .not. optimizer_state_matches(state, model)) then
+          .not. apex_state_is_finite(state) .or. .not. apex_state_matches(state, model)) then
          status = NPT_ERR_INVALID_ARGUMENT
          return
       end if
@@ -930,24 +854,22 @@ contains
       if (io_status == 0) write(unit, iostat=io_status) bpe%token_count, bpe%merge_count
       if (io_status == 0) write(unit, iostat=io_status) config%trainable_mode, config%learning_rate, config%gradient_clip_norm, &
                                                          config%embedding_value_limit, config%maximum_tokens_per_record
-      if (io_status == 0) write(unit, iostat=io_status) config%optimizer, config%adam_beta1, config%adam_beta2, &
-                                                         config%adam_epsilon, config%weight_decay, config%label_smoothing, &
-                                                         config%lr_schedule, config%warmup_updates, config%total_updates, &
-                                                         config%minimum_lr_ratio
+      if (io_status == 0) write(unit, iostat=io_status) config%apex_beta1, config%apex_beta2, &
+                                                         config%apex_epsilon, config%apex_gamma, &
+                                                         config%weight_decay, config%label_smoothing, config%lr_schedule, &
+                                                         config%warmup_updates, config%total_updates, config%minimum_lr_ratio
       if (io_status == 0) write(unit, iostat=io_status) state%records_completed, state%source_records_completed, &
                                                          state%updates_completed, state%tokens_seen, state%cumulative_nll
       if (io_status == 0) then
-         if (optimizer_state_is_present(state)) then
+         if (apex_state_is_present(state)) then
             write(unit, iostat=io_status) 1_int32
          else
             write(unit, iostat=io_status) 0_int32
          end if
       end if
-      if (io_status == 0 .and. optimizer_state_is_present(state)) then
-         write(unit, iostat=io_status) state%adam_m_embedding
-         if (io_status == 0) write(unit, iostat=io_status) state%adam_v_embedding
-         if (io_status == 0) write(unit, iostat=io_status) state%adam_m_bias
-         if (io_status == 0) write(unit, iostat=io_status) state%adam_v_bias
+      if (io_status == 0 .and. apex_state_is_present(state)) then
+         write(unit, iostat=io_status) state%apex_m_embedding
+         if (io_status == 0) write(unit, iostat=io_status) state%apex_m_bias
       end if
       call write_model_payload(unit, model, io_status)
       write_status = io_status
@@ -963,9 +885,8 @@ contains
       type(neural_train_state_t), intent(out) :: state
       integer(int32), intent(out) :: status
       character(len=8) :: magic
-      integer :: unit, io_status, read_status
-      integer :: allocation_status
-      integer(int32) :: version, stored_bpe_tokens, stored_bpe_merges, stored_optimizer_flag
+      integer :: unit, io_status, read_status, allocation_status
+      integer(int32) :: version, stored_bpe_tokens, stored_bpe_merges, stored_apex_state
       type(neural_decoder_config_t) :: decoder_config
 
       call neural_decoder_destroy(model)
@@ -984,46 +905,28 @@ contains
       end if
       read(unit, iostat=io_status) magic
       if (io_status == 0) read(unit, iostat=io_status) version
-      if (io_status == 0) read(unit, iostat=io_status) decoder_config%vocabulary_size, decoder_config%width, decoder_config%heads, &
-                                                       decoder_config%local_window, decoder_config%ffn_width, &
-                                                       decoder_config%memory_decay, decoder_config%rms_epsilon, &
-                                                       decoder_config%rotary_period
+      if (io_status == 0) read(unit, iostat=io_status) decoder_config%vocabulary_size, decoder_config%width, &
+         decoder_config%heads, decoder_config%local_window, decoder_config%ffn_width, &
+         decoder_config%memory_decay, decoder_config%rms_epsilon, decoder_config%rotary_period
       if (io_status == 0) read(unit, iostat=io_status) stored_bpe_tokens, stored_bpe_merges
-      if (io_status == 0) read(unit, iostat=io_status) config%trainable_mode, config%learning_rate, config%gradient_clip_norm, &
-                                                       config%embedding_value_limit, config%maximum_tokens_per_record
-      stored_optimizer_flag = 0_int32
-      if (io_status == 0) then
-         if (version == NEURAL_CHECKPOINT_VERSION) then
-            read(unit, iostat=io_status) config%optimizer, config%adam_beta1, config%adam_beta2, &
-                                         config%adam_epsilon, config%weight_decay, config%label_smoothing, &
-                                         config%lr_schedule, config%warmup_updates, config%total_updates, &
-                                         config%minimum_lr_ratio
-         else if (version == NEURAL_CHECKPOINT_VERSION_V2) then
-            ! v2 checkpoints were written by the SGD-only trainer; restore
-            ! exactly those semantics instead of the v3 type defaults.
-            config%optimizer = NPT_OPTIMIZER_SGD
-            config%weight_decay = 0.0_real64
-            config%label_smoothing = 0.0_real64
-            config%lr_schedule = NPT_SCHEDULE_CONSTANT
-            config%warmup_updates = 0_int64
-            config%total_updates = 0_int64
-         end if
-      end if
+      if (io_status == 0) read(unit, iostat=io_status) config%trainable_mode, config%learning_rate, &
+         config%gradient_clip_norm, config%embedding_value_limit, config%maximum_tokens_per_record
+      if (io_status == 0) read(unit, iostat=io_status) config%apex_beta1, config%apex_beta2, &
+         config%apex_epsilon, config%apex_gamma, config%weight_decay, config%label_smoothing, &
+         config%lr_schedule, config%warmup_updates, config%total_updates, config%minimum_lr_ratio
       if (io_status == 0) read(unit, iostat=io_status) state%records_completed, state%source_records_completed, &
-                                                       state%updates_completed, state%tokens_seen, state%cumulative_nll
-      if (io_status == 0 .and. version == NEURAL_CHECKPOINT_VERSION) then
-         read(unit, iostat=io_status) stored_optimizer_flag
-      end if
+         state%updates_completed, state%tokens_seen, state%cumulative_nll
+      if (io_status == 0) read(unit, iostat=io_status) stored_apex_state
       if (io_status /= 0) then
          close(unit)
          status = NPT_ERR_IO
          return
       end if
-      if (magic /= NEURAL_CHECKPOINT_MAGIC .or. &
-          (version /= NEURAL_CHECKPOINT_VERSION .and. version /= NEURAL_CHECKPOINT_VERSION_V2) .or. &
+      if (magic /= NEURAL_CHECKPOINT_MAGIC .or. version /= NEURAL_CHECKPOINT_VERSION .or. &
           stored_bpe_tokens /= bpe%token_count .or. stored_bpe_merges /= bpe%merge_count .or. &
           .not. neural_decoder_config_is_valid(decoder_config) .or. .not. neural_train_config_is_valid(config) .or. &
-          (stored_optimizer_flag /= 0_int32 .and. stored_optimizer_flag /= 1_int32) .or. &
+          (stored_apex_state /= 0_int32 .and. stored_apex_state /= 1_int32) .or. &
+          (stored_apex_state == 0_int32 .and. state%updates_completed > 0_int64) .or. &
           state%records_completed < 0_int64 .or. state%source_records_completed < 0_int64 .or. &
           state%updates_completed < 0_int64 .or. state%tokens_seen < 0_int64 .or. &
           .not. ieee_is_finite(state%cumulative_nll)) then
@@ -1038,11 +941,9 @@ contains
          status = NPT_ERR_FORMAT
          return
       end if
-      if (stored_optimizer_flag == 1_int32) then
-         allocate(state%adam_m_embedding(decoder_config%width, decoder_config%vocabulary_size), &
-                  state%adam_v_embedding(decoder_config%width, decoder_config%vocabulary_size), &
-                  state%adam_m_bias(decoder_config%vocabulary_size), &
-                  state%adam_v_bias(decoder_config%vocabulary_size), stat=allocation_status)
+      if (stored_apex_state == 1_int32) then
+         allocate(state%apex_m_embedding(decoder_config%width, decoder_config%vocabulary_size), &
+                  state%apex_m_bias(decoder_config%vocabulary_size), stat=allocation_status)
          if (allocation_status /= 0) then
             close(unit)
             call neural_decoder_destroy(model)
@@ -1050,11 +951,9 @@ contains
             status = NPT_ERR_ALLOCATION
             return
          end if
-         read(unit, iostat=io_status) state%adam_m_embedding
-         if (io_status == 0) read(unit, iostat=io_status) state%adam_v_embedding
-         if (io_status == 0) read(unit, iostat=io_status) state%adam_m_bias
-         if (io_status == 0) read(unit, iostat=io_status) state%adam_v_bias
-         if (io_status /= 0 .or. .not. optimizer_state_is_finite(state)) then
+         read(unit, iostat=io_status) state%apex_m_embedding
+         if (io_status == 0) read(unit, iostat=io_status) state%apex_m_bias
+         if (io_status /= 0 .or. .not. apex_state_is_finite(state)) then
             close(unit)
             call neural_decoder_destroy(model)
             state = neural_train_state_t()

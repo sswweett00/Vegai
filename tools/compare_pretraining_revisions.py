@@ -211,7 +211,7 @@ def verify_legacy_resume_compatibility(
     workdir: Path,
     one_epoch_tokens: int,
 ) -> dict[str, object]:
-    """Prove that the v7 binary resumes a real pre-v7 checkpoint byte-exactly."""
+    """Prove that the current binary resumes a historical checkpoint byte-exactly."""
     baseline_checkpoint = workdir / f"{name}-baseline-legacy-resume.vgai"
     candidate_checkpoint = workdir / f"{name}-candidate-legacy-resume.vgai"
     baseline_checkpoint.write_bytes(initial_checkpoint)
@@ -223,7 +223,7 @@ def verify_legacy_resume_compatibility(
     baseline_resumed = baseline_checkpoint.read_bytes()
     candidate_resumed = candidate_checkpoint.read_bytes()
     require(baseline_resumed == candidate_resumed,
-            f"{name}: v7 candidate did not byte-exactly continue the real pre-v7 checkpoint")
+            f"{name}: candidate did not byte-exactly continue the historical checkpoint")
     return {
         "initial_checkpoint_sha256": hashlib.sha256(initial_checkpoint).hexdigest(),
         "resumed_checkpoint_sha256": hashlib.sha256(candidate_resumed).hexdigest(),

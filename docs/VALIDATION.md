@@ -129,9 +129,9 @@ saturate ederek ambiguity'yi doğrular.
   frozen learned semantic input kullanarak ayrışması, fused/reference ve
   checkpoint-resume byte equality'si;
 - binary checkpoint save/load, rebuilt hash index ve payload plane round-trip;
-  raw header regression'ı ile ordinary fresh model writer'ın v7, resonant'ın v8
-  yazdığının ve synthetic v5/coherent-v6 lineage'lerinin historical exact-mask
-  sampler identity'sini koruduğunun doğrulanması;
+  raw header regression'ı ile modern fresh model writer'ın v9 fixed-point,
+  synthetic v5/coherent-v6 lineage'lerinin historical whole-percent wire formatı
+  ve exact-mask sampler identity'sini koruduğunun doğrulanması;
 - kesintisiz ikinci epoch ile checkpoint'ten resume edilen ikinci epoch'un
   bit-tam eşitliği;
 - resume semantic config mismatch, strict long-token, strict non-ASCII byte ve
@@ -213,7 +213,7 @@ host için anlamlıdır.
 Native testler fused raw-word/permuted/pair ve mixed semantic-pair accumulator
 plane bit-eşitliğini, fused/reference hybrid, hierarchical, coherent ve resonant
 replay eşitliğini, repeated-center serial/OpenMP context-build eşitliğini;
-ordinary fresh mode'lar için v7, resonant için v8 checkpoint round-trip'ini ve
+fresh modern mode'lar için v9 fixed-point plasticity checkpoint round-trip'ini ve
 v5 legacy sampler resume'ini denetler. `tools/compare_pretraining_modes.py`
 portable binary üzerinde yalnız her bir gerçek `vegai_pretrain train` child-
 process wall-clock'ını raporlar: compiler, CI setup, fixture construction,

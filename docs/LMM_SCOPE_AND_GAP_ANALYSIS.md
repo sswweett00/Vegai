@@ -39,7 +39,7 @@ factuality ya da fiziksel ölçüm doğruluğu değildir. Bunun için source ide
 calibration/uncertainty ve target-domain evaluation ayrı gerekir. Ayrıntılı
 sınır [TOKENLESS_SIGNAL_FIELD.md](TOKENLESS_SIGNAL_FIELD.md)'dedir.
 
-`evidential_optimizer.py` de native AdamW/Lion/Transformer optimizer eklemez.
+`evidential_optimizer.py` de neural training runtime veya Transformer güncelleme çekirdeği eklemez.
 Gerçek external algorithm/optimizer candidate'larının config/artifact identity'si
 ve aynı held-out benchmark üzerindeki repeated bounded ölçümleri için güçlü bir
 selection gate sağlar. Bu gate geçilirse yalnız declared domain/metric altında
@@ -87,7 +87,7 @@ yeni data plane, model runtime ve test yüzeyi gerektirir.
 |---|---|---|
 | Unicode/subword tokenizer | Optional `tokenizers-json` model package ile var; HDC `text_tokenizer` hâlâ ASCII-byte'dır | BPE/Unigram tokenizer gerçek model package'ine aittir; geniş tokenizer quality/normalization test suite'i model owner tarafından sağlanmalıdır |
 | Tensor/matrix runtime | Native Vegai'de yok; harici actual backend bağlanabilir | Transformer linear layers, embeddings, attention ve activations packed-HV XOR/majority işlemleri değildir |
-| Autodiff + optimizer | Native Vegai'de yok; EPO yalnız external candidate evidence selection yapar | Backpropagation, gradient accumulation, AdamW/Lion, clipping, loss scaling ve optimizer state gerekir |
+| Autodiff + optimizer | Native Vegai'de yok; Apex yalnız mevcut tied-output eğitim yolunu günceller; EPO external candidate evidence selection yapar | Full backpropagation, gradient accumulation, mixed-precision loss scaling ve distributed optimizer state gerekir |
 | Transformer/sequence objective | Harici model backend'de olabilir; repo model weight/architecture sağlamaz | Causal/encoder-decoder attention, positional encoding, logits, cross entropy ve sampling/generation gerçek model package'inde kanıtlanmalıdır |
 | Multimodal encoders/fusion | Asset registry + worker protocol var; native encoder/fusion yok | image/audio/video decoding, vision/audio encoder, alignment/fusion, modality batching ve safety policy gerçek VLM/AV worker tarafından sağlanmalıdır |
 | Distributed training | Yok | data/model/pipeline parallelism, collectives, gradient synchronization, elastic fault recovery ve sharded optimizer/checkpoint gerekir |
