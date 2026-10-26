@@ -157,6 +157,26 @@ def main() -> int:
             evidence = json.loads((run_dir / "evidence.json").read_text(encoding="utf-8"))
             expect(evidence["exact_epochs"] == 1, "micro run is exactly one epoch")
             expect(len(evidence["generations"]) == len(runner.DEFAULT_PROMPTS), "prompt suite completed")
+
+            chunk_run_dir = tmp / "run-chunks"
+            completed = subprocess.run(
+                [sys.executable, str(ROOT / "tools/run_neural_turkish_epoch1.py"),
+                 "--neural-bin", binary, "--corpus-dir", str(tmp / "a"), "--run-dir", str(chunk_run_dir),
+                 "--vocab", "300", "--width", "16", "--heads", "2", "--window", "8", "--ffn", "32",
+                 "--warmup-updates", "10", "--generation-tokens", "4", "--chunks", "2"],
+                capture_output=True, text=True, check=False, timeout=1200,
+            )
+            expect(completed.returncode == 0,
+                   f"chunked micro epoch-1 run succeeds (stderr: {completed.stderr[-600:]})")
+            chunk_evidence = json.loads((chunk_run_dir / "evidence.json").read_text(encoding="utf-8"))
+            expect(chunk_evidence["exact_epochs"] == 1, "chunked micro run is exactly one epoch")
+            expect(len(chunk_evidence["training_chunks"]) >= 1, "chunked run reports its chunks")
+            expect(chunk_evidence["training_epoch"]["prediction_tokens"]
+                   == evidence["training_epoch"]["prediction_tokens"],
+                   "chunked and single-call modes consume identical prediction tokens")
+            expect(chunk_evidence["training_epoch"]["source_records_completed"]
+                   == chunk_evidence["corpus"]["manifest"]["outputs"]["train_epoch"]["records"],
+                   "chunked run consumes every epoch source record exactly once")
         else:
             print("skip - VEGAI_NEURAL_BIN unset; native micro run not executed")
     print("verify_neural_turkish_epoch1: all checks passed")

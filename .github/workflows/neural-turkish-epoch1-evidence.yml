@@ -52,6 +52,12 @@ on:
       max_eval_records:
         description: Held-out evaluation record cap (0 = full held-out split)
         default: "0"
+      chunks:
+        description: Train the one epoch in N checkpointed chunks (1 = single native call)
+        default: "1"
+      train_timeout_seconds:
+        description: Runner timeout per native train call (per chunk when chunks > 1)
+        default: "18000"
 
 permissions:
   contents: read
@@ -72,17 +78,22 @@ jobs:
       - name: Resolve effective parameters (dispatch inputs or push defaults)
         run: |
           set -euo pipefail
-          # Phase control for push-triggered runs: edit the two literals in
-          # this step to move probe -> full with the probe-sized budget.
-          # Phase: full.  Probe run 40225294843 measured 5125.05 token/s and
-          # 3.82 bytes/token at vocab 4096 / width 96, so 200 MB ~= 52M
-          # prediction tokens ~= 2.9 h of native training inside the job
-          # budget.  Cosine horizon is the same token estimate.
-          echo "VEGAI_MODE=${{ inputs.mode || 'full' }}" >> "$GITHUB_ENV"
-          echo "VEGAI_INPUT_BUDGET=${{ inputs.train_byte_budget || '200000000' }}" >> "$GITHUB_ENV"
-          echo "VEGAI_SCHEDULE=${{ inputs.schedule || 'cosine' }}" >> "$GITHUB_ENV"
-          echo "VEGAI_TOTAL_UPDATES=${{ inputs.total_updates || '52000000' }}" >> "$GITHUB_ENV"
-          echo "VEGAI_WARMUP=${{ inputs.warmup_updates || '4000' }}" >> "$GITHUB_ENV"
+          # Phase control for push-triggered runs: edit the literals in this
+          # step to move probe -> full with measured sizing.
+          # Phase: probe A/B for the quality-preserving speed change (run
+          # 40226479496 full attempt timed out at the old speed).  This
+          # replicates probe run 40225294843 exactly (same 3 MB slice,
+          # invsqrt schedule, warmup, single train call) so tokens/s and
+          # held-out NLL/top-k compare like-for-like against the recorded
+          # baseline (5125.051 token/s, held-out NLL 7.839114).  After the
+          # A/B is read, literals move to full with measured sizing.
+          echo "VEGAI_MODE=${{ inputs.mode || 'probe' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_INPUT_BUDGET=${{ inputs.train_byte_budget || '3000000' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_SCHEDULE=${{ inputs.schedule || 'invsqrt' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_TOTAL_UPDATES=${{ inputs.total_updates || '0' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_WARMUP=${{ inputs.warmup_updates || '2000' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_CHUNKS=${{ inputs.chunks || '1' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_TRAIN_TIMEOUT=${{ inputs.train_timeout_seconds || '3600' }}" >> "$GITHUB_ENV"
           echo "VEGAI_INPUT_MAX_DOCS=${{ inputs.max_docs || '0' }}" >> "$GITHUB_ENV"
           echo "VEGAI_TOKENIZER_SAMPLE=${{ inputs.tokenizer_sample_bytes || '2000000' }}" >> "$GITHUB_ENV"
           echo "VEGAI_VOCAB=${{ inputs.vocab || '4096' }}" >> "$GITHUB_ENV"
@@ -185,6 +196,7 @@ jobs:
             --lr "${VEGAI_LR}" \
             --schedule "${VEGAI_SCHEDULE}" --total-updates "${VEGAI_TOTAL_UPDATES}" \
             --warmup-updates "${VEGAI_WARMUP}" \
+            --chunks "${VEGAI_CHUNKS}" --train-timeout-seconds "${VEGAI_TRAIN_TIMEOUT}" \
             --max-eval-records "${VEGAI_MAX_EVAL}" \
             | tee "${VEGAI_RUN_ROOT}/runner.json"
 

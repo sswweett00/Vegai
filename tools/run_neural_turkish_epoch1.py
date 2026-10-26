@@ -175,6 +175,10 @@ def render_results_md(evidence: dict[str, Any]) -> str:
         f"{fmt(epoch['epoch_wall_seconds'])} sn, {fmt(epoch['prediction_tokens_per_second'])} token/sn"
     )
     lines.append(f"- Eğitim içi ortalama NLL: {fmt(epoch['mean_nll'])} (online, güncelleme öncesi dağılım)")
+    if epoch.get("chunks"):
+        lines.append(
+            f"- Eğitim {epoch['chunks']} checkpoint'li parçada koşuldu (aynı online sıra/config; "
+            f"süre: {epoch['timing_basis']})")
     lines.append("")
     lines.append("## Held-out sonuç (belge-düzeyinde ayrık, eğitimde görülmedi)")
     lines.append("")
@@ -241,7 +245,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--generation-tokens", type=int, default=32)
     parser.add_argument("--max-eval-records", type=int, default=0, help="0 = full held-out split")
     parser.add_argument("--tokenizer-timeout-seconds", type=int, default=7200)
-    parser.add_argument("--train-timeout-seconds", type=int, default=18000)
+    parser.add_argument("--train-timeout-seconds", type=int, default=18000,
+                        help="timeout per native train call (per chunk when --chunks > 1)")
+    parser.add_argument("--chunks", type=int, default=1,
+                        help="split the single epoch into N train-chunk calls with a checkpoint "
+                             "save after each; identical online order/config as a single train call, "
+                             "but a timeout loses at most the in-flight chunk")
     parser.add_argument("--evaluate-timeout-seconds", type=int, default=7200)
     parser.add_argument("--generation-timeout-seconds", type=int, default=600)
     parser.add_argument("--prompts-file", help="optional UTF-8 file, one prompt per line")
@@ -297,14 +306,85 @@ def main(argv: list[str] | None = None) -> int:
 
         baseline = evaluate()
 
-        stdout, train_wall = run_child(
-            [binary, "train", str(corpus_dir / manifest["outputs"]["train_epoch"]["path"]),
-             str(checkpoint_path), str(tokenizer_path), "1", *model_options],
-            timeout=args.train_timeout_seconds,
-            env_extra={"OMP_NUM_THREADS": str(os.cpu_count() or 2)},
-        )
-        epoch_report = parse_prefixed_json(stdout, "NEURAL_PRETRAIN_EPOCH_JSON:")
-        complete_report = parse_prefixed_json(stdout, "NEURAL_PRETRAIN_COMPLETE_JSON:")
+        epoch_file = str(corpus_dir / manifest["outputs"]["train_epoch"]["path"])
+        train_chunks: list[dict[str, Any]] = []
+        if args.chunks <= 1:
+            stdout, train_wall = run_child(
+                [binary, "train", epoch_file,
+                 str(checkpoint_path), str(tokenizer_path), "1", *model_options],
+                timeout=args.train_timeout_seconds,
+                env_extra={"OMP_NUM_THREADS": str(os.cpu_count() or 2)},
+            )
+            epoch_report = parse_prefixed_json(stdout, "NEURAL_PRETRAIN_EPOCH_JSON:")
+            complete_report = parse_prefixed_json(stdout, "NEURAL_PRETRAIN_COMPLETE_JSON:")
+        else:
+            # Chunked single epoch: repeated train-chunk calls advance the
+            # checkpoint's own source-record cursor with the same options and
+            # online order as one `train` call (v3 checkpoints round-trip
+            # optimizer state bit-exactly), saving a checkpoint after every
+            # chunk.  A subprocess timeout therefore loses only the chunk in
+            # flight, and chunks.json in the run dir shows exact progress.
+            epoch_records = int(manifest["outputs"]["train_epoch"]["records"])
+            chunk_records = max(1, -(-epoch_records // args.chunks))
+            train_wall = 0.0
+            completed_records = 0
+            guard = 0
+            while completed_records < epoch_records:
+                guard += 1
+                if guard > args.chunks + 3:
+                    raise RunError(
+                        f"chunked training stalled at {completed_records}/{epoch_records} source records")
+                stdout, chunk_wall = run_child(
+                    [binary, "train-chunk", epoch_file,
+                     str(checkpoint_path), str(tokenizer_path), str(chunk_records), *model_options],
+                    timeout=args.train_timeout_seconds,
+                    env_extra={"OMP_NUM_THREADS": str(os.cpu_count() or 2)},
+                )
+                chunk = parse_prefixed_json(stdout, "NEURAL_PRETRAIN_CHUNK_JSON:")
+                chunk["controller_wall_seconds"] = chunk_wall
+                train_chunks.append(chunk)
+                (run_dir / "chunks.json").write_text(
+                    json.dumps(train_chunks, ensure_ascii=False, indent=2), encoding="utf-8")
+                train_wall += chunk_wall
+                completed_records = int(chunk["source_records_completed"])
+            total_tokens = sum(int(c["prediction_tokens"]) for c in train_chunks)
+            total_eligible = sum(int(c["eligible_records"]) for c in train_chunks)
+
+            def weighted(key: str) -> float:
+                if total_tokens <= 0:
+                    return 0.0
+                return sum(float(c[key]) * int(c["prediction_tokens"]) for c in train_chunks) / total_tokens
+
+            mean_nll = weighted("mean_nll")
+            epoch_report = {
+                "schema_version": "vegai-neural-pretraining-chunk-aggregate/v1",
+                "mode": "tied-output-cross-entropy-adapter/v1",
+                "epoch_in_invocation": 1,
+                "chunks": len(train_chunks),
+                "optimizer": args.optimizer,
+                "schedule": args.schedule,
+                "learning_rate": args.lr,
+                "label_smoothing": args.label_smoothing,
+                "eligible_records": total_eligible,
+                "skipped_records_derived": completed_records - total_eligible,
+                "source_records_completed": completed_records,
+                "prediction_tokens": total_tokens,
+                "mean_nll": mean_nll,
+                "perplexity": math.exp(mean_nll) if mean_nll < 700 else float("inf"),
+                "top1_accuracy": weighted("top1_accuracy"),
+                "top5_accuracy": weighted("top5_accuracy"),
+                "epoch_wall_seconds": train_wall,
+                "prediction_tokens_per_second": (total_tokens / train_wall) if train_wall > 0 else 0.0,
+                "timing_basis": "runner wall per chunk including checkpoint save/load between chunks",
+                "updates_completed": int(train_chunks[-1]["updates_completed"]) if train_chunks else 0,
+            }
+            complete_report = {
+                "schema_version": "vegai-neural-pretraining-chunk-aggregate/v1",
+                "epochs_completed_in_invocation": 1,
+                "chunks": len(train_chunks),
+                "updates_completed": epoch_report["updates_completed"],
+                "prediction_tokens": total_tokens,
+            }
         if int(epoch_report["epoch_in_invocation"]) != 1:
             raise RunError("native trainer did not report exactly epoch 1")
 
@@ -354,12 +434,14 @@ def main(argv: list[str] | None = None) -> int:
                 "label_smoothing": args.label_smoothing,
                 "weight_decay": args.weight_decay,
                 "seed": args.seed,
+                "chunks": args.chunks,
             },
             "tokenizer": {**tokenizer_report, "file": sha256_file(tokenizer_path),
                           "controller_wall_seconds": tokenizer_wall},
             "init": init_report,
             "baseline_heldout": baseline,
             "training_epoch": epoch_report,
+            "training_chunks": train_chunks,
             "training_complete": complete_report,
             "training_controller_wall_seconds": train_wall,
             "final_heldout": final,
