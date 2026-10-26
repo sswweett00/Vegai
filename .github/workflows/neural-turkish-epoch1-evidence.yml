@@ -80,26 +80,25 @@ jobs:
           set -euo pipefail
           # Phase control for push-triggered runs: edit the literals in this
           # step to move probe -> full with measured sizing.
-          # Phase: probe A/B for the quality-preserving speed change (run
-          # 40226479496 full attempt timed out at the old speed).  This
-          # replicates probe run 40225294843 exactly (same 3 MB slice,
-          # invsqrt schedule, warmup, single train call) so tokens/s and
-          # held-out NLL/top-k compare like-for-like against the recorded
-          # baseline (5125.051 token/s, held-out NLL 7.839114).  After the
-          # A/B is read, literals move to full with measured sizing.
-          # A/B #1 (40301975287): quality held (NLL 7.796473) but a latency-
-          # bound logits chain ran 2275 token/s.  A/B #2 (40305596215):
-          # eight partial sums reached only 3250 token/s -- scalar chains
-          # plus extra per-token OpenMP fork-join wake-ups lose to the SIMD
-          # matmul kernel.  A/B #3: logits via fork-free matmul(hidden, E)
-          # (no transpose copy) and OMP_WAIT_POLICY=ACTIVE in the runner.
-          echo "VEGAI_MODE=${{ inputs.mode || 'probe' }}" >> "$GITHUB_ENV"
-          echo "VEGAI_INPUT_BUDGET=${{ inputs.train_byte_budget || '3000000' }}" >> "$GITHUB_ENV"
-          echo "VEGAI_SCHEDULE=${{ inputs.schedule || 'invsqrt' }}" >> "$GITHUB_ENV"
-          echo "VEGAI_TOTAL_UPDATES=${{ inputs.total_updates || '0' }}" >> "$GITHUB_ENV"
-          echo "VEGAI_WARMUP=${{ inputs.warmup_updates || '2000' }}" >> "$GITHUB_ENV"
-          echo "VEGAI_CHUNKS=${{ inputs.chunks || '1' }}" >> "$GITHUB_ENV"
-          echo "VEGAI_TRAIN_TIMEOUT=${{ inputs.train_timeout_seconds || '3600' }}" >> "$GITHUB_ENV"
+          # Phase: FULL (second attempt).  A/B history on the byte-identical
+          # probe slice (784,931 tokens): baseline 5125.051 token/s, failed
+          # full #1 (200 MB, old code) hit the 18000 s train-subprocess
+          # timeout, A/B #1 2275 / #2 3250 (scalar-chain and fork-wake
+          # regressions, quality held each time), A/B #3 6408.916 token/s
+          # with held-out NLL 7.781494 <= baseline 7.839114 (no quality
+          # loss).  Sizing applies the full-#1 lesson: plan at HALF the
+          # measured probe rate (~3200 token/s).  100 MB ~= 26.2M tokens
+          # (3.82 B/token) => ~68 min at measured rate, ~136 min at plan
+          # rate, inside the 350 min job even with the whole-dump corpus
+          # build.  Training runs in 10 checkpointed chunks so a timeout
+          # loses at most one chunk; cosine horizon = token estimate.
+          echo "VEGAI_MODE=${{ inputs.mode || 'full' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_INPUT_BUDGET=${{ inputs.train_byte_budget || '100000000' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_SCHEDULE=${{ inputs.schedule || 'cosine' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_TOTAL_UPDATES=${{ inputs.total_updates || '26200000' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_WARMUP=${{ inputs.warmup_updates || '4000' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_CHUNKS=${{ inputs.chunks || '10' }}" >> "$GITHUB_ENV"
+          echo "VEGAI_TRAIN_TIMEOUT=${{ inputs.train_timeout_seconds || '2400' }}" >> "$GITHUB_ENV"
           echo "VEGAI_INPUT_MAX_DOCS=${{ inputs.max_docs || '0' }}" >> "$GITHUB_ENV"
           echo "VEGAI_TOKENIZER_SAMPLE=${{ inputs.tokenizer_sample_bytes || '2000000' }}" >> "$GITHUB_ENV"
           echo "VEGAI_VOCAB=${{ inputs.vocab || '4096' }}" >> "$GITHUB_ENV"

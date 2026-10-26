@@ -83,6 +83,39 @@ Tokenizer → eğitimsiz baseline → **tam 1 epoch** → held-out → 10 prompt
 üretim süiti → `evidence.json` + `RESULTS.md`. Her artefakt hash'lenir;
 prompt/response'lar düzenlenmeden yazılır.
 
+### 3.4 Kalite-korumalı hız çalışması (ölçüm-güdümlü A/B)
+
+İlk full denemesi (run 40226479496, 200 MB dilim) native `train` çağrısının
+18000 sn alt-süreç timeout'una takılmasıyla başarısız oldu; tanı,
+publisher'ın PR'a taşıdığı `failure.json` ile kondu. Ardından hız, kaliteyi
+düşürmeden artırılmak üzere **bayt-özdeş** probe dilimi (SHA `5215e60c…`,
+784.931 tahmin tokenı, aynı held-out kümesi) üzerinde A/B ile ölçüldü:
+
+| Koşu | Değişiklik | token/sn | Held-out NLL | Top-1 | Top-5 |
+|---|---|---:|---:|---:|---:|
+| Baz 40225294843 | `matmul(transpose(E), h)` (token başına tam transpoze kopyası) | 5125.051 | 7.839114 | 0.008929 | 0.039559 |
+| A/B#1 40301975287 | sütun-akışlı sıralı dot + paralel softmax exp + Adam bölme katlama | 2275.346 | 7.796473 | 0.008972 | 0.038877 |
+| A/B#2 40305596215 | 8 bağımsız kısmi toplam zinciri | 3250.440 | 7.815675 | 0.008918 | 0.038239 |
+| **A/B#3 40307841176** | **`matmul(h, E)` (transposesiz, forksuz) + `OMP_WAIT_POLICY=ACTIVE`** | **6408.916** | **7.781494** | **0.009099** | **0.040591** |
+
+Dersler (ölçüldü, tahmin değil): bu boyutta transpoze kopyası L3'te
+yaşadığından sandığımız kadar pahalı değil; asıl maliyetler (a) skaler FMA
+zincirlerinin gecikme-bağımlılığı ve (b) token başına OpenMP fork-join
+thread uyku/uyanma gecikmesi. Nihai paket: transposesiz vektör-matris
+matmul, bit-birebir paralel softmax üstelleri (sıralı normalizatör aynı),
+Adam moment yinelemeleri bit-birebir kalırken proposal bölmelerinin
+döngü-değişmez çarpanlara katlanması, rotary sin/cos ve local-attention
+skorlarının bir kez hesaplanması, aktif OpenMP bekleme politikası.
+Sonuç: **+%25,1 hız, held-out kalitesinde kayıp yok** (NLL −%0,74 göreli
+iyileşme; farklar FP yörünge gürültüsü bandındadır, üstünlük iddia edilmez).
+Yeni logits yolu, birim testte transpoze-matmul referansıyla 1e-4 tolerans
+ve aynı argmax ile kapılanır.
+
+Dayanıklılık: runner artık epoch'u N checkpoint'li `train-chunk` çağrısına
+bölebilir (aynı online sıra/config; timeout yalnız uçuşan parçayı kaybettirir,
+ilerleme `chunks.json`'da görünür; verifier mikro koşuda tek-çağrı ile aynı
+tahmin-tokenı tüketimini ve tam kaynak-kayıt kapsamasını denetler).
+
 ## 4. Koşu tarifi
 
 Probe (hız ölçümü) ve full (bütün dump boru hattı + boyutlandırılmış epoch
@@ -90,7 +123,10 @@ dilimi) modları `neural-turkish-epoch1-evidence.yml` içindedir:
 
 1. `mode=probe`: 6.000 belge, 3 MB epoch dilimi — token/sn ölçülür.
 2. Epoch bütçesi, hedef duvar süresine göre hesaplanır:
-   `bayt ≈ token/sn × saniye × (bayt/token)`.
+   `bayt ≈ token/sn × saniye × (bayt/token)`. **Güvenlik payı zorunludur:**
+   ilk full denemesi, uzun koşuda etkin hızın probe hızının <%56'sına
+   düşebildiğini gösterdi; full boyutlandırma ölçülen hızın yarısı
+   varsayılarak yapılır (ör. 6409 token/sn ölçümü → ~3200 plan hızı).
 3. `mode=full` + `train_byte_budget`: bütün dump filtrelenir (gerçek
    toplam sayılır), epoch 1 bu dilimde tanımlı ve hash'lidir.
 4. Kalan veri, `train-chunk` + attested imleç ile sonraki koşularda aynı
