@@ -150,12 +150,16 @@ def arm_name(accumulation: int) -> str:
 
 
 def train_arm(binary: str, tokenizer_path: Path, checkpoint_path: Path, train_path: Path, heldout_path: Path,
-              args: argparse.Namespace, accumulation: int, supports_accumulation: bool = True) -> dict[str, Any]:
+              args: argparse.Namespace, accumulation: int, supports_accumulation: bool = True,
+              optimizer: str | None = None) -> dict[str, Any]:
+    """Trains one arm.  OPTIMIZER overrides the arm's optimizer, which the
+    comparison arm needs: the merge-base binary predates the native optimizer and
+    would exit on an option it does not know."""
     """Trains one arm from a freshly initialized checkpoint and measures nothing but behavior."""
     model_options = [
         "--width", str(args.width), "--heads", str(args.heads), "--window", str(args.window),
         "--ffn", str(args.ffn), "--seed", str(args.seed), "--lr", repr(args.lr),
-        "--optimizer", args.optimizer, "--schedule", args.schedule,
+        "--optimizer", optimizer or args.optimizer, "--schedule", args.schedule,
         "--warmup-updates", str(args.warmup_updates), "--total-updates", str(args.total_updates),
         "--label-smoothing", repr(args.label_smoothing),
     ]
@@ -331,7 +335,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--window", type=int, default=48)
     parser.add_argument("--ffn", type=int, default=384)
     parser.add_argument("--lr", type=float, default=0.01)
-    parser.add_argument("--optimizer", default="adamw", choices=("adamw", "sgd"))
+    parser.add_argument("--optimizer", default="nova", choices=("nova", "adamw", "sgd"),
+                        help="project default is nova (the native optimizer); adamw/sgd exist for comparison")
+    parser.add_argument("--baseline-optimizer", default="adamw", choices=("nova", "adamw", "sgd"),
+                        help="optimizer the comparison binary is asked for; older revisions do not know nova")
     parser.add_argument("--schedule", default="invsqrt", choices=("constant", "invsqrt", "cosine"))
     parser.add_argument("--warmup-updates", type=int, default=100)
     parser.add_argument("--total-updates", type=int, default=0)
@@ -378,6 +385,7 @@ def main(argv: list[str] | None = None) -> int:
     report: dict[str, Any] = {"schema": SCHEMA, "status": "running", "shape": {
         "vocab": args.vocab, "width": args.width, "heads": args.heads, "window": args.window,
         "ffn": args.ffn, "optimizer": args.optimizer, "schedule": args.schedule,
+        "baseline_optimizer": args.baseline_optimizer,
         "lr": args.lr, "threads": args.threads, "corpus_bytes": args.corpus_bytes,
     }, "gates": {"min_speedup": args.min_speedup, "min_baseline_speedup": args.min_baseline_speedup,
                  "max_nll_regression": args.max_nll_regression,
@@ -429,6 +437,7 @@ def main(argv: list[str] | None = None) -> int:
             arms["baseline"] = train_arm(
                 baseline_binary, tokenizer_path, work_dir / "baseline_arm.vgnr", work_dir / "train.txt",
                 work_dir / "heldout.txt", args, 1, supports_accumulation=False,
+                optimizer=args.baseline_optimizer,
             )
         report["arms"] = arms
 

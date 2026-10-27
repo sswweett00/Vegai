@@ -32,7 +32,7 @@ program vegai_neural_pretrain
    real(real64) :: opt_embedding_limit = 8.0_real64
    real(real64) :: opt_label_smoothing = 0.0_real64
    real(real64) :: opt_min_lr_ratio = 0.1_real64
-   integer(int32) :: opt_optimizer = NPT_OPTIMIZER_ADAMW
+   integer(int32) :: opt_optimizer = NPT_OPTIMIZER_NOVA
    integer(int32) :: opt_schedule = NPT_SCHEDULE_WARMUP_INVSQRT
    integer(int32) :: opt_max_tokens_per_record = 8192_int32
    ! Mini-batch accumulation for the tied-output update.  1 is the exact
@@ -152,6 +152,7 @@ contains
             end select
          case ('--optimizer')
             select case (trim(value))
+            case ('nova'); opt_optimizer = NPT_OPTIMIZER_NOVA
             case ('adamw'); opt_optimizer = NPT_OPTIMIZER_ADAMW
             case ('sgd'); opt_optimizer = NPT_OPTIMIZER_SGD
             case default; call usage_and_stop()
@@ -176,7 +177,10 @@ contains
 
       if (opt_lr_set) then
          peak_lr = opt_lr
-      else if (opt_optimizer == NPT_OPTIMIZER_ADAMW) then
+      else if (opt_optimizer == NPT_OPTIMIZER_NOVA .or. opt_optimizer == NPT_OPTIMIZER_ADAMW) then
+         ! Both normalize the step by a gradient scale, so their step magnitude is
+         ! the learning rate itself; SGD multiplies the raw gradient instead and
+         ! needs the historical, much larger rate.
          peak_lr = 0.003_real64
       else
          peak_lr = 0.025_real64
@@ -186,10 +190,10 @@ contains
       ! reported as active regularisation while doing nothing, so it is a
       ! usage error; the AdamW-only default is simply dropped for SGD.
       effective_weight_decay = opt_weight_decay
-      if (opt_optimizer /= NPT_OPTIMIZER_ADAMW) then
+      if (opt_optimizer == NPT_OPTIMIZER_SGD) then
          if (opt_weight_decay_set .and. opt_weight_decay /= 0.0_real64) then
             write(error_unit, '(A)') 'vegai_neural_pretrain: --weight-decay requires '// &
-                                      '--optimizer adamw (the SGD update has no decay term)'
+                                      '--optimizer nova or adamw (the SGD update has no decay term)'
             call usage_and_stop()
          end if
          effective_weight_decay = 0.0_real64
@@ -248,7 +252,9 @@ contains
       integer(int32), intent(in) :: optimizer
       character(len=6) :: name
 
-      if (optimizer == NPT_OPTIMIZER_ADAMW) then
+      if (optimizer == NPT_OPTIMIZER_NOVA) then
+         name = 'nova  '
+      else if (optimizer == NPT_OPTIMIZER_ADAMW) then
          name = 'adamw '
       else
          name = 'sgd   '
@@ -945,9 +951,9 @@ contains
       write(output_unit, '(A)') '  vegai_neural_pretrain train-chunk CORPUS CHECKPOINT TOKENIZER NEW_RECORDS '// &
                                 '[START_RECORD] [--key value ...]'
       write(output_unit, '(A)') '  vegai_neural_pretrain plan CHECKPOINT TOKENIZER'
-      write(output_unit, '(A)') 'Options: --width --heads --window --ffn --seed --lr --optimizer adamw|sgd '// &
+      write(output_unit, '(A)') 'Options: --width --heads --window --ffn --seed --lr --optimizer nova|adamw|sgd '// &
                                 '--schedule constant|invsqrt|cosine --warmup-updates --total-updates --min-lr-ratio'
-      write(output_unit, '(A)') '         --weight-decay (adamw only) --beta1 --beta2 --adam-eps --grad-clip '// &
+      write(output_unit, '(A)') '         --weight-decay (nova/adamw only) --beta1 --beta2 --adam-eps --grad-clip '// &
                                 '--embedding-limit --label-smoothing --max-tokens-per-record '// &
                                 '--gradient-accumulation'
       write(output_unit, '(A)') '--total-updates and --warmup-updates count optimizer steps; with '// &

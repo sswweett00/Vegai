@@ -50,6 +50,38 @@ module neural_pretraining
    ! training-system v2 default for newly constructed configurations.
    integer(int32), parameter, public :: NPT_OPTIMIZER_SGD = 1_int32
    integer(int32), parameter, public :: NPT_OPTIMIZER_ADAMW = 2_int32
+   ! NOVA-1: the native optimizer of this project, written for the one block
+   ! this trainer actually updates.  The tied output gradient of a prediction is
+   ! r(v) * h, i.e. rank one: every column v of the embedding receives the same
+   ! direction h scaled by that token's residual r(v).  AdamW's per-element
+   ! second moment therefore mostly re-derives |r(v)| * |h_i|, spending a sqrt and
+   ! a divide on every element to reconstruct something a per-column scalar
+   ! already knows.  NOVA-1 keeps one velocity array, one energy scalar per
+   ! column, and moves the transcendental work from O(width * vocabulary) to
+   ! O(vocabulary) per step:
+   !
+   !   1. mean gradient per column      g(v) = (1/B) sum_b clip_b r_b(v) h_b
+   !   2. column energy (EMA)          z(v) <- b2 z(v) + (1-b2) ||g(v)||^2 / width
+   !   3. direction agreement          a(v) = g(v) . u(v)   (sign only)
+   !   4. velocity                    u(v) <- gamma u(v) + g(v),
+   !                                   gamma = b1, or b1 * restart when a(v) < 0
+   !   5. step                         theta(:,v) <- decay theta(:,v) - s(v) u(v)
+   !                                   s(v) = lr / (sqrt(z(v)) + eps)
+   !
+   ! Step 3 is the part that is not in Adam or RMSprop: when a column's new
+   ! gradient points against the velocity it is carrying, the velocity is
+   ! restarted instead of being trusted, which is the overshoot failure mode of
+   ! heavy momentum.  It costs one dot product per column (O(width) per column,
+   ! not per element).  Step 5 is a multiply and a fused multiply-add per element
+   ! and no transcendental at all, so the update is bound by 16 bytes of state
+   ! traffic per element instead of AdamW's 28.
+   integer(int32), parameter, public :: NPT_OPTIMIZER_NOVA = 3_int32
+
+   ! Velocity restart factor applied to a column whose gradient disagrees with
+   ! its carried velocity (see the NOVA-1 rule above).  It is an algorithm
+   ! constant, not a tunable: a checkpoint records which optimizer produced it,
+   ! and changing this constant would silently change what "nova" means.
+   real(real64), parameter :: NPT_NOVA_RESTART_DAMP = 0.5_real64
 
    ! Blocks of the softmax normalizer reduction.  Four is what the measurement
    ! threads use; the combine order is fixed, so the sum -- and therefore the
@@ -77,11 +109,17 @@ module neural_pretraining
    ! AdamW first/second moments, so a resumed stream is bit-identical to the
    ! one-pass stream.  Loading a v2 checkpoint restores the legacy SGD
    ! configuration with no moments, preserving its original update semantics.
+   ! v5 adds the NOVA-1 optimizer state (one velocity per element plus one
+   ! energy scalar per column) and, for any optimizer that carries state, the
+   ! optimizer identifier that produced it, so the reader never has to infer an
+   ! array layout.  v4 (AdamW moments in the parameter precision), v3 (the same
+   ! moments in real64) and v2 (SGD-only) still load.
    ! v4 adds the mini-batch accumulation factor to the serialized training
    ! configuration, so a resume can never silently regroup the updates of a
    ! run that was started with a different gradient_accumulation.  v2 and v3
    ! files still load (v3 binds accumulation = 1, the path it was written by).
-   integer(int32), parameter :: NEURAL_CHECKPOINT_VERSION = 4_int32
+   integer(int32), parameter :: NEURAL_CHECKPOINT_VERSION = 5_int32
+   integer(int32), parameter :: NEURAL_CHECKPOINT_VERSION_V4 = 4_int32
    integer(int32), parameter :: NEURAL_CHECKPOINT_VERSION_V3 = 3_int32
    integer(int32), parameter :: NEURAL_CHECKPOINT_VERSION_V2 = 2_int32
    integer(int32), parameter :: FILE_LINE_BYTES = 32768_int32
@@ -95,9 +133,13 @@ module neural_pretraining
       ! Per-value safety envelope for the mutable tied embedding matrix.
       real(real64) :: embedding_value_limit = 8.0_real64
       integer(int32) :: maximum_tokens_per_record = 8192_int32
-      ! Training-system v2 fields.  Defaults keep every pre-v2 named-arg
+      ! Training-system fields.  Defaults keep every pre-v2 named-arg
       ! construction valid; the CLI sets schedule/horizon explicitly.
-      integer(int32) :: optimizer = NPT_OPTIMIZER_ADAMW
+      ! NOVA-1 is the project default: it is the native optimizer of this
+      ! trainer (see the rule at the optimizer identifiers) and the one every
+      ! governed run uses.  AdamW and SGD remain selectable for comparison and
+      ! for reproducing older checkpoints.
+      integer(int32) :: optimizer = NPT_OPTIMIZER_NOVA
       real(real64) :: adam_beta1 = 0.9_real64
       real(real64) :: adam_beta2 = 0.999_real64
       real(real64) :: adam_epsilon = 1.0e-8_real64
@@ -148,6 +190,13 @@ module neural_pretraining
       real(real32), allocatable :: adam_v_embedding(:, :)
       real(real32), allocatable :: adam_m_bias(:)
       real(real32), allocatable :: adam_v_bias(:)
+      ! NOVA-1 state: one velocity per element (half of AdamW's two moments) plus
+      ! one energy scalar per column.  Stored in the parameter precision for the
+      ! same reason the AdamW moments are: the state is read and written once per
+      ! element per step, and the parameters it updates are real32.
+      real(real32), allocatable :: nova_u_embedding(:, :)
+      real(real32), allocatable :: nova_u_bias(:)
+      real(real32), allocatable :: nova_energy(:)
    end type neural_train_state_t
 
    type, public :: neural_train_metrics_t
@@ -179,7 +228,10 @@ module neural_pretraining
       integer(int64) :: decoder_state_bytes_real32 = 0_int64
       integer(int64) :: record_token_buffer_bytes = 0_int64
       integer(int64) :: per_step_working_bytes = 0_int64
-      ! real64 AdamW moments (zero for SGD): 2 x (width*vocabulary + vocab).
+      ! Optimizer state bytes (zero for SGD).  The name is historical: it holds
+      ! the byte count of whichever optimizer the configuration selects --
+      ! 8 bytes per element for AdamW's two moments, 4 for NOVA-1's single
+      ! velocity.
       integer(int64) :: optimizer_state_bytes_real64 = 0_int64
       integer(int64) :: minimum_resident_bytes = 0_int64
    end type neural_training_resource_plan_t
@@ -245,7 +297,8 @@ contains
                                      config%embedding_value_limit > 0.0_real64 .and. &
                                      config%maximum_tokens_per_record >= 2_int32 .and. &
                                      (config%optimizer == NPT_OPTIMIZER_SGD .or. &
-                                      config%optimizer == NPT_OPTIMIZER_ADAMW) .and. &
+                                      config%optimizer == NPT_OPTIMIZER_ADAMW .or. &
+                                      config%optimizer == NPT_OPTIMIZER_NOVA) .and. &
                                      ieee_is_finite(config%adam_beta1) .and. config%adam_beta1 >= 0.0_real64 .and. &
                                      config%adam_beta1 < 1.0_real64 .and. &
                                      ieee_is_finite(config%adam_beta2) .and. config%adam_beta2 >= 0.0_real64 .and. &
@@ -254,6 +307,7 @@ contains
                                      ieee_is_finite(config%weight_decay) .and. config%weight_decay >= 0.0_real64 .and. &
                                      config%learning_rate * config%weight_decay < 1.0_real64 .and. &
                                      (config%optimizer == NPT_OPTIMIZER_ADAMW .or. &
+                                      config%optimizer == NPT_OPTIMIZER_NOVA .or. &
                                       config%weight_decay == 0.0_real64) .and. &
                                      ieee_is_finite(config%label_smoothing) .and. &
                                      config%label_smoothing >= 0.0_real64 .and. config%label_smoothing < 0.5_real64 .and. &
@@ -360,6 +414,10 @@ contains
       if (train_config%optimizer == NPT_OPTIMIZER_ADAMW) then
          ! Two moment arrays per element, each in the parameter precision.
          plan%optimizer_state_bytes_real64 = 8_int64 * (width * vocabulary + vocabulary)
+      else if (train_config%optimizer == NPT_OPTIMIZER_NOVA) then
+         ! One velocity per element plus one energy scalar per column: half the
+         ! optimizer memory of AdamW, which is the point of the design.
+         plan%optimizer_state_bytes_real64 = 4_int64 * width * vocabulary + 8_int64 * vocabulary
       end if
       plan%minimum_resident_bytes = plan%decoder_parameter_bytes_real32 + plan%tokenizer_bytes + &
                                     plan%decoder_state_bytes_real32 + plan%record_token_buffer_bytes + &
@@ -429,6 +487,34 @@ contains
       integer :: allocation_status
 
       status = NPT_OK
+      if (config%optimizer == NPT_OPTIMIZER_NOVA) then
+         if (allocated(state%nova_u_embedding)) then
+            if (.not. allocated(state%nova_u_bias)) status = NPT_ERR_INCOMPATIBLE
+            if (.not. allocated(state%nova_energy)) status = NPT_ERR_INCOMPATIBLE
+            if (status == NPT_OK) then
+               if (size(state%nova_u_embedding, 1, kind=int32) /= model%config%width .or. &
+                   size(state%nova_u_embedding, 2, kind=int32) /= model%config%vocabulary_size .or. &
+                   size(state%nova_u_bias, kind=int32) /= model%config%vocabulary_size .or. &
+                   size(state%nova_energy, kind=int32) /= model%config%vocabulary_size) then
+                  status = NPT_ERR_INCOMPATIBLE
+               end if
+            end if
+            return
+         end if
+         allocate(state%nova_u_embedding(model%config%width, model%config%vocabulary_size), &
+                  state%nova_u_bias(model%config%vocabulary_size), &
+                  state%nova_energy(model%config%vocabulary_size), stat=allocation_status)
+         if (allocation_status /= 0) then
+            status = NPT_ERR_ALLOCATION
+            return
+         end if
+         state%nova_u_embedding = 0.0_real32
+         state%nova_u_bias = 0.0_real32
+         ! Energy starts at zero and is initialized from the first step's own
+         ! gradient (see the kernel), so no bias correction is needed.
+         state%nova_energy = 0.0_real32
+         return
+      end if
       if (config%optimizer /= NPT_OPTIMIZER_ADAMW) return
       if (allocated(state%adam_m_embedding)) then
          ! Sequential checks: Fortran does not guarantee short-circuit
@@ -586,6 +672,10 @@ contains
       real(real32) :: proposal32, m32, v32, gradient32, scaled_residual32
       real(real32) :: beta1_32, one_minus_beta1_32, beta2_32, one_minus_beta2_32, adam_epsilon_32
       real(real32) :: scaled_rate_32, inverse_step_scale_32, decay_factor_32, value_limit_32
+      ! NOVA-1 scalars: all loop invariant except the per-column step scale.
+      real(real32) :: momentum_32, energy_decay_32, one_minus_energy_32, restart_32
+      real(real32) :: step_rate_32, epsilon_32, width_32, energy, agreement, step_scale, gamma32, previous
+      logical :: first_step
 
       status = NPT_OK
       vocabulary_size = model%config%vocabulary_size
@@ -694,6 +784,80 @@ contains
             model%output_bias(token) = max(-value_limit_32, min(value_limit_32, proposal32))
          end do
          !$omp end parallel do
+      else if (config%optimizer == NPT_OPTIMIZER_NOVA) then
+         call ensure_optimizer_state(model, config, state, status)
+         if (status /= NPT_OK) return
+         if (.not. ieee_is_finite(rate) .or. rate <= 0.0_real64) then
+            status = NPT_ERR_NUMERICAL
+            return
+         end if
+         if (rate * config%weight_decay >= 1.0_real64) then
+            status = NPT_ERR_INVALID_ARGUMENT
+            return
+         end if
+         ! NOVA-1, per-token form (the rule is documented at the optimizer
+         ! identifiers).  Two passes over the width axis: the first measures the
+         ! gradient's energy and its agreement with the carried velocity, the
+         ! second applies the step.  The gradient is recomputed instead of being
+         ! stored, which costs one multiply and saves a per-thread vector.
+         decay_factor = 1.0_real64 - rate * config%weight_decay
+         value_limit = config%embedding_value_limit
+         momentum_32 = real(config%adam_beta1, real32)
+         energy_decay_32 = real(config%adam_beta2, real32)
+         one_minus_energy_32 = 1.0_real32 - energy_decay_32
+         restart_32 = real(NPT_NOVA_RESTART_DAMP, real32)
+         step_rate_32 = real(rate, real32)
+         epsilon_32 = real(config%adam_epsilon, real32)
+         decay_factor_32 = real(decay_factor, real32)
+         value_limit_32 = real(value_limit, real32)
+         width_32 = real(width, real32)
+         first_step = state%updates_completed == 0_int64
+         !$omp parallel do private(token, feature, residual, scaled_residual32, &
+         !$omp gradient32, proposal32, energy, agreement, step_scale, gamma32, previous) &
+         !$omp schedule(static) if(vocabulary_size >= 512_int32)
+         do token = 1_int32, vocabulary_size
+            residual = probabilities(token) - smooth_mass
+            if (token == target) residual = residual - (1.0_real64 - config%label_smoothing)
+            scaled_residual32 = real(residual * clip_scale, real32)
+            energy = 0.0_real32
+            agreement = 0.0_real32
+            !$omp simd reduction(+:energy, agreement)
+            do feature = 1_int32, width
+               gradient32 = scaled_residual32 * hidden(feature)
+               energy = energy + gradient32 * gradient32
+               agreement = agreement + gradient32 * state%nova_u_embedding(feature, token)
+            end do
+            energy = energy / width_32
+            if (first_step) then
+               ! Initialize from the step's own gradient: no bias correction,
+               ! because the first estimate is already unbiased.
+               state%nova_energy(token) = energy
+            else
+               state%nova_energy(token) = energy_decay_32 * state%nova_energy(token) + &
+                                          one_minus_energy_32 * energy
+            end if
+            ! One square root and one divide per column, not per element.
+            step_scale = step_rate_32 / (sqrt(state%nova_energy(token)) + epsilon_32)
+            gamma32 = momentum_32
+            if (agreement < 0.0_real32) gamma32 = momentum_32 * restart_32
+            !$omp simd private(previous, proposal32)
+            do feature = 1_int32, width
+               gradient32 = scaled_residual32 * hidden(feature)
+               previous = gamma32 * state%nova_u_embedding(feature, token) + gradient32
+               state%nova_u_embedding(feature, token) = previous
+               proposal32 = decay_factor_32 * model%token_embedding(feature, token) - step_scale * previous
+               model%token_embedding(feature, token) = max(-value_limit_32, min(value_limit_32, proposal32))
+            end do
+            ! The bias row reuses the column's scale: its gradient is the same
+            ! residual without the clip factor, so its energy would be a constant
+            ! multiple of the column energy.
+            gradient32 = real(residual, real32)
+            previous = gamma32 * state%nova_u_bias(token) + gradient32
+            state%nova_u_bias(token) = previous
+            proposal32 = model%output_bias(token) - step_scale * previous
+            model%output_bias(token) = max(-value_limit_32, min(value_limit_32, proposal32))
+         end do
+         !$omp end parallel do
       else
          ! Legacy SGD update, preserved with its original operation order for
          ! pre-v3 checkpoint reproducibility (scheduled rate only replaces
@@ -769,6 +933,11 @@ contains
       real(real32) :: proposal32, m32, v32, gradient32, inverse_batch_32
       real(real32) :: beta1_32, one_minus_beta1_32, beta2_32, one_minus_beta2_32, adam_epsilon_32
       real(real32) :: scaled_rate_32, inverse_step_scale_32, decay_factor_32, value_limit_32, scale_32
+      ! NOVA-1 scalars: loop invariant except the per-column step scale.
+      real(real32) :: momentum_32, energy_decay_32, one_minus_energy_32, restart_32
+      real(real32) :: step_rate_32, epsilon_32, width_32, energy, agreement, step_scale, gamma32, previous
+      real(real32) :: residual32
+      logical :: first_step
       ! One width-sized accumulator per vocabulary column, private per thread.
       real(real32) :: column_gradient(size(hidden_batch, 2)), column_bias_gradient
       ! Bounded by construction: the staging capacity is capped at
@@ -890,6 +1059,82 @@ contains
             state%adam_v_bias(token) = v32
             proposal32 = model%output_bias(token) - &
                          scaled_rate_32 * m32 / (sqrt(v32) * inverse_step_scale_32 + adam_epsilon_32)
+            model%output_bias(token) = max(-value_limit_32, min(value_limit_32, proposal32))
+         end do
+         !$omp end parallel do
+      else if (config%optimizer == NPT_OPTIMIZER_NOVA) then
+         call ensure_optimizer_state(model, config, state, status)
+         if (status /= NPT_OK) return
+         if (.not. ieee_is_finite(rate) .or. rate <= 0.0_real64) then
+            status = NPT_ERR_NUMERICAL
+            return
+         end if
+         if (rate * config%weight_decay >= 1.0_real64) then
+            status = NPT_ERR_INVALID_ARGUMENT
+            return
+         end if
+         ! NOVA-1 on a mini-batch (rule documented at the optimizer identifiers).
+         ! The batch reduction produces the mean gradient of each column; the
+         ! energy and the agreement are then measured in one pass over the width
+         ! axis, and the step is one multiply plus one fused multiply-add per
+         ! element with no transcendental in the element chain.
+         decay_factor = 1.0_real64 - rate * config%weight_decay
+         value_limit = config%embedding_value_limit
+         momentum_32 = real(config%adam_beta1, real32)
+         energy_decay_32 = real(config%adam_beta2, real32)
+         one_minus_energy_32 = 1.0_real32 - energy_decay_32
+         restart_32 = real(NPT_NOVA_RESTART_DAMP, real32)
+         step_rate_32 = real(rate, real32)
+         epsilon_32 = real(config%adam_epsilon, real32)
+         decay_factor_32 = real(decay_factor, real32)
+         value_limit_32 = real(value_limit, real32)
+         width_32 = real(width, real32)
+         first_step = state%updates_completed == 0_int64
+         !$omp parallel do private(token, feature, batch_index, residual32, gradient32, &
+         !$omp proposal32, column_gradient, column_bias_gradient, energy, agreement, &
+         !$omp step_scale, gamma32, previous) &
+         !$omp schedule(static) if(vocabulary_size >= 512_int32)
+         do token = 1_int32, vocabulary_size
+            column_gradient = 0.0_real32
+            column_bias_gradient = 0.0_real32
+            do batch_index = 1_int32, batch_count
+               residual32 = residuals(token, batch_index)
+               column_bias_gradient = column_bias_gradient + residual32
+               !$omp simd
+               do feature = 1_int32, width
+                  column_gradient(feature) = column_gradient(feature) + &
+                                             residual32 * clipped_hidden(batch_index, feature)
+               end do
+            end do
+            energy = 0.0_real32
+            agreement = 0.0_real32
+            !$omp simd reduction(+:energy, agreement)
+            do feature = 1_int32, width
+               column_gradient(feature) = column_gradient(feature) * inverse_batch_32
+               energy = energy + column_gradient(feature) * column_gradient(feature)
+               agreement = agreement + column_gradient(feature) * state%nova_u_embedding(feature, token)
+            end do
+            energy = energy / width_32
+            if (first_step) then
+               state%nova_energy(token) = energy
+            else
+               state%nova_energy(token) = energy_decay_32 * state%nova_energy(token) + &
+                                          one_minus_energy_32 * energy
+            end if
+            step_scale = step_rate_32 / (sqrt(state%nova_energy(token)) + epsilon_32)
+            gamma32 = momentum_32
+            if (agreement < 0.0_real32) gamma32 = momentum_32 * restart_32
+            !$omp simd private(previous, proposal32)
+            do feature = 1_int32, width
+               previous = gamma32 * state%nova_u_embedding(feature, token) + column_gradient(feature)
+               state%nova_u_embedding(feature, token) = previous
+               proposal32 = decay_factor_32 * model%token_embedding(feature, token) - step_scale * previous
+               model%token_embedding(feature, token) = max(-value_limit_32, min(value_limit_32, proposal32))
+            end do
+            gradient32 = column_bias_gradient * inverse_batch_32
+            previous = gamma32 * state%nova_u_bias(token) + gradient32
+            state%nova_u_bias(token) = previous
+            proposal32 = model%output_bias(token) - step_scale * previous
             model%output_bias(token) = max(-value_limit_32, min(value_limit_32, proposal32))
          end do
          !$omp end parallel do
@@ -1447,9 +1692,18 @@ contains
    pure logical function optimizer_state_is_present(state)
       type(neural_train_state_t), intent(in) :: state
 
-      optimizer_state_is_present = allocated(state%adam_m_embedding) .and. allocated(state%adam_v_embedding) .and. &
-                                   allocated(state%adam_m_bias) .and. allocated(state%adam_v_bias)
+      optimizer_state_is_present = (allocated(state%adam_m_embedding) .and. allocated(state%adam_v_embedding) .and. &
+                                    allocated(state%adam_m_bias) .and. allocated(state%adam_v_bias)) .or. &
+                                   (allocated(state%nova_u_embedding) .and. allocated(state%nova_u_bias) .and. &
+                                    allocated(state%nova_energy))
    end function optimizer_state_is_present
+
+   pure logical function nova_state_is_present(state)
+      type(neural_train_state_t), intent(in) :: state
+
+      nova_state_is_present = allocated(state%nova_u_embedding) .and. allocated(state%nova_u_bias) .and. &
+                              allocated(state%nova_energy)
+   end function nova_state_is_present
 
    pure logical function optimizer_state_is_finite(state)
       type(neural_train_state_t), intent(in) :: state
@@ -1465,6 +1719,13 @@ contains
       if (allocated(state%adam_v_bias)) optimizer_state_is_finite = &
          optimizer_state_is_finite .and. all(ieee_is_finite(state%adam_v_bias)) .and. &
          all(state%adam_v_bias >= 0.0_real32)
+      if (allocated(state%nova_u_embedding)) optimizer_state_is_finite = &
+         optimizer_state_is_finite .and. all(ieee_is_finite(state%nova_u_embedding))
+      if (allocated(state%nova_u_bias)) optimizer_state_is_finite = &
+         optimizer_state_is_finite .and. all(ieee_is_finite(state%nova_u_bias))
+      if (allocated(state%nova_energy)) optimizer_state_is_finite = &
+         optimizer_state_is_finite .and. all(ieee_is_finite(state%nova_energy)) .and. &
+         all(state%nova_energy >= 0.0_real32)
    end function optimizer_state_is_finite
 
    pure logical function optimizer_state_matches(state, model)
@@ -1481,6 +1742,16 @@ contains
                   size(state%adam_v_embedding, 2, kind=int32) /= model%config%vocabulary_size .or. &
                   size(state%adam_m_bias, kind=int32) /= model%config%vocabulary_size .or. &
                   size(state%adam_v_bias, kind=int32) /= model%config%vocabulary_size) then
+            optimizer_state_matches = .false.
+         end if
+      end if
+      if (allocated(state%nova_u_embedding)) then
+         if (.not. nova_state_is_present(state)) then
+            optimizer_state_matches = .false.
+         else if (size(state%nova_u_embedding, 1, kind=int32) /= model%config%width .or. &
+                  size(state%nova_u_embedding, 2, kind=int32) /= model%config%vocabulary_size .or. &
+                  size(state%nova_u_bias, kind=int32) /= model%config%vocabulary_size .or. &
+                  size(state%nova_energy, kind=int32) /= model%config%vocabulary_size) then
             optimizer_state_matches = .false.
          end if
       end if
@@ -1537,10 +1808,20 @@ contains
          end if
       end if
       if (io_status == 0 .and. optimizer_state_is_present(state)) then
-         write(unit, iostat=io_status) state%adam_m_embedding
-         if (io_status == 0) write(unit, iostat=io_status) state%adam_v_embedding
-         if (io_status == 0) write(unit, iostat=io_status) state%adam_m_bias
-         if (io_status == 0) write(unit, iostat=io_status) state%adam_v_bias
+         ! The state layout is recorded, not inferred from the configuration.
+         write(unit, iostat=io_status) config%optimizer
+         if (io_status == 0) then
+            if (config%optimizer == NPT_OPTIMIZER_NOVA) then
+               write(unit, iostat=io_status) state%nova_u_embedding
+               if (io_status == 0) write(unit, iostat=io_status) state%nova_u_bias
+               if (io_status == 0) write(unit, iostat=io_status) state%nova_energy
+            else
+               write(unit, iostat=io_status) state%adam_m_embedding
+               if (io_status == 0) write(unit, iostat=io_status) state%adam_v_embedding
+               if (io_status == 0) write(unit, iostat=io_status) state%adam_m_bias
+               if (io_status == 0) write(unit, iostat=io_status) state%adam_v_bias
+            end if
+         end if
       end if
       call write_model_payload(unit, model, io_status)
       write_status = io_status
@@ -1559,6 +1840,7 @@ contains
       integer :: unit, io_status, read_status
       integer :: allocation_status
       integer(int32) :: version, stored_bpe_tokens, stored_bpe_merges, stored_optimizer_flag
+      integer(int32) :: stored_state_optimizer
       type(neural_decoder_config_t) :: decoder_config
       ! Only used to read a v3 (real64 moment) checkpoint.
       real(real64), allocatable :: m_wide(:, :), v_wide(:, :), m_bias_wide(:), v_bias_wide(:)
@@ -1588,12 +1870,12 @@ contains
                                                        config%embedding_value_limit, config%maximum_tokens_per_record
       stored_optimizer_flag = 0_int32
       if (io_status == 0) then
-         if (version == NEURAL_CHECKPOINT_VERSION .or. version == NEURAL_CHECKPOINT_VERSION_V3) then
+         if (version >= NEURAL_CHECKPOINT_VERSION_V3) then
             read(unit, iostat=io_status) config%optimizer, config%adam_beta1, config%adam_beta2, &
                                          config%adam_epsilon, config%weight_decay, config%label_smoothing, &
                                          config%lr_schedule, config%warmup_updates, config%total_updates, &
                                          config%minimum_lr_ratio
-            if (io_status == 0 .and. version == NEURAL_CHECKPOINT_VERSION) then
+            if (io_status == 0 .and. version >= NEURAL_CHECKPOINT_VERSION_V4) then
                read(unit, iostat=io_status) config%gradient_accumulation
             else if (io_status == 0) then
                ! v3 files were written by the one-step-per-token path.
@@ -1612,8 +1894,7 @@ contains
       end if
       if (io_status == 0) read(unit, iostat=io_status) state%records_completed, state%source_records_completed, &
                                                        state%updates_completed, state%tokens_seen, state%cumulative_nll
-      if (io_status == 0 .and. (version == NEURAL_CHECKPOINT_VERSION .or. &
-                                 version == NEURAL_CHECKPOINT_VERSION_V3)) then
+      if (io_status == 0 .and. version >= NEURAL_CHECKPOINT_VERSION_V3) then
          read(unit, iostat=io_status) stored_optimizer_flag
       end if
       if (io_status /= 0) then
@@ -1625,10 +1906,9 @@ contains
       ! Normalize that field before validation so the restored configuration
       ! describes the update that will actually run: SGD applies no decoupled
       ! decay at all, and the trainer now rejects such a contradictory config.
-      if (config%optimizer /= NPT_OPTIMIZER_ADAMW) config%weight_decay = 0.0_real64
+      if (config%optimizer == NPT_OPTIMIZER_SGD) config%weight_decay = 0.0_real64
       if (magic /= NEURAL_CHECKPOINT_MAGIC .or. &
-          (version /= NEURAL_CHECKPOINT_VERSION .and. version /= NEURAL_CHECKPOINT_VERSION_V3 .and. &
-           version /= NEURAL_CHECKPOINT_VERSION_V2) .or. &
+          version < NEURAL_CHECKPOINT_VERSION_V2 .or. version > NEURAL_CHECKPOINT_VERSION .or. &
           stored_bpe_tokens /= bpe%token_count .or. stored_bpe_merges /= bpe%merge_count .or. &
           .not. neural_decoder_config_is_valid(decoder_config) .or. .not. neural_train_config_is_valid(config) .or. &
           (stored_optimizer_flag /= 0_int32 .and. stored_optimizer_flag /= 1_int32) .or. &
@@ -1647,31 +1927,32 @@ contains
          return
       end if
       if (stored_optimizer_flag == 1_int32) then
-         allocate(state%adam_m_embedding(decoder_config%width, decoder_config%vocabulary_size), &
-                  state%adam_v_embedding(decoder_config%width, decoder_config%vocabulary_size), &
-                  state%adam_m_bias(decoder_config%vocabulary_size), &
-                  state%adam_v_bias(decoder_config%vocabulary_size), stat=allocation_status)
-         if (allocation_status /= 0) then
-            close(unit)
-            call neural_decoder_destroy(model)
-            state = neural_train_state_t()
-            status = NPT_ERR_ALLOCATION
-            return
-         end if
-         if (version == NEURAL_CHECKPOINT_VERSION) then
-            ! v4 stores the moments in the parameter precision.
-            read(unit, iostat=io_status) state%adam_m_embedding
-            if (io_status == 0) read(unit, iostat=io_status) state%adam_v_embedding
-            if (io_status == 0) read(unit, iostat=io_status) state%adam_m_bias
-            if (io_status == 0) read(unit, iostat=io_status) state%adam_v_bias
+         if (version >= NEURAL_CHECKPOINT_VERSION) then
+            ! v5 states which optimizer produced the payload, so a checkpoint is
+            ! rejected rather than misread if the two ever disagree.
+            read(unit, iostat=io_status) stored_state_optimizer
+            if (io_status /= 0) then
+               close(unit)
+               call neural_decoder_destroy(model)
+               state = neural_train_state_t()
+               status = NPT_ERR_IO
+               return
+            end if
+            if (stored_state_optimizer /= config%optimizer) then
+               close(unit)
+               call neural_decoder_destroy(model)
+               state = neural_train_state_t()
+               status = NPT_ERR_FORMAT
+               return
+            end if
          else
-            ! v3 stored real64 moments; convert on load so an existing run stays
-            ! resumable.  The conversion is the only precision change and it is
-            ! monotone (real64 -> real32 rounds towards the nearest value).
-            allocate(m_wide(decoder_config%width, decoder_config%vocabulary_size), &
-                     v_wide(decoder_config%width, decoder_config%vocabulary_size), &
-                     m_bias_wide(decoder_config%vocabulary_size), &
-                     v_bias_wide(decoder_config%vocabulary_size), stat=allocation_status)
+            ! v3/v4 only ever stored AdamW moments.
+            stored_state_optimizer = config%optimizer
+         end if
+         if (stored_state_optimizer == NPT_OPTIMIZER_NOVA) then
+            allocate(state%nova_u_embedding(decoder_config%width, decoder_config%vocabulary_size), &
+                     state%nova_u_bias(decoder_config%vocabulary_size), &
+                     state%nova_energy(decoder_config%vocabulary_size), stat=allocation_status)
             if (allocation_status /= 0) then
                close(unit)
                call neural_decoder_destroy(model)
@@ -1679,17 +1960,54 @@ contains
                status = NPT_ERR_ALLOCATION
                return
             end if
-            read(unit, iostat=io_status) m_wide
-            if (io_status == 0) read(unit, iostat=io_status) v_wide
-            if (io_status == 0) read(unit, iostat=io_status) m_bias_wide
-            if (io_status == 0) read(unit, iostat=io_status) v_bias_wide
-            if (io_status == 0) then
-               state%adam_m_embedding = real(m_wide, real32)
-               state%adam_v_embedding = real(v_wide, real32)
-               state%adam_m_bias = real(m_bias_wide, real32)
-               state%adam_v_bias = real(v_bias_wide, real32)
+            read(unit, iostat=io_status) state%nova_u_embedding
+            if (io_status == 0) read(unit, iostat=io_status) state%nova_u_bias
+            if (io_status == 0) read(unit, iostat=io_status) state%nova_energy
+         else
+            allocate(state%adam_m_embedding(decoder_config%width, decoder_config%vocabulary_size), &
+                     state%adam_v_embedding(decoder_config%width, decoder_config%vocabulary_size), &
+                     state%adam_m_bias(decoder_config%vocabulary_size), &
+                     state%adam_v_bias(decoder_config%vocabulary_size), stat=allocation_status)
+            if (allocation_status /= 0) then
+               close(unit)
+               call neural_decoder_destroy(model)
+               state = neural_train_state_t()
+               status = NPT_ERR_ALLOCATION
+               return
             end if
-            deallocate(m_wide, v_wide, m_bias_wide, v_bias_wide)
+            if (version >= NEURAL_CHECKPOINT_VERSION_V4) then
+               ! v4+ stores the moments in the parameter precision.
+               read(unit, iostat=io_status) state%adam_m_embedding
+               if (io_status == 0) read(unit, iostat=io_status) state%adam_v_embedding
+               if (io_status == 0) read(unit, iostat=io_status) state%adam_m_bias
+               if (io_status == 0) read(unit, iostat=io_status) state%adam_v_bias
+            else
+               ! v3 stored real64 moments; convert on load so an existing run stays
+               ! resumable.  The conversion is the only precision change and it is
+               ! monotone (real64 -> real32 rounds towards the nearest value).
+               allocate(m_wide(decoder_config%width, decoder_config%vocabulary_size), &
+                        v_wide(decoder_config%width, decoder_config%vocabulary_size), &
+                        m_bias_wide(decoder_config%vocabulary_size), &
+                        v_bias_wide(decoder_config%vocabulary_size), stat=allocation_status)
+               if (allocation_status /= 0) then
+                  close(unit)
+                  call neural_decoder_destroy(model)
+                  state = neural_train_state_t()
+                  status = NPT_ERR_ALLOCATION
+                  return
+               end if
+               read(unit, iostat=io_status) m_wide
+               if (io_status == 0) read(unit, iostat=io_status) v_wide
+               if (io_status == 0) read(unit, iostat=io_status) m_bias_wide
+               if (io_status == 0) read(unit, iostat=io_status) v_bias_wide
+               if (io_status == 0) then
+                  state%adam_m_embedding = real(m_wide, real32)
+                  state%adam_v_embedding = real(v_wide, real32)
+                  state%adam_m_bias = real(m_bias_wide, real32)
+                  state%adam_v_bias = real(v_bias_wide, real32)
+               end if
+               deallocate(m_wide, v_wide, m_bias_wide, v_bias_wide)
+            end if
          end if
          if (io_status /= 0 .or. .not. optimizer_state_is_finite(state)) then
             close(unit)
@@ -1699,6 +2017,7 @@ contains
             return
          end if
       end if
+
       call read_model_payload(unit, model, io_status)
       read_status = io_status
       close(unit, iostat=io_status)

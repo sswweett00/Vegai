@@ -36,6 +36,7 @@ program test_all
    call test_utf8_record_stream()
    call test_neural_causal_design()
    call test_neural_continuation_checkpoint()
+   call test_nova_optimizer_contract()
    call test_adamw_optimizer_contract()
    call test_batched_optimizer_contract()
    call test_text_ingest()
@@ -882,8 +883,12 @@ contains
       decoder_config = neural_decoder_config_t(vocabulary_size=256_int32, width=16_int32, heads=2_int32, &
                                                local_window=4_int32, ffn_width=32_int32, memory_decay=0.91_real32, &
                                                rms_epsilon=2.0e-5_real32, rotary_period=4096_int32)
+      ! Pinned to AdamW on purpose: this test asserts the v4/v5 checkpoint carries
+      ! AdamW moments bit-identically, which is one of the two optimizer state
+      ! layouts the format has to support.  NOVA-1 has its own contract test.
       train_config = neural_train_config_t(learning_rate=0.025_real64, gradient_clip_norm=4.0_real64, &
-                                           embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32)
+                                           embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32, &
+                                           optimizer=NPT_OPTIMIZER_ADAMW)
       call neural_training_resource_plan(decoder_config, bpe, train_config, resource_plan, status)
       call assert_i32_equal(status, NPT_OK, 'neural continuous resource plan succeeds')
       call assert_true(resource_plan%minimum_resident_bytes > resource_plan%decoder_parameter_bytes_real32 .and. &
@@ -951,6 +956,166 @@ contains
    ! AdamW-only weight decay must never be silently ignored on the legacy SGD
    ! path, the moments must exist exactly when the optimizer is AdamW, and the
    ! optimizer identity plus moments must survive a checkpoint round trip.
+   ! NOVA-1 is the project default optimizer, so it needs the same contract the
+   ! AdamW path has: a real loss reduction, a resource plan that reflects its
+   ! single velocity array, a checkpoint that round-trips its state bit-exactly,
+   ! and chunk+resume identity.  The last one is the strongest: it fails if any
+   ! part of the optimizer state is not persisted.
+   subroutine test_nova_optimizer_contract()
+      type(bpe_model_t) :: bpe
+      type(neural_decoder_t) :: model, full_model, split_model, restored_model
+      type(neural_decoder_config_t) :: decoder_config
+      type(neural_train_config_t) :: config, full_config, restored_config
+      type(neural_train_state_t) :: state, full_state, split_state, restored_state
+      type(neural_train_metrics_t) :: before, after, update_metrics
+      type(neural_train_metrics_t) :: full_metrics, split_metrics, resumed_metrics
+      type(neural_training_resource_plan_t) :: nova_plan, adam_plan
+      integer(int32) :: status, index
+      integer :: unit, io_status
+      integer(int32), parameter :: token_count = 12_int32
+      integer(int32) :: tokens(token_count)
+      character(len=8) :: stored_magic
+      integer(int32) :: stored_version
+      real(real64) :: nova_bytes, adam_bytes
+      character(len=*), parameter :: corpus_path = 'test_neural_nova.txt'
+      character(len=*), parameter :: checkpoint_path = 'test_neural_nova.vgnr'
+
+      config = neural_train_config_t(learning_rate=0.02_real64, gradient_clip_norm=4.0_real64, &
+                                     embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32, &
+                                     optimizer=NPT_OPTIMIZER_NOVA, weight_decay=0.01_real64, &
+                                     gradient_accumulation=4_int32)
+      call assert_true(neural_train_config_is_valid(config), &
+                       'NOVA configuration with decoupled decay is accepted')
+      config%learning_rate = 0.0_real64
+      call assert_true(.not. neural_train_config_is_valid(config), 'NOVA rejects a zero learning rate')
+      config%learning_rate = 0.02_real64
+
+      do index = 1_int32, token_count
+         tokens(index) = modulo(index - 1_int32, 4_int32) + 1_int32
+      end do
+      call bpe_init(bpe, 1_int32, status)
+      call assert_i32_equal(status, BPE_OK, 'NOVA byte tokenizer initializes')
+      decoder_config = neural_decoder_config_t(vocabulary_size=256_int32, width=16_int32, heads=2_int32, &
+                                               local_window=4_int32, ffn_width=32_int32)
+      call neural_decoder_init(model, decoder_config, 515151_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'NOVA contract model initializes')
+
+      ! One velocity per element plus one energy scalar per column: half the
+      ! optimizer bytes AdamW needs for the same shape.
+      call neural_training_resource_plan(decoder_config, bpe, config, nova_plan, status)
+      call assert_i32_equal(status, NPT_OK, 'NOVA resource plan succeeds')
+      config%optimizer = NPT_OPTIMIZER_ADAMW
+      call neural_training_resource_plan(decoder_config, bpe, config, adam_plan, status)
+      call assert_i32_equal(status, NPT_OK, 'AdamW resource plan succeeds for comparison')
+      config%optimizer = NPT_OPTIMIZER_NOVA
+      nova_bytes = real(nova_plan%optimizer_state_bytes_real64, real64)
+      adam_bytes = real(adam_plan%optimizer_state_bytes_real64, real64)
+      call assert_true(nova_bytes > 0.0_real64 .and. nova_bytes < 0.75_real64 * adam_bytes, &
+                       'NOVA state is materially smaller than the two-moment AdamW state')
+
+      call neural_train_state_init(state)
+      call neural_train_metrics_reset(before)
+      call neural_evaluate_token_sequence(model, tokens, token_count, config, before, status)
+      call assert_i32_equal(status, NPT_OK, 'NOVA baseline evaluation succeeds')
+      do index = 1_int32, 30_int32
+         call neural_train_metrics_reset(update_metrics)
+         call neural_train_token_sequence(model, tokens, token_count, config, state, update_metrics, status)
+         call assert_i32_equal(status, NPT_OK, 'NOVA update succeeds')
+      end do
+      ! 11 predictions per record, batch of 4 => ceil(11/4) = 3 steps per record.
+      call assert_true(state%updates_completed == 30_int64 * 3_int64, &
+                       'NOVA counts one optimizer step per full or trailing batch')
+      call assert_true(allocated(state%nova_u_embedding) .and. allocated(state%nova_u_bias) .and. &
+                       allocated(state%nova_energy), 'NOVA materializes its own state')
+      call assert_true(.not. allocated(state%adam_m_embedding), &
+                       'NOVA does not allocate the AdamW moments it replaces')
+      call neural_train_metrics_reset(after)
+      call neural_evaluate_token_sequence(model, tokens, token_count, config, after, status)
+      call assert_i32_equal(status, NPT_OK, 'NOVA post-update evaluation succeeds')
+      call assert_true(after%mean_nll < before%mean_nll, 'NOVA steps reduce deterministic toy NLL')
+
+      ! Checkpoint round trip, including the file's declared format version.
+      call neural_checkpoint_save(checkpoint_path, model, bpe, config, state, status)
+      call assert_i32_equal(status, NPT_OK, 'NOVA checkpoint saves')
+      open(newunit=unit, file=checkpoint_path, status='old', action='read', access='stream', &
+           form='unformatted', iostat=io_status)
+      call assert_true(io_status == 0, 'NOVA checkpoint reopens for a header probe')
+      if (io_status == 0) then
+         read(unit, iostat=io_status) stored_magic
+         read(unit, iostat=io_status) stored_version
+         close(unit)
+      end if
+      call assert_true(stored_magic == 'VGNR0001' .and. stored_version == 5_int32, &
+                       'NOVA checkpoint declares checkpoint format v5')
+      call neural_checkpoint_load(checkpoint_path, bpe, restored_model, restored_config, restored_state, status)
+      call assert_i32_equal(status, NPT_OK, 'NOVA checkpoint loads')
+      call assert_true(restored_config%optimizer == NPT_OPTIMIZER_NOVA, &
+                       'checkpoint preserves the NOVA optimizer identity')
+      call assert_true(all(restored_state%nova_u_embedding == state%nova_u_embedding) .and. &
+                       all(restored_state%nova_u_bias == state%nova_u_bias) .and. &
+                       all(restored_state%nova_energy == state%nova_energy), &
+                       'checkpoint restores bit-identical NOVA state')
+      call neural_decoder_destroy(restored_model)
+
+      ! Chunk + checkpoint + resume must reproduce the one-pass parameters and the
+      ! NOVA state bit-identically, exactly like the AdamW contract does.
+      open(newunit=unit, file=corpus_path, status='replace', action='write', iostat=io_status)
+      call assert_true(io_status == 0, 'temporary NOVA corpus opens')
+      if (io_status == 0) then
+         write(unit, '(A)') 'abababab'
+         write(unit, '(A)') 'babababa'
+         write(unit, '(A)') 'abababab'
+         write(unit, '(A)') 'babababa'
+         close(unit)
+      end if
+      full_config = neural_train_config_t(learning_rate=0.02_real64, gradient_clip_norm=4.0_real64, &
+                                          embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32, &
+                                          optimizer=NPT_OPTIMIZER_NOVA, weight_decay=0.01_real64, &
+                                          gradient_accumulation=3_int32)
+      call neural_decoder_init(full_model, decoder_config, 848484_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'NOVA one-pass model initializes')
+      call neural_decoder_init(split_model, decoder_config, 848484_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'NOVA chunked model initializes')
+      call neural_train_state_init(full_state)
+      call neural_train_state_init(split_state)
+      call neural_train_metrics_reset(full_metrics)
+      call neural_train_utf8_file(full_model, bpe, corpus_path, full_config, full_state, full_metrics, status)
+      call assert_i32_equal(status, NPT_OK, 'NOVA one-pass training succeeds')
+      call neural_train_metrics_reset(split_metrics)
+      call neural_train_utf8_file(split_model, bpe, corpus_path, full_config, split_state, split_metrics, status, &
+                                  maximum_new_source_records=2_int64)
+      call assert_i32_equal(status, NPT_OK, 'first NOVA chunk succeeds')
+      call neural_checkpoint_save(checkpoint_path, split_model, bpe, full_config, split_state, status)
+      call assert_i32_equal(status, NPT_OK, 'NOVA chunk checkpoint saves')
+      call neural_checkpoint_load(checkpoint_path, bpe, restored_model, restored_config, restored_state, status)
+      call assert_i32_equal(status, NPT_OK, 'NOVA chunk checkpoint loads')
+      call neural_train_metrics_reset(resumed_metrics)
+      call neural_train_utf8_file(restored_model, bpe, corpus_path, restored_config, restored_state, resumed_metrics, &
+                                  status, skip_source_records=restored_state%source_records_completed, &
+                                  maximum_new_source_records=2_int64)
+      call assert_i32_equal(status, NPT_OK, 'resumed NOVA chunk succeeds')
+      call assert_true(restored_state%updates_completed == full_state%updates_completed, &
+                       'NOVA resume restores the optimizer-step cursor')
+      call assert_true(all(full_model%token_embedding == restored_model%token_embedding) .and. &
+                       all(full_model%output_bias == restored_model%output_bias), &
+                       'NOVA chunk+resume reproduces the one-pass parameters bit-identically')
+      call assert_true(all(full_state%nova_u_embedding == restored_state%nova_u_embedding) .and. &
+                       all(full_state%nova_u_bias == restored_state%nova_u_bias) .and. &
+                       all(full_state%nova_energy == restored_state%nova_energy), &
+                       'NOVA chunk+resume reproduces the one-pass optimizer state bit-identically')
+
+      open(newunit=unit, file=corpus_path, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+      open(newunit=unit, file=checkpoint_path, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+
+      call neural_decoder_destroy(model)
+      call neural_decoder_destroy(full_model)
+      call neural_decoder_destroy(split_model)
+      call neural_decoder_destroy(restored_model)
+      call bpe_destroy(bpe)
+   end subroutine test_nova_optimizer_contract
+
    subroutine test_adamw_optimizer_contract()
       type(bpe_model_t) :: bpe
       type(neural_decoder_t) :: model, restored_model
