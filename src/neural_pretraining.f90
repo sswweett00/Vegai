@@ -132,10 +132,17 @@ module neural_pretraining
       ! resumed run applies bit-identical updates to a one-pass run.  The
       ! Adam step index is derived from updates_completed, never stored
       ! separately, which makes counter/moment divergence impossible.
-      real(real64), allocatable :: adam_m_embedding(:, :)
-      real(real64), allocatable :: adam_v_embedding(:, :)
-      real(real64), allocatable :: adam_m_bias(:)
-      real(real64), allocatable :: adam_v_bias(:)
+      ! AdamW first/second moments live in the parameter precision (real32).
+      ! The element update is sqrt + divide bound, and real32 lets the compiler
+      ! use 8-wide vector sqrt/divide instead of 4-wide: that is what makes the
+      ! per-token update loop fast, since its cost is arithmetic, not memory.
+      ! Storing moments at the same precision as the parameters they update is
+      ! also the mainstream configuration (PyTorch keeps exp_avg/exp_avg_sq in
+      ! the parameter dtype); the gradient itself is still accumulated real64.
+      real(real32), allocatable :: adam_m_embedding(:, :)
+      real(real32), allocatable :: adam_v_embedding(:, :)
+      real(real32), allocatable :: adam_m_bias(:)
+      real(real32), allocatable :: adam_v_bias(:)
    end type neural_train_state_t
 
    type, public :: neural_train_metrics_t
@@ -330,7 +337,8 @@ contains
       end if
       plan%optimizer_state_bytes_real64 = 0_int64
       if (train_config%optimizer == NPT_OPTIMIZER_ADAMW) then
-         plan%optimizer_state_bytes_real64 = 16_int64 * (width * vocabulary + vocabulary)
+         ! Two moment arrays per element, each in the parameter precision.
+         plan%optimizer_state_bytes_real64 = 8_int64 * (width * vocabulary + vocabulary)
       end if
       plan%minimum_resident_bytes = plan%decoder_parameter_bytes_real32 + plan%tokenizer_bytes + &
                                     plan%decoder_state_bytes_real32 + plan%record_token_buffer_bytes + &
@@ -408,10 +416,10 @@ contains
          status = NPT_ERR_ALLOCATION
          return
       end if
-      state%adam_m_embedding = 0.0_real64
-      state%adam_v_embedding = 0.0_real64
-      state%adam_m_bias = 0.0_real64
-      state%adam_v_bias = 0.0_real64
+      state%adam_m_embedding = 0.0_real32
+      state%adam_v_embedding = 0.0_real32
+      state%adam_m_bias = 0.0_real32
+      state%adam_v_bias = 0.0_real32
    end subroutine ensure_optimizer_state
 
    subroutine workspace_ensure(workspace, model, batch_capacity, status)
@@ -513,10 +521,13 @@ contains
       integer(int64) :: update_index
       real(real64) :: clip_scale, residual, proposal, scale, rate
       logical :: norm_is_finite
-      real(real64) :: smooth_mass, gradient, beta1_pow, beta2_pow, adam_step_scale
+      real(real64) :: smooth_mass, beta1_pow, beta2_pow, adam_step_scale
       real(real64) :: m_hat_factor, decay_factor
       real(real64) :: beta1, beta2, one_minus_beta1, one_minus_beta2, adam_epsilon, value_limit
-      real(real64) :: scaled_rate, inverse_step_scale, scaled_residual, m_value, v_value
+      real(real64) :: scaled_rate, inverse_step_scale, scaled_residual
+      real(real32) :: proposal32, m32, v32, gradient32, scaled_residual32
+      real(real32) :: beta1_32, one_minus_beta1_32, beta2_32, one_minus_beta2_32, adam_epsilon_32
+      real(real32) :: scaled_rate_32, inverse_step_scale_32, decay_factor_32, value_limit_32
 
       status = NPT_OK
       vocabulary_size = model%config%vocabulary_size
@@ -580,33 +591,49 @@ contains
          value_limit = config%embedding_value_limit
          scaled_rate = rate / m_hat_factor
          inverse_step_scale = 1.0_real64 / adam_step_scale
+         ! The per-element chain runs in the parameter precision (real32).  Its
+         ! cost is one sqrt and one divide per element over vocabulary x width
+         ! elements, i.e. pure arithmetic, and 8-wide real32 vector sqrt/divide
+         ! is roughly twice as fast as the 4-wide real64 form.  The scalars are
+         ! converted once instead of per element.
+         beta1_32 = real(beta1, real32)
+         one_minus_beta1_32 = real(one_minus_beta1, real32)
+         beta2_32 = real(beta2, real32)
+         one_minus_beta2_32 = real(one_minus_beta2, real32)
+         adam_epsilon_32 = real(adam_epsilon, real32)
+         value_limit_32 = real(value_limit, real32)
+         scaled_rate_32 = real(scaled_rate, real32)
+         inverse_step_scale_32 = real(inverse_step_scale, real32)
+         decay_factor_32 = real(decay_factor, real32)
          ! Columns (and their moment columns) are disjoint, so the OpenMP
          ! loop below needs no reduction and preserves online token order.
-         !$omp parallel do private(residual, proposal, gradient, scaled_residual, m_value, v_value, feature) &
+         !$omp parallel do private(residual, proposal, scaled_residual, feature, &
+         !$omp proposal32, m32, v32, gradient32, scaled_residual32) &
          !$omp schedule(static) if(vocabulary_size >= 512_int32)
          do token = 1_int32, vocabulary_size
             residual = probabilities(token) - smooth_mass
             if (token == target) residual = residual - (1.0_real64 - config%label_smoothing)
             scaled_residual = residual * clip_scale
+            scaled_residual32 = real(scaled_residual, real32)
+            !$omp simd private(proposal32)
             do feature = 1_int32, width
-               gradient = scaled_residual * real(hidden(feature), real64)
-               m_value = beta1 * state%adam_m_embedding(feature, token) + one_minus_beta1 * gradient
-               v_value = beta2 * state%adam_v_embedding(feature, token) + one_minus_beta2 * gradient * gradient
-               state%adam_m_embedding(feature, token) = m_value
-               state%adam_v_embedding(feature, token) = v_value
-               proposal = decay_factor * real(model%token_embedding(feature, token), real64) - &
-                          scaled_rate * m_value / (sqrt(v_value) * inverse_step_scale + adam_epsilon)
-               proposal = max(-value_limit, min(value_limit, proposal))
-               model%token_embedding(feature, token) = real(proposal, real32)
+               gradient32 = scaled_residual32 * hidden(feature)
+               m32 = beta1_32 * state%adam_m_embedding(feature, token) + one_minus_beta1_32 * gradient32
+               v32 = beta2_32 * state%adam_v_embedding(feature, token) + one_minus_beta2_32 * gradient32 * gradient32
+               state%adam_m_embedding(feature, token) = m32
+               state%adam_v_embedding(feature, token) = v32
+               proposal32 = decay_factor_32 * model%token_embedding(feature, token) - &
+                            scaled_rate_32 * m32 / (sqrt(v32) * inverse_step_scale_32 + adam_epsilon_32)
+               model%token_embedding(feature, token) = max(-value_limit_32, min(value_limit_32, proposal32))
             end do
-            m_value = beta1 * state%adam_m_bias(token) + one_minus_beta1 * residual
-            v_value = beta2 * state%adam_v_bias(token) + one_minus_beta2 * residual * residual
-            state%adam_m_bias(token) = m_value
-            state%adam_v_bias(token) = v_value
-            proposal = real(model%output_bias(token), real64) - &
-                       scaled_rate * m_value / (sqrt(v_value) * inverse_step_scale + adam_epsilon)
-            proposal = max(-value_limit, min(value_limit, proposal))
-            model%output_bias(token) = real(proposal, real32)
+            m32 = beta1_32 * state%adam_m_bias(token) + one_minus_beta1_32 * real(residual, real32)
+            v32 = beta2_32 * state%adam_v_bias(token) + &
+                  one_minus_beta2_32 * real(residual, real32) * real(residual, real32)
+            state%adam_m_bias(token) = m32
+            state%adam_v_bias(token) = v32
+            proposal32 = model%output_bias(token) - &
+                         scaled_rate_32 * m32 / (sqrt(v32) * inverse_step_scale_32 + adam_epsilon_32)
+            model%output_bias(token) = max(-value_limit_32, min(value_limit_32, proposal32))
          end do
          !$omp end parallel do
       else
@@ -674,7 +701,10 @@ contains
       real(real64) :: rate, inverse_batch, gradient, proposal, scale, value_limit
       real(real64) :: beta1, beta2, one_minus_beta1, one_minus_beta2, adam_epsilon
       real(real64) :: beta1_pow, beta2_pow, m_hat_factor, adam_step_scale, decay_factor
-      real(real64) :: scaled_rate, inverse_step_scale, m_value, v_value
+      real(real64) :: scaled_rate, inverse_step_scale
+      real(real32) :: proposal32, m32, v32, gradient32, inverse_batch_32
+      real(real32) :: beta1_32, one_minus_beta1_32, beta2_32, one_minus_beta2_32, adam_epsilon_32
+      real(real32) :: scaled_rate_32, inverse_step_scale_32, decay_factor_32, value_limit_32
       ! Bounded by construction: the staging capacity is capped at
       ! NPT_MAX_GRADIENT_ACCUMULATION, so this block is O(width*512) reals.
       real(real64) :: clipped_hidden(size(hidden_batch, 1), size(hidden_batch, 2))
@@ -732,38 +762,52 @@ contains
          adam_epsilon = config%adam_epsilon
          scaled_rate = rate / m_hat_factor
          inverse_step_scale = 1.0_real64 / adam_step_scale
-         !$omp parallel do private(token, feature, batch_index, gradient, m_value, v_value, proposal) &
+         ! Same real32 element chain as the per-token path: the batch only
+         ! amortizes memory traffic, the sqrt/divide arithmetic per element is
+         ! unchanged, so the element precision is what decides the cost.
+         beta1_32 = real(beta1, real32)
+         one_minus_beta1_32 = real(one_minus_beta1, real32)
+         beta2_32 = real(beta2, real32)
+         one_minus_beta2_32 = real(one_minus_beta2, real32)
+         adam_epsilon_32 = real(adam_epsilon, real32)
+         value_limit_32 = real(value_limit, real32)
+         scaled_rate_32 = real(scaled_rate, real32)
+         inverse_step_scale_32 = real(inverse_step_scale, real32)
+         decay_factor_32 = real(decay_factor, real32)
+         inverse_batch_32 = real(inverse_batch, real32)
+         !$omp parallel do private(token, feature, batch_index, gradient, gradient32, m32, v32, proposal32) &
          !$omp schedule(static) if(vocabulary_size >= 512_int32)
          do token = 1_int32, vocabulary_size
             do feature = 1_int32, width
+               ! The batch sum stays real64 so a long batch cannot lose low-order
+               ! bits of the average; only the per-element optimizer chain is
+               ! real32.
                gradient = 0.0_real64
                do batch_index = 1_int32, batch_count
                   gradient = gradient + real(residuals(token, batch_index), real64) * &
                              clipped_hidden(feature, batch_index)
                end do
-               gradient = gradient * inverse_batch
-               m_value = beta1 * state%adam_m_embedding(feature, token) + one_minus_beta1 * gradient
-               v_value = beta2 * state%adam_v_embedding(feature, token) + one_minus_beta2 * gradient * gradient
-               state%adam_m_embedding(feature, token) = m_value
-               state%adam_v_embedding(feature, token) = v_value
-               proposal = decay_factor * real(model%token_embedding(feature, token), real64) - &
-                          scaled_rate * m_value / (sqrt(v_value) * inverse_step_scale + adam_epsilon)
-               proposal = max(-value_limit, min(value_limit, proposal))
-               model%token_embedding(feature, token) = real(proposal, real32)
+               gradient32 = real(gradient, real32) * inverse_batch_32
+               m32 = beta1_32 * state%adam_m_embedding(feature, token) + one_minus_beta1_32 * gradient32
+               v32 = beta2_32 * state%adam_v_embedding(feature, token) + one_minus_beta2_32 * gradient32 * gradient32
+               state%adam_m_embedding(feature, token) = m32
+               state%adam_v_embedding(feature, token) = v32
+               proposal32 = decay_factor_32 * model%token_embedding(feature, token) - &
+                            scaled_rate_32 * m32 / (sqrt(v32) * inverse_step_scale_32 + adam_epsilon_32)
+               model%token_embedding(feature, token) = max(-value_limit_32, min(value_limit_32, proposal32))
             end do
             gradient = 0.0_real64
             do batch_index = 1_int32, batch_count
                gradient = gradient + real(residuals(token, batch_index), real64)
             end do
-            gradient = gradient * inverse_batch
-            m_value = beta1 * state%adam_m_bias(token) + one_minus_beta1 * gradient
-            v_value = beta2 * state%adam_v_bias(token) + one_minus_beta2 * gradient * gradient
-            state%adam_m_bias(token) = m_value
-            state%adam_v_bias(token) = v_value
-            proposal = real(model%output_bias(token), real64) - &
-                       scaled_rate * m_value / (sqrt(v_value) * inverse_step_scale + adam_epsilon)
-            proposal = max(-value_limit, min(value_limit, proposal))
-            model%output_bias(token) = real(proposal, real32)
+            gradient32 = real(gradient, real32) * inverse_batch_32
+            m32 = beta1_32 * state%adam_m_bias(token) + one_minus_beta1_32 * gradient32
+            v32 = beta2_32 * state%adam_v_bias(token) + one_minus_beta2_32 * gradient32 * gradient32
+            state%adam_m_bias(token) = m32
+            state%adam_v_bias(token) = v32
+            proposal32 = model%output_bias(token) - &
+                         scaled_rate_32 * m32 / (sqrt(v32) * inverse_step_scale_32 + adam_epsilon_32)
+            model%output_bias(token) = max(-value_limit_32, min(value_limit_32, proposal32))
          end do
          !$omp end parallel do
       else
@@ -1233,12 +1277,12 @@ contains
          optimizer_state_is_finite .and. all(ieee_is_finite(state%adam_m_embedding))
       if (allocated(state%adam_v_embedding)) optimizer_state_is_finite = &
          optimizer_state_is_finite .and. all(ieee_is_finite(state%adam_v_embedding)) .and. &
-         all(state%adam_v_embedding >= 0.0_real64)
+         all(state%adam_v_embedding >= 0.0_real32)
       if (allocated(state%adam_m_bias)) optimizer_state_is_finite = &
          optimizer_state_is_finite .and. all(ieee_is_finite(state%adam_m_bias))
       if (allocated(state%adam_v_bias)) optimizer_state_is_finite = &
          optimizer_state_is_finite .and. all(ieee_is_finite(state%adam_v_bias)) .and. &
-         all(state%adam_v_bias >= 0.0_real64)
+         all(state%adam_v_bias >= 0.0_real32)
    end function optimizer_state_is_finite
 
    pure logical function optimizer_state_matches(state, model)
@@ -1334,6 +1378,8 @@ contains
       integer :: allocation_status
       integer(int32) :: version, stored_bpe_tokens, stored_bpe_merges, stored_optimizer_flag
       type(neural_decoder_config_t) :: decoder_config
+      ! Only used to read a v3 (real64 moment) checkpoint.
+      real(real64), allocatable :: m_wide(:, :), v_wide(:, :), m_bias_wide(:), v_bias_wide(:)
 
       call neural_decoder_destroy(model)
       config = neural_train_config_t()
@@ -1430,10 +1476,39 @@ contains
             status = NPT_ERR_ALLOCATION
             return
          end if
-         read(unit, iostat=io_status) state%adam_m_embedding
-         if (io_status == 0) read(unit, iostat=io_status) state%adam_v_embedding
-         if (io_status == 0) read(unit, iostat=io_status) state%adam_m_bias
-         if (io_status == 0) read(unit, iostat=io_status) state%adam_v_bias
+         if (version == NEURAL_CHECKPOINT_VERSION) then
+            ! v4 stores the moments in the parameter precision.
+            read(unit, iostat=io_status) state%adam_m_embedding
+            if (io_status == 0) read(unit, iostat=io_status) state%adam_v_embedding
+            if (io_status == 0) read(unit, iostat=io_status) state%adam_m_bias
+            if (io_status == 0) read(unit, iostat=io_status) state%adam_v_bias
+         else
+            ! v3 stored real64 moments; convert on load so an existing run stays
+            ! resumable.  The conversion is the only precision change and it is
+            ! monotone (real64 -> real32 rounds towards the nearest value).
+            allocate(m_wide(decoder_config%width, decoder_config%vocabulary_size), &
+                     v_wide(decoder_config%width, decoder_config%vocabulary_size), &
+                     m_bias_wide(decoder_config%vocabulary_size), &
+                     v_bias_wide(decoder_config%vocabulary_size), stat=allocation_status)
+            if (allocation_status /= 0) then
+               close(unit)
+               call neural_decoder_destroy(model)
+               state = neural_train_state_t()
+               status = NPT_ERR_ALLOCATION
+               return
+            end if
+            read(unit, iostat=io_status) m_wide
+            if (io_status == 0) read(unit, iostat=io_status) v_wide
+            if (io_status == 0) read(unit, iostat=io_status) m_bias_wide
+            if (io_status == 0) read(unit, iostat=io_status) v_bias_wide
+            if (io_status == 0) then
+               state%adam_m_embedding = real(m_wide, real32)
+               state%adam_v_embedding = real(v_wide, real32)
+               state%adam_m_bias = real(m_bias_wide, real32)
+               state%adam_v_bias = real(v_bias_wide, real32)
+            end if
+            deallocate(m_wide, v_wide, m_bias_wide, v_bias_wide)
+         end if
          if (io_status /= 0 .or. .not. optimizer_state_is_finite(state)) then
             close(unit)
             call neural_decoder_destroy(model)
