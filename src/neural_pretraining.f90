@@ -1106,15 +1106,13 @@ contains
                                              residual32 * clipped_hidden(batch_index, feature)
                end do
             end do
-            !$omp simd
-            do feature = 1_int32, width
-               column_gradient(feature) = column_gradient(feature) * inverse_batch_32
-            end do
-            ! DOT_PRODUCT, not a hand-written reduction: on contiguous slices the
-            ! intrinsic vectorizes with several accumulators, while the two-reduction
-            ! scalar loop it replaces stayed serial and cost more than the whole
-            ! optimizer chain (measured on the first NOVA run).
-            energy = dot_product(column_gradient, column_gradient) / width_32
+            ! Both quantities are measured on the un-normalized column: the energy
+            ! of the batch mean is the raw energy over B^2, and only the SIGN of the
+            ! agreement is used, which division by a positive B cannot change.  That
+            ! keeps the whole step to two sweeps of the column (this one and the
+            ! update) instead of three; normalizing in place first measured slower.
+            energy = dot_product(column_gradient, column_gradient) * &
+                     (inverse_batch_32 * inverse_batch_32) / width_32
             agreement = dot_product(column_gradient, state%nova_u_embedding(:, token))
             if (first_step) then
                state%nova_energy(token) = energy
@@ -1125,9 +1123,10 @@ contains
             step_scale = step_rate_32 / (sqrt(state%nova_energy(token)) + epsilon_32)
             gamma32 = momentum_32
             if (agreement < 0.0_real32) gamma32 = momentum_32 * restart_32
-            !$omp simd private(previous, proposal32)
+            !$omp simd private(previous, proposal32, gradient32)
             do feature = 1_int32, width
-               previous = gamma32 * state%nova_u_embedding(feature, token) + column_gradient(feature)
+               gradient32 = column_gradient(feature) * inverse_batch_32
+               previous = gamma32 * state%nova_u_embedding(feature, token) + gradient32
                state%nova_u_embedding(feature, token) = previous
                proposal32 = decay_factor_32 * model%token_embedding(feature, token) - step_scale * previous
                model%token_embedding(feature, token) = max(-value_limit_32, min(value_limit_32, proposal32))
