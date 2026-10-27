@@ -371,8 +371,8 @@ contains
       real(real64), contiguous, intent(out) :: probabilities(:)
       integer(int32), intent(out) :: status
       real(real64) :: maximum, normalizer
-      real(real64) :: partial_sums(NPT_SOFTMAX_BLOCKS), block_total
-      integer(int32) :: index, block, first, last, block_size
+      real(real64) :: partial_sums(NPT_SOFTMAX_BLOCKS)
+      integer(int32) :: index, block, block_size
 
       status = NPT_OK
       if (size(logits, kind=int32) <= 0_int32 .or. size(probabilities, kind=int32) /= size(logits, kind=int32) .or. &
@@ -397,15 +397,14 @@ contains
       ! vocabulary (4096 real64 adds, ~2 us of the scoring phase).
       !$omp parallel do schedule(static) if(size(logits) >= 1024)
       do block = 0_int32, NPT_SOFTMAX_BLOCKS - 1_int32
-         first = block * block_size + 1_int32
-         last = min(size(logits, kind=int32), first + block_size - 1_int32)
-         block_total = 0.0_real64
-         if (first <= last) then
-            do index = first, last
-               block_total = block_total + probabilities(index)
-            end do
-         end if
-         partial_sums(block + 1_int32) = block_total
+         ! The accumulator is the block's own array element, not a scalar
+         ! temporary: a scalar written inside a parallel do would be shared by
+         ! default and race between the threads.
+         partial_sums(block + 1_int32) = 0.0_real64
+         do index = block * block_size + 1_int32, &
+                   min(size(logits, kind=int32), block * block_size + block_size)
+            partial_sums(block + 1_int32) = partial_sums(block + 1_int32) + probabilities(index)
+         end do
       end do
       !$omp end parallel do
       normalizer = ((partial_sums(1) + partial_sums(2)) + (partial_sums(3) + partial_sums(4)))
