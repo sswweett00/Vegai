@@ -198,7 +198,7 @@ def render_markdown(report: dict[str, Any]) -> str:
     if comparison:
         lines += [
             "",
-            f"- reported batch arm: **N={comparison.get('accumulation', args.accumulation)}**",
+            f"- reported batch arm: **N={comparison.get('accumulation', 'n/a')}**",
             f"- speedup (batched vs per-token, same binary): **{comparison['speedup_tokens_per_second']:.3f}x**",
         ]
         if "speedup_vs_baseline" in comparison:
