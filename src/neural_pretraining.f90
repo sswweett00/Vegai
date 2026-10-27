@@ -704,7 +704,9 @@ contains
       real(real64) :: scaled_rate, inverse_step_scale
       real(real32) :: proposal32, m32, v32, gradient32, inverse_batch_32
       real(real32) :: beta1_32, one_minus_beta1_32, beta2_32, one_minus_beta2_32, adam_epsilon_32
-      real(real32) :: scaled_rate_32, inverse_step_scale_32, decay_factor_32, value_limit_32
+      real(real32) :: scaled_rate_32, inverse_step_scale_32, decay_factor_32, value_limit_32, scale_32
+      ! One width-sized accumulator per vocabulary column, private per thread.
+      real(real32) :: column_gradient(size(hidden_batch, 1)), column_bias_gradient
       ! Bounded by construction: the staging capacity is capped at
       ! NPT_MAX_GRADIENT_ACCUMULATION, so this block is O(width*512) reals.
       real(real64) :: clipped_hidden(size(hidden_batch, 1), size(hidden_batch, 2))
@@ -775,19 +777,33 @@ contains
          inverse_step_scale_32 = real(inverse_step_scale, real32)
          decay_factor_32 = real(decay_factor, real32)
          inverse_batch_32 = real(inverse_batch, real32)
-         !$omp parallel do private(token, feature, batch_index, gradient, gradient32, m32, v32, proposal32) &
+         ! Loop order matters: for one vocabulary column the batch reduction is
+         ! a sequence of axpy updates over the width vector, so the inner loop
+         ! runs over features (contiguous, 8-wide vectorizable) and each batch
+         ! member contributes one broadcast scalar.  The previous order -- batch
+         ! innermost per element -- was a chain of B dependent scalar FMAs per
+         ! element, which is why the batched arm measured *slower* than the
+         ! per-token arm once the element math became cheap.
+         !$omp parallel do private(token, feature, batch_index, gradient, gradient32, m32, v32, proposal32, &
+         !$omp column_gradient, column_bias_gradient) &
          !$omp schedule(static) if(vocabulary_size >= 512_int32)
          do token = 1_int32, vocabulary_size
-            do feature = 1_int32, width
-               ! The batch sum stays real64 so a long batch cannot lose low-order
-               ! bits of the average; only the per-element optimizer chain is
-               ! real32.
-               gradient = 0.0_real64
-               do batch_index = 1_int32, batch_count
-                  gradient = gradient + real(residuals(token, batch_index), real64) * &
-                             clipped_hidden(feature, batch_index)
+            column_gradient = 0.0_real32
+            do batch_index = 1_int32, batch_count
+               gradient32 = real(residuals(token, batch_index), real32)
+               !$omp simd
+               do feature = 1_int32, width
+                  column_gradient(feature) = column_gradient(feature) + &
+                                             gradient32 * clipped_hidden(feature, batch_index)
                end do
-               gradient32 = real(gradient, real32) * inverse_batch_32
+            end do
+            column_bias_gradient = 0.0_real32
+            do batch_index = 1_int32, batch_count
+               column_bias_gradient = column_bias_gradient + real(residuals(token, batch_index), real32)
+            end do
+            !$omp simd private(m32, v32, proposal32)
+            do feature = 1_int32, width
+               gradient32 = column_gradient(feature) * inverse_batch_32
                m32 = beta1_32 * state%adam_m_embedding(feature, token) + one_minus_beta1_32 * gradient32
                v32 = beta2_32 * state%adam_v_embedding(feature, token) + one_minus_beta2_32 * gradient32 * gradient32
                state%adam_m_embedding(feature, token) = m32
@@ -796,11 +812,7 @@ contains
                             scaled_rate_32 * m32 / (sqrt(v32) * inverse_step_scale_32 + adam_epsilon_32)
                model%token_embedding(feature, token) = max(-value_limit_32, min(value_limit_32, proposal32))
             end do
-            gradient = 0.0_real64
-            do batch_index = 1_int32, batch_count
-               gradient = gradient + real(residuals(token, batch_index), real64)
-            end do
-            gradient32 = real(gradient, real32) * inverse_batch_32
+            gradient32 = column_bias_gradient * inverse_batch_32
             m32 = beta1_32 * state%adam_m_bias(token) + one_minus_beta1_32 * gradient32
             v32 = beta2_32 * state%adam_v_bias(token) + one_minus_beta2_32 * gradient32 * gradient32
             state%adam_m_bias(token) = m32
@@ -814,26 +826,34 @@ contains
          ! Legacy SGD: the batched form is the arithmetic mean of the per-token
          ! updates, accumulated in one pass over the tied embedding.
          scale = rate * inverse_batch
-         !$omp parallel do private(token, feature, batch_index, gradient, proposal) &
+         scale_32 = real(scale, real32)
+         value_limit_32 = real(value_limit, real32)
+         ! Same column-accumulator order as the AdamW branch above: axpy over the
+         ! width vector per batch member, then one pass over the column.
+         !$omp parallel do private(token, feature, batch_index, gradient32, proposal32, &
+         !$omp column_gradient, column_bias_gradient) &
          !$omp schedule(static) if(vocabulary_size >= 512_int32)
          do token = 1_int32, vocabulary_size
-            do feature = 1_int32, width
-               gradient = 0.0_real64
-               do batch_index = 1_int32, batch_count
-                  gradient = gradient + real(residuals(token, batch_index), real64) * &
-                             clipped_hidden(feature, batch_index)
-               end do
-               proposal = real(model%token_embedding(feature, token), real64) - scale * gradient
-               proposal = max(-value_limit, min(value_limit, proposal))
-               model%token_embedding(feature, token) = real(proposal, real32)
-            end do
-            gradient = 0.0_real64
+            column_gradient = 0.0_real32
             do batch_index = 1_int32, batch_count
-               gradient = gradient + real(residuals(token, batch_index), real64)
+               gradient32 = real(residuals(token, batch_index), real32)
+               !$omp simd
+               do feature = 1_int32, width
+                  column_gradient(feature) = column_gradient(feature) + &
+                                             gradient32 * clipped_hidden(feature, batch_index)
+               end do
             end do
-            proposal = real(model%output_bias(token), real64) - scale * gradient
-            proposal = max(-value_limit, min(value_limit, proposal))
-            model%output_bias(token) = real(proposal, real32)
+            column_bias_gradient = 0.0_real32
+            do batch_index = 1_int32, batch_count
+               column_bias_gradient = column_bias_gradient + real(residuals(token, batch_index), real32)
+            end do
+            !$omp simd private(proposal32)
+            do feature = 1_int32, width
+               proposal32 = model%token_embedding(feature, token) - scale_32 * column_gradient(feature)
+               model%token_embedding(feature, token) = max(-value_limit_32, min(value_limit_32, proposal32))
+            end do
+            proposal32 = model%output_bias(token) - scale_32 * column_bias_gradient
+            model%output_bias(token) = max(-value_limit_32, min(value_limit_32, proposal32))
          end do
          !$omp end parallel do
       end if
