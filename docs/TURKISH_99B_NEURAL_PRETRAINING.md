@@ -188,19 +188,24 @@ held-out diliminde değerlendirilir:
 | bu dal, N=128 | 7794,6 | 8,317527 |
 
 - **Hız:** birikim, bu dalın token-başına yoluna göre **1,92x**; merge-base'e
-  göre **3,60x**. Token-başına yolun kendisi (real32 eleman zinciri, paralel
+  göre **3,60x** (aynı kodun bir sonraki koşusu: 3,29x). Token-başına yolun kendisi (real32 eleman zinciri, paralel
   bölümler, vektörel softmax) merge-base'in 1,88 katı.
 - **Kalite:** eşit tahmin-tokenı sayısında held-out NLL birikim lehine
   **−0,646** (perplexity 8857 → 4629); merge-base'e göre **−0,647**.
 - **Faz bütçesi** (seçilen kolda, tahmin başına): decoder adımı **34,6 µs**,
   blok projeksiyonu **23,3 µs**, skorlama **21,8 µs**, optimize edici adımı
   **41,3 µs**; güncellemesiz held-out değerlendirmesi 8052 token/sn.
-- **Koşular arası değişkenlik dürüstçe:** aynı job tanımıyla ölçülen oranlar
-  2,78x · 2,81x · 2,94x · 3,60x. Pay merge-base kolunun makineye daha duyarlı
-  olmasından geliyor (o kol her tahminde 1,5 MB bağlı embedding okuyor, yani
-  bellek bant genişliğine bağımlı); yavaş/paylaşımlı runner'da daha çok düşüyor.
-  Bu yüzden 3x tek bir koşunun değil, ölçülen aralığın ifadesidir: **≥2,78x,
-  son koşuda 3,60x**.
+- **Koşular arası değişkenlik dürüstçe:** aynı job tanımıyla ölçülen oranlar,
+  kodun iki hâli için:
+  - adım paralelleştirmesi ve bloklu normalizer **öncesi**: 2,78x · 2,81x ·
+    2,94x (üç koşu),
+  - **son hâli**: 3,60x · 3,29x (iki koşu).
+
+  Yani son kodun ölçülen aralığı **3,29–3,60x**. Payın kaynağı merge-base
+  kolunun makineye daha duyarlı olması: o kol her tahminde 1,5 MB bağlı
+  embedding okuyor, yani bellek bant genişliğine bağımlı ve yavaş/paylaşımlı
+  runner'da daha çok düşüyor. Aynı kolun koşular arası farkı 2205–2443 token/sn
+  iken bizimkinin 7937–8008 token/sn olması bunu doğruluyor.
 
 Hızı buraya getiren değişiklikler, her biri ölçümle doğrulanmış:
 
