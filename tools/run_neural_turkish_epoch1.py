@@ -176,6 +176,11 @@ def render_results_md(evidence: dict[str, Any]) -> str:
         f"eps {cfg.get('adam_epsilon', 'n/a')}"
     )
     lines.append(
+        f"- Güncelleme birikimi: her {cfg.get('gradient_accumulation', 1)} tahmin tokenında bir optimize edici adımı "
+        f"(adım cinsinden warmup {cfg['warmup_updates']:,}, horizon {cfg['total_updates']:,}); "
+        f"tied embedding ve AdamW momentleri token başına değil batch başına bir kez akıtılır"
+    )
+    lines.append(
         f"- Epoch: {epoch['eligible_records']:,} kayıt, {epoch['prediction_tokens']:,} tahmin tokenı, "
         f"{fmt(epoch['epoch_wall_seconds'])} sn, {fmt(epoch['prediction_tokens_per_second'])} token/sn"
     )
@@ -239,9 +244,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lr", type=float, default=0.003)
     parser.add_argument("--optimizer", default="adamw", choices=("adamw", "sgd"))
     parser.add_argument("--schedule", default="invsqrt", choices=("constant", "invsqrt", "cosine"))
-    parser.add_argument("--warmup-updates", type=int, default=2000)
+    # The two schedule horizons below are expressed in *prediction tokens*, the
+    # unit the corpus estimate is available in (bytes/token).  They are divided
+    # by --gradient-accumulation because the native scheduler counts optimizer
+    # steps, and one step now consumes a whole batch.
+    parser.add_argument("--warmup-updates", type=int, default=2000,
+                        help="warmup in prediction tokens (converted to optimizer steps)")
     parser.add_argument("--total-updates", type=int, default=0,
-                        help="cosine horizon in updates (estimate from measured bytes/token); 0 = omit")
+                        help="cosine horizon in prediction tokens (estimate from measured bytes/token); "
+                             "0 = omit")
+    parser.add_argument("--gradient-accumulation", type=int, default=32,
+                        help="prediction tokens averaged into one optimizer step (1 = exact per-token "
+                             "updates).  The update loops over the tied embedding and both AdamW "
+                             "moments once per batch instead of once per token, which is where the "
+                             "epoch time went; 32-64 is the measured sweet spot for this shape.")
     parser.add_argument("--min-lr-ratio", type=float, default=0.1)
     parser.add_argument("--label-smoothing", type=float, default=0.05)
     # AdamW-only decoupled weight decay; the legacy SGD update has no decay
@@ -266,6 +282,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--generation-timeout-seconds", type=int, default=600)
     parser.add_argument("--prompts-file", help="optional UTF-8 file, one prompt per line")
     args = parser.parse_args(argv)
+    if args.gradient_accumulation < 1:
+        parser.error("--gradient-accumulation must be >= 1")
     if args.optimizer == "sgd":
         if args.weight_decay not in (None, 0.0):
             # parser.error exits with a clean usage message; the native CLI
@@ -275,6 +293,15 @@ def main(argv: list[str] | None = None) -> int:
         args.weight_decay = 0.0
     elif args.weight_decay is None:
         args.weight_decay = 0.01
+
+    # Token-unit horizons -> optimizer-step horizons.  Keeping the conversion
+    # here means the workflow can keep expressing budgets in tokens while the
+    # native trainer only ever sees steps.
+    warmup_steps = max(1, args.warmup_updates // args.gradient_accumulation) if args.warmup_updates else 0
+    total_steps = args.total_updates // args.gradient_accumulation if args.total_updates else 0
+    if args.total_updates and total_steps <= warmup_steps:
+        parser.error("--total-updates must exceed --warmup-updates in optimizer steps "
+                     "(raise the budget or lower --warmup-updates)")
 
     corpus_dir = Path(args.corpus_dir)
     run_dir = Path(args.run_dir)
@@ -295,15 +322,16 @@ def main(argv: list[str] | None = None) -> int:
             "--width", str(args.width), "--heads", str(args.heads), "--window", str(args.window),
             "--ffn", str(args.ffn), "--seed", str(args.seed), "--lr", repr(args.lr),
             "--optimizer", args.optimizer, "--schedule", args.schedule,
-            "--warmup-updates", str(args.warmup_updates),
+            "--warmup-updates", str(warmup_steps),
             "--label-smoothing", repr(args.label_smoothing),
             "--min-lr-ratio", repr(args.min_lr_ratio),
             "--beta1", repr(args.beta1), "--beta2", repr(args.beta2), "--adam-eps", repr(args.adam_eps),
+            "--gradient-accumulation", str(args.gradient_accumulation),
         ]
         if args.optimizer == "adamw":
             model_options += ["--weight-decay", repr(args.weight_decay)]
-        if args.total_updates:
-            model_options += ["--total-updates", str(args.total_updates)]
+        if total_steps:
+            model_options += ["--total-updates", str(total_steps)]
 
         stdout, tokenizer_wall = run_child(
             [binary, "tokenizer-train-fast", str(corpus_dir / manifest["outputs"]["tokenizer_sample"]["path"]),
@@ -457,8 +485,11 @@ def main(argv: list[str] | None = None) -> int:
                 "lr": args.lr,
                 "optimizer": args.optimizer,
                 "schedule": args.schedule,
-                "warmup_updates": args.warmup_updates,
-                "total_updates": args.total_updates,
+                "warmup_updates": warmup_steps,
+                "total_updates": total_steps,
+                "warmup_updates_token_units": args.warmup_updates,
+                "total_updates_token_units": args.total_updates,
+                "gradient_accumulation": args.gradient_accumulation,
                 "min_lr_ratio": args.min_lr_ratio,
                 "label_smoothing": args.label_smoothing,
                 "weight_decay": args.weight_decay,

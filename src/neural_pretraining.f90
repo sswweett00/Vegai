@@ -51,6 +51,13 @@ module neural_pretraining
    integer(int32), parameter, public :: NPT_OPTIMIZER_SGD = 1_int32
    integer(int32), parameter, public :: NPT_OPTIMIZER_ADAMW = 2_int32
 
+   ! Upper bound on gradient_accumulation.  It bounds two stack allocations
+   ! (the staging buffers are O(vocabulary * accumulation) and the flush
+   ! kernel's clipped-hidden block is O(width * accumulation)), and it costs
+   ! nothing in throughput: past a few hundred tokens per step the optimizer
+   ! state is amortized to noise and only the batch memory grows.
+   integer(int32), parameter, public :: NPT_MAX_GRADIENT_ACCUMULATION = 512_int32
+
    ! Learning-rate schedule identifiers.  The schedule is a pure function of
    ! the persisted update counter, so a checkpoint/resume boundary cannot
    ! change the effective learning rate of any update.
@@ -65,7 +72,12 @@ module neural_pretraining
    ! AdamW first/second moments, so a resumed stream is bit-identical to the
    ! one-pass stream.  Loading a v2 checkpoint restores the legacy SGD
    ! configuration with no moments, preserving its original update semantics.
-   integer(int32), parameter :: NEURAL_CHECKPOINT_VERSION = 3_int32
+   ! v4 adds the mini-batch accumulation factor to the serialized training
+   ! configuration, so a resume can never silently regroup the updates of a
+   ! run that was started with a different gradient_accumulation.  v2 and v3
+   ! files still load (v3 binds accumulation = 1, the path it was written by).
+   integer(int32), parameter :: NEURAL_CHECKPOINT_VERSION = 4_int32
+   integer(int32), parameter :: NEURAL_CHECKPOINT_VERSION_V3 = 3_int32
    integer(int32), parameter :: NEURAL_CHECKPOINT_VERSION_V2 = 2_int32
    integer(int32), parameter :: FILE_LINE_BYTES = 32768_int32
 
@@ -94,6 +106,16 @@ module neural_pretraining
       integer(int64) :: total_updates = 0_int64
       ! Cosine floor as a fraction of the peak learning rate, in [0, 1].
       real(real64) :: minimum_lr_ratio = 0.1_real64
+      ! Prediction tokens accumulated into one optimizer step.  1 keeps the
+      ! exact one-step-per-token path.  N > 1 evaluates N per-token gradients
+      ! at the pre-step parameters, averages them, and applies a single step,
+      ! which is ordinary mini-batch SGD/AdamW.  The batch is always flushed
+      ! at the end of a record, and every checkpoint boundary is a record
+      ! boundary, so "chunk + checkpoint + chunk" stays bit-identical to the
+      ! one-pass stream for any fixed accumulation.  The effective batch is
+      ! min(gradient_accumulation, maximum_tokens_per_record) and is capped
+      ! at NPT_MAX_GRADIENT_ACCUMULATION.
+      integer(int32) :: gradient_accumulation = 1_int32
    end type neural_train_config_t
 
    type, public :: neural_train_state_t
@@ -153,6 +175,19 @@ module neural_pretraining
       real(real32), allocatable :: hidden(:)
       real(real32), allocatable :: logits(:)
       real(real64), allocatable :: probabilities(:)
+      ! Mini-batch staging buffers, allocated only when
+      ! gradient_accumulation > 1.  RESIDUALS is (vocabulary, capacity) so a
+      ! column holds the whole smoothed residual vector of one prediction
+      ! token, which keeps the flush kernel's inner accumulation contiguous.
+      ! The residual is stored in real32 (the parameter precision) because it
+      ! is one of ~B terms in an averaged gradient; the accumulate itself is
+      ! real64.
+      real(real32), allocatable :: batch_residuals(:, :)
+      real(real32), allocatable :: batch_hidden(:, :)
+      real(real64), allocatable :: batch_clip(:)
+      integer(int32), allocatable :: batch_targets(:)
+      integer(int32) :: batch_count = 0_int32
+      integer(int32) :: batch_capacity = 0_int32
    end type neural_train_workspace_t
 
    public :: neural_train_config_is_valid, neural_train_state_init, neural_train_metrics_reset
@@ -174,6 +209,9 @@ contains
       type(neural_train_config_t), intent(in) :: config
 
       neural_train_config_is_valid = config%trainable_mode == NPT_TRAINABLE_TIED_OUTPUT .and. &
+                                     config%gradient_accumulation >= 1_int32 .and. &
+                                     config%gradient_accumulation <= NPT_MAX_GRADIENT_ACCUMULATION .and. &
+                                     config%gradient_accumulation <= config%maximum_tokens_per_record .and. &
                                      ieee_is_finite(config%learning_rate) .and. config%learning_rate > 0.0_real64 .and. &
                                      ieee_is_finite(config%gradient_clip_norm) .and. config%gradient_clip_norm > 0.0_real64 .and. &
                                      ieee_is_finite(config%embedding_value_limit) .and. &
@@ -258,7 +296,7 @@ contains
       integer(int32), intent(out) :: status
       type(neural_resource_plan_t) :: decoder_plan
       integer(int32) :: decoder_status
-      integer(int64) :: width, vocabulary, ffn_width
+      integer(int64) :: width, vocabulary, ffn_width, accumulation
 
       plan = neural_training_resource_plan_t()
       status = NPT_OK
@@ -283,6 +321,13 @@ contains
       ! vectors; trainer allocations: hidden, logits, and real64 softmax.
       plan%per_step_working_bytes = 4_int64 * (11_int64 * width + 3_int64 * ffn_width + vocabulary) + &
                                     8_int64 * vocabulary
+      ! Mini-batch staging: one residual column (real32 per vocabulary entry),
+      ! one hidden column and the clip/target scalars per accumulated token.
+      if (train_config%gradient_accumulation > 1_int32) then
+         accumulation = int(min(train_config%gradient_accumulation, train_config%maximum_tokens_per_record), int64)
+         plan%per_step_working_bytes = plan%per_step_working_bytes + &
+                                        accumulation * (4_int64 * vocabulary + 4_int64 * width + 8_int64 + 4_int64)
+      end if
       plan%optimizer_state_bytes_real64 = 0_int64
       if (train_config%optimizer == NPT_OPTIMIZER_ADAMW) then
          plan%optimizer_state_bytes_real64 = 16_int64 * (width * vocabulary + vocabulary)
@@ -369,9 +414,10 @@ contains
       state%adam_v_bias = 0.0_real64
    end subroutine ensure_optimizer_state
 
-   subroutine workspace_ensure(workspace, model, status)
+   subroutine workspace_ensure(workspace, model, batch_capacity, status)
       type(neural_train_workspace_t), intent(inout) :: workspace
       type(neural_decoder_t), intent(in) :: model
+      integer(int32), intent(in) :: batch_capacity
       integer(int32), intent(out) :: status
       integer :: allocation_status
       integer(int32) :: decoder_status
@@ -379,7 +425,8 @@ contains
       status = NPT_OK
       if (workspace%ready) then
          if (size(workspace%hidden, kind=int32) == model%config%width .and. &
-             size(workspace%logits, kind=int32) == model%config%vocabulary_size) return
+             size(workspace%logits, kind=int32) == model%config%vocabulary_size .and. &
+             workspace%batch_capacity == batch_capacity) return
          call workspace_destroy(workspace)
       end if
       allocate(workspace%hidden(model%config%width), workspace%logits(model%config%vocabulary_size), &
@@ -387,6 +434,19 @@ contains
       if (allocation_status /= 0) then
          status = NPT_ERR_ALLOCATION
          return
+      end if
+      workspace%batch_capacity = batch_capacity
+      workspace%batch_count = 0_int32
+      if (batch_capacity > 1_int32) then
+         allocate(workspace%batch_residuals(model%config%vocabulary_size, batch_capacity), &
+                  workspace%batch_hidden(model%config%width, batch_capacity), &
+                  workspace%batch_clip(batch_capacity), workspace%batch_targets(batch_capacity), &
+                  stat=allocation_status)
+         if (allocation_status /= 0) then
+            call workspace_destroy(workspace)
+            status = NPT_ERR_ALLOCATION
+            return
+         end if
       end if
       call neural_decoder_state_init(workspace%decoder_state, model, decoder_status)
       if (decoder_status /= NRD_OK) then
@@ -404,8 +464,30 @@ contains
       if (allocated(workspace%hidden)) deallocate(workspace%hidden)
       if (allocated(workspace%logits)) deallocate(workspace%logits)
       if (allocated(workspace%probabilities)) deallocate(workspace%probabilities)
+      if (allocated(workspace%batch_residuals)) deallocate(workspace%batch_residuals)
+      if (allocated(workspace%batch_hidden)) deallocate(workspace%batch_hidden)
+      if (allocated(workspace%batch_clip)) deallocate(workspace%batch_clip)
+      if (allocated(workspace%batch_targets)) deallocate(workspace%batch_targets)
+      workspace%batch_count = 0_int32
+      workspace%batch_capacity = 0_int32
       workspace%ready = .false.
    end subroutine workspace_destroy
+
+   ! Gradient-clip scale for one hidden vector.  Factored out so the per-token
+   ! path and the mini-batch staging path cannot drift apart: both must apply
+   ! exactly the same bound, otherwise a batched run would not be the average
+   ! of the per-token gradients it replaces.
+   pure subroutine hidden_clip(hidden, config, clip_scale, finite_norm)
+      real(real32), intent(in) :: hidden(:)
+      type(neural_train_config_t), intent(in) :: config
+      real(real64), intent(out) :: clip_scale
+      logical, intent(out) :: finite_norm
+      real(real64) :: hidden_norm
+
+      hidden_norm = sqrt(sum(real(hidden, real64) * real(hidden, real64)))
+      finite_norm = ieee_is_finite(hidden_norm)
+      clip_scale = min(1.0_real64, config%gradient_clip_norm / max(hidden_norm, tiny(1.0_real64)))
+   end subroutine hidden_clip
 
    ! One exact tied-output cross-entropy update.  neural_decoder_step uses
    ! logits = E^T h + b, so dL/dE(:,v) = residual(v) * h and dL/db(v) =
@@ -429,7 +511,8 @@ contains
       integer(int32), intent(out) :: status
       integer(int32) :: vocabulary_size, width, token, feature
       integer(int64) :: update_index
-      real(real64) :: hidden_norm, clip_scale, residual, proposal, scale, rate
+      real(real64) :: clip_scale, residual, proposal, scale, rate
+      logical :: norm_is_finite
       real(real64) :: smooth_mass, gradient, beta1_pow, beta2_pow, adam_step_scale
       real(real64) :: m_hat_factor, decay_factor
       real(real64) :: beta1, beta2, one_minus_beta1, one_minus_beta2, adam_epsilon, value_limit
@@ -448,12 +531,11 @@ contains
          status = NPT_ERR_INVALID_ARGUMENT
          return
       end if
-      hidden_norm = sqrt(sum(real(hidden, real64) * real(hidden, real64)))
-      if (.not. ieee_is_finite(hidden_norm)) then
+      call hidden_clip(hidden, config, clip_scale, norm_is_finite)
+      if (.not. norm_is_finite) then
          status = NPT_ERR_NUMERICAL
          return
       end if
-      clip_scale = min(1.0_real64, config%gradient_clip_norm / max(hidden_norm, tiny(1.0_real64)))
       update_index = state%updates_completed + 1_int64
       rate = neural_scheduled_learning_rate(config, update_index)
       smooth_mass = config%label_smoothing / real(vocabulary_size, real64)
@@ -557,6 +639,243 @@ contains
       end if
    end subroutine tied_output_update
 
+   ! One mini-batch tied-output update.  GRADIENT_ACCUMULATION per-token
+   ! gradients, all evaluated at the pre-step parameters, are averaged and
+   ! applied as a single optimizer step -- ordinary mini-batch SGD/AdamW.  The
+   ! average (not the sum) is what keeps the effective step size independent
+   ! of how many tokens a record happened to contribute.
+   !
+   ! The motivation is measured, not theoretical: at the production shape
+   ! (vocabulary 4096, width 96) the per-token path streams the tied
+   ! embedding, both AdamW moments and the two bias moments once per
+   ! prediction token, about 17 MB of L3-resident traffic per token.  That
+   ! dominated the epoch wall clock (~80% of it).  Batching streams the same
+   ! state once per B tokens, so the update cost per token falls by roughly a
+   ! factor of B while the arithmetic done is identical.
+   !
+   ! Only the batch column's own state is touched, so the OpenMP loop over
+   ! vocabulary columns needs no reduction and no critical section.
+   subroutine batched_tied_output_update(model, residuals, hidden_batch, clip_batch, targets, batch_count, &
+                                         config, state, status)
+      type(neural_decoder_t), intent(inout) :: model
+      ! (vocabulary, capacity): column b holds the unsmoothed-mean residual of
+      ! staged token b, i.e. softmax - label_smoothing/V, minus
+      ! (1 - label_smoothing) at that token's target.
+      real(real32), intent(in) :: residuals(:, :)
+      real(real32), intent(in) :: hidden_batch(:, :)
+      real(real64), intent(in) :: clip_batch(:)
+      integer(int32), intent(in) :: targets(:)
+      integer(int32), intent(in) :: batch_count
+      type(neural_train_config_t), intent(in) :: config
+      type(neural_train_state_t), intent(inout) :: state
+      integer(int32), intent(out) :: status
+      integer(int32) :: vocabulary_size, width, token, feature, batch_index
+      integer(int64) :: update_index
+      real(real64) :: rate, inverse_batch, gradient, proposal, scale, value_limit
+      real(real64) :: beta1, beta2, one_minus_beta1, one_minus_beta2, adam_epsilon
+      real(real64) :: beta1_pow, beta2_pow, m_hat_factor, adam_step_scale, decay_factor
+      real(real64) :: scaled_rate, inverse_step_scale, m_value, v_value
+      ! Bounded by construction: the staging capacity is capped at
+      ! NPT_MAX_GRADIENT_ACCUMULATION, so this block is O(width*512) reals.
+      real(real64) :: clipped_hidden(size(hidden_batch, 1), size(hidden_batch, 2))
+
+      status = NPT_OK
+      vocabulary_size = model%config%vocabulary_size
+      width = model%config%width
+      if (batch_count < 1_int32 .or. batch_count > size(residuals, 2, kind=int32) .or. &
+          batch_count > size(hidden_batch, 2, kind=int32) .or. batch_count > size(clip_batch, kind=int32) .or. &
+          batch_count > size(targets, kind=int32) .or. size(residuals, 1, kind=int32) /= vocabulary_size .or. &
+          size(hidden_batch, 1, kind=int32) /= width) then
+         status = NPT_ERR_INVALID_ARGUMENT
+         return
+      end if
+      update_index = state%updates_completed + 1_int64
+      rate = neural_scheduled_learning_rate(config, update_index)
+      inverse_batch = 1.0_real64 / real(batch_count, real64)
+      value_limit = config%embedding_value_limit
+      ! The per-token clip is folded into the staged hidden vectors: the
+      ! embedding gradient is clip * residual * hidden and the output-bias
+      ! gradient is the unclipped residual (legacy semantics), so the residual
+      ! itself must stay untouched.
+      do batch_index = 1_int32, batch_count
+         do feature = 1_int32, width
+            clipped_hidden(feature, batch_index) = clip_batch(batch_index) * &
+                                                   real(hidden_batch(feature, batch_index), real64)
+         end do
+      end do
+
+      if (config%optimizer == NPT_OPTIMIZER_ADAMW) then
+         call ensure_optimizer_state(model, config, state, status)
+         if (status /= NPT_OK) return
+         if (.not. ieee_is_finite(rate) .or. rate <= 0.0_real64) then
+            status = NPT_ERR_NUMERICAL
+            return
+         end if
+         if (rate * config%weight_decay >= 1.0_real64) then
+            status = NPT_ERR_INVALID_ARGUMENT
+            return
+         end if
+         beta1_pow = config%adam_beta1 ** real(update_index, real64)
+         beta2_pow = config%adam_beta2 ** real(update_index, real64)
+         m_hat_factor = 1.0_real64 - beta1_pow
+         adam_step_scale = sqrt(max(0.0_real64, 1.0_real64 - beta2_pow))
+         if (.not. ieee_is_finite(m_hat_factor) .or. .not. ieee_is_finite(adam_step_scale) .or. &
+             m_hat_factor <= 0.0_real64) then
+            status = NPT_ERR_NUMERICAL
+            return
+         end if
+         decay_factor = 1.0_real64 - rate * config%weight_decay
+         beta1 = config%adam_beta1
+         beta2 = config%adam_beta2
+         one_minus_beta1 = 1.0_real64 - beta1
+         one_minus_beta2 = 1.0_real64 - beta2
+         adam_epsilon = config%adam_epsilon
+         scaled_rate = rate / m_hat_factor
+         inverse_step_scale = 1.0_real64 / adam_step_scale
+         !$omp parallel do private(token, feature, batch_index, gradient, m_value, v_value, proposal) &
+         !$omp schedule(static) if(vocabulary_size >= 512_int32)
+         do token = 1_int32, vocabulary_size
+            do feature = 1_int32, width
+               gradient = 0.0_real64
+               do batch_index = 1_int32, batch_count
+                  gradient = gradient + real(residuals(token, batch_index), real64) * &
+                             clipped_hidden(feature, batch_index)
+               end do
+               gradient = gradient * inverse_batch
+               m_value = beta1 * state%adam_m_embedding(feature, token) + one_minus_beta1 * gradient
+               v_value = beta2 * state%adam_v_embedding(feature, token) + one_minus_beta2 * gradient * gradient
+               state%adam_m_embedding(feature, token) = m_value
+               state%adam_v_embedding(feature, token) = v_value
+               proposal = decay_factor * real(model%token_embedding(feature, token), real64) - &
+                          scaled_rate * m_value / (sqrt(v_value) * inverse_step_scale + adam_epsilon)
+               proposal = max(-value_limit, min(value_limit, proposal))
+               model%token_embedding(feature, token) = real(proposal, real32)
+            end do
+            gradient = 0.0_real64
+            do batch_index = 1_int32, batch_count
+               gradient = gradient + real(residuals(token, batch_index), real64)
+            end do
+            gradient = gradient * inverse_batch
+            m_value = beta1 * state%adam_m_bias(token) + one_minus_beta1 * gradient
+            v_value = beta2 * state%adam_v_bias(token) + one_minus_beta2 * gradient * gradient
+            state%adam_m_bias(token) = m_value
+            state%adam_v_bias(token) = v_value
+            proposal = real(model%output_bias(token), real64) - &
+                       scaled_rate * m_value / (sqrt(v_value) * inverse_step_scale + adam_epsilon)
+            proposal = max(-value_limit, min(value_limit, proposal))
+            model%output_bias(token) = real(proposal, real32)
+         end do
+         !$omp end parallel do
+      else
+         ! Legacy SGD: the batched form is the arithmetic mean of the per-token
+         ! updates, accumulated in one pass over the tied embedding.
+         scale = rate * inverse_batch
+         !$omp parallel do private(token, feature, batch_index, gradient, proposal) &
+         !$omp schedule(static) if(vocabulary_size >= 512_int32)
+         do token = 1_int32, vocabulary_size
+            do feature = 1_int32, width
+               gradient = 0.0_real64
+               do batch_index = 1_int32, batch_count
+                  gradient = gradient + real(residuals(token, batch_index), real64) * &
+                             clipped_hidden(feature, batch_index)
+               end do
+               proposal = real(model%token_embedding(feature, token), real64) - scale * gradient
+               proposal = max(-value_limit, min(value_limit, proposal))
+               model%token_embedding(feature, token) = real(proposal, real32)
+            end do
+            gradient = 0.0_real64
+            do batch_index = 1_int32, batch_count
+               gradient = gradient + real(residuals(token, batch_index), real64)
+            end do
+            proposal = real(model%output_bias(token), real64) - scale * gradient
+            proposal = max(-value_limit, min(value_limit, proposal))
+            model%output_bias(token) = real(proposal, real32)
+         end do
+         !$omp end parallel do
+      end if
+      ! Canary identical in spirit to the per-token sentinel: every touched
+      ! column is clamped to +/-value_limit, so only the staged target columns
+      ! need a final finiteness probe.
+      do batch_index = 1_int32, batch_count
+         token = targets(batch_index)
+         if (token < 1_int32 .or. token > vocabulary_size) then
+            status = NPT_ERR_INVALID_ARGUMENT
+            return
+         end if
+         if (.not. all(ieee_is_finite(model%token_embedding(:, token))) .or. &
+             .not. ieee_is_finite(model%output_bias(token))) then
+            status = NPT_ERR_NUMERICAL
+            return
+         end if
+      end do
+   end subroutine batched_tied_output_update
+
+   ! Stages one prediction token into the mini-batch buffers.  The residual is
+   ! stored unclipped because the output-bias gradient never sees the clip.
+   subroutine stage_batch_token(workspace, config, hidden, probabilities, target, status)
+      type(neural_train_workspace_t), intent(inout) :: workspace
+      type(neural_train_config_t), intent(in) :: config
+      real(real32), intent(in) :: hidden(:)
+      real(real64), intent(in) :: probabilities(:)
+      integer(int32), intent(in) :: target
+      integer(int32), intent(out) :: status
+      integer(int32) :: vocabulary_size, slot, token
+      real(real64) :: clip_scale, smooth_mass, residual
+      logical :: norm_is_finite
+
+      status = NPT_OK
+      vocabulary_size = size(probabilities, kind=int32)
+      if (.not. allocated(workspace%batch_residuals) .or. .not. allocated(workspace%batch_targets) .or. &
+          workspace%batch_count >= workspace%batch_capacity .or. workspace%batch_capacity <= 1_int32 .or. &
+          size(hidden, kind=int32) /= size(workspace%batch_hidden, 1, kind=int32) .or. &
+          vocabulary_size /= size(workspace%batch_residuals, 1, kind=int32) .or. &
+          target < 1_int32 .or. target > vocabulary_size) then
+         status = NPT_ERR_INVALID_ARGUMENT
+         return
+      end if
+      call hidden_clip(hidden, config, clip_scale, norm_is_finite)
+      if (.not. norm_is_finite) then
+         status = NPT_ERR_NUMERICAL
+         return
+      end if
+      slot = workspace%batch_count + 1_int32
+      smooth_mass = config%label_smoothing / real(vocabulary_size, real64)
+      ! Columns of the staging buffer are disjoint, so this parallel fill stores
+      ! independent elements and needs no reduction.
+      !$omp parallel do private(token, residual) schedule(static) if(vocabulary_size >= 1024_int32)
+      do token = 1_int32, vocabulary_size
+         residual = probabilities(token) - smooth_mass
+         if (token == target) residual = residual - (1.0_real64 - config%label_smoothing)
+         workspace%batch_residuals(token, slot) = real(residual, real32)
+      end do
+      !$omp end parallel do
+      workspace%batch_hidden(:, slot) = hidden
+      workspace%batch_clip(slot) = clip_scale
+      workspace%batch_targets(slot) = target
+      workspace%batch_count = slot
+   end subroutine stage_batch_token
+
+   ! Applies the staged mini-batch (if any) as one optimizer step and resets
+   ! the staging cursor.  Called at the batch capacity and at every record end;
+   ! the latter is what keeps checkpoint boundaries -- which always fall on
+   ! record boundaries -- bit-identical to a one-pass stream.
+   subroutine flush_train_batch(model, workspace, config, state, status)
+      type(neural_decoder_t), intent(inout) :: model
+      type(neural_train_workspace_t), intent(inout) :: workspace
+      type(neural_train_config_t), intent(in) :: config
+      type(neural_train_state_t), intent(inout) :: state
+      integer(int32), intent(out) :: status
+
+      status = NPT_OK
+      if (workspace%batch_count <= 0_int32) return
+      call batched_tied_output_update(model, workspace%batch_residuals, workspace%batch_hidden, &
+                                      workspace%batch_clip, workspace%batch_targets, workspace%batch_count, &
+                                      config, state, status)
+      if (status /= NPT_OK) return
+      state%updates_completed = state%updates_completed + 1_int64
+      workspace%batch_count = 0_int32
+   end subroutine flush_train_batch
+
    subroutine process_token_sequence(model, tokens, token_count, config, state, metrics, update_model, workspace, status)
       type(neural_decoder_t), intent(inout) :: model
       integer(int32), intent(in) :: tokens(:)
@@ -568,7 +887,9 @@ contains
       type(neural_train_workspace_t), intent(inout) :: workspace
       integer(int32), intent(out) :: status
       integer(int32) :: position, decoder_status, target, candidate, target_rank
+      integer(int32) :: batch_capacity
       real(real64) :: loss, sequence_nll, target_probability
+      logical :: accumulating
 
       status = NPT_OK
       if (.not. neural_decoder_is_ready(model) .or. .not. neural_train_config_is_valid(config) .or. &
@@ -581,7 +902,17 @@ contains
          status = NPT_ERR_INCOMPATIBLE
          return
       end if
-      call workspace_ensure(workspace, model, status)
+      ! gradient_accumulation = 1 keeps the exact one-step-per-token path, so
+      ! every existing contract (bit-identical continuation, per-token update
+      ! counting) is untouched unless a caller opts into batching.
+      batch_capacity = 1_int32
+      if (update_model .and. config%gradient_accumulation > 1_int32) then
+         ! Evaluation never stages a gradient, so it must not pay for the
+         ! staging buffers (they are O(vocabulary * accumulation) bytes).
+         batch_capacity = min(config%gradient_accumulation, config%maximum_tokens_per_record)
+      end if
+      accumulating = batch_capacity > 1_int32
+      call workspace_ensure(workspace, model, batch_capacity, status)
       if (status /= NPT_OK) return
       sequence_nll = 0.0_real64
       ! Reset is allocation-free and zero-equivalent to a fresh state init,
@@ -622,11 +953,26 @@ contains
          if (target_rank == 0_int32) metrics%top1_correct = metrics%top1_correct + 1_int64
          if (target_rank < 5_int32) metrics%top5_correct = metrics%top5_correct + 1_int64
          if (update_model) then
-            call tied_output_update(model, workspace%hidden, workspace%probabilities, target, config, state, status)
-            if (status /= NPT_OK) exit
-            state%updates_completed = state%updates_completed + 1_int64
+            if (accumulating) then
+               call stage_batch_token(workspace, config, workspace%hidden, workspace%probabilities, target, status)
+               if (status /= NPT_OK) exit
+               if (workspace%batch_count >= batch_capacity) then
+                  call flush_train_batch(model, workspace, config, state, status)
+                  if (status /= NPT_OK) exit
+               end if
+            else
+               call tied_output_update(model, workspace%hidden, workspace%probabilities, target, config, state, status)
+               if (status /= NPT_OK) exit
+               state%updates_completed = state%updates_completed + 1_int64
+            end if
          end if
       end do
+      ! Flush the trailing partial batch of this record.  Doing it here (rather
+      ! than across records) is what preserves chunk/resume bit-identity: every
+      ! checkpoint boundary in process_utf8_file is a record boundary.
+      if (status == NPT_OK .and. update_model .and. accumulating .and. workspace%batch_count > 0_int32) then
+         call flush_train_batch(model, workspace, config, state, status)
+      end if
       if (status /= NPT_OK) return
       metrics%records = metrics%records + 1_int64
       if (metrics%prediction_tokens > 0_int64) then
@@ -954,6 +1300,7 @@ contains
                                                          config%adam_epsilon, config%weight_decay, config%label_smoothing, &
                                                          config%lr_schedule, config%warmup_updates, config%total_updates, &
                                                          config%minimum_lr_ratio
+      if (io_status == 0) write(unit, iostat=io_status) config%gradient_accumulation
       if (io_status == 0) write(unit, iostat=io_status) state%records_completed, state%source_records_completed, &
                                                          state%updates_completed, state%tokens_seen, state%cumulative_nll
       if (io_status == 0) then
@@ -1013,11 +1360,17 @@ contains
                                                        config%embedding_value_limit, config%maximum_tokens_per_record
       stored_optimizer_flag = 0_int32
       if (io_status == 0) then
-         if (version == NEURAL_CHECKPOINT_VERSION) then
+         if (version == NEURAL_CHECKPOINT_VERSION .or. version == NEURAL_CHECKPOINT_VERSION_V3) then
             read(unit, iostat=io_status) config%optimizer, config%adam_beta1, config%adam_beta2, &
                                          config%adam_epsilon, config%weight_decay, config%label_smoothing, &
                                          config%lr_schedule, config%warmup_updates, config%total_updates, &
                                          config%minimum_lr_ratio
+            if (io_status == 0 .and. version == NEURAL_CHECKPOINT_VERSION) then
+               read(unit, iostat=io_status) config%gradient_accumulation
+            else if (io_status == 0) then
+               ! v3 files were written by the one-step-per-token path.
+               config%gradient_accumulation = 1_int32
+            end if
          else if (version == NEURAL_CHECKPOINT_VERSION_V2) then
             ! v2 checkpoints were written by the SGD-only trainer; restore
             ! exactly those semantics instead of the v3 type defaults.
@@ -1031,7 +1384,8 @@ contains
       end if
       if (io_status == 0) read(unit, iostat=io_status) state%records_completed, state%source_records_completed, &
                                                        state%updates_completed, state%tokens_seen, state%cumulative_nll
-      if (io_status == 0 .and. version == NEURAL_CHECKPOINT_VERSION) then
+      if (io_status == 0 .and. (version == NEURAL_CHECKPOINT_VERSION .or. &
+                                 version == NEURAL_CHECKPOINT_VERSION_V3)) then
          read(unit, iostat=io_status) stored_optimizer_flag
       end if
       if (io_status /= 0) then
@@ -1045,7 +1399,8 @@ contains
       ! decay at all, and the trainer now rejects such a contradictory config.
       if (config%optimizer /= NPT_OPTIMIZER_ADAMW) config%weight_decay = 0.0_real64
       if (magic /= NEURAL_CHECKPOINT_MAGIC .or. &
-          (version /= NEURAL_CHECKPOINT_VERSION .and. version /= NEURAL_CHECKPOINT_VERSION_V2) .or. &
+          (version /= NEURAL_CHECKPOINT_VERSION .and. version /= NEURAL_CHECKPOINT_VERSION_V3 .and. &
+           version /= NEURAL_CHECKPOINT_VERSION_V2) .or. &
           stored_bpe_tokens /= bpe%token_count .or. stored_bpe_merges /= bpe%merge_count .or. &
           .not. neural_decoder_config_is_valid(decoder_config) .or. .not. neural_train_config_is_valid(config) .or. &
           (stored_optimizer_flag /= 0_int32 .and. stored_optimizer_flag /= 1_int32) .or. &

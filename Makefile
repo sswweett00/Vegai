@@ -272,6 +272,14 @@ attested-pretrain-check: $(PRETRAIN)
 lookup-cache-compare: $(PRETRAIN)
 	python3 tools/compare_pretraining_lookup_cache.py --pretrain-bin $(PRETRAIN) --repetitions 3
 
+# Measured A/B of the tied-output update: per-token steps versus averaged
+# mini-batch steps over a byte-identical synthetic corpus. Reports tokens/s,
+# held-out NLL at equal tokens, and NLL improvement per second, and fails the
+# target when the measured ratios miss the gates.
+neural-throughput-check: $(NEURAL_PRETRAIN)
+	python3 tools/benchmark_neural_batch_throughput.py --neural-bin $(NEURAL_PRETRAIN) \
+		--output $(BUILD_DIR)/neural-throughput.json
+
 # A deterministic, provenance-labelled 9 MiB structural fixture. It carries no
 # third-party text and must not be interpreted as domain or language knowledge.
 fixture-9mib:

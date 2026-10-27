@@ -1,0 +1,115 @@
+name: Neural mini-batch throughput and quality A/B
+
+# The batched tied-output update claims a measured speedup, not an asserted
+# one: this workflow trains a byte-identical synthetic corpus twice (per-token
+# vs accumulated), gates the measured tokens/s ratio, the held-out NLL
+# regression at equal tokens and the NLL-improvement-per-second ratio, and
+# publishes the JSON evidence.
+
+on:
+  workflow_dispatch:
+    inputs:
+      accumulation:
+        description: "optimizer-step accumulation factor for the batched arm"
+        required: false
+        default: "32"
+      corpus_bytes:
+        description: "synthetic corpus size per arm"
+        required: false
+        default: "1000000"
+      min_speedup:
+        description: "gate for the measured tokens/s ratio"
+        required: false
+        default: "1.5"
+  pull_request:
+    paths:
+      - 'src/neural_pretraining.f90'
+      - 'src/neural_retention_decoder.f90'
+      - 'app/neural_pretrain.f90'
+      - 'tools/benchmark_neural_batch_throughput.py'
+      - 'tools/run_neural_turkish_epoch1.py'
+      - '.github/workflows/neural-batch-throughput.yml'
+
+concurrency:
+  group: neural-batch-throughput-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  throughput:
+    name: Per-token vs accumulated update A/B
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GNU Fortran toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gfortran make
+
+      - name: Build native binaries
+        run: |
+          set -euo pipefail
+          make native
+          ./build-native/vegai_neural_pretrain smoke | tail -3
+
+      - name: Measure per-token vs mini-batch throughput and quality
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/throughput"
+          python3 tools/benchmark_neural_batch_throughput.py \
+            --neural-bin ./build-native/vegai_neural_pretrain \
+            --accumulation "${{ inputs.accumulation || '32' }}" \
+            --corpus-bytes "${{ inputs.corpus_bytes || '1000000' }}" \
+            --min-speedup "${{ inputs.min_speedup || '1.5' }}" \
+            --max-nll-regression 0.05 \
+            --min-quality-rate-ratio 1.5 \
+            --output "${RUNNER_TEMP}/throughput/benchmark.json" \
+            | tee /dev/stderr > /dev/null
+
+      - name: Summarize the measured comparison
+        if: always()
+        run: |
+          set -euo pipefail
+          report="${RUNNER_TEMP}/throughput/benchmark.json"
+          if [ ! -f "$report" ]; then
+            echo "## Neural throughput A/B produced no report" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 - "$report" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          report = json.load(open(sys.argv[1], encoding="utf-8"))
+          print(f"### Neural update A/B: {report.get('status')}")
+          shape = report.get("shape", {})
+          print(f"- shape: vocab {shape.get('vocab')}, width {shape.get('width')}, window {shape.get('window')}, "
+                f"ffn {shape.get('ffn')}, {shape.get('optimizer')}, threads {shape.get('threads')}")
+          arms = report.get("arms", {})
+          print("")
+          print("| Arm | prediction tok/s | held-out NLL | held-out ppl | train wall (s) |")
+          print("|---|---:|---:|---:|---:|")
+          for name, arm in arms.items():
+              print(f"| {name} | {arm['reported_tokens_per_second']:.1f} | "
+                    f"{float(arm['heldout']['mean_nll']):.6f} | "
+                    f"{float(arm['heldout']['perplexity']):.3f} | "
+                    f"{arm['controller_wall_seconds']:.1f} |")
+          comparison = report.get("comparison", {})
+          if comparison:
+              print("")
+              print(f"- speedup: **{comparison['speedup_tokens_per_second']:.3f}x**")
+              print(f"- held-out NLL delta (batched - per-token): "
+                    f"{comparison['heldout_nll_delta_batched_minus_per_token']:+.6f}")
+              print(f"- NLL improvement per second ratio: "
+                    f"**{comparison['nll_improvement_per_second_ratio']:.3f}x**")
+          for failure in report.get("gate_failures", []):
+              print(f"- gate failure: {failure}")
+          if report.get("error"):
+              print(f"- error: {report['error']}")
+          PY
+
+      - name: Upload throughput evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: neural-batch-throughput-${{ github.run_id }}
+          path: ${{ runner.temp }}/throughput
+          if-no-files-found: warn

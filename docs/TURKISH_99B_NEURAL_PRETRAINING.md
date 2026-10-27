@@ -84,8 +84,10 @@ Tokenizer → eğitimsiz baseline → **tam 1 epoch** → held-out → 10 prompt
 prompt/response'lar düzenlenmeden yazılır. `evidence.json` içindeki `config`
 bloğu optimize edicinin tam kimliğini taşır: optimizer, LR, zamanlama,
 `weight_decay` (kapsamı ile birlikte: AdamW'de yalnız embedding'ler, SGD'de
-uygulanmaz) ve `adam_beta1/beta2/adam_epsilon`. `--weight-decay` yalnız
-`--optimizer adamw` ile kabul edilir.
+uygulanmaz), `adam_beta1/beta2/adam_epsilon`, `gradient_accumulation`
+(bkz. §3.5) ve zamanlama ufuklarının hem token hem adım birimindeki değerleri
+(`*_updates_token_units`). `--weight-decay` yalnız `--optimizer adamw` ile
+kabul edilir.
 
 ### 3.4 Kalite-korumalı hız çalışması (ölçüm-güdümlü A/B)
 
@@ -119,6 +121,48 @@ Dayanıklılık: runner artık epoch'u N checkpoint'li `train-chunk` çağrısı
 bölebilir (aynı online sıra/config; timeout yalnız uçuşan parçayı kaybettirir,
 ilerleme `chunks.json`'da görünür; verifier mikro koşuda tek-çağrı ile aynı
 tahmin-tokenı tüketimini ve tam kaynak-kayıt kapsamasını denetler).
+
+### 3.5 Güncelleme birikimi (mini-batch) — darboğazın ölçülmüş yeri
+
+Ölçüm (run 40307841176, vocab 4096 × width 96, 4 thread): eğitim süresinin
+~%80'i `tied_output_update` döngüsünde geçiyordu. O döngü **her tahmin
+tokenında** bağlı (tied) embedding matrisini, iki AdamW moment matrisini ve
+iki bias moment vektörünü baştan sona akıtıyor: token başına ~17 MB
+L3-yerleşik trafik. Aritmetik değil, bellek trafiği darboğazdı.
+
+`--gradient-accumulation N` (kütüphanede `neural_train_config_t%gradient_accumulation`)
+N tahmin tokenının **güncelleme öncesi parametrelerde** hesaplanmış tam
+gradyanlarını ortalar ve tek optimizer adımında uygular — yani sıradan
+mini-batch SGD/AdamW. Toplamak değil *ortalamak* şart: aksi hâlde 40 tokenlık
+bir kayıt, 1 tokenlık kayıttan 40 kat büyük adım atardı.
+
+Sözleşmeler korunur:
+
+- **Batch kayıt sınırını aşmaz.** Her kayıt sonunda kalan kısmi batch
+  flush edilir; her checkpoint sınırı zaten kayıt sınırıdır, dolayısıyla
+  `2 + checkpoint + 2` akışı tek-geçiş akışıyla **bit-birebir** aynıdır
+  (native test `test_batched_optimizer_contract`, AdamW momentleri dâhil).
+- **N = 1 varsayılandır** ve tam olarak eski token-başına yolu çalıştırır;
+  mevcut kanıt/test sözleşmeleri değişmez.
+- **Birikim katsayısı checkpoint'e yazılır** (format v4). v2/v3 dosyaları
+  yüklenebilir; v3, yazıldığı yolu (N = 1) geri yükler. Böylece bir resume
+  güncelleme gruplamasını sessizce değiştiremez.
+- **LR zamanlaması adım sayar.** Bu yüzden runner'ın `--warmup-updates` /
+  `--total-updates` argümanları *tahmin tokenı* birimindedir ve runner
+  bunları `--gradient-accumulation`'a bölüp adım cinsine çevirir; token
+  birimindeki cosine ufku adım biriminde warmup'ın altına düşerse koşu
+  argüman hatasıyla (exit 2) durur.
+- Katsayı üst sınırı 512'dir (`NPT_MAX_GRADIENT_ACCUMULATION`): staging
+  tamponları O(vocabulary × N), flush çekirdeğinin blok tamponu
+  O(width × N). 512'nin üstü hız kazandırmaz, yalnız bellek büyütür.
+
+Hız iddiası ölçümle kapılanır: `make neural-throughput-check`
+(`tools/benchmark_neural_batch_throughput.py`) bayt-özdeş sentetik korpusta
+aynı seed/shape/zamanlamayla iki kol koşar (N=1 ve N=32), token/sn oranını,
+**eşit token sayısında** held-out NLL farkını ve "saniye başına NLL iyileşmesi"
+oranını raporlar. `.github/workflows/neural-batch-throughput.yml` bu üç kapıyı
+(sırasıyla ≥1,5x, ≤0,05 NLL sapması, ≥1,5x) PR'da zorlar ve JSON kanıtı
+artifact olarak yayımlar.
 
 ## 4. Koşu tarifi
 

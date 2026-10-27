@@ -37,6 +37,7 @@ program test_all
    call test_neural_causal_design()
    call test_neural_continuation_checkpoint()
    call test_adamw_optimizer_contract()
+   call test_batched_optimizer_contract()
    call test_text_ingest()
    call test_fortran_control()
    call test_fortran_integrity()
@@ -1065,6 +1066,146 @@ contains
       open(newunit=unit, file=checkpoint_path, status='old', iostat=io_status)
       if (io_status == 0) close(unit, status='delete')
    end subroutine test_adamw_optimizer_contract
+
+   ! Mini-batch accumulation is the throughput mode of the tied-output
+   ! trainer: N per-token gradients are evaluated at the pre-step parameters,
+   ! averaged, and applied as one optimizer step.  These assertions pin the
+   ! contract that makes it safe: the accumulation factor is validated, one
+   ! step consumes a whole batch instead of one token, the batch is flushed at
+   ! every record boundary so 2+checkpoint+2 stays bit-identical to one pass,
+   ! and the factor survives the checkpoint round trip.
+   subroutine test_batched_optimizer_contract()
+      type(bpe_model_t) :: bpe
+      type(neural_decoder_t) :: model, full_model, split_model, restored_model
+      type(neural_decoder_config_t) :: decoder_config
+      type(neural_train_config_t) :: config, full_config, restored_config
+      type(neural_train_state_t) :: state, full_state, split_state, restored_state
+      type(neural_train_metrics_t) :: before, after, update_metrics
+      type(neural_train_metrics_t) :: full_metrics, split_metrics, resumed_metrics
+      integer(int32) :: status, tokens(12), index
+      integer :: unit, io_status
+      character(len=*), parameter :: corpus_path = 'test_neural_batch.txt'
+      character(len=*), parameter :: checkpoint_path = 'test_neural_batch.vgnr'
+
+      ! Validation: an accumulation factor of zero or one larger than a record
+      ! can never be honoured, so it must be rejected instead of silently
+      ! clamped (a clamp would change the effective learning rate).
+      config = neural_train_config_t(learning_rate=0.003_real64, gradient_clip_norm=4.0_real64, &
+                                     embedding_value_limit=4.0_real64, maximum_tokens_per_record=32_int32)
+      config%gradient_accumulation = 0_int32
+      call assert_true(.not. neural_train_config_is_valid(config), 'zero gradient accumulation is rejected')
+      config%gradient_accumulation = 33_int32
+      call assert_true(.not. neural_train_config_is_valid(config), &
+                       'gradient accumulation larger than a record is rejected')
+      config%gradient_accumulation = 32_int32
+      call assert_true(neural_train_config_is_valid(config), 'gradient accumulation equal to a record is accepted')
+      config%maximum_tokens_per_record = 4096_int32
+      config%gradient_accumulation = NPT_MAX_GRADIENT_ACCUMULATION + 1_int32
+      call assert_true(.not. neural_train_config_is_valid(config), &
+                       'gradient accumulation above the staging cap is rejected instead of allocating without bound')
+      config%maximum_tokens_per_record = 32_int32
+      config%gradient_accumulation = 1_int32
+      call assert_true(neural_train_config_is_valid(config), 'per-token accumulation remains valid')
+
+      do index = 1_int32, size(tokens, kind=int32)
+         tokens(index) = modulo(index - 1_int32, 4_int32) + 1_int32
+      end do
+      call bpe_init(bpe, 1_int32, status)
+      call assert_i32_equal(status, BPE_OK, 'batched byte tokenizer initializes')
+      decoder_config = neural_decoder_config_t(vocabulary_size=256_int32, width=16_int32, heads=2_int32, &
+                                               local_window=4_int32, ffn_width=32_int32)
+      call neural_decoder_init(model, decoder_config, 717171_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'batched contract model initializes')
+
+      config = neural_train_config_t(learning_rate=0.01_real64, gradient_clip_norm=4.0_real64, &
+                                     embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32, &
+                                     optimizer=NPT_OPTIMIZER_ADAMW, weight_decay=0.01_real64, &
+                                     gradient_accumulation=4_int32)
+      call neural_train_state_init(state)
+      call neural_train_metrics_reset(before)
+      call neural_evaluate_token_sequence(model, tokens, size(tokens, kind=int32), config, before, status)
+      call assert_i32_equal(status, NPT_OK, 'batched baseline evaluation succeeds')
+      do index = 1_int32, 30_int32
+         call neural_train_metrics_reset(update_metrics)
+         call neural_train_token_sequence(model, tokens, size(tokens, kind=int32), config, state, update_metrics, status)
+         call assert_i32_equal(status, NPT_OK, 'batched teacher-forced update succeeds')
+      end do
+      ! 11 prediction tokens per record with a batch of 4 => ceil(11/4) = 3
+      ! optimizer steps per record, i.e. the counter measures steps, not the
+      ! tokens that were accumulated into them.
+      call assert_true(state%updates_completed == 30_int64 * 3_int64, &
+                       'batched accumulation counts one optimizer step per full or trailing batch')
+      call assert_true(allocated(state%adam_m_embedding) .and. allocated(state%adam_v_embedding), &
+                       'batched AdamW path materializes the moments')
+      call neural_train_metrics_reset(after)
+      call neural_evaluate_token_sequence(model, tokens, size(tokens, kind=int32), config, after, status)
+      call assert_i32_equal(status, NPT_OK, 'batched post-update evaluation succeeds')
+      call assert_true(after%mean_nll < before%mean_nll, &
+                       'averaged mini-batch steps still reduce deterministic toy NLL')
+
+      ! Accumulation across a record boundary must never happen: every
+      ! checkpoint is written between records, so a batch that spanned two
+      ! records would make chunk+resume differ from the one-pass stream.
+      open(newunit=unit, file=corpus_path, status='replace', action='write', iostat=io_status)
+      call assert_true(io_status == 0, 'temporary batched neural corpus opens')
+      if (io_status == 0) then
+         write(unit, '(A)') 'abababab'
+         write(unit, '(A)') 'babababa'
+         write(unit, '(A)') 'abababab'
+         write(unit, '(A)') 'babababa'
+         close(unit)
+      end if
+      full_config = neural_train_config_t(learning_rate=0.02_real64, gradient_clip_norm=4.0_real64, &
+                                          embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32, &
+                                          optimizer=NPT_OPTIMIZER_ADAMW, weight_decay=0.01_real64, &
+                                          gradient_accumulation=3_int32)
+      call neural_decoder_init(full_model, decoder_config, 828282_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'batched one-pass model initializes')
+      call neural_decoder_init(split_model, decoder_config, 828282_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'batched chunked model initializes')
+      call neural_train_state_init(full_state)
+      call neural_train_state_init(split_state)
+      call neural_train_metrics_reset(full_metrics)
+      call neural_train_utf8_file(full_model, bpe, corpus_path, full_config, full_state, full_metrics, status)
+      call assert_i32_equal(status, NPT_OK, 'batched one-pass training succeeds')
+      call neural_train_metrics_reset(split_metrics)
+      call neural_train_utf8_file(split_model, bpe, corpus_path, full_config, split_state, split_metrics, status, &
+                                  maximum_new_source_records=2_int64)
+      call assert_i32_equal(status, NPT_OK, 'first batched chunk succeeds')
+      call neural_checkpoint_save(checkpoint_path, split_model, bpe, full_config, split_state, status)
+      call assert_i32_equal(status, NPT_OK, 'batched chunk checkpoint saves')
+      call neural_checkpoint_load(checkpoint_path, bpe, restored_model, restored_config, restored_state, status)
+      call assert_i32_equal(status, NPT_OK, 'batched chunk checkpoint loads')
+      call assert_true(restored_config%gradient_accumulation == 3_int32, &
+                       'checkpoint preserves the gradient accumulation factor')
+      call neural_train_metrics_reset(resumed_metrics)
+      call neural_train_utf8_file(restored_model, bpe, corpus_path, restored_config, restored_state, resumed_metrics, &
+                                  status, skip_source_records=restored_state%source_records_completed, &
+                                  maximum_new_source_records=2_int64)
+      call assert_i32_equal(status, NPT_OK, 'resumed batched chunk succeeds')
+      call assert_true(restored_state%updates_completed == full_state%updates_completed, &
+                       'batched resume restores the optimizer-step cursor')
+      call assert_true(all(full_model%token_embedding == restored_model%token_embedding) .and. &
+                       all(full_model%output_bias == restored_model%output_bias), &
+                       'batched chunk+resume reproduces the one-pass parameters bit-identically')
+      if (allocated(full_state%adam_m_embedding) .and. allocated(restored_state%adam_m_embedding)) then
+         call assert_true(all(full_state%adam_m_embedding == restored_state%adam_m_embedding) .and. &
+                          all(full_state%adam_v_embedding == restored_state%adam_v_embedding), &
+                          'batched chunk+resume reproduces the one-pass AdamW moments bit-identically')
+      else
+         call assert_true(.false., 'batched chunk+resume reproduces the one-pass AdamW moments bit-identically')
+      end if
+
+      call neural_decoder_destroy(model)
+      call neural_decoder_destroy(full_model)
+      call neural_decoder_destroy(split_model)
+      call neural_decoder_destroy(restored_model)
+      call bpe_destroy(bpe)
+      open(newunit=unit, file=corpus_path, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+      open(newunit=unit, file=checkpoint_path, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+   end subroutine test_batched_optimizer_contract
 
    subroutine test_text_ingest()
       type(vocabulary_t) :: vocab
