@@ -240,22 +240,13 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"- NLL improvement per second: {comparison['nll_improvement_per_second']:.4g} nats/s "
             f"(reference arm {comparison['nll_improvement_per_second_reference']:.4g} nats/s)",
         ]
-        compared = arms.get(f"optimizer-{args.compare_optimizer}") if args.compare_optimizer else None
-        if compared:
-            compared_rate = float(compared["reported_tokens_per_second"])
-            comparison.update({
-                "compare_optimizer": args.compare_optimizer,
-                "compare_optimizer_tokens_per_second": compared_rate,
-                "compare_optimizer_heldout_mean_nll": float(compared["heldout"]["mean_nll"]),
-                "speedup_vs_compare_optimizer": (float(batched["reported_tokens_per_second"]) / compared_rate
-                                                 if compared_rate else 0.0),
-                "heldout_nll_delta_vs_compare_optimizer": (
-                    float(batched["heldout"]["mean_nll"]) - float(compared["heldout"]["mean_nll"])),
-            })
+        if "speedup_vs_compare_optimizer" in comparison:
             lines += [
-                f"- optimizer A/B (same binary, same accumulation): **{args.optimizer}** vs "
-                f"**{args.compare_optimizer}** -- rate **{comparison['speedup_vs_compare_optimizer']:.3f}x**, "
-                f"held-out NLL delta **{comparison['heldout_nll_delta_vs_compare_optimizer']:+.6f}**",
+                f"- optimizer A/B (same binary, same accumulation): "
+                f"**{comparison.get('optimizer', 'reported')}** vs "
+                f"**{comparison['compare_optimizer']}** -- rate "
+                f"**{comparison['speedup_vs_compare_optimizer']:.3f}x**, held-out NLL delta "
+                f"**{comparison['heldout_nll_delta_vs_compare_optimizer']:+.6f}**",
             ]
         ratio = comparison.get("nll_improvement_per_second_ratio")
         lines += [
@@ -577,6 +568,18 @@ def main(argv: list[str] | None = None) -> int:
                     f"held-out NLL regression vs baseline {baseline_nll_delta:+.4f} > "
                     f"gate {args.max_baseline_nll_regression:.4f}"
                 )
+        compared = arms.get(f"optimizer-{args.compare_optimizer}") if args.compare_optimizer else None
+        if compared:
+            compared_rate = float(compared["reported_tokens_per_second"])
+            comparison.update({
+                "compare_optimizer": args.compare_optimizer,
+                "compare_optimizer_tokens_per_second": compared_rate,
+                "compare_optimizer_heldout_mean_nll": float(compared["heldout"]["mean_nll"]),
+                "speedup_vs_compare_optimizer": (float(batched["reported_tokens_per_second"]) / compared_rate
+                                                 if compared_rate else 0.0),
+                "heldout_nll_delta_vs_compare_optimizer": (
+                    float(batched["heldout"]["mean_nll"]) - float(compared["heldout"]["mean_nll"])),
+            })
         report["comparison"] = comparison
         report["status"] = "passed" if not failures else "failed"
         report["gate_failures"] = failures
