@@ -89,6 +89,7 @@ module neural_retention_decoder
    public :: neural_decoder_init, neural_decoder_destroy, neural_decoder_is_ready
    public :: neural_decoder_state_init, neural_decoder_state_destroy, neural_decoder_state_reset
    public :: neural_decoder_state_is_ready, neural_decoder_step, neural_decoder_plan
+   public :: neural_decoder_step_hidden, neural_decoder_project_logits
    public :: neural_decoder_config_is_valid
 
 contains
@@ -470,12 +471,17 @@ contains
       state%cache_count = min(state%cache_count + 1_int32, state%local_window)
    end subroutine append_local_cache
 
-   subroutine neural_decoder_step(model, state, token, hidden, logits, status)
+   ! Everything a step does except the tied logits projection: the residual
+   ! stream, attention, retention update and the gated feed-forward.  Splitting
+   ! it out lets the trainer project the logits of a whole accumulated block in
+   ! one pass over the tied embedding (see neural_decoder_project_logits), which
+   ! is the difference between reading the (vocabulary x width) matrix once per
+   ! block instead of once per prediction token.
+   subroutine neural_decoder_step_hidden(model, state, token, hidden, status)
       type(neural_decoder_t), intent(in) :: model
       type(neural_decoder_state_t), intent(inout) :: state
       integer(int32), intent(in) :: token
       real(real32), intent(out) :: hidden(:)
-      real(real32), intent(out) :: logits(:)
       integer(int32), intent(out) :: status
       real(real32) :: normalized(model%config%width), attention_normalized(model%config%width)
       real(real32) :: query(model%head_width, model%config%heads), key(model%head_width, model%config%heads)
@@ -488,8 +494,7 @@ contains
 
       status = NRD_OK
       if (.not. neural_decoder_is_ready(model) .or. .not. neural_decoder_state_is_ready(state, model) .or. &
-          token < 1_int32 .or. token > model%config%vocabulary_size .or. size(hidden) /= model%config%width .or. &
-          size(logits) /= model%config%vocabulary_size) then
+          token < 1_int32 .or. token > model%config%vocabulary_size .or. size(hidden) /= model%config%width) then
          status = NRD_ERR_INVALID_ARGUMENT
          return
       end if
@@ -521,6 +526,29 @@ contains
          ffn_input(component) = stable_sigmoid(gate(component)) * tanh(value_gate(component))
       end do
       hidden = residual + matmul(model%ffn_output, ffn_input)
+      if (.not. all(ieee_is_finite(hidden))) then
+         status = NRD_ERR_NUMERIC
+         return
+      end if
+      call append_local_cache(state, key, value)
+      state%steps = state%steps + 1_int64
+   end subroutine neural_decoder_step_hidden
+
+   subroutine neural_decoder_step(model, state, token, hidden, logits, status)
+      type(neural_decoder_t), intent(in) :: model
+      type(neural_decoder_state_t), intent(inout) :: state
+      integer(int32), intent(in) :: token
+      real(real32), intent(out) :: hidden(:)
+      real(real32), intent(out) :: logits(:)
+      integer(int32), intent(out) :: status
+
+      status = NRD_OK
+      if (size(logits) /= model%config%vocabulary_size) then
+         status = NRD_ERR_INVALID_ARGUMENT
+         return
+      end if
+      call neural_decoder_step_hidden(model, state, token, hidden, status)
+      if (status /= NRD_OK) return
       ! Logits use the vector-matrix matmul form hidden . E, which streams
       ! the tied embedding without materializing a transposed copy (the
       ! earlier matmul(transpose(E), hidden) allocated a full (vocabulary x
@@ -533,13 +561,58 @@ contains
       ! same embedding^T hidden + bias up to reassociation, gated against
       ! the transpose-matmul reference in the test suite.
       logits = matmul(hidden, model%token_embedding) + model%output_bias
-      if (.not. all(ieee_is_finite(hidden)) .or. .not. all(ieee_is_finite(logits))) then
+      if (.not. all(ieee_is_finite(logits))) then
          status = NRD_ERR_NUMERIC
          return
       end if
-      call append_local_cache(state, key, value)
-      state%steps = state%steps + 1_int64
    end subroutine neural_decoder_step
+
+   ! Projects a block of hidden states onto the tied embedding in one pass.
+   ! hidden_matrix is (width, count), logits_matrix is (vocabulary, count); the
+   ! embedding element E(feature, token) is loaded once and fanned out to every
+   ! column of the block, so the (vocabulary x width) matrix is streamed once
+   ! per block instead of once per token.  Column accumulators are contiguous,
+   ! which is what makes the fan-out vectorizable; the write of one row is
+   ! count-spaced but lands in a block that stays cache resident.
+   subroutine neural_decoder_project_logits(model, hidden_matrix, count, logits_matrix, status)
+      type(neural_decoder_t), intent(in) :: model
+      real(real32), intent(in) :: hidden_matrix(:, :)
+      integer(int32), intent(in) :: count
+      real(real32), intent(out) :: logits_matrix(:, :)
+      integer(int32), intent(out) :: status
+      integer(int32) :: width, vocabulary_size, token, feature, slot
+      real(real32) :: weight
+      real(real32) :: accumulator(size(hidden_matrix, 2))
+
+      status = NRD_OK
+      width = model%config%width
+      vocabulary_size = model%config%vocabulary_size
+      if (.not. neural_decoder_is_ready(model) .or. count < 1_int32 .or. &
+          count > size(hidden_matrix, 2, kind=int32) .or. &
+          count > size(logits_matrix, 2, kind=int32) .or. &
+          size(hidden_matrix, 1, kind=int32) /= width .or. &
+          size(logits_matrix, 1, kind=int32) /= vocabulary_size) then
+         status = NRD_ERR_INVALID_ARGUMENT
+         return
+      end if
+      do token = 1_int32, vocabulary_size
+         accumulator(1_int32:count) = 0.0_real32
+         do feature = 1_int32, width
+            weight = model%token_embedding(feature, token)
+            !$omp simd
+            do slot = 1_int32, count
+               accumulator(slot) = accumulator(slot) + weight * hidden_matrix(feature, slot)
+            end do
+         end do
+         do slot = 1_int32, count
+            logits_matrix(token, slot) = accumulator(slot) + model%output_bias(token)
+         end do
+      end do
+      if (.not. all(ieee_is_finite(logits_matrix(1_int32:vocabulary_size, 1_int32:count)))) then
+         status = NRD_ERR_NUMERIC
+      end if
+   end subroutine neural_decoder_project_logits
+
 
    subroutine neural_decoder_plan(config, plan, status)
       type(neural_decoder_config_t), intent(in) :: config

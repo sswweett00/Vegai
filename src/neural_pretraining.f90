@@ -191,6 +191,10 @@ module neural_pretraining
       ! real64.
       real(real32), allocatable :: batch_residuals(:, :)
       real(real32), allocatable :: batch_hidden(:, :)
+      ! (vocabulary, capacity): one column per staged token.  Filled by a single
+      ! pass over the tied embedding when the block is resolved, which is the
+      ! whole point of deferring the projection.
+      real(real32), allocatable :: batch_logits(:, :)
       real(real64), allocatable :: batch_clip(:)
       integer(int32), allocatable :: batch_targets(:)
       integer(int32) :: batch_count = 0_int32
@@ -328,12 +332,13 @@ contains
       ! vectors; trainer allocations: hidden, logits, and real64 softmax.
       plan%per_step_working_bytes = 4_int64 * (11_int64 * width + 3_int64 * ffn_width + vocabulary) + &
                                     8_int64 * vocabulary
-      ! Mini-batch staging: one residual column (real32 per vocabulary entry),
-      ! one hidden column and the clip/target scalars per accumulated token.
+      ! Mini-batch staging per accumulated token: the residual column, the
+      ! deferred logits column (both real32 per vocabulary entry), the hidden
+      ! column and the clip/target scalars.
       if (train_config%gradient_accumulation > 1_int32) then
          accumulation = int(min(train_config%gradient_accumulation, train_config%maximum_tokens_per_record), int64)
          plan%per_step_working_bytes = plan%per_step_working_bytes + &
-                                        accumulation * (4_int64 * vocabulary + 4_int64 * width + 8_int64 + 4_int64)
+                                        accumulation * (8_int64 * vocabulary + 4_int64 * width + 8_int64 + 4_int64)
       end if
       plan%optimizer_state_bytes_real64 = 0_int64
       if (train_config%optimizer == NPT_OPTIMIZER_ADAMW) then
@@ -448,6 +453,7 @@ contains
       if (batch_capacity > 1_int32) then
          allocate(workspace%batch_residuals(model%config%vocabulary_size, batch_capacity), &
                   workspace%batch_hidden(model%config%width, batch_capacity), &
+                  workspace%batch_logits(model%config%vocabulary_size, batch_capacity), &
                   workspace%batch_clip(batch_capacity), workspace%batch_targets(batch_capacity), &
                   stat=allocation_status)
          if (allocation_status /= 0) then
@@ -474,6 +480,7 @@ contains
       if (allocated(workspace%probabilities)) deallocate(workspace%probabilities)
       if (allocated(workspace%batch_residuals)) deallocate(workspace%batch_residuals)
       if (allocated(workspace%batch_hidden)) deallocate(workspace%batch_hidden)
+      if (allocated(workspace%batch_logits)) deallocate(workspace%batch_logits)
       if (allocated(workspace%batch_clip)) deallocate(workspace%batch_clip)
       if (allocated(workspace%batch_targets)) deallocate(workspace%batch_targets)
       workspace%batch_count = 0_int32
@@ -874,26 +881,65 @@ contains
       end do
    end subroutine batched_tied_output_update
 
-   ! Stages one prediction token into the mini-batch buffers.  The residual is
-   ! stored unclipped because the output-bias gradient never sees the clip.
-   subroutine stage_batch_token(workspace, config, hidden, probabilities, target, status)
+   ! Records one prediction: the teacher-forced loss, the running NLL sums and
+   ! the top-1/top-5 bookkeeping.  Both the per-token path and the resolving
+   ! block path call it in token order, so a block of deferred predictions sums
+   ! in exactly the order the per-token path would have used.
+   subroutine observe_prediction(metrics, probabilities, target, loss, status)
+      type(neural_train_metrics_t), intent(inout) :: metrics
+      real(real64), intent(in) :: probabilities(:)
+      integer(int32), intent(in) :: target
+      real(real64), intent(out) :: loss
+      integer(int32), intent(out) :: status
+      integer(int32) :: candidate, target_rank
+      real(real64) :: target_probability
+
+      status = NPT_OK
+      loss = -log(max(probabilities(target), tiny(1.0_real64)))
+      if (.not. ieee_is_finite(loss)) then
+         status = NPT_ERR_NUMERICAL
+         return
+      end if
+      metrics%prediction_tokens = metrics%prediction_tokens + 1_int64
+      metrics%cumulative_nll = metrics%cumulative_nll + loss
+      ! Rank of the true token under the pre-update distribution.  Ties
+      ! resolve to the lowest index, matching greedy argmax decoding.
+      target_probability = probabilities(target)
+      target_rank = 0_int32
+      do candidate = 1_int32, size(probabilities, kind=int32)
+         if (probabilities(candidate) > target_probability .or. &
+             (probabilities(candidate) == target_probability .and. candidate < target)) then
+            target_rank = target_rank + 1_int32
+         end if
+      end do
+      if (target_rank == 0_int32) metrics%top1_correct = metrics%top1_correct + 1_int64
+      if (target_rank < 5_int32) metrics%top5_correct = metrics%top5_correct + 1_int64
+   end subroutine observe_prediction
+
+   ! Stages one prediction token's hidden state and target.  The residual vector
+   ! is filled in later (stage_batch_residual) because its softmax needs the
+   ! logits of the whole block, and those are computed in one pass over the tied
+   ! embedding when the block is resolved.
+   subroutine stage_pending_hidden(workspace, config, hidden, target, status)
       type(neural_train_workspace_t), intent(inout) :: workspace
       type(neural_train_config_t), intent(in) :: config
       real(real32), intent(in) :: hidden(:)
-      real(real64), intent(in) :: probabilities(:)
       integer(int32), intent(in) :: target
       integer(int32), intent(out) :: status
-      integer(int32) :: vocabulary_size, slot, token
-      real(real64) :: clip_scale, smooth_mass, residual
+      integer(int32) :: slot, vocabulary_size
+      real(real64) :: clip_scale
       logical :: norm_is_finite
 
       status = NPT_OK
-      vocabulary_size = size(probabilities, kind=int32)
-      if (.not. allocated(workspace%batch_residuals) .or. .not. allocated(workspace%batch_targets) .or. &
-          workspace%batch_count >= workspace%batch_capacity .or. workspace%batch_capacity <= 1_int32 .or. &
-          size(hidden, kind=int32) /= size(workspace%batch_hidden, 1, kind=int32) .or. &
-          vocabulary_size /= size(workspace%batch_residuals, 1, kind=int32) .or. &
-          target < 1_int32 .or. target > vocabulary_size) then
+      if (.not. allocated(workspace%batch_residuals) .or. .not. allocated(workspace%batch_hidden) .or. &
+          .not. allocated(workspace%batch_targets) .or. &
+          workspace%batch_capacity <= 1_int32 .or. workspace%batch_count >= workspace%batch_capacity .or. &
+          size(hidden, kind=int32) /= size(workspace%batch_hidden, 1, kind=int32)) then
+         status = NPT_ERR_INVALID_ARGUMENT
+         return
+      end if
+      vocabulary_size = size(workspace%batch_residuals, 1, kind=int32)
+      if (target < 1_int32 .or. target > vocabulary_size) then
          status = NPT_ERR_INVALID_ARGUMENT
          return
       end if
@@ -903,6 +949,32 @@ contains
          return
       end if
       slot = workspace%batch_count + 1_int32
+      workspace%batch_hidden(:, slot) = hidden
+      workspace%batch_clip(slot) = clip_scale
+      workspace%batch_targets(slot) = target
+      workspace%batch_count = slot
+   end subroutine stage_pending_hidden
+
+   ! Fills the residual column of one staged token.  The residual is stored
+   ! unclipped because the output-bias gradient never sees the clip.
+   subroutine stage_batch_residual(workspace, config, probabilities, target, slot, status)
+      type(neural_train_workspace_t), intent(inout) :: workspace
+      type(neural_train_config_t), intent(in) :: config
+      real(real64), intent(in) :: probabilities(:)
+      integer(int32), intent(in) :: target
+      integer(int32), intent(in) :: slot
+      integer(int32), intent(out) :: status
+      integer(int32) :: vocabulary_size, token
+      real(real64) :: smooth_mass, residual
+
+      status = NPT_OK
+      vocabulary_size = size(probabilities, kind=int32)
+      if (.not. allocated(workspace%batch_residuals) .or. slot < 1_int32 .or. slot > workspace%batch_count .or. &
+          vocabulary_size /= size(workspace%batch_residuals, 1, kind=int32) .or. &
+          target < 1_int32 .or. target > vocabulary_size) then
+         status = NPT_ERR_INVALID_ARGUMENT
+         return
+      end if
       smooth_mass = config%label_smoothing / real(vocabulary_size, real64)
       ! Columns of the staging buffer are disjoint, so this parallel fill stores
       ! independent elements and needs no reduction.
@@ -913,32 +985,52 @@ contains
          workspace%batch_residuals(token, slot) = real(residual, real32)
       end do
       !$omp end parallel do
-      workspace%batch_hidden(:, slot) = hidden
-      workspace%batch_clip(slot) = clip_scale
-      workspace%batch_targets(slot) = target
-      workspace%batch_count = slot
-   end subroutine stage_batch_token
+   end subroutine stage_batch_residual
 
-   ! Applies the staged mini-batch (if any) as one optimizer step and resets
-   ! the staging cursor.  Called at the batch capacity and at every record end;
-   ! the latter is what keeps checkpoint boundaries -- which always fall on
-   ! record boundaries -- bit-identical to a one-pass stream.
-   subroutine flush_train_batch(model, workspace, config, state, status)
+   ! Turns a staged block into one optimizer step: project the block's logits in
+   ! a single pass over the tied embedding, score every prediction in block
+   ! order, fill the residual columns, then apply the averaged update.  Every
+   ! quantity is computed from the pre-step parameters, exactly as the per-token
+   ! path does; only the logits projection is shared across the block.
+   subroutine resolve_train_batch(model, workspace, config, state, metrics, sequence_nll, status)
       type(neural_decoder_t), intent(inout) :: model
       type(neural_train_workspace_t), intent(inout) :: workspace
       type(neural_train_config_t), intent(in) :: config
       type(neural_train_state_t), intent(inout) :: state
+      type(neural_train_metrics_t), intent(inout) :: metrics
+      real(real64), intent(inout) :: sequence_nll
       integer(int32), intent(out) :: status
+      integer(int32) :: count, slot, decoder_status
+      real(real64) :: loss
 
       status = NPT_OK
-      if (workspace%batch_count <= 0_int32) return
+      count = workspace%batch_count
+      if (count <= 0_int32) return
+      if (.not. allocated(workspace%batch_logits)) then
+         status = NPT_ERR_INVALID_ARGUMENT
+         return
+      end if
+      call neural_decoder_project_logits(model, workspace%batch_hidden, count, workspace%batch_logits, decoder_status)
+      if (decoder_status /= NRD_OK) then
+         status = NPT_ERR_MODEL
+         return
+      end if
+      do slot = 1_int32, count
+         workspace%logits = workspace%batch_logits(:, slot)
+         call stable_softmax(workspace%logits, workspace%probabilities, status)
+         if (status /= NPT_OK) return
+         call observe_prediction(metrics, workspace%probabilities, workspace%batch_targets(slot), loss, status)
+         if (status /= NPT_OK) return
+         sequence_nll = sequence_nll + loss
+         call stage_batch_residual(workspace, config, workspace%probabilities, workspace%batch_targets(slot), slot, status)
+         if (status /= NPT_OK) return
+      end do
       call batched_tied_output_update(model, workspace%batch_residuals, workspace%batch_hidden, &
-                                      workspace%batch_clip, workspace%batch_targets, workspace%batch_count, &
-                                      config, state, status)
+                                      workspace%batch_clip, workspace%batch_targets, count, config, state, status)
       if (status /= NPT_OK) return
       state%updates_completed = state%updates_completed + 1_int64
       workspace%batch_count = 0_int32
-   end subroutine flush_train_batch
+   end subroutine resolve_train_batch
 
    subroutine process_token_sequence(model, tokens, token_count, config, state, metrics, update_model, workspace, status)
       type(neural_decoder_t), intent(inout) :: model
@@ -950,9 +1042,9 @@ contains
       logical, intent(in) :: update_model
       type(neural_train_workspace_t), intent(inout) :: workspace
       integer(int32), intent(out) :: status
-      integer(int32) :: position, decoder_status, target, candidate, target_rank
+      integer(int32) :: position, decoder_status, target
       integer(int32) :: batch_capacity
-      real(real64) :: loss, sequence_nll, target_probability
+      real(real64) :: loss, sequence_nll
       logical :: accumulating
 
       status = NPT_OK
@@ -987,44 +1079,38 @@ contains
          return
       end if
       do position = 1_int32, token_count - 1_int32
-         call neural_decoder_step(model, workspace%decoder_state, tokens(position), workspace%hidden, &
-                                  workspace%logits, decoder_status)
-         if (decoder_status /= NRD_OK) then
-            status = NPT_ERR_MODEL
-            exit
-         end if
-         call stable_softmax(workspace%logits, workspace%probabilities, status)
-         if (status /= NPT_OK) exit
          target = tokens(position + 1_int32)
-         loss = -log(max(workspace%probabilities(target), tiny(1.0_real64)))
-         if (.not. ieee_is_finite(loss)) then
-            status = NPT_ERR_NUMERICAL
-            exit
-         end if
-         metrics%prediction_tokens = metrics%prediction_tokens + 1_int64
-         metrics%cumulative_nll = metrics%cumulative_nll + loss
-         sequence_nll = sequence_nll + loss
-         ! Rank of the true token under the pre-update distribution.  Ties
-         ! resolve to the lowest index, matching greedy argmax decoding.
-         target_probability = workspace%probabilities(target)
-         target_rank = 0_int32
-         do candidate = 1_int32, model%config%vocabulary_size
-            if (workspace%probabilities(candidate) > target_probability .or. &
-                (workspace%probabilities(candidate) == target_probability .and. candidate < target)) then
-               target_rank = target_rank + 1_int32
+         if (accumulating) then
+            ! Forward without the tied projection.  The projection of the whole
+            ! block happens once, when the block is resolved, so the
+            ! (vocabulary x width) embedding is streamed once per block instead
+            ! of once per prediction token -- that read is the single largest
+            ! memory stream of a step.
+            call neural_decoder_step_hidden(model, workspace%decoder_state, tokens(position), &
+                                            workspace%hidden, decoder_status)
+            if (decoder_status /= NRD_OK) then
+               status = NPT_ERR_MODEL
+               exit
             end if
-         end do
-         if (target_rank == 0_int32) metrics%top1_correct = metrics%top1_correct + 1_int64
-         if (target_rank < 5_int32) metrics%top5_correct = metrics%top5_correct + 1_int64
-         if (update_model) then
-            if (accumulating) then
-               call stage_batch_token(workspace, config, workspace%hidden, workspace%probabilities, target, status)
+            call stage_pending_hidden(workspace, config, workspace%hidden, target, status)
+            if (status /= NPT_OK) exit
+            if (workspace%batch_count >= batch_capacity) then
+               call resolve_train_batch(model, workspace, config, state, metrics, sequence_nll, status)
                if (status /= NPT_OK) exit
-               if (workspace%batch_count >= batch_capacity) then
-                  call flush_train_batch(model, workspace, config, state, status)
-                  if (status /= NPT_OK) exit
-               end if
-            else
+            end if
+         else
+            call neural_decoder_step(model, workspace%decoder_state, tokens(position), workspace%hidden, &
+                                     workspace%logits, decoder_status)
+            if (decoder_status /= NRD_OK) then
+               status = NPT_ERR_MODEL
+               exit
+            end if
+            call stable_softmax(workspace%logits, workspace%probabilities, status)
+            if (status /= NPT_OK) exit
+            call observe_prediction(metrics, workspace%probabilities, target, loss, status)
+            if (status /= NPT_OK) exit
+            sequence_nll = sequence_nll + loss
+            if (update_model) then
                call tied_output_update(model, workspace%hidden, workspace%probabilities, target, config, state, status)
                if (status /= NPT_OK) exit
                state%updates_completed = state%updates_completed + 1_int64
@@ -1035,7 +1121,7 @@ contains
       ! than across records) is what preserves chunk/resume bit-identity: every
       ! checkpoint boundary in process_utf8_file is a record boundary.
       if (status == NPT_OK .and. update_model .and. accumulating .and. workspace%batch_count > 0_int32) then
-         call flush_train_batch(model, workspace, config, state, status)
+         call resolve_train_batch(model, workspace, config, state, metrics, sequence_nll, status)
       end if
       if (status /= NPT_OK) return
       metrics%records = metrics%records + 1_int64
