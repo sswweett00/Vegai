@@ -127,6 +127,23 @@ jobs:
               print(f"- gate failure: {failure}")
           if report.get("error"):
               print(f"- error: {report['error']}")
+          # Also emit the headline numbers as a check annotation: workflow
+          # summaries are not readable through the API surface used by the
+          # review tooling, annotations are.
+          arms = report.get("arms", {})
+          comparison = report.get("comparison", {})
+          if arms and comparison:
+              measured = "; ".join(
+                  f"{name}: {arm['reported_tokens_per_second']:.1f} tok/s, "
+                  f"NLL {float(arm['heldout']['mean_nll']):.6f}"
+                  for name, arm in arms.items()
+              )
+              print(
+                  f"::notice title=Neural update A/B ({report.get('status')})::"
+                  f"speedup {comparison['speedup_tokens_per_second']:.3f}x; "
+                  f"held-out NLL delta {comparison['heldout_nll_delta_batched_minus_per_token']:+.6f}; "
+                  f"quality-per-second {comparison['nll_improvement_per_second_ratio']:.3f}x; {measured}"
+              )
           PY
 
       - name: Upload throughput evidence
