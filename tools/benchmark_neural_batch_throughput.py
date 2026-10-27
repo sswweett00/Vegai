@@ -198,6 +198,7 @@ def render_markdown(report: dict[str, Any]) -> str:
     if comparison:
         lines += [
             "",
+            f"- reported batch arm: **N={comparison.get('accumulation', args.accumulation)}**",
             f"- speedup (batched vs per-token, same binary): **{comparison['speedup_tokens_per_second']:.3f}x**",
         ]
         if "speedup_vs_baseline" in comparison:
@@ -247,6 +248,7 @@ def headline(report: dict[str, Any]) -> str:
             f"NLL delta vs baseline {comparison['heldout_nll_delta_batched_minus_baseline']:+.6f}; "
         )
     return (
+        f"N={comparison.get('accumulation', 0)}; "
         f"speedup {comparison['speedup_tokens_per_second']:.3f}x; "
         f"held-out NLL delta {comparison['heldout_nll_delta_batched_minus_per_token']:+.6f}; "
         f"{baseline_text}quality-per-second {comparison['nll_improvement_per_second_ratio']:.3f}x; "
@@ -299,6 +301,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--label-smoothing", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=20261025)
     parser.add_argument("--accumulation", type=int, default=32, help="batch arm accumulation factor")
+    parser.add_argument("--sweep", default=None,
+                        help="comma separated accumulation factors to compare (e.g. 32,64,128); "
+                             "the fastest arm whose held-out NLL does not regress becomes the reported"
+                             " batch arm")
     parser.add_argument("--threads", type=int, default=os.cpu_count() or 2)
     parser.add_argument("--timeout", type=int, default=3600)
     parser.add_argument("--baseline-bin", help="optional binary built from the comparison revision (e.g. main); "
@@ -367,7 +373,11 @@ def main(argv: list[str] | None = None) -> int:
         # Both arms train from the same seed-determined initialization; the
         # corpus, tokenizer, shape, learning rate and schedule are identical.
         arms = {}
-        for position, accumulation in enumerate((1, args.accumulation)):
+        factors: list[int] = [args.accumulation]
+        if args.sweep:
+            factors += [int(part) for part in args.sweep.split(",") if part.strip()]
+        factors = [factor for factor in dict.fromkeys(factors) if factor > 1]
+        for position, accumulation in enumerate([1, *factors]):
             checkpoint = work_dir / f"arm{position}.vgnr"
             arms[arm_name(accumulation)] = train_arm(
                 binary, tokenizer_path, checkpoint, work_dir / "train.txt", work_dir / "heldout.txt",
@@ -386,7 +396,24 @@ def main(argv: list[str] | None = None) -> int:
         report["arms"] = arms
 
         per_token = arms["per-token"]
-        batched = arms[arm_name(args.accumulation)]
+        # The reported batch arm is the fastest accumulation factor whose
+        # held-out NLL does not regress against the per-token arm; a larger
+        # batch buys speed by amortizing the optimizer step, and it must not buy
+        # it by degrading the model, so the choice is made from measurements.
+        candidates = [arms[arm_name(factor)] for factor in factors]
+        eligible = [arm for arm in candidates
+                    if float(arm["heldout"]["mean_nll"]) - float(per_token["heldout"]["mean_nll"])
+                    <= args.max_nll_regression]
+        batched = max(eligible or candidates, key=lambda arm: arm["reported_tokens_per_second"])
+        chosen_accumulation = int(batched["gradient_accumulation"])
+        report["accumulation_sweep"] = {
+            arm["arm"]: {
+                "accumulation": int(arm["gradient_accumulation"]),
+                "tokens_per_second": float(arm["reported_tokens_per_second"]),
+                "heldout_mean_nll": float(arm["heldout"]["mean_nll"]),
+            }
+            for arm in candidates
+        }
         speedup = (batched["reported_tokens_per_second"] / per_token["reported_tokens_per_second"]
                    if per_token["reported_tokens_per_second"] else 0.0)
         nll_delta = float(batched["heldout"]["mean_nll"]) - float(per_token["heldout"]["mean_nll"])
@@ -398,6 +425,7 @@ def main(argv: list[str] | None = None) -> int:
         quality_rate = (batched["nll_improvement_per_second"] / reference["nll_improvement_per_second"]
                         if reference["nll_improvement_per_second"] > 0 else 0.0)
         comparison = {
+            "accumulation": chosen_accumulation,
             "speedup_tokens_per_second": speedup,
             "heldout_nll_delta_batched_minus_per_token": nll_delta,
             "heldout_perplexity_per_token": math.exp(float(per_token["heldout"]["mean_nll"])),

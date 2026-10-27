@@ -10,9 +10,13 @@ on:
   workflow_dispatch:
     inputs:
       accumulation:
-        description: "optimizer-step accumulation factor for the batched arm"
+        description: "optimizer-step accumulation factor reported when no sweep is given"
         required: false
         default: "32"
+      sweep:
+        description: "comma separated accumulation factors; the fastest one that does not regress held-out NLL is reported"
+        required: false
+        default: "32,64,128"
       corpus_bytes:
         description: "synthetic corpus size per arm"
         required: false
@@ -115,6 +119,7 @@ jobs:
           python3 tools/benchmark_neural_batch_throughput.py \
             --neural-bin ./build-throughput/vegai_neural_pretrain \
             --accumulation "${{ inputs.accumulation || '32' }}" \
+            --sweep "${{ inputs.sweep || '32,64,128' }}" \
             --corpus-bytes "${{ inputs.corpus_bytes || '400000' }}" \
             --min-speedup "${{ inputs.min_speedup || '1.25' }}" \
             --baseline-bin ./build-compare/vegai_neural_pretrain \
