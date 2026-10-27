@@ -378,8 +378,13 @@ def main(argv: list[str] | None = None) -> int:
         speedup = (batched["reported_tokens_per_second"] / per_token["reported_tokens_per_second"]
                    if per_token["reported_tokens_per_second"] else 0.0)
         nll_delta = float(batched["heldout"]["mean_nll"]) - float(per_token["heldout"]["mean_nll"])
-        quality_rate = (batched["nll_improvement_per_second"] / per_token["nll_improvement_per_second"]
-                        if per_token["nll_improvement_per_second"] > 0 else 0.0)
+        # Quality per unit of wall clock.  The honest reference is the
+        # comparison binary when one was supplied, because a short probe run
+        # does not necessarily improve the per-token arm at all (its
+        # improvement-per-second then divides by ~0 and reports a meaningless 0).
+        reference = arms.get("baseline", per_token)
+        quality_rate = (batched["nll_improvement_per_second"] / reference["nll_improvement_per_second"]
+                        if reference["nll_improvement_per_second"] > 0 else 0.0)
         comparison = {
             "speedup_tokens_per_second": speedup,
             "heldout_nll_delta_batched_minus_per_token": nll_delta,

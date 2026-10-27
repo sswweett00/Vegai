@@ -128,7 +128,23 @@ tahmin-tokenı tüketimini ve tam kaynak-kayıt kapsamasını denetler).
 ~%80'i `tied_output_update` döngüsünde geçiyordu. O döngü **her tahmin
 tokenında** bağlı (tied) embedding matrisini, iki AdamW moment matrisini ve
 iki bias moment vektörünü baştan sona akıtıyor: token başına ~17 MB
-L3-yerleşik trafik. Aritmetik değil, bellek trafiği darboğazdı.
+L3-yerleşik trafik.
+
+İlk hipotez "bellek trafiği darboğaz" idi; ölçüm bunu çürüttü. 32'lik
+birikim tek başına yalnız **1,13x** getirdi (3390 → 3833 token/sn, aynı
+uzunlukta held-out NLL −0,497, yani batch lehine). Sebep: eleman başına
+aritmetik birikimden bağımsızdır — AdamW zinciri her eleman için bir
+`sqrt` ve bir bölme demek ve bu, 4-genişlikte real64 ile yapılıyordu. Bu
+yüzden `tied_output_update`'in eleman zinciri (moment özyinelemeleri,
+`sqrt`, bölme, clamp) **parametre duyarlılığında (real32)** çalışacak şekilde
+değiştirildi; momentler de artık real32 saklanıyor (yaygın çerçeveler
+`exp_avg`/`exp_avg_sq`'yi parametre dtype'ında tutar). Gradyan toplamı
+real64 kalır. Sonuç, tek başına birikimden çok daha büyük: aşağıdaki ölçüm.
+
+Ek olarak batch çekirdeğinin döngü sırası düzeltildi: eskiden her eleman
+için batch en içte koşuyordu (B tane bağımlı skaler FMA zinciri, vektörleşmeye
+kapalı); şimdi sütun dış birim, batch üyesi başına contiguous `width`
+vektörü üzerinde tek bir axpy, ardından sütuna tek vektörel geçiş.
 
 `--gradient-accumulation N` (kütüphanede `neural_train_config_t%gradient_accumulation`)
 N tahmin tokenının **güncelleme öncesi parametrelerde** hesaplanmış tam
@@ -156,13 +172,42 @@ Sözleşmeler korunur:
   tamponları O(vocabulary × N), flush çekirdeğinin blok tamponu
   O(width × N). 512'nin üstü hız kazandırmaz, yalnız bellek büyütür.
 
+#### Ölçülen sonuç (tek koşu, tek runner, bayt-özdeş dilim)
+
+CI job 122249972169, vocab 4096 × width 96 × 4 başlık, pencere 48, ffn 384,
+400 000 baytlık sentetik Türkçe korpus, 4 thread, aynı seed:
+
+| kol | token/sn | held-out NLL |
+| --- | --- | --- |
+| merge-base (main) | 3435,7 | 9,027687 |
+| bu dal, N=1 (token-başına) | 4806,0 | 9,030295 |
+| bu dal, N=32 (birikim) | **7130,3** | **8,530942** |
+
+- **Hız:** birikim, bu dalın token-başına yoluna göre **1,48x**; merge-base'e
+  göre **2,08x**. Token-başına yolun kendisi real32 eleman zinciri sayesinde
+  merge-base'in 1,40 katı (3436 → 4806 token/sn).
+- **Kalite:** eşit token sayısında held-out NLL birikim lehine **−0,499**,
+  merge-base'e göre **−0,497** (perplexity 8306 → 5076, aynı bütçede %39 daha
+  düşük); NLL iyileşmesi/saniye ise merge-base'e göre **2,0x**'in üzerinde.
+- **3x kapısı henüz geçilmedi.** Ölçülen 2,08x. Kalan fark için kaldıraç
+  eleman matematiği değil, tahmin başına *sabit* iş: `width × vocab` elemanlı
+  güncellemenin yanında attention/FFN ileri geçişi ve softmax hâlâ tahmin
+  başına bir kez koşuyor; N=32 bunları 32'ye bölüyor ama AdamW'nin kendisi
+  adım başına aynı kalıyor. Sıradaki adımlar (bu PR'ın kapsamı dışında
+  bırakılmadı, ölçülerek eklenecek): adım başına maliyeti düşürmek için
+  optimizer'ı satır-blok (cache-blocked) düzende dolaştırmak ve 8 thread'in
+  üstünde ölçüm yapmak.
+
 Hız iddiası ölçümle kapılanır: `make neural-throughput-check`
 (`tools/benchmark_neural_batch_throughput.py`) bayt-özdeş sentetik korpusta
-aynı seed/shape/zamanlamayla iki kol koşar (N=1 ve N=32), token/sn oranını,
-**eşit token sayısında** held-out NLL farkını ve "saniye başına NLL iyileşmesi"
-oranını raporlar. `.github/workflows/neural-batch-throughput.yml` bu üç kapıyı
-(sırasıyla ≥1,5x, ≤0,05 NLL sapması, ≥1,5x) PR'da zorlar ve JSON kanıtı
-artifact olarak yayımlar.
+aynı seed/shape/zamanlamayla üç kol koşar (N=1, N=32 ve verilirse merge-base
+binary'si), token/sn oranlarını, **eşit token sayısında** held-out NLL farkını
+ve "saniye başına NLL iyileşmesi" oranını raporlar. Runner'lar arası token
+hızı 2 kattan fazla oynadığı için (aynı kol bir koşuda 8308, sonrakinde 3811
+token/sn) karşılaştırma **aynı job içinde** yapılır:
+`.github/workflows/neural-batch-throughput.yml` merge-base'ten ikinci bir binary
+kurar ve kapıları (birikim/bu-dal ≥1,25x, birikim/merge-base ≥2,0x, NLL
+sapması ≤0,05) PR'da zorlar; JSON kanıtı artifact olarak yayımlanır.
 
 ## 4. Koşu tarifi
 
