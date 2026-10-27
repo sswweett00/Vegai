@@ -29,6 +29,7 @@ import math
 import os
 import random
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -242,7 +243,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         ]
         if "speedup_vs_compare_optimizer" in comparison:
             lines += [
-                f"- optimizer A/B (same binary, same accumulation): "
+                f"- optimizer A/B (same binary, N={comparison.get('compare_optimizer_accumulation', '?')}, "
+                f"median of {comparison.get('compare_optimizer_repeats', 1)} interleaved rounds): "
                 f"**{comparison.get('optimizer', 'reported')}** vs "
                 f"**{comparison['compare_optimizer']}** -- rate "
                 f"**{comparison['speedup_vs_compare_optimizer']:.3f}x**, held-out NLL delta "
@@ -275,7 +277,8 @@ def optimizer_ab_text(comparison: dict[str, Any]) -> str:
         return "optimizer-ab unavailable"
     return (
         f"vs {comparison['compare_optimizer']} rate {comparison['speedup_vs_compare_optimizer']:.3f}x, "
-        f"NLL delta {comparison['heldout_nll_delta_vs_compare_optimizer']:+.6f}"
+        f"NLL delta {comparison['heldout_nll_delta_vs_compare_optimizer']:+.6f} "
+        f"(median of {comparison.get('compare_optimizer_repeats', 1)} rounds)"
     )
 
 
@@ -361,6 +364,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="optional arm that runs THIS binary with another optimizer at the same "
                              "accumulation, which isolates the optimizer from everything else; "
                              "empty string disables it")
+    parser.add_argument("--compare-repeats", type=int, default=2,
+                        help="interleaved rounds of the optimizer A/B (medians are reported); "
+                             "a shared runner drifts by more than the difference being measured")
     parser.add_argument("--schedule", default="invsqrt", choices=("constant", "invsqrt", "cosine"))
     parser.add_argument("--warmup-updates", type=int, default=100)
     parser.add_argument("--total-updates", type=int, default=0)
@@ -450,14 +456,6 @@ def main(argv: list[str] | None = None) -> int:
                 binary, tokenizer_path, checkpoint, work_dir / "train.txt", work_dir / "heldout.txt",
                 args, accumulation,
             )
-        if args.compare_optimizer and args.compare_optimizer != args.optimizer:
-            # Same binary, same seed, same corpus, same accumulation: the only
-            # difference is the optimizer, so any rate or held-out NLL difference
-            # belongs to it.
-            arms[f"optimizer-{args.compare_optimizer}"] = train_arm(
-                binary, tokenizer_path, work_dir / "compare_optimizer.vgnr", work_dir / "train.txt",
-                work_dir / "heldout.txt", args, args.accumulation, optimizer=args.compare_optimizer,
-            )
         if args.baseline_bin:
             # Same corpus, tokenizer, shape and seed, but the binary built from
             # the comparison revision: this is the end-to-end number ("training
@@ -491,6 +489,58 @@ def main(argv: list[str] | None = None) -> int:
                  >= 0.97 * float(fastest["reported_tokens_per_second"])]
         batched = min(close, key=lambda arm: float(arm["heldout"]["mean_nll"]))
         chosen_accumulation = int(batched["gradient_accumulation"])
+        # Optimizer A/B: same binary, same seed, same corpus, same accumulation
+        # factor, so the only difference is the update rule.  It has to run at the
+        # factor that was actually chosen, not at --accumulation, or the two arms
+        # amortize over different batch sizes.  It is also repeated and
+        # interleaved, because a shared runner drifts more than the difference
+        # being measured: single rounds of this exact comparison came back 0.963x
+        # and 1.242x on identical code, and only the sign of the quality delta was
+        # stable across both.  Medians of interleaved rounds cancel the drift
+        # instead of doubling it.
+        optimizer_ab: dict[str, Any] = {}
+        if args.compare_optimizer and args.compare_optimizer != args.optimizer:
+            rounds = max(1, args.compare_repeats)
+            reported_rates = [float(batched["reported_tokens_per_second"])]
+            reported_nlls = [float(batched["heldout"]["mean_nll"])]
+            control_rates: list[float] = []
+            control_nlls: list[float] = []
+            for repeat in range(rounds):
+                control = train_arm(
+                    binary, tokenizer_path, work_dir / f"control_{repeat}.vgnr", work_dir / "train.txt",
+                    work_dir / "heldout.txt", args, chosen_accumulation, optimizer=args.compare_optimizer,
+                )
+                arms[f"optimizer-{args.compare_optimizer}#{repeat + 1}"] = control
+                control_rates.append(float(control["reported_tokens_per_second"]))
+                control_nlls.append(float(control["heldout"]["mean_nll"]))
+                print(f"NEURAL_OPTIMIZER_AB: {args.optimizer} vs {args.compare_optimizer} "
+                      f"round {repeat + 1}/{rounds}: {control_rates[-1]:.1f} tok/s, "
+                      f"NLL {control_nlls[-1]:.6f}", flush=True)
+                if repeat + 1 < rounds:
+                    repeat_arm = train_arm(
+                        binary, tokenizer_path, work_dir / f"reported_{repeat}.vgnr", work_dir / "train.txt",
+                        work_dir / "heldout.txt", args, chosen_accumulation, optimizer=args.optimizer,
+                    )
+                    arms[f"optimizer-{args.optimizer}#{repeat + 1}"] = repeat_arm
+                    reported_rates.append(float(repeat_arm["reported_tokens_per_second"]))
+                    reported_nlls.append(float(repeat_arm["heldout"]["mean_nll"]))
+            reported_rate = statistics.median(reported_rates)
+            control_rate = statistics.median(control_rates)
+            reported_nll = statistics.median(reported_nlls)
+            control_nll = statistics.median(control_nlls)
+            optimizer_ab = {
+                "compare_optimizer": args.compare_optimizer,
+                "compare_optimizer_accumulation": chosen_accumulation,
+                "compare_optimizer_repeats": rounds,
+                "reported_optimizer_rate_samples": reported_rates,
+                "compare_optimizer_rate_samples": control_rates,
+                "reported_optimizer_tokens_per_second": reported_rate,
+                "compare_optimizer_tokens_per_second": control_rate,
+                "reported_optimizer_heldout_mean_nll": reported_nll,
+                "compare_optimizer_heldout_mean_nll": control_nll,
+                "speedup_vs_compare_optimizer": (reported_rate / control_rate) if control_rate else 0.0,
+                "heldout_nll_delta_vs_compare_optimizer": reported_nll - control_nll,
+            }
         report["accumulation_sweep"] = {
             arm["arm"]: {
                 "accumulation": int(arm["gradient_accumulation"]),
@@ -568,18 +618,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"held-out NLL regression vs baseline {baseline_nll_delta:+.4f} > "
                     f"gate {args.max_baseline_nll_regression:.4f}"
                 )
-        compared = arms.get(f"optimizer-{args.compare_optimizer}") if args.compare_optimizer else None
-        if compared:
-            compared_rate = float(compared["reported_tokens_per_second"])
-            comparison.update({
-                "compare_optimizer": args.compare_optimizer,
-                "compare_optimizer_tokens_per_second": compared_rate,
-                "compare_optimizer_heldout_mean_nll": float(compared["heldout"]["mean_nll"]),
-                "speedup_vs_compare_optimizer": (float(batched["reported_tokens_per_second"]) / compared_rate
-                                                 if compared_rate else 0.0),
-                "heldout_nll_delta_vs_compare_optimizer": (
-                    float(batched["heldout"]["mean_nll"]) - float(compared["heldout"]["mean_nll"])),
-            })
+        comparison.update(optimizer_ab)
         report["comparison"] = comparison
         report["status"] = "passed" if not failures else "failed"
         report["gate_failures"] = failures
