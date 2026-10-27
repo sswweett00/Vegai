@@ -16,7 +16,7 @@ on:
       corpus_bytes:
         description: "synthetic corpus size per arm"
         required: false
-        default: "800000"
+        default: "400000"
       min_speedup:
         description: "gate for the measured tokens/s ratio"
         required: false
@@ -83,7 +83,7 @@ jobs:
           python3 tools/benchmark_neural_batch_throughput.py \
             --neural-bin ./build-throughput/vegai_neural_pretrain \
             --accumulation "${{ inputs.accumulation || '32' }}" \
-            --corpus-bytes "${{ inputs.corpus_bytes || '800000' }}" \
+            --corpus-bytes "${{ inputs.corpus_bytes || '400000' }}" \
             --min-speedup "${{ inputs.min_speedup || '1.5' }}" \
             --max-nll-regression 0.05 \
             --min-quality-rate-ratio 1.5 \

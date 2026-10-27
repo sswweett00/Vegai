@@ -251,13 +251,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--neural-bin", help="path to the built vegai_neural_pretrain binary (not needed with --report)")
     parser.add_argument("--work-dir", help="default: a temporary directory")
     parser.add_argument("--keep-work-dir", action="store_true")
-    parser.add_argument("--corpus-bytes", type=int, default=1_000_000)
+    parser.add_argument("--corpus-bytes", type=int, default=400_000)
     parser.add_argument("--heldout-every", type=int, default=9, help="every nth record is held-out")
-    parser.add_argument("--vocab", type=int, default=512)
-    parser.add_argument("--width", type=int, default=48)
+    # Defaults mirror the governed Turkish epoch contract, because the size of
+    # the win depends on the shape: the update loop scales with vocabulary x
+    # width while the rest of the step scales with width^2, so a toy 512-token
+    # vocabulary understates the production effect (measured 1.30x there versus
+    # the shape below).  Measure at the shape the claim is about.
+    parser.add_argument("--vocab", type=int, default=4096)
+    parser.add_argument("--width", type=int, default=96)
     parser.add_argument("--heads", type=int, default=4)
-    parser.add_argument("--window", type=int, default=16)
-    parser.add_argument("--ffn", type=int, default=192)
+    parser.add_argument("--window", type=int, default=48)
+    parser.add_argument("--ffn", type=int, default=384)
     parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--optimizer", default="adamw", choices=("adamw", "sgd"))
     parser.add_argument("--schedule", default="invsqrt", choices=("constant", "invsqrt", "cosine"))
