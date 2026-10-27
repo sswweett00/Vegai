@@ -247,6 +247,78 @@ kurar, faktör süpürmesini (32,64,128) çalıştırır ve kapıları
 (birikim/bu-dal ≥1,25x, birikim/merge-base ≥2,0x, NLL sapması ≤0,05) PR'da
 zorlar; JSON kanıtı artifact olarak yayımlanır.
 
+### 3.6 NOVA-1 — sıfırdan yazılmış güncelleme kuralı (proje varsayılanı)
+
+Eğiticinin güncelleme kuralı artık AdamW değil: `src/neural_pretraining.f90`
+içinde, harici hiçbir kütüphane/çerçeve kullanılmadan yazılmış **NOVA-1**
+(`NPT_OPTIMIZER_NOVA`). AdamW ve eski SGD yolu seçilebilir karşılaştırma /
+eski checkpoint yolu olarak duruyor (`--optimizer nova|adamw|sgd`); CLI,
+`neural_train_config_t` ve benchmark varsayılanı NOVA.
+
+**Kural.** Bağlı (tied) çıktı gradyanı bir tahmin için `r(v) · h`'dir, yani
+rank-1: her sütun aynı `h` yönünü kendi `r(v)` katsayısıyla alır. Bu yüzden
+eleman başına ikinci moment, sütun başına sabit olan bir büyüklüğü
+`width × vocabulary` eleman üzerinde `sqrt`+bölme ile yeniden türetmek olur.
+NOVA-1 onu sütun düzeyinde tutar: sütunun batch üzerinden ortalama gradyanı
+`g(v)`, enerjisi `z(v) = b2·z + (1-b2)·||g(v)||²/width` (ilk adımda kendi
+gradyanından başlatılır, bu yüzden bias düzeltmesi yok), taşınan hızla
+uyumu `a(v) = g(v)·u(v)`, hız `u(v) ← γ·u(v) + g(v)` (`γ = b1`, `a(v) < 0`
+ise `γ = b1·NPT_NOVA_RESTART_DAMP`) ve adım
+`θ(:,v) ← (1 - lr·wd)·θ(:,v) - s(v)·u(v)`, `s(v) = lr/(sqrt(z(v)) + eps)`.
+Uyum terimi Adam/RMSprop'ta yoktur: hızıyla çelişen sütun, körü körüne
+güvenilmek yerine sönümlenerek yeniden başlatılır — ağır momentumun aşırı
+salınım hatası budur — ve bedeli eleman başına değil sütun başına bir iç
+çarpımdır. Eleman zinciri tek çarpma + tek FMA; hiçbir eleman için
+transandantal yok. Durum: tek hız dizisi (`nova_u_embedding`) + sütun başına
+enerji (`nova_energy`), yani eleman başına **16 B** durum trafiği (AdamW 28 B),
+bellek `4·width·vocabulary + 8·vocabulary` (AdamW `8·(width·vocabulary + vocabulary)`).
+Checkpoint **v5** bu durumu optimizer kimliğiyle birlikte yazar; v2/v3/v4
+dosyaları yüklenmeye devam eder, farklı optimizer durumu yüklemek
+`NPT_ERR_FORMAT`'tır.
+
+#### Ölçüm — aynı ikili, aynı birikim faktörü, interleaved turlar
+
+`tools/benchmark_neural_batch_throughput.py --compare-optimizer adamw` aynı
+koşu içinde NOVA'yı ve AdamW'yu **aynı seed, korpus, şekil ve birikim
+faktörüyle** eğitir; tek fark kuraldır. Paylaşımlı runner'ın sürüklenmesi tek
+turda ölçülen farktan büyük olduğu için (aynı kod iki koşuda 0,963x ve
+1,242x verdi) turlar dönüşümlü koşulur ve **medyan** raporlanır.
+
+| koşu (commit) | N | NOVA tok/sn | AdamW tok/sn | oran | held-out NLL farkı (NOVA−AdamW) |
+| --- | --- | --- | --- | --- | --- |
+| d54011e | 32 | 7507,5 · 7555,3 | 8080,6 · 8103,4 | **0,931x** | **−0,0322** |
+| 3627026 | 64 | 7621,3 · 7630,1 | 8042,2 · 6598,9 | **1,042x** | **−0,1016** |
+
+- **Hız:** ölçülen bant **0,93–1,04x**, yani adım başına AdamW ile parite
+  bandında; NOVA örnekleri kendi içinde çok daha kararlı (7621–7630'a karşı
+  6598–8080). Adım süresinin baskın kısmı bu şekilde (vocab 4096 × width 96,
+  N=64) paylaşılan gradyan toplama (batch × width) olduğu için optimizer
+  farkının üst sınırı yapısal olarak küçüktür; NOVA'nın kazancı eleman başına
+  iş ve durum trafiğindedir.
+- **Kalite:** her iki koşuda da NOVA lehine; eşit birikimde fark birikim
+  büyüdükçe açılıyor (−0,032 → −0,102), çünkü sütun enerjisi batch ortalaması
+  üzerinden ölçülüyor ve `1/B` ölçekli ikinci momentin aksine gürültüden
+  etkilenmiyor.
+- **Uçtan uca:** aynı koşuda merge-base'e göre **3,119x** (yukarıdaki
+  3,24–3,60x bandıyla aynı sınıf). Faz bütçesi (tahmin başına): decoder
+  **33,5 µs**, blok projeksiyonu **23,8 µs**, skorlama **23,2 µs**, optimize
+  edici **46,8 µs**.
+
+Denenip **ölçümle reddedilen** iki NOVA optimizasyonu (kodda not düşülmüş):
+
+- **Hız dizisini token-major saklamak** (`nova_u_embedding(vocabulary, width)`):
+  sütun unit-stride olur, `DOT_PRODUCT` geçici kopya üretmez — beklenti buydu.
+  Ölçüm tersini söyledi: aynı koşuda batched kol 0,623x'e düştü, token-başına
+  kol 12 kat yavaşladı. Geri alındı (21d396d).
+- **Enerji ve uyumu tek skaler tarama içinde birleştirmek:** iki biriktiricili
+  döngü ve strided hız okuması vektörleşmiyor; oran 0,931x → 0,823x (179d3f8,
+  geri alındı). Normalizasyon geçişini güncelleme taramasına katlamak
+  (toplam iki tarama) ise 1,042x veren hâldir.
+
+Sözleşme native testtedir: `test_nova_optimizer_contract` (kayıp düşüşü, tek
+hız dizisi, AdamW'dan küçük kaynak planı, v5 turu, parça+devam
+bit-birebirliği) ve `test_adamw_optimizer_contract` (eski yol bozulmadı).
+
 ## 4. Koşu tarifi
 
 Probe (hız ölçümü) ve full (bütün dump boru hattı + boyutlandırılmış epoch
