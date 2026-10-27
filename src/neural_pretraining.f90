@@ -1106,16 +1106,21 @@ contains
                                              residual32 * clipped_hidden(batch_index, feature)
                end do
             end do
-            !$omp simd
+            ! One pass, not four.  The scoped variant normalized the column, then
+            ! measured its energy and its agreement with two DOT_PRODUCTs, and the
+            ! strided velocity section each of those took was copied into a
+            ! temporary first: four sweeps over the column to produce two scalars.
+            ! The same two scalars, the normalization and the buffer all come out of
+            ! this single sweep, so the column is touched once before the update.
+            energy = 0.0_real32
+            agreement = 0.0_real32
             do feature = 1_int32, width
-               column_gradient(feature) = column_gradient(feature) * inverse_batch_32
+               gradient32 = column_gradient(feature) * inverse_batch_32
+               column_gradient(feature) = gradient32
+               energy = energy + gradient32 * gradient32
+               agreement = agreement + gradient32 * state%nova_u_embedding(feature, token)
             end do
-            ! DOT_PRODUCT, not a hand-written reduction: on contiguous slices the
-            ! intrinsic vectorizes with several accumulators, while the two-reduction
-            ! scalar loop it replaces stayed serial and cost more than the whole
-            ! optimizer chain (measured on the first NOVA run).
-            energy = dot_product(column_gradient, column_gradient) / width_32
-            agreement = dot_product(column_gradient, state%nova_u_embedding(:, token))
+            energy = energy / width_32
             if (first_step) then
                state%nova_energy(token) = energy
             else
