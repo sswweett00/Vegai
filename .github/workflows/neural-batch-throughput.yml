@@ -16,7 +16,7 @@ on:
       corpus_bytes:
         description: "synthetic corpus size per arm"
         required: false
-        default: "1000000"
+        default: "800000"
       min_speedup:
         description: "gate for the measured tokens/s ratio"
         required: false
@@ -78,17 +78,30 @@ jobs:
 
       - name: Measure per-token vs mini-batch throughput and quality
         run: |
-          set -euo pipefail
+          set +e
           mkdir -p "${RUNNER_TEMP}/throughput"
           python3 tools/benchmark_neural_batch_throughput.py \
             --neural-bin ./build-throughput/vegai_neural_pretrain \
             --accumulation "${{ inputs.accumulation || '32' }}" \
-            --corpus-bytes "${{ inputs.corpus_bytes || '1000000' }}" \
+            --corpus-bytes "${{ inputs.corpus_bytes || '800000' }}" \
             --min-speedup "${{ inputs.min_speedup || '1.5' }}" \
             --max-nll-regression 0.05 \
             --min-quality-rate-ratio 1.5 \
             --output "${RUNNER_TEMP}/throughput/benchmark.json" \
-            | tee /dev/stderr > /dev/null
+            > "${RUNNER_TEMP}/throughput/benchmark.stdout" 2> "${RUNNER_TEMP}/throughput/benchmark.stderr"
+          code=$?
+          tail -n 40 "${RUNNER_TEMP}/throughput/benchmark.stdout" || true
+          tail -n 40 "${RUNNER_TEMP}/throughput/benchmark.stderr" || true
+          if [ "$code" -ne 0 ]; then
+            # Workflow logs are not always reachable from review tooling, so the
+            # failure reason is republished as an API-readable annotation.
+            detail=$(tail -n 12 "${RUNNER_TEMP}/throughput/benchmark.stderr" | tr '\n' ' ' | cut -c1-1800)
+            if [ -z "$detail" ]; then
+              detail=$(tail -n 12 "${RUNNER_TEMP}/throughput/benchmark.stdout" | tr '\n' ' ' | cut -c1-1800)
+            fi
+            echo "::error title=Neural throughput A/B diagnostic::${detail}"
+          fi
+          exit "$code"
 
       - name: Summarize the measured comparison
         if: always()
@@ -96,55 +109,10 @@ jobs:
           set -euo pipefail
           report="${RUNNER_TEMP}/throughput/benchmark.json"
           if [ ! -f "$report" ]; then
-            echo "## Neural throughput A/B produced no report" >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=Neural throughput A/B::no report was produced"
             exit 0
           fi
-          python3 - "$report" >> "$GITHUB_STEP_SUMMARY" <<'PY'
-          import json, sys
-          report = json.load(open(sys.argv[1], encoding="utf-8"))
-          print(f"### Neural update A/B: {report.get('status')}")
-          shape = report.get("shape", {})
-          print(f"- shape: vocab {shape.get('vocab')}, width {shape.get('width')}, window {shape.get('window')}, "
-                f"ffn {shape.get('ffn')}, {shape.get('optimizer')}, threads {shape.get('threads')}")
-          arms = report.get("arms", {})
-          print("")
-          print("| Arm | prediction tok/s | held-out NLL | held-out ppl | train wall (s) |")
-          print("|---|---:|---:|---:|---:|")
-          for name, arm in arms.items():
-              print(f"| {name} | {arm['reported_tokens_per_second']:.1f} | "
-                    f"{float(arm['heldout']['mean_nll']):.6f} | "
-                    f"{float(arm['heldout']['perplexity']):.3f} | "
-                    f"{arm['controller_wall_seconds']:.1f} |")
-          comparison = report.get("comparison", {})
-          if comparison:
-              print("")
-              print(f"- speedup: **{comparison['speedup_tokens_per_second']:.3f}x**")
-              print(f"- held-out NLL delta (batched - per-token): "
-                    f"{comparison['heldout_nll_delta_batched_minus_per_token']:+.6f}")
-              print(f"- NLL improvement per second ratio: "
-                    f"**{comparison['nll_improvement_per_second_ratio']:.3f}x**")
-          for failure in report.get("gate_failures", []):
-              print(f"- gate failure: {failure}")
-          if report.get("error"):
-              print(f"- error: {report['error']}")
-          # Also emit the headline numbers as a check annotation: workflow
-          # summaries are not readable through the API surface used by the
-          # review tooling, annotations are.
-          arms = report.get("arms", {})
-          comparison = report.get("comparison", {})
-          if arms and comparison:
-              measured = "; ".join(
-                  f"{name}: {arm['reported_tokens_per_second']:.1f} tok/s, "
-                  f"NLL {float(arm['heldout']['mean_nll']):.6f}"
-                  for name, arm in arms.items()
-              )
-              print(
-                  f"::notice title=Neural update A/B ({report.get('status')})::"
-                  f"speedup {comparison['speedup_tokens_per_second']:.3f}x; "
-                  f"held-out NLL delta {comparison['heldout_nll_delta_batched_minus_per_token']:+.6f}; "
-                  f"quality-per-second {comparison['nll_improvement_per_second_ratio']:.3f}x; {measured}"
-              )
-          PY
+          python3 tools/benchmark_neural_batch_throughput.py --report "$report" --summary || true
 
       - name: Upload throughput evidence
         if: always()

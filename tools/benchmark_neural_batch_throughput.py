@@ -173,6 +173,79 @@ def train_arm(binary: str, tokenizer_path: Path, checkpoint_path: Path, train_pa
     }
 
 
+def render_markdown(report: dict[str, Any]) -> str:
+    """Human-readable summary of one report (also used as the CI step summary)."""
+    lines = [f"### Neural update A/B: {report.get('status')}", ""]
+    shape = report.get("shape", {})
+    if shape:
+        lines.append(
+            f"- shape: vocab {shape.get('vocab')}, width {shape.get('width')}, heads {shape.get('heads')}, "
+            f"window {shape.get('window')}, ffn {shape.get('ffn')}, {shape.get('optimizer')}/{shape.get('schedule')}, "
+            f"{shape.get('threads')} threads, {shape.get('corpus_bytes')} corpus bytes per arm"
+        )
+    arms = report.get("arms", {})
+    if arms:
+        lines += ["", "| Arm | prediction tok/s | held-out NLL | held-out ppl | train wall (s) |",
+                  "|---|---:|---:|---:|---:|"]
+        for name, arm in arms.items():
+            lines.append(
+                f"| {name} | {float(arm['reported_tokens_per_second']):.1f} | "
+                f"{float(arm['heldout']['mean_nll']):.6f} | {float(arm['heldout']['perplexity']):.3f} | "
+                f"{float(arm['controller_wall_seconds']):.1f} |"
+            )
+    comparison = report.get("comparison", {})
+    if comparison:
+        lines += [
+            "",
+            f"- speedup: **{comparison['speedup_tokens_per_second']:.3f}x**",
+            f"- held-out NLL delta (batched - per-token): "
+            f"{comparison['heldout_nll_delta_batched_minus_per_token']:+.6f}",
+            f"- NLL improvement per second ratio: **{comparison['nll_improvement_per_second_ratio']:.3f}x**",
+        ]
+    for failure in report.get("gate_failures", []):
+        lines.append(f"- gate failure: {failure}")
+    if report.get("error"):
+        lines.append(f"- error: {report['error']}")
+    return "\n".join(lines) + "\n"
+
+
+def headline(report: dict[str, Any]) -> str:
+    """One-line, API-readable restatement of the measurement."""
+    arms = report.get("arms", {})
+    comparison = report.get("comparison", {})
+    if not arms or not comparison:
+        return ""
+    measured = "; ".join(
+        f"{name}: {float(arm['reported_tokens_per_second']):.1f} tok/s, "
+        f"NLL {float(arm['heldout']['mean_nll']):.6f}"
+        for name, arm in arms.items()
+    )
+    return (
+        f"speedup {comparison['speedup_tokens_per_second']:.3f}x; "
+        f"held-out NLL delta {comparison['heldout_nll_delta_batched_minus_per_token']:+.6f}; "
+        f"quality-per-second {comparison['nll_improvement_per_second_ratio']:.3f}x; {measured}"
+    )
+
+
+def publish(report: dict[str, Any]) -> None:
+    """Writes the step summary and a check annotation when running in CI."""
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        try:
+            with open(summary_path, "a", encoding="utf-8") as handle:
+                handle.write(render_markdown(report))
+        except OSError:
+            pass
+    if not os.environ.get("GITHUB_ACTIONS"):
+        return
+    text = headline(report)
+    if report.get("status") == "passed" and text:
+        print(f"::notice title=Neural update A/B (passed)::{text}")
+    else:
+        detail = text or str(report.get("error", "unknown failure"))
+        print(f"::error title=Neural update A/B (failed)::{detail[:1800]}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--neural-bin", required=True, help="path to the built vegai_neural_pretrain binary")
@@ -202,7 +275,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-quality-rate-ratio", type=float, default=1.5,
                         help="gate: required ratio of NLL-improvement-per-second (quality per wall clock)")
     parser.add_argument("--output", help="write the JSON report here")
+    parser.add_argument("--report", help="render an existing report (no training) and publish it")
+    parser.add_argument("--summary", action="store_true",
+                        help="with --report: write the Markdown summary to $GITHUB_STEP_SUMMARY and annotate")
     args = parser.parse_args(argv)
+    if args.report:
+        existing = json.loads(Path(args.report).read_text(encoding="utf-8"))
+        print(render_markdown(existing), end="")
+        if args.summary:
+            publish(existing)
+        return 0 if existing.get("status") == "passed" else 1
     if args.accumulation < 2:
         parser.error("--accumulation must be >= 2 (the gate compares against the per-token path)")
 
@@ -284,6 +366,8 @@ def main(argv: list[str] | None = None) -> int:
         payload = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         if args.output:
             Path(args.output).write_text(payload, encoding="utf-8")
+        publish(report)
+        print(render_markdown(report), end="")
         print(payload, end="")
         if not args.keep_work_dir and not args.work_dir:
             shutil.rmtree(work_dir, ignore_errors=True)
