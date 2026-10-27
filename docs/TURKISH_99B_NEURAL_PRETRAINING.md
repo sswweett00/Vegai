@@ -199,9 +199,9 @@ held-out diliminde değerlendirilir:
   kodun iki hâli için:
   - adım paralelleştirmesi ve bloklu normalizer **öncesi**: 2,78x · 2,81x ·
     2,94x (üç koşu),
-  - **son hâli**: 3,60x · 3,29x (iki koşu).
+  - **son hâli**: 3,60x · 3,29x · 3,24x (üç koşu, ortalama 3,38x).
 
-  Yani son kodun ölçülen aralığı **3,29–3,60x**. Payın kaynağı merge-base
+  Yani son kodun ölçülen aralığı **3,24–3,60x**; her koşuda 3x'in üzerinde. Payın kaynağı merge-base
   kolunun makineye daha duyarlı olması: o kol her tahminde 1,5 MB bağlı
   embedding okuyor, yani bellek bant genişliğine bağımlı ve yavaş/paylaşımlı
   runner'da daha çok düşüyor. Aynı kolun koşular arası farkı 2205–2443 token/sn
