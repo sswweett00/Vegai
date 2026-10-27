@@ -568,12 +568,18 @@ contains
    end subroutine neural_decoder_step
 
    ! Projects a block of hidden states onto the tied embedding in one pass.
-   ! hidden_matrix is (width, count), logits_matrix is (vocabulary, count); the
-   ! embedding element E(feature, token) is loaded once and fanned out to every
-   ! column of the block, so the (vocabulary x width) matrix is streamed once
-   ! per block instead of once per token.  Column accumulators are contiguous,
-   ! which is what makes the fan-out vectorizable; the write of one row is
-   ! count-spaced but lands in a block that stays cache resident.
+   !
+   ! hidden_matrix is (width, count) and logits_matrix is (count, vocabulary):
+   ! one row of the output per staged token, so a row is contiguous and can be
+   ! handed straight to stable_softmax.  The outer loop runs over the vocabulary
+   ! (parallel, one token per iteration) and the embedding element
+   ! E(feature, token) is loaded once and fanned out to every column of the
+   ! block, so the (vocabulary x width) matrix is streamed once per block instead
+   ! of once per token.  The fan-out vector is the only dependency: its elements
+   ! are updated once per feature and there are count of them, which is what
+   ! keeps the inner loop at one vector FMA per element instead of a scalar
+   ! chain.  Writes of one token's row step by vocabulary, but each cache line is
+   ! reused by the next fifteen tokens, so the block's output stays resident.
    subroutine neural_decoder_project_logits(model, hidden_matrix, count, logits_matrix, status)
       type(neural_decoder_t), intent(in) :: model
       real(real32), intent(in) :: hidden_matrix(:, :)
@@ -581,20 +587,23 @@ contains
       real(real32), intent(out) :: logits_matrix(:, :)
       integer(int32), intent(out) :: status
       integer(int32) :: width, vocabulary_size, token, feature, slot
-      real(real32) :: weight
-      real(real32) :: accumulator(size(hidden_matrix, 2))
+      real(real32) :: weight, bias
+      ! One accumulator per staged token, private per thread.
+      real(real32) :: accumulator(size(logits_matrix, 1))
 
       status = NRD_OK
       width = model%config%width
       vocabulary_size = model%config%vocabulary_size
       if (.not. neural_decoder_is_ready(model) .or. count < 1_int32 .or. &
           count > size(hidden_matrix, 2, kind=int32) .or. &
-          count > size(logits_matrix, 2, kind=int32) .or. &
+          count > size(logits_matrix, 1, kind=int32) .or. &
           size(hidden_matrix, 1, kind=int32) /= width .or. &
-          size(logits_matrix, 1, kind=int32) /= vocabulary_size) then
+          size(logits_matrix, 2, kind=int32) /= vocabulary_size) then
          status = NRD_ERR_INVALID_ARGUMENT
          return
       end if
+      !$omp parallel do private(token, feature, slot, weight, bias, accumulator) &
+      !$omp schedule(static) if(vocabulary_size >= 512_int32)
       do token = 1_int32, vocabulary_size
          accumulator(1_int32:count) = 0.0_real32
          do feature = 1_int32, width
@@ -604,11 +613,13 @@ contains
                accumulator(slot) = accumulator(slot) + weight * hidden_matrix(feature, slot)
             end do
          end do
+         bias = model%output_bias(token)
          do slot = 1_int32, count
-            logits_matrix(token, slot) = accumulator(slot) + model%output_bias(token)
+            logits_matrix(slot, token) = accumulator(slot) + bias
          end do
       end do
-      if (.not. all(ieee_is_finite(logits_matrix(1_int32:vocabulary_size, 1_int32:count)))) then
+      !$omp end parallel do
+      if (.not. all(ieee_is_finite(logits_matrix(1_int32:count, 1_int32:vocabulary_size)))) then
          status = NRD_ERR_NUMERIC
       end if
    end subroutine neural_decoder_project_logits

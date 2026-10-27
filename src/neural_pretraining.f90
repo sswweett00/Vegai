@@ -191,9 +191,10 @@ module neural_pretraining
       ! real64.
       real(real32), allocatable :: batch_residuals(:, :)
       real(real32), allocatable :: batch_hidden(:, :)
-      ! (vocabulary, capacity): one column per staged token.  Filled by a single
-      ! pass over the tied embedding when the block is resolved, which is the
-      ! whole point of deferring the projection.
+      ! (capacity, vocabulary): one row per staged token, so a row is
+      ! contiguous and can be handed to stable_softmax without a copy.  Filled
+      ! by a single pass over the tied embedding when the block is resolved,
+      ! which is the whole point of deferring the projection.
       real(real32), allocatable :: batch_logits(:, :)
       real(real64), allocatable :: batch_clip(:)
       integer(int32), allocatable :: batch_targets(:)
@@ -453,7 +454,7 @@ contains
       if (batch_capacity > 1_int32) then
          allocate(workspace%batch_residuals(model%config%vocabulary_size, batch_capacity), &
                   workspace%batch_hidden(model%config%width, batch_capacity), &
-                  workspace%batch_logits(model%config%vocabulary_size, batch_capacity), &
+                  workspace%batch_logits(batch_capacity, model%config%vocabulary_size), &
                   workspace%batch_clip(batch_capacity), workspace%batch_targets(batch_capacity), &
                   stat=allocation_status)
          if (allocation_status /= 0) then
@@ -1016,8 +1017,8 @@ contains
          return
       end if
       do slot = 1_int32, count
-         workspace%logits = workspace%batch_logits(:, slot)
-         call stable_softmax(workspace%logits, workspace%probabilities, status)
+         ! Row of the block: contiguous, so no staging copy is needed.
+         call stable_softmax(workspace%batch_logits(slot, :), workspace%probabilities, status)
          if (status /= NPT_OK) return
          call observe_prediction(metrics, workspace%probabilities, workspace%batch_targets(slot), loss, status)
          if (status /= NPT_OK) return
