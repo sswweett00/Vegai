@@ -248,7 +248,7 @@ def publish(report: dict[str, Any]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--neural-bin", required=True, help="path to the built vegai_neural_pretrain binary")
+    parser.add_argument("--neural-bin", help="path to the built vegai_neural_pretrain binary (not needed with --report)")
     parser.add_argument("--work-dir", help="default: a temporary directory")
     parser.add_argument("--keep-work-dir", action="store_true")
     parser.add_argument("--corpus-bytes", type=int, default=1_000_000)
@@ -285,7 +285,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.summary:
             publish(existing)
         return 0 if existing.get("status") == "passed" else 1
-    if args.accumulation < 2:
+    if not args.report and not args.neural_bin:
+        parser.error("--neural-bin is required unless --report renders an existing measurement")
+    if not args.report and args.accumulation < 2:
         parser.error("--accumulation must be >= 2 (the gate compares against the per-token path)")
 
     work_dir = Path(args.work_dir) if args.work_dir else Path(tempfile.mkdtemp(prefix="vegai-throughput-"))
