@@ -58,16 +58,6 @@ module neural_pretraining
    ! state is amortized to noise and only the batch memory grows.
    integer(int32), parameter, public :: NPT_MAX_GRADIENT_ACCUMULATION = 512_int32
 
-   ! Vocabulary columns processed together by the batched update kernel.  The
-   ! kernel needs, per column, every staged hidden row: with one column at a time
-   ! that is batch * width floats re-read for each of the (large) vocabulary
-   ! entries, ~50 MB per step at 4096 x 96 x 32, which is L2 bandwidth bound and
-   ! was the whole cost of the phase (33.8 us per prediction).  A tile keeps its
-   ! column accumulators (TILE * width * 4 bytes = 12 KB at TILE=32) plus the
-   ! clipped hidden block (12 KB) inside a 32 KB L1, so each hidden row is read
-   ! once per tile instead of once per column.
-   integer(int32), parameter, public :: NPT_UPDATE_TILE = 32_int32
-
    ! Learning-rate schedule identifiers.  The schedule is a pure function of
    ! the persisted update counter, so a checkpoint/resume boundary cannot
    ! change the effective learning rate of any update.
@@ -745,8 +735,7 @@ contains
       type(neural_train_config_t), intent(in) :: config
       type(neural_train_state_t), intent(inout) :: state
       integer(int32), intent(out) :: status
-      integer(int32) :: vocabulary_size, width, token, target_token, feature, batch_index
-      integer(int32) :: tile, first, tile_count
+      integer(int32) :: vocabulary_size, width, token, feature, batch_index
       integer(int64) :: update_index
       real(real64) :: rate, inverse_batch, gradient, proposal, scale, value_limit
       real(real64) :: beta1, beta2, one_minus_beta1, one_minus_beta2, adam_epsilon
@@ -755,11 +744,8 @@ contains
       real(real32) :: proposal32, m32, v32, gradient32, inverse_batch_32
       real(real32) :: beta1_32, one_minus_beta1_32, beta2_32, one_minus_beta2_32, adam_epsilon_32
       real(real32) :: scaled_rate_32, inverse_step_scale_32, decay_factor_32, value_limit_32, scale_32
-      ! One width-sized accumulator per tile column, private per thread.  Fixed
-      ! column count, dynamic width: the block is TILE * width reals and stays in
-      ! the 32 KB L1 for the configured shapes.
-      real(real32) :: tile_gradient(NPT_UPDATE_TILE, size(hidden_batch, 2))
-      real(real32) :: tile_bias(NPT_UPDATE_TILE), residual32
+      ! One width-sized accumulator per vocabulary column, private per thread.
+      real(real32) :: column_gradient(size(hidden_batch, 2)), column_bias_gradient
       ! Bounded by construction: the staging capacity is capped at
       ! NPT_MAX_GRADIENT_ACCUMULATION, so this block is O(width*512) reals.
       real(real32) :: clipped_hidden(size(hidden_batch, 1), size(hidden_batch, 2))
@@ -831,64 +817,49 @@ contains
          inverse_step_scale_32 = real(inverse_step_scale, real32)
          decay_factor_32 = real(decay_factor, real32)
          inverse_batch_32 = real(inverse_batch, real32)
-         ! Two things decide this loop's cost.  First, the reduction per column
-         ! is a sequence of axpy updates over the contiguous width axis, so the
-         ! inner loop runs over features and each batch member contributes one
-         ! broadcast scalar; with the batch innermost per element it was a chain
-         ! of B dependent scalar FMAs, which is why the batched arm once measured
-         ! slower than the per-token arm.  Second, the tile: the kernel needs
-         ! every staged hidden row for every column it touches, so the columns are
-         ! processed NPT_UPDATE_TILE at a time and the accumulators stay in L1.
-         !$omp parallel do private(tile, first, tile_count, token, target_token, feature, batch_index, &
-         !$omp residual32, gradient32, m32, v32, proposal32, tile_gradient, tile_bias) &
+         ! Loop order matters: for one vocabulary column the batch reduction is
+         ! a sequence of axpy updates over the width vector, so the inner loop
+         ! runs over features (contiguous, 8-wide vectorizable) and each batch
+         ! member contributes one broadcast scalar.  The previous order -- batch
+         ! innermost per element -- was a chain of B dependent scalar FMAs per
+         ! element, which is why the batched arm measured *slower* than the
+         ! per-token arm once the element math became cheap.
+         !$omp parallel do private(token, feature, batch_index, gradient, gradient32, m32, v32, proposal32, &
+         !$omp column_gradient, column_bias_gradient) &
          !$omp schedule(static) if(vocabulary_size >= 512_int32)
-         do tile = 0_int32, (vocabulary_size - 1_int32) / NPT_UPDATE_TILE
-            first = tile * NPT_UPDATE_TILE + 1_int32
-            tile_count = min(NPT_UPDATE_TILE, vocabulary_size - first + 1_int32)
-            tile_gradient(1_int32:tile_count, 1_int32:width) = 0.0_real32
-            tile_bias(1_int32:tile_count) = 0.0_real32
-            ! Each staged token contributes one broadcast residual and one axpy
-            ! over the contiguous width axis, for every column of the tile.  The
-            ! accumulation order is unchanged: the batch still runs in ascending
-            ! order per column, so the result is bit-identical to the
-            ! column-at-a-time form.
+         do token = 1_int32, vocabulary_size
+            column_gradient = 0.0_real32
             do batch_index = 1_int32, batch_count
-               do token = 1_int32, tile_count
-                  residual32 = residuals(first + token - 1_int32, batch_index)
-                  !$omp simd
-                  do feature = 1_int32, width
-                     tile_gradient(token, feature) = tile_gradient(token, feature) + &
-                                                     residual32 * clipped_hidden(batch_index, feature)
-                  end do
-                  tile_bias(token) = tile_bias(token) + residual32
-               end do
-            end do
-            do token = 1_int32, tile_count
-               ! Global vocabulary index of this tile column.
-               target_token = first + token - 1_int32
-               !$omp simd private(gradient32, m32, v32, proposal32)
+               gradient32 = real(residuals(token, batch_index), real32)
+               !$omp simd
                do feature = 1_int32, width
-                  gradient32 = tile_gradient(token, feature) * inverse_batch_32
-                  m32 = beta1_32 * state%adam_m_embedding(feature, target_token) + &
-                        one_minus_beta1_32 * gradient32
-                  v32 = beta2_32 * state%adam_v_embedding(feature, target_token) + &
-                        one_minus_beta2_32 * gradient32 * gradient32
-                  state%adam_m_embedding(feature, target_token) = m32
-                  state%adam_v_embedding(feature, target_token) = v32
-                  proposal32 = decay_factor_32 * model%token_embedding(feature, target_token) - &
-                               scaled_rate_32 * m32 / (sqrt(v32) * inverse_step_scale_32 + adam_epsilon_32)
-                  model%token_embedding(feature, target_token) = &
-                     max(-value_limit_32, min(value_limit_32, proposal32))
+                  column_gradient(feature) = column_gradient(feature) + &
+                                             gradient32 * clipped_hidden(batch_index, feature)
                end do
-               gradient32 = tile_bias(token) * inverse_batch_32
-               m32 = beta1_32 * state%adam_m_bias(target_token) + one_minus_beta1_32 * gradient32
-               v32 = beta2_32 * state%adam_v_bias(target_token) + one_minus_beta2_32 * gradient32 * gradient32
-               state%adam_m_bias(target_token) = m32
-               state%adam_v_bias(target_token) = v32
-               proposal32 = model%output_bias(target_token) - &
-                            scaled_rate_32 * m32 / (sqrt(v32) * inverse_step_scale_32 + adam_epsilon_32)
-               model%output_bias(target_token) = max(-value_limit_32, min(value_limit_32, proposal32))
             end do
+            column_bias_gradient = 0.0_real32
+            do batch_index = 1_int32, batch_count
+               column_bias_gradient = column_bias_gradient + real(residuals(token, batch_index), real32)
+            end do
+            !$omp simd private(m32, v32, proposal32)
+            do feature = 1_int32, width
+               gradient32 = column_gradient(feature) * inverse_batch_32
+               m32 = beta1_32 * state%adam_m_embedding(feature, token) + one_minus_beta1_32 * gradient32
+               v32 = beta2_32 * state%adam_v_embedding(feature, token) + one_minus_beta2_32 * gradient32 * gradient32
+               state%adam_m_embedding(feature, token) = m32
+               state%adam_v_embedding(feature, token) = v32
+               proposal32 = decay_factor_32 * model%token_embedding(feature, token) - &
+                            scaled_rate_32 * m32 / (sqrt(v32) * inverse_step_scale_32 + adam_epsilon_32)
+               model%token_embedding(feature, token) = max(-value_limit_32, min(value_limit_32, proposal32))
+            end do
+            gradient32 = column_bias_gradient * inverse_batch_32
+            m32 = beta1_32 * state%adam_m_bias(token) + one_minus_beta1_32 * gradient32
+            v32 = beta2_32 * state%adam_v_bias(token) + one_minus_beta2_32 * gradient32 * gradient32
+            state%adam_m_bias(token) = m32
+            state%adam_v_bias(token) = v32
+            proposal32 = model%output_bias(token) - &
+                         scaled_rate_32 * m32 / (sqrt(v32) * inverse_step_scale_32 + adam_epsilon_32)
+            model%output_bias(token) = max(-value_limit_32, min(value_limit_32, proposal32))
          end do
          !$omp end parallel do
       else
@@ -899,37 +870,30 @@ contains
          value_limit_32 = real(value_limit, real32)
          ! Same column-accumulator order as the AdamW branch above: axpy over the
          ! width vector per batch member, then one pass over the column.
-         !$omp parallel do private(tile, first, tile_count, token, target_token, feature, batch_index, &
-         !$omp residual32, proposal32, tile_gradient, tile_bias) &
+         !$omp parallel do private(token, feature, batch_index, gradient32, proposal32, &
+         !$omp column_gradient, column_bias_gradient) &
          !$omp schedule(static) if(vocabulary_size >= 512_int32)
-         do tile = 0_int32, (vocabulary_size - 1_int32) / NPT_UPDATE_TILE
-            first = tile * NPT_UPDATE_TILE + 1_int32
-            tile_count = min(NPT_UPDATE_TILE, vocabulary_size - first + 1_int32)
-            tile_gradient(1_int32:tile_count, 1_int32:width) = 0.0_real32
-            tile_bias(1_int32:tile_count) = 0.0_real32
+         do token = 1_int32, vocabulary_size
+            column_gradient = 0.0_real32
             do batch_index = 1_int32, batch_count
-               do token = 1_int32, tile_count
-                  residual32 = residuals(first + token - 1_int32, batch_index)
-                  !$omp simd
-                  do feature = 1_int32, width
-                     tile_gradient(token, feature) = tile_gradient(token, feature) + &
-                                                     residual32 * clipped_hidden(batch_index, feature)
-                  end do
-                  tile_bias(token) = tile_bias(token) + residual32
-               end do
-            end do
-            do token = 1_int32, tile_count
-               target_token = first + token - 1_int32
-               !$omp simd private(proposal32)
+               gradient32 = real(residuals(token, batch_index), real32)
+               !$omp simd
                do feature = 1_int32, width
-                  proposal32 = model%token_embedding(feature, target_token) - &
-                               scale_32 * tile_gradient(token, feature)
-                  model%token_embedding(feature, target_token) = &
-                     max(-value_limit_32, min(value_limit_32, proposal32))
+                  column_gradient(feature) = column_gradient(feature) + &
+                                             gradient32 * clipped_hidden(batch_index, feature)
                end do
-               proposal32 = model%output_bias(target_token) - scale_32 * tile_bias(token)
-               model%output_bias(target_token) = max(-value_limit_32, min(value_limit_32, proposal32))
             end do
+            column_bias_gradient = 0.0_real32
+            do batch_index = 1_int32, batch_count
+               column_bias_gradient = column_bias_gradient + real(residuals(token, batch_index), real32)
+            end do
+            !$omp simd private(proposal32)
+            do feature = 1_int32, width
+               proposal32 = model%token_embedding(feature, token) - scale_32 * column_gradient(feature)
+               model%token_embedding(feature, token) = max(-value_limit_32, min(value_limit_32, proposal32))
+            end do
+            proposal32 = model%output_bias(token) - scale_32 * column_bias_gradient
+            model%output_bias(token) = max(-value_limit_32, min(value_limit_32, proposal32))
          end do
          !$omp end parallel do
       end if
