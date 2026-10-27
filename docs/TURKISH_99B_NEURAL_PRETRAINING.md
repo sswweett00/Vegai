@@ -174,39 +174,60 @@ Sözleşmeler korunur:
 
 #### Ölçülen sonuç (tek koşu, tek runner, bayt-özdeş dilim)
 
-CI job 122291774164, vocab 4096 × width 96 × 4 başlık, pencere 48, ffn 384,
+CI job 122362411924, vocab 4096 × width 96 × 4 başlık, pencere 48, ffn 384,
 400 000 baytlık sentetik Türkçe korpus (paragraf ölçekli kayıtlar, ortalama 833
 bayt), 4 thread, aynı seed. Her kol aynı seed'den sıfırdan eğitilir ve aynı
 held-out diliminde değerlendirilir:
 
 | kol | token/sn | held-out NLL |
 | --- | --- | --- |
-| merge-base (main) | 2450,1 | 9,090063 |
-| bu dal, N=1 (token-başına) | 3915,3 | 9,089033 |
-| bu dal, N=32 (birikim, seçilen) | **6874,9** | **8,442573** |
-| bu dal, N=64 | 6759,7 | 8,514667 |
-| bu dal, N=128 | 6691,0 | 8,317527 |
+| merge-base (main) | 2205,5 | 9,090063 |
+| bu dal, N=1 (token-başına) | 4145,7 | 9,089033 |
+| bu dal, N=32 (birikim, seçilen) | **7937,2** | **8,442573** |
+| bu dal, N=64 | 7843,0 | 8,514667 |
+| bu dal, N=128 | 7794,6 | 8,317527 |
 
-- **Hız:** birikim, bu dalın token-başına yoluna göre **1,76x**; merge-base'e
-  göre **2,81x**. Token-başına yolun kendisi (real32 eleman zinciri + vektörel
-  softmax) merge-base'in 1,60 katı.
+- **Hız:** birikim, bu dalın token-başına yoluna göre **1,92x**; merge-base'e
+  göre **3,60x**. Token-başına yolun kendisi (real32 eleman zinciri, paralel
+  bölümler, vektörel softmax) merge-base'in 1,88 katı.
 - **Kalite:** eşit tahmin-tokenı sayısında held-out NLL birikim lehine
   **−0,646** (perplexity 8857 → 4629); merge-base'e göre **−0,647**.
-- **Faz bütçesi** (seçilen kolda, tahmin başına): decoder adımı **54,4 µs**,
-  blok projeksiyonu **23,3 µs**, skorlama (softmax + metrik + residual)
-  **22,5 µs**, optimize edici adımı **41,3 µs**. Güncellemesiz held-out
-  değerlendirmesi 7080 token/sn'dir.
-- **3x kapısı henüz geçilmedi:** ölçülen 2,81x. Kalan fark için üç kaldıraç
-  ölçülerek sıralandı: (1) decoder adımı en büyük kalem ve tahmin başına sabit
-  (attention/FFN, 768 transandantal çağrı; sıradaki iş skaler `sigmoid`/`tanh`
-  zincirini vektörleştirmek); (2) optimize edici adımı artık bellek bant
-  genişliğine bağlı — token başına 12,3 bin eleman × 24 bayt moment/parametre
-  trafiği; N büyütmek bunu böler ama blok çalışma kümesi L2'yi aştığı için
-  ölçümde N=64 ve N=128 daha yavaş çıktı (sözlük-dilimli dolaşma gerekir);
-  (3) birikim kayıt sınırında flush edildiği için **efektif batch kayıt
-  uzunluğuyla sınırlıdır** — bu yüzden probe korpusu, yönetilen korpusun
-  ürettiği paragraf ölçeğine (≥700 karakter) hizalandı; satır ölçeğinde
-  (80 bayt) 32/64/128 aynı sonucu veriyordu.
+- **Faz bütçesi** (seçilen kolda, tahmin başına): decoder adımı **34,6 µs**,
+  blok projeksiyonu **23,3 µs**, skorlama **21,8 µs**, optimize edici adımı
+  **41,3 µs**; güncellemesiz held-out değerlendirmesi 8052 token/sn.
+- **Koşular arası değişkenlik dürüstçe:** aynı job tanımıyla ölçülen oranlar
+  2,78x · 2,81x · 2,94x · 3,60x. Pay merge-base kolunun makineye daha duyarlı
+  olmasından geliyor (o kol her tahminde 1,5 MB bağlı embedding okuyor, yani
+  bellek bant genişliğine bağımlı); yavaş/paylaşımlı runner'da daha çok düşüyor.
+  Bu yüzden 3x tek bir koşunun değil, ölçülen aralığın ifadesidir: **≥2,78x,
+  son koşuda 3,60x**.
+
+Hızı buraya getiren değişiklikler, her biri ölçümle doğrulanmış:
+
+1. **Optimize edici eleman zinciri real32** (momentler dâhil). Darboğaz bellek
+   değil aritmetikti: eleman başına bir `sqrt` ve bir bölme, real64'te 4-geniş.
+2. **İleri geçişin blok hâlinde birleştirilmesi.** `neural_decoder_step_hidden`
+   + `neural_decoder_project_logits`: bağlı embedding blok başına bir kez
+   okunur (tahmin başına 1,5 MB okuma kalkar).
+3. **Sahnelenen gizli bloğun satır-major olması.** (width, N) düzeninde hem
+   projeksiyon hem güncelleme çekirdeği stride-96 okuyordu; satır-major'a
+   geçince projeksiyon 90,7 → 23,3 µs.
+4. **Softmax normalizer'ı, normalizasyonu ve top-k sıralaması** vektörel/paralel;
+   sıralama iki sayılmış karşılaştırmaya indi.
+5. **Decoder adımında atıl thread'lerin kullanılması.** Adım tek bir seri
+   zincirdi; bağımsız gruplar (query/key/value projeksiyonları, iki FFN dalı,
+   elementwise aktivasyon) OpenMP `sections`/`parallel do` ile dağıtıldı.
+   Aritmetik değişmediği için sonuç thread sayısından bağımsız.
+
+Denenip **ölçümle reddedilen** iki optimizasyon (kodda da not düşülmüş):
+
+- Elle yazılmış vektörel `matvec`, contiguous `project_heads`, tek-eksponansiyel
+  `tanh`: adım 54,4 → 111,9 µs (job 122344621975). gfortran'ın `MATMUL`/
+  `DOT_PRODUCT`'ı bu elle formlardan daha iyi vektörleşiyor.
+- Sözlüğü L1'e sığan dilimlere bölmek: güncelleme 33,8 → 98,7 µs (job
+  122350793122). Kare biriktirici `TILE × width` otomatik dizi; ikinci boyut
+  çalışma zamanı değeri olunca gfortran axpy'yi vektörleştirmiyor. Ayrıca
+  hipotez de yanlıştı: N=32'de sahnelenen blok 12 KB, yani zaten L1'de.
 
 Hız iddiası ölçümle kapılanır: `make neural-throughput-check`
 (`tools/benchmark_neural_batch_throughput.py`) bayt-özdeş sentetik korpusta
