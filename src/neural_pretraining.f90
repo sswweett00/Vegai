@@ -197,6 +197,9 @@ module neural_pretraining
       ! is one of ~B terms in an averaged gradient; the accumulate itself is
       ! real64.
       real(real32), allocatable :: batch_residuals(:, :)
+      ! (capacity + projection lanes, width): one contiguous hidden row per
+      ! staged token, padded so the block projection's last lane group reads
+      ! defined values.
       real(real32), allocatable :: batch_hidden(:, :)
       ! (capacity, vocabulary): one row per staged token, so a row is
       ! contiguous and can be handed to stable_softmax without a copy.  Filled
@@ -472,7 +475,7 @@ contains
       workspace%batch_count = 0_int32
       if (batch_capacity > 1_int32) then
          allocate(workspace%batch_residuals(model%config%vocabulary_size, batch_capacity), &
-                  workspace%batch_hidden(model%config%width, batch_capacity + NRD_LOGIT_BLOCK_LANES), &
+                  workspace%batch_hidden(batch_capacity + NRD_LOGIT_BLOCK_LANES, model%config%width), &
                   workspace%batch_logits(batch_capacity, model%config%vocabulary_size), &
                   workspace%batch_clip(batch_capacity), workspace%batch_targets(batch_capacity), &
                   stat=allocation_status)
@@ -721,6 +724,10 @@ contains
       ! CONTIGUOUS keeps the column axpy vectorizable; without it gfortran
       ! assumes an arbitrary stride and emits a scalar loop.
       real(real32), contiguous, intent(in) :: residuals(:, :)
+      ! (capacity, width): one contiguous hidden row per staged token.  The
+      ! transposed layout is what makes the batch reduction below a vector axpy
+      ! over features; with (width, capacity) every read of a batch member's
+      ! hidden vector was a stride-width gather, which measured ~20x slower.
       real(real32), contiguous, intent(in) :: hidden_batch(:, :)
       real(real64), contiguous, intent(in) :: clip_batch(:)
       integer(int32), contiguous, intent(in) :: targets(:)
@@ -738,18 +745,18 @@ contains
       real(real32) :: beta1_32, one_minus_beta1_32, beta2_32, one_minus_beta2_32, adam_epsilon_32
       real(real32) :: scaled_rate_32, inverse_step_scale_32, decay_factor_32, value_limit_32, scale_32
       ! One width-sized accumulator per vocabulary column, private per thread.
-      real(real32) :: column_gradient(size(hidden_batch, 1)), column_bias_gradient
+      real(real32) :: column_gradient(size(hidden_batch, 2)), column_bias_gradient
       ! Bounded by construction: the staging capacity is capped at
       ! NPT_MAX_GRADIENT_ACCUMULATION, so this block is O(width*512) reals.
-      real(real64) :: clipped_hidden(size(hidden_batch, 1), size(hidden_batch, 2))
+      real(real32) :: clipped_hidden(size(hidden_batch, 1), size(hidden_batch, 2))
 
       status = NPT_OK
       vocabulary_size = model%config%vocabulary_size
       width = model%config%width
       if (batch_count < 1_int32 .or. batch_count > size(residuals, 2, kind=int32) .or. &
-          batch_count > size(hidden_batch, 2, kind=int32) .or. batch_count > size(clip_batch, kind=int32) .or. &
+          batch_count > size(hidden_batch, 1, kind=int32) .or. batch_count > size(clip_batch, kind=int32) .or. &
           batch_count > size(targets, kind=int32) .or. size(residuals, 1, kind=int32) /= vocabulary_size .or. &
-          size(hidden_batch, 1, kind=int32) /= width) then
+          size(hidden_batch, 2, kind=int32) /= width) then
          status = NPT_ERR_INVALID_ARGUMENT
          return
       end if
@@ -762,9 +769,10 @@ contains
       ! gradient is the unclipped residual (legacy semantics), so the residual
       ! itself must stay untouched.
       do batch_index = 1_int32, batch_count
+         !$omp simd
          do feature = 1_int32, width
-            clipped_hidden(feature, batch_index) = clip_batch(batch_index) * &
-                                                   real(hidden_batch(feature, batch_index), real64)
+            clipped_hidden(batch_index, feature) = real(clip_batch(batch_index), real32) * &
+                                                   hidden_batch(batch_index, feature)
          end do
       end do
 
@@ -826,7 +834,7 @@ contains
                !$omp simd
                do feature = 1_int32, width
                   column_gradient(feature) = column_gradient(feature) + &
-                                             gradient32 * clipped_hidden(feature, batch_index)
+                                             gradient32 * clipped_hidden(batch_index, feature)
                end do
             end do
             column_bias_gradient = 0.0_real32
@@ -872,7 +880,7 @@ contains
                !$omp simd
                do feature = 1_int32, width
                   column_gradient(feature) = column_gradient(feature) + &
-                                             gradient32 * clipped_hidden(feature, batch_index)
+                                             gradient32 * clipped_hidden(batch_index, feature)
                end do
             end do
             column_bias_gradient = 0.0_real32
@@ -957,7 +965,7 @@ contains
       if (.not. allocated(workspace%batch_residuals) .or. .not. allocated(workspace%batch_hidden) .or. &
           .not. allocated(workspace%batch_targets) .or. &
           workspace%batch_capacity <= 1_int32 .or. workspace%batch_count >= workspace%batch_capacity .or. &
-          size(hidden, kind=int32) /= size(workspace%batch_hidden, 1, kind=int32)) then
+          size(hidden, kind=int32) /= size(workspace%batch_hidden, 2, kind=int32)) then
          status = NPT_ERR_INVALID_ARGUMENT
          return
       end if
@@ -972,7 +980,7 @@ contains
          return
       end if
       slot = workspace%batch_count + 1_int32
-      workspace%batch_hidden(:, slot) = hidden
+      workspace%batch_hidden(slot, :) = hidden
       workspace%batch_clip(slot) = clip_scale
       workspace%batch_targets(slot) = target
       workspace%batch_count = slot

@@ -577,7 +577,9 @@ contains
 
    ! Projects a block of hidden states onto the tied embedding in one pass.
    !
-   ! hidden_matrix is (width, count) and logits_matrix is (count, vocabulary):
+   ! hidden_matrix is (count, width) -- one contiguous row per staged token, so
+   ! the lane fan-out below is unit stride -- and logits_matrix is
+   ! (count, vocabulary):
    ! one row of the output per staged token, so a row is contiguous and can be
    ! handed straight to stable_softmax.  The outer loop runs over the vocabulary
    ! (parallel, one token per iteration) and the embedding element
@@ -608,9 +610,9 @@ contains
       width = model%config%width
       vocabulary_size = model%config%vocabulary_size
       if (.not. neural_decoder_is_ready(model) .or. count < 1_int32 .or. &
-          count > size(hidden_matrix, 2, kind=int32) .or. &
+          count > size(hidden_matrix, 1, kind=int32) .or. &
           count > size(logits_matrix, 1, kind=int32) .or. &
-          size(hidden_matrix, 1, kind=int32) /= width .or. &
+          size(hidden_matrix, 2, kind=int32) /= width .or. &
           size(logits_matrix, 2, kind=int32) /= vocabulary_size) then
          status = NRD_ERR_INVALID_ARGUMENT
          return
@@ -627,7 +629,7 @@ contains
                weight = model%token_embedding(feature, token)
                !$omp simd
                do lane = 1_int32, NRD_LOGIT_BLOCK_LANES
-                  accumulator(lane) = accumulator(lane) + weight * hidden_matrix(feature, first + lane - 1_int32)
+                  accumulator(lane) = accumulator(lane) + weight * hidden_matrix(first + lane - 1_int32, feature)
                end do
             end do
             do lane = 1_int32, available
