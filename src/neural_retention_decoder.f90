@@ -508,9 +508,20 @@ contains
       end if
       call rms_normalize(model%token_embedding(:, token), model%attention_rms, model%config%rms_epsilon, normalized, local_status)
       if (local_status /= NRD_OK) then; status = local_status; return; end if
+      ! The three head projections are independent dense products of the same
+      ! input vector, so they run as one parallel section each instead of
+      ! serially.  Nothing about the arithmetic changes -- same expressions, same
+      ! order, disjoint outputs -- so the result is bit-identical at any thread
+      ! count; the condition keeps small models (tests) out of a fork that would
+      ! cost more than the work.
+      !$omp parallel sections if(size(query) + size(key) + size(value) >= 96)
+      !$omp section
       call project_heads(model%query, normalized, query)
+      !$omp section
       call project_heads(model%key, normalized, key)
+      !$omp section
       call project_heads(model%value, normalized, value)
+      !$omp end parallel sections
       call apply_rotary(query, key, state%steps, model%config%rotary_period)
       call local_attention(state, query, key, value, local_context)
       call update_retention_and_context(state, model, query, key, value, global_context, local_status)
@@ -541,11 +552,24 @@ contains
       ! 384 sigmoid + 384 tanh per token is the transcendental bill of the
       ! gate.  Fusing them (tanh(x) = 2*sigmoid(2x) - 1, or a one-exponential
       ! tanh) does not pay here: see the note above on the same measurement.
+      ! The two gated branches are independent; their product is the widest
+      ! dense work of a step, so they are the natural place to use the second
+      ! thread.  Same MATMUL, same operands, disjoint results.
+      !$omp parallel sections if(model%config%ffn_width >= 256)
+      !$omp section
       gate = matmul(model%ffn_gate, attention_normalized)
+      !$omp section
       value_gate = matmul(model%ffn_value, attention_normalized)
+      !$omp end parallel sections
+      ! Elementwise and independent, and it is the transcendental bill of the
+      ! step (one sigmoid plus one tanh per FFN lane), so it is spread over the
+      ! team as well.  Each lane keeps its own expression, so the values do not
+      ! depend on how many threads run the loop.
+      !$omp parallel do schedule(static) if(model%config%ffn_width >= 256)
       do component = 1_int32, model%config%ffn_width
          ffn_input(component) = stable_sigmoid(gate(component)) * tanh(value_gate(component))
       end do
+      !$omp end parallel do
       hidden = residual + matmul(model%ffn_output, ffn_input)
       if (.not. all(ieee_is_finite(hidden))) then
          status = NRD_ERR_NUMERIC

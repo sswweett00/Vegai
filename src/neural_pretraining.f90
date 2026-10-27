@@ -392,7 +392,12 @@ contains
          status = NPT_ERR_NUMERICAL
          return
       end if
-      probabilities = probabilities / normalizer
+      ! Elementwise, so it can be parallelized without touching a single value.
+      !$omp parallel do schedule(static) if(size(probabilities) >= 1024)
+      do index = 1_int32, size(logits, kind=int32)
+         probabilities(index) = probabilities(index) / normalizer
+      end do
+      !$omp end parallel do
       if (.not. all(ieee_is_finite(probabilities))) status = NPT_ERR_NUMERICAL
    end subroutine stable_softmax
 
