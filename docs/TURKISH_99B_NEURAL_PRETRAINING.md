@@ -174,40 +174,52 @@ Sözleşmeler korunur:
 
 #### Ölçülen sonuç (tek koşu, tek runner, bayt-özdeş dilim)
 
-CI job 122249972169, vocab 4096 × width 96 × 4 başlık, pencere 48, ffn 384,
-400 000 baytlık sentetik Türkçe korpus, 4 thread, aynı seed:
+CI job 122291774164, vocab 4096 × width 96 × 4 başlık, pencere 48, ffn 384,
+400 000 baytlık sentetik Türkçe korpus (paragraf ölçekli kayıtlar, ortalama 833
+bayt), 4 thread, aynı seed. Her kol aynı seed'den sıfırdan eğitilir ve aynı
+held-out diliminde değerlendirilir:
 
 | kol | token/sn | held-out NLL |
 | --- | --- | --- |
-| merge-base (main) | 3435,7 | 9,027687 |
-| bu dal, N=1 (token-başına) | 4806,0 | 9,030295 |
-| bu dal, N=32 (birikim) | **7130,3** | **8,530942** |
+| merge-base (main) | 2450,1 | 9,090063 |
+| bu dal, N=1 (token-başına) | 3915,3 | 9,089033 |
+| bu dal, N=32 (birikim, seçilen) | **6874,9** | **8,442573** |
+| bu dal, N=64 | 6759,7 | 8,514667 |
+| bu dal, N=128 | 6691,0 | 8,317527 |
 
-- **Hız:** birikim, bu dalın token-başına yoluna göre **1,48x**; merge-base'e
-  göre **2,08x**. Token-başına yolun kendisi real32 eleman zinciri sayesinde
-  merge-base'in 1,40 katı (3436 → 4806 token/sn).
-- **Kalite:** eşit token sayısında held-out NLL birikim lehine **−0,499**,
-  merge-base'e göre **−0,497** (perplexity 8306 → 5076, aynı bütçede %39 daha
-  düşük); NLL iyileşmesi/saniye ise merge-base'e göre **2,0x**'in üzerinde.
-- **3x kapısı henüz geçilmedi.** Ölçülen 2,08x. Kalan fark için kaldıraç
-  eleman matematiği değil, tahmin başına *sabit* iş: `width × vocab` elemanlı
-  güncellemenin yanında attention/FFN ileri geçişi ve softmax hâlâ tahmin
-  başına bir kez koşuyor; N=32 bunları 32'ye bölüyor ama AdamW'nin kendisi
-  adım başına aynı kalıyor. Sıradaki adımlar (bu PR'ın kapsamı dışında
-  bırakılmadı, ölçülerek eklenecek): adım başına maliyeti düşürmek için
-  optimizer'ı satır-blok (cache-blocked) düzende dolaştırmak ve 8 thread'in
-  üstünde ölçüm yapmak.
+- **Hız:** birikim, bu dalın token-başına yoluna göre **1,76x**; merge-base'e
+  göre **2,81x**. Token-başına yolun kendisi (real32 eleman zinciri + vektörel
+  softmax) merge-base'in 1,60 katı.
+- **Kalite:** eşit tahmin-tokenı sayısında held-out NLL birikim lehine
+  **−0,646** (perplexity 8857 → 4629); merge-base'e göre **−0,647**.
+- **Faz bütçesi** (seçilen kolda, tahmin başına): decoder adımı **54,4 µs**,
+  blok projeksiyonu **23,3 µs**, skorlama (softmax + metrik + residual)
+  **22,5 µs**, optimize edici adımı **41,3 µs**. Güncellemesiz held-out
+  değerlendirmesi 7080 token/sn'dir.
+- **3x kapısı henüz geçilmedi:** ölçülen 2,81x. Kalan fark için üç kaldıraç
+  ölçülerek sıralandı: (1) decoder adımı en büyük kalem ve tahmin başına sabit
+  (attention/FFN, 768 transandantal çağrı; sıradaki iş skaler `sigmoid`/`tanh`
+  zincirini vektörleştirmek); (2) optimize edici adımı artık bellek bant
+  genişliğine bağlı — token başına 12,3 bin eleman × 24 bayt moment/parametre
+  trafiği; N büyütmek bunu böler ama blok çalışma kümesi L2'yi aştığı için
+  ölçümde N=64 ve N=128 daha yavaş çıktı (sözlük-dilimli dolaşma gerekir);
+  (3) birikim kayıt sınırında flush edildiği için **efektif batch kayıt
+  uzunluğuyla sınırlıdır** — bu yüzden probe korpusu, yönetilen korpusun
+  ürettiği paragraf ölçeğine (≥700 karakter) hizalandı; satır ölçeğinde
+  (80 bayt) 32/64/128 aynı sonucu veriyordu.
 
 Hız iddiası ölçümle kapılanır: `make neural-throughput-check`
 (`tools/benchmark_neural_batch_throughput.py`) bayt-özdeş sentetik korpusta
-aynı seed/shape/zamanlamayla üç kol koşar (N=1, N=32 ve verilirse merge-base
-binary'si), token/sn oranlarını, **eşit token sayısında** held-out NLL farkını
-ve "saniye başına NLL iyileşmesi" oranını raporlar. Runner'lar arası token
-hızı 2 kattan fazla oynadığı için (aynı kol bir koşuda 8308, sonrakinde 3811
-token/sn) karşılaştırma **aynı job içinde** yapılır:
+aynı seed/shape/zamanlamayla kolları koşar (N=1, `--sweep` ile verilen birikim
+faktörleri ve verilirse merge-base binary'si), token/sn oranlarını, **eşit token
+sayısında** held-out NLL farkını, faz başına mikrosaniye bütçesini ve "saniye
+başına NLL iyileşmesi"ni raporlar; referans kol hiç iyileşmediyse oran yerine
+mutlak değeri yazar (0,000x yanıltıcıydı). Runner'lar arası token hızı 2 kattan
+fazla oynadığı için karşılaştırma **aynı job içinde** yapılır.
 `.github/workflows/neural-batch-throughput.yml` merge-base'ten ikinci bir binary
-kurar ve kapıları (birikim/bu-dal ≥1,25x, birikim/merge-base ≥2,0x, NLL
-sapması ≤0,05) PR'da zorlar; JSON kanıtı artifact olarak yayımlanır.
+kurar, faktör süpürmesini (32,64,128) çalıştırır ve kapıları
+(birikim/bu-dal ≥1,25x, birikim/merge-base ≥2,0x, NLL sapması ≤0,05) PR'da
+zorlar; JSON kanıtı artifact olarak yayımlanır.
 
 ## 4. Koşu tarifi
 

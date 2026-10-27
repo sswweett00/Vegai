@@ -233,13 +233,28 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines += [
             f"- held-out NLL delta (batched - per-token): "
             f"{comparison['heldout_nll_delta_batched_minus_per_token']:+.6f}",
-            f"- NLL improvement per second ratio: {comparison['nll_improvement_per_second_ratio']:.3f}x",
+            f"- NLL improvement per second: {comparison['nll_improvement_per_second']:.4g} nats/s "
+            f"(reference arm {comparison['nll_improvement_per_second_reference']:.4g} nats/s)",
+        ]
+        ratio = comparison.get("nll_improvement_per_second_ratio")
+        lines += [
+            (f"- NLL improvement per second ratio: **{ratio:.3f}x**" if ratio is not None
+             else "- NLL improvement per second ratio: n/a (the reference arm did not improve in this probe)"),
         ]
     for failure in report.get("gate_failures", []):
         lines.append(f"- gate failure: {failure}")
     if report.get("error"):
         lines.append(f"- error: {report['error']}")
     return "\n".join(lines) + "\n"
+
+
+def quality_text(comparison: dict[str, Any]) -> str:
+    """Quality per wall clock, reported as a ratio only when it is defined."""
+    ratio = comparison.get("nll_improvement_per_second_ratio")
+    batched_rate = comparison.get("nll_improvement_per_second", 0.0)
+    if ratio is None:
+        return f"quality-per-second {batched_rate:.4g} nats/s (reference did not improve)"
+    return f"quality-per-second {ratio:.3f}x"
 
 
 def phase_text(comparison: dict[str, Any]) -> str:
@@ -273,7 +288,7 @@ def headline(report: dict[str, Any]) -> str:
         f"N={comparison.get('accumulation', 0)}; "
         f"speedup {comparison['speedup_tokens_per_second']:.3f}x; "
         f"held-out NLL delta {comparison['heldout_nll_delta_batched_minus_per_token']:+.6f}; "
-        f"{baseline_text}quality-per-second {comparison['nll_improvement_per_second_ratio']:.3f}x; "
+        f"{baseline_text}{quality_text(comparison)}; "
         f"evaluate-only {comparison.get('evaluate_only_tokens_per_second', 0.0):.1f} tok/s; "
         f"{phase_text(comparison)}; {measured}"
     )
@@ -444,14 +459,21 @@ def main(argv: list[str] | None = None) -> int:
         # does not necessarily improve the per-token arm at all (its
         # improvement-per-second then divides by ~0 and reports a meaningless 0).
         reference = arms.get("baseline", per_token)
-        quality_rate = (batched["nll_improvement_per_second"] / reference["nll_improvement_per_second"]
-                        if reference["nll_improvement_per_second"] > 0 else 0.0)
+        batched_rate = float(batched["nll_improvement_per_second"])
+        reference_rate = float(reference["nll_improvement_per_second"])
+        # A ratio is only meaningful when the reference arm itself improved.  In a
+        # short probe the per-token arm can finish at (or above) the untrained
+        # NLL, and dividing by ~0 published a meaningless 0.000x, which reads as
+        # "no quality gain" when it means "the reference did not learn yet".
+        quality_rate = (batched_rate / reference_rate) if reference_rate > 0 else None
         comparison = {
             "accumulation": chosen_accumulation,
             "speedup_tokens_per_second": speedup,
             "heldout_nll_delta_batched_minus_per_token": nll_delta,
             "heldout_perplexity_per_token": math.exp(float(per_token["heldout"]["mean_nll"])),
             "heldout_perplexity_batched": math.exp(float(batched["heldout"]["mean_nll"])),
+            "nll_improvement_per_second": batched_rate,
+            "nll_improvement_per_second_reference": reference_rate,
             "nll_improvement_per_second_ratio": quality_rate,
         }
         failures = []
