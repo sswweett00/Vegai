@@ -824,6 +824,12 @@ contains
          ! innermost per element -- was a chain of B dependent scalar FMAs per
          ! element, which is why the batched arm measured *slower* than the
          ! per-token arm once the element math became cheap.
+         ! Vocabulary tiling was tried here and measured 3x slower (update 33.8 ->
+         ! 98.7 us per prediction, CI job 122350793122): the tile accumulator is a
+         ! TILE x width automatic array whose width is a runtime value, and with a
+         ! dynamic extent gfortran stops vectorizing the axpy.  The column
+         ! accumulator below has the same shape but is filled by a loop whose
+         ! vector form survives, which is why the simple form is the fast one.
          !$omp parallel do private(token, feature, batch_index, gradient, gradient32, m32, v32, proposal32, &
          !$omp column_gradient, column_bias_gradient) &
          !$omp schedule(static) if(vocabulary_size >= 512_int32)
