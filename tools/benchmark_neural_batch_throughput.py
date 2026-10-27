@@ -41,6 +41,10 @@ SCHEMA = "vegai-neural-batch-throughput/v1"
 # Deterministic Turkish-flavoured synthetic text.  The point is a controlled,
 # dependency-free corpus with realistic BPE merge structure, not a language
 # model benchmark: both arms see byte-identical data.
+# Paragraph-scale records, matching the governed corpus builder, which drops
+# filtered paragraphs below 700 characters (tools/build_turkish_wiki_corpus.py).
+RECORD_MIN_CHARS = 700
+
 STEMS = (
     "deniz", "kıyı", "bulut", "yağmur", "şehir", "sokak", "kitap", "defter",
     "öğrenci", "öğretmen", "sabah", "akşam", "yolculuk", "tren", "istasyon",
@@ -52,24 +56,42 @@ CONNECTORS = (" ve ", " ama ", " çünkü ", ", ", " ki ", "; ", ". ", " - ")
 
 
 def build_corpus(path: Path, target_bytes: int, seed: int) -> dict[str, Any]:
-    """Writes a deterministic UTF-8 record-per-line corpus of about target_bytes."""
+    """Writes a deterministic UTF-8 record-per-line corpus of about target_bytes.
+
+    Records are paragraph scale (at least RECORD_MIN_CHARS), because that is what
+    the governed corpus emits: the wiki builder filters out paragraphs below 700
+    characters and frames whole paragraphs as records.  Record length is not
+    cosmetic here -- accumulation flushes at a record boundary, so a corpus of
+    eighty byte lines caps the effective batch at roughly twenty tokens whatever
+    factor is requested, which made a 32/64/128 comparison meaningless.
+    """
     rng = random.Random(seed)
     written = 0
     records = 0
+    record_bytes = 0
     digest = hashlib.sha256()
     with path.open("w", encoding="utf-8", newline="\n") as handle:
         while written < target_bytes:
-            words = []
-            for _ in range(rng.randint(4, 14)):
-                words.append(rng.choice(STEMS) + rng.choice(SUFFIXES))
-                words.append(rng.choice(CONNECTORS))
-            line = "".join(words).strip() + "\n"
+            sentences = []
+            length = 0
+            while length < RECORD_MIN_CHARS:
+                words = []
+                for _ in range(rng.randint(5, 12)):
+                    words.append(rng.choice(STEMS) + rng.choice(SUFFIXES))
+                    words.append(rng.choice(CONNECTORS))
+                sentence = "".join(words).strip().rstrip(",") + "."
+                sentences.append(sentence)
+                length += len(sentence) + 1
+            line = " ".join(sentences) + "\n"
             payload = line.encode("utf-8")
             handle.write(line)
             digest.update(payload)
             written += len(payload)
+            record_bytes += len(payload)
             records += 1
-    return {"path": str(path), "bytes": written, "records": records, "sha256": digest.hexdigest()}
+    return {"path": str(path), "bytes": written, "records": records, "sha256": digest.hexdigest(),
+            "mean_record_bytes": (record_bytes / records) if records else 0.0,
+            "record_min_chars": RECORD_MIN_CHARS}
 
 
 def split_heldout(corpus_path: Path, heldout_path: Path, train_path: Path, heldout_every: int) -> dict[str, Any]:
