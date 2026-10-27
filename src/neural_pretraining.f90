@@ -156,6 +156,13 @@ module neural_pretraining
       ! counted with lowest-index tie-breaking (matching greedy argmax).
       integer(int64) :: top1_correct = 0_int64
       integer(int64) :: top5_correct = 0_int64
+      ! Cumulative wall time per phase.  A throughput claim has to be
+      ! attributable: without this, "the update is the bottleneck" is a guess.
+      ! The cost is a few clock reads per prediction.
+      real(real64) :: decode_seconds = 0.0_real64
+      real(real64) :: project_seconds = 0.0_real64
+      real(real64) :: score_seconds = 0.0_real64
+      real(real64) :: update_seconds = 0.0_real64
    end type neural_train_metrics_t
 
    ! Conservative resident-memory accounting for one sequential training
@@ -427,6 +434,18 @@ contains
       state%adam_m_bias = 0.0_real32
       state%adam_v_bias = 0.0_real32
    end subroutine ensure_optimizer_state
+
+   ! Monotonic wall clock for the phase counters.
+   real(real64) function clock_seconds()
+      integer(int64) :: count, rate
+
+      call system_clock(count, rate)
+      if (rate <= 0_int64) then
+         clock_seconds = 0.0_real64
+      else
+         clock_seconds = real(count, real64) / real(rate, real64)
+      end if
+   end function clock_seconds
 
    subroutine workspace_ensure(workspace, model, batch_capacity, status)
       type(neural_train_workspace_t), intent(inout) :: workspace
@@ -1003,7 +1022,7 @@ contains
       real(real64), intent(inout) :: sequence_nll
       integer(int32), intent(out) :: status
       integer(int32) :: count, slot, decoder_status
-      real(real64) :: loss
+      real(real64) :: loss, phase_start
 
       status = NPT_OK
       count = workspace%batch_count
@@ -1012,11 +1031,14 @@ contains
          status = NPT_ERR_INVALID_ARGUMENT
          return
       end if
+      phase_start = clock_seconds()
       call neural_decoder_project_logits(model, workspace%batch_hidden, count, workspace%batch_logits, decoder_status)
+      metrics%project_seconds = metrics%project_seconds + (clock_seconds() - phase_start)
       if (decoder_status /= NRD_OK) then
          status = NPT_ERR_MODEL
          return
       end if
+      phase_start = clock_seconds()
       do slot = 1_int32, count
          ! Row of the block: contiguous, so no staging copy is needed.
          call stable_softmax(workspace%batch_logits(slot, :), workspace%probabilities, status)
@@ -1027,8 +1049,11 @@ contains
          call stage_batch_residual(workspace, config, workspace%probabilities, workspace%batch_targets(slot), slot, status)
          if (status /= NPT_OK) return
       end do
+      metrics%score_seconds = metrics%score_seconds + (clock_seconds() - phase_start)
+      phase_start = clock_seconds()
       call batched_tied_output_update(model, workspace%batch_residuals, workspace%batch_hidden, &
                                       workspace%batch_clip, workspace%batch_targets, count, config, state, status)
+      metrics%update_seconds = metrics%update_seconds + (clock_seconds() - phase_start)
       if (status /= NPT_OK) return
       state%updates_completed = state%updates_completed + 1_int64
       workspace%batch_count = 0_int32
@@ -1046,7 +1071,7 @@ contains
       integer(int32), intent(out) :: status
       integer(int32) :: position, decoder_status, target
       integer(int32) :: batch_capacity
-      real(real64) :: loss, sequence_nll
+      real(real64) :: loss, sequence_nll, phase_start
       logical :: accumulating
 
       status = NPT_OK
@@ -1088,8 +1113,10 @@ contains
             ! (vocabulary x width) embedding is streamed once per block instead
             ! of once per prediction token -- that read is the single largest
             ! memory stream of a step.
+            phase_start = clock_seconds()
             call neural_decoder_step_hidden(model, workspace%decoder_state, tokens(position), &
                                             workspace%hidden, decoder_status)
+            metrics%decode_seconds = metrics%decode_seconds + (clock_seconds() - phase_start)
             if (decoder_status /= NRD_OK) then
                status = NPT_ERR_MODEL
                exit
@@ -1101,19 +1128,25 @@ contains
                if (status /= NPT_OK) exit
             end if
          else
+            phase_start = clock_seconds()
             call neural_decoder_step(model, workspace%decoder_state, tokens(position), workspace%hidden, &
                                      workspace%logits, decoder_status)
+            metrics%decode_seconds = metrics%decode_seconds + (clock_seconds() - phase_start)
             if (decoder_status /= NRD_OK) then
                status = NPT_ERR_MODEL
                exit
             end if
+            phase_start = clock_seconds()
             call stable_softmax(workspace%logits, workspace%probabilities, status)
             if (status /= NPT_OK) exit
             call observe_prediction(metrics, workspace%probabilities, target, loss, status)
+            metrics%score_seconds = metrics%score_seconds + (clock_seconds() - phase_start)
             if (status /= NPT_OK) exit
             sequence_nll = sequence_nll + loss
             if (update_model) then
+               phase_start = clock_seconds()
                call tied_output_update(model, workspace%hidden, workspace%probabilities, target, config, state, status)
+               metrics%update_seconds = metrics%update_seconds + (clock_seconds() - phase_start)
                if (status /= NPT_OK) exit
                state%updates_completed = state%updates_completed + 1_int64
             end if

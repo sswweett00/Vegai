@@ -555,6 +555,10 @@ contains
             '"top5_accuracy":'//trim(ratio_text(metrics%top5_correct, metrics%prediction_tokens))//','// &
             '"epoch_wall_seconds":'//trim(r64_text(epoch_seconds))//','// &
             '"prediction_tokens_per_second":'//trim(r64_text(tokens_per_second))//','// &
+            '"phase_seconds":{"decode":'//trim(r64_text(metrics%decode_seconds))//','// &
+            '"project":'//trim(r64_text(metrics%project_seconds))//','// &
+            '"score":'//trim(r64_text(metrics%score_seconds))//','// &
+            '"update":'//trim(r64_text(metrics%update_seconds))//'},'// &
             '"skipped_records":'//trim(i64_text(metrics%skipped_records))//','// &
             '"tokenizer_truncations":'//trim(i64_text(metrics%tokenizer_truncations))//'}'
       end do

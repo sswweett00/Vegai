@@ -219,6 +219,16 @@ def render_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def phase_text(comparison: dict[str, Any]) -> str:
+    """Compact per-token phase breakdown (microseconds) for the annotation."""
+    phases = comparison.get("phase_microseconds_per_token")
+    if not phases:
+        return "phases unavailable"
+    return "phases us/token " + " ".join(
+        f"{name} {value:.1f}" for name, value in phases.items()
+    )
+
+
 def headline(report: dict[str, Any]) -> str:
     """One-line, API-readable restatement of the measurement."""
     arms = report.get("arms", {})
@@ -240,7 +250,8 @@ def headline(report: dict[str, Any]) -> str:
         f"speedup {comparison['speedup_tokens_per_second']:.3f}x; "
         f"held-out NLL delta {comparison['heldout_nll_delta_batched_minus_per_token']:+.6f}; "
         f"{baseline_text}quality-per-second {comparison['nll_improvement_per_second_ratio']:.3f}x; "
-        f"evaluate-only {comparison.get('evaluate_only_tokens_per_second', 0.0):.1f} tok/s; {measured}"
+        f"evaluate-only {comparison.get('evaluate_only_tokens_per_second', 0.0):.1f} tok/s; "
+        f"{phase_text(comparison)}; {measured}"
     )
 
 
@@ -405,6 +416,16 @@ def main(argv: list[str] | None = None) -> int:
         comparison["evaluate_only_tokens_per_second"] = float(
             batched["heldout"].get("prediction_tokens_per_second", 0.0)
         )
+        # Per-prediction cost of each phase, in microseconds, straight from the
+        # trainer's own counters.  Runners differ by more than 2x in absolute
+        # rate, so the breakdown is reported per token to stay comparable.
+        phase_seconds = batched.get("epoch", {}).get("phase_seconds", {})
+        predictions = int(batched["epoch"].get("prediction_tokens", 0) or 0)
+        if phase_seconds and predictions > 0:
+            comparison["phase_microseconds_per_token"] = {
+                name: (float(phase_seconds.get(name, 0.0)) / predictions) * 1.0e6
+                for name in ("decode", "project", "score", "update")
+            }
         baseline_arm = arms.get("baseline")
         if baseline_arm:
             baseline_rate = float(baseline_arm["reported_tokens_per_second"])
