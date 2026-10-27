@@ -51,6 +51,11 @@ module neural_pretraining
    integer(int32), parameter, public :: NPT_OPTIMIZER_SGD = 1_int32
    integer(int32), parameter, public :: NPT_OPTIMIZER_ADAMW = 2_int32
 
+   ! Blocks of the softmax normalizer reduction.  Four is what the measurement
+   ! threads use; the combine order is fixed, so the sum -- and therefore the
+   ! distribution -- is identical at any thread count.
+   integer(int32), parameter :: NPT_SOFTMAX_BLOCKS = 4_int32
+
    ! Upper bound on gradient_accumulation.  It bounds two stack allocations
    ! (the staging buffers are O(vocabulary * accumulation) and the flush
    ! kernel's clipped-hidden block is O(width * accumulation)), and it costs
@@ -366,7 +371,8 @@ contains
       real(real64), contiguous, intent(out) :: probabilities(:)
       integer(int32), intent(out) :: status
       real(real64) :: maximum, normalizer
-      integer(int32) :: index
+      real(real64) :: partial_sums(NPT_SOFTMAX_BLOCKS), block_total
+      integer(int32) :: index, block, first, last, block_size
 
       status = NPT_OK
       if (size(logits, kind=int32) <= 0_int32 .or. size(probabilities, kind=int32) /= size(logits, kind=int32) .or. &
@@ -374,20 +380,35 @@ contains
          status = NPT_ERR_NUMERICAL
          return
       end if
+      block_size = (size(logits, kind=int32) + NPT_SOFTMAX_BLOCKS - 1_int32) / NPT_SOFTMAX_BLOCKS
       maximum = maxval(real(logits, real64))
       ! Exponentials are independent per token, so the optional parallel
-      ! fill stores bit-identical values; the normalizer then accumulates
-      ! in the same ascending order as the sequential form, keeping the
-      ! resulting distribution bit-identical at any thread count.
+      ! fill stores bit-identical values, and the blocked normalizer below has a
+      ! fixed combine order, so the distribution is identical at any thread count.
       !$omp parallel do schedule(static) if(size(logits) >= 1024)
       do index = 1_int32, size(logits, kind=int32)
          probabilities(index) = exp(real(logits(index), real64) - maximum)
       end do
       !$omp end parallel do
-      ! The reduction is order-fixed (the intrinsic sums in array order), so
-      ! the distribution is identical at any thread count; writing it as a
-      ! reduction rather than a scalar loop lets the compiler vectorize it.
-      normalizer = sum(probabilities)
+      ! Blocked reduction: four contiguous blocks are summed independently and
+      ! the partial sums are combined in a fixed order, so the result is
+      ! identical at any thread count and still deterministic, while the work is
+      ! spread over the team.  A plain SUM here was a serial pass over the whole
+      ! vocabulary (4096 real64 adds, ~2 us of the scoring phase).
+      !$omp parallel do schedule(static) if(size(logits) >= 1024)
+      do block = 0_int32, NPT_SOFTMAX_BLOCKS - 1_int32
+         first = block * block_size + 1_int32
+         last = min(size(logits, kind=int32), first + block_size - 1_int32)
+         block_total = 0.0_real64
+         if (first <= last) then
+            do index = first, last
+               block_total = block_total + probabilities(index)
+            end do
+         end if
+         partial_sums(block + 1_int32) = block_total
+      end do
+      !$omp end parallel do
+      normalizer = ((partial_sums(1) + partial_sums(2)) + (partial_sums(3) + partial_sums(4)))
       if (.not. ieee_is_finite(normalizer) .or. normalizer <= tiny(1.0_real64)) then
          status = NPT_ERR_NUMERICAL
          return
