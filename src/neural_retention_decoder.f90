@@ -315,39 +315,19 @@ contains
       end if
    end function stable_sigmoid
 
-   ! tanh through a single exponential of a non-positive argument: the libm
-   ! call costs an argument reduction plus branchy special cases, and this form
-   ! is exactly bounded -- exp(-2|v|) is in (0, 1], so the division never loses
-   ! its denominator and the result stays in [-1, 1].
-   pure real(real32) function stable_tanh(value) result(transformed)
-      real(real32), intent(in) :: value
-      real(real32) :: exponential
-
-      exponential = exp(-2.0_real32 * abs(value))
-      transformed = sign((1.0_real32 - exponential) / (1.0_real32 + exponential), value)
-   end function stable_tanh
-
    subroutine rms_normalize(input, scale, epsilon, output, status)
       real(real32), intent(in) :: input(:), scale(:)
       real(real32), intent(in) :: epsilon
       real(real32), intent(out) :: output(:)
       integer(int32), intent(out) :: status
       real(real32) :: mean_square, inverse_rms
-      integer :: row
 
       status = NRD_OK
       if (size(input) <= 0 .or. size(scale) /= size(input) .or. size(output) /= size(input) .or. epsilon <= 0.0_real32) then
          status = NRD_ERR_INVALID_ARGUMENT
          return
       end if
-      ! Accumulated in place: SUM(INPUT * INPUT) materialized a temporary vector
-      ! twice per step for no reason.
-      mean_square = 0.0_real32
-      !$omp simd reduction(+:mean_square)
-      do row = 1, size(input)
-         mean_square = mean_square + input(row) * input(row)
-      end do
-      mean_square = mean_square / real(size(input), real32)
+      mean_square = sum(input * input) / real(size(input), real32)
       if (.not. ieee_is_finite(mean_square) .or. mean_square < 0.0_real32) then
          status = NRD_ERR_NUMERIC
          return
@@ -394,43 +374,14 @@ contains
       end do
    end subroutine apply_rotary
 
-   ! Dense matrix-vector product, WEIGHTS(row, column) with the input index in
-   ! the second dimension: every output row is a contiguous reduction, which is
-   ! the layout the compiler can vectorize.  The intrinsic MATMUL used here
-   ! before is single threaded and, without a BLAS vendor library, competes with
-   ! a plain loop rather than beating it.
-   pure subroutine matvec(weights, input, output)
-      real(real32), contiguous, intent(in) :: weights(:, :), input(:)
-      real(real32), contiguous, intent(out) :: output(:)
-      integer :: row, column
-      real(real32) :: accumulator
+   subroutine project_heads(weights, input, output)
+      real(real32), intent(in) :: weights(:, :, :), input(:)
+      real(real32), intent(out) :: output(:, :)
+      integer :: head, component
 
-      do row = 1, size(weights, 1)
-         accumulator = 0.0_real32
-         !$omp simd reduction(+:accumulator)
-         do column = 1, size(weights, 2)
-            accumulator = accumulator + weights(row, column) * input(column)
-         end do
-         output(row) = accumulator
-      end do
-   end subroutine matvec
-
-   ! Per-head projection: WEIGHTS(component, source, head).  It is accumulated as
-   ! an axpy over the contiguous component axis, because the alternative --
-   ! dot_product over WEIGHTS(component, :, head) -- reads with a stride of the
-   ! head width and keeps the loop scalar.
-   pure subroutine project_heads(weights, input, output)
-      real(real32), contiguous, intent(in) :: weights(:, :, :), input(:)
-      real(real32), contiguous, intent(out) :: output(:, :)
-      integer :: head, component, source
-
-      output = 0.0_real32
       do head = 1, size(weights, 3)
-         do source = 1, size(weights, 2)
-            !$omp simd
-            do component = 1, size(weights, 1)
-               output(component, head) = output(component, head) + weights(component, source, head) * input(source)
-            end do
+         do component = 1, size(weights, 1)
+            output(component, head) = dot_product(weights(component, :, head), input)
          end do
       end do
    end subroutine project_heads
@@ -545,7 +496,6 @@ contains
       real(real32) :: value(model%head_width, model%config%heads), local_context(model%head_width, model%config%heads)
       real(real32) :: global_context(model%head_width, model%config%heads), mixed_context(model%head_width, model%config%heads)
       real(real32) :: attention_vector(model%config%width), residual(model%config%width)
-      real(real32) :: attention_projection(model%config%width), ffn_projection(model%config%width)
       real(real32) :: gate(model%config%ffn_width), value_gate(model%config%ffn_width), ffn_input(model%config%ffn_width)
       integer(int32) :: head, component, offset, local_status
       real(real32) :: mixture
@@ -575,17 +525,28 @@ contains
             attention_vector(offset + component) = mixed_context(component, head)
          end do
       end do
-      call matvec(model%attention_output, attention_vector, attention_projection)
-      residual = model%token_embedding(:, token) + attention_projection
+      ! Keep the intrinsic dense products.  Hand-written alternatives were
+      ! measured and are slower, not faster: replacing these four MATMUL calls
+      ! with a vectorized matvec loop, the strided project_heads dot products
+      ! with a contiguous axpy, and TANH with a one-exponential identity moved
+      ! the decoder step from 54.4 to 111.9 microseconds per prediction (CI job
+      ! 122344621975; the same job's held-out evaluate pass fell from 6998 to
+      ! 4600 tokens/s while the untouched merge-base arm moved only 10%, so the
+      ! regression is the code, not the runner).  gfortran lowers MATMUL and
+      ! DOT_PRODUCT on contiguous operands to loops it vectorizes better than
+      ! these hand-written forms.
+      residual = model%token_embedding(:, token) + matmul(model%attention_output, attention_vector)
       call rms_normalize(residual, model%ffn_rms, model%config%rms_epsilon, attention_normalized, local_status)
       if (local_status /= NRD_OK) then; status = local_status; return; end if
-      call matvec(model%ffn_gate, attention_normalized, gate)
-      call matvec(model%ffn_value, attention_normalized, value_gate)
+      ! 384 sigmoid + 384 tanh per token is the transcendental bill of the
+      ! gate.  Fusing them (tanh(x) = 2*sigmoid(2x) - 1, or a one-exponential
+      ! tanh) does not pay here: see the note above on the same measurement.
+      gate = matmul(model%ffn_gate, attention_normalized)
+      value_gate = matmul(model%ffn_value, attention_normalized)
       do component = 1_int32, model%config%ffn_width
-         ffn_input(component) = stable_sigmoid(gate(component)) * stable_tanh(value_gate(component))
+         ffn_input(component) = stable_sigmoid(gate(component)) * tanh(value_gate(component))
       end do
-      call matvec(model%ffn_output, ffn_input, ffn_projection)
-      hidden = residual + ffn_projection
+      hidden = residual + matmul(model%ffn_output, ffn_input)
       if (.not. all(ieee_is_finite(hidden))) then
          status = NRD_ERR_NUMERIC
          return
