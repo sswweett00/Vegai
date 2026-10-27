@@ -592,9 +592,12 @@ contains
    ! following tokens of the block, so the output stays resident.
    subroutine neural_decoder_project_logits(model, hidden_matrix, count, logits_matrix, status)
       type(neural_decoder_t), intent(in) :: model
-      real(real32), intent(in) :: hidden_matrix(:, :)
+      ! CONTIGUOUS is load bearing: with a bare assumed-shape dummy gfortran
+      ! cannot prove the inner fan-out has unit stride and leaves the loop
+      ! scalar, which measured ~20x slower than the vector form.
+      real(real32), contiguous, intent(in) :: hidden_matrix(:, :)
       integer(int32), intent(in) :: count
-      real(real32), intent(out) :: logits_matrix(:, :)
+      real(real32), contiguous, intent(out) :: logits_matrix(:, :)
       integer(int32), intent(out) :: status
       integer(int32) :: width, vocabulary_size, token, feature, lane, group, first, available
       real(real32) :: weight, bias

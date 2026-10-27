@@ -359,8 +359,8 @@ contains
    end subroutine neural_training_resource_plan
 
    subroutine stable_softmax(logits, probabilities, status)
-      real(real32), intent(in) :: logits(:)
-      real(real64), intent(out) :: probabilities(:)
+      real(real32), contiguous, intent(in) :: logits(:)
+      real(real64), contiguous, intent(out) :: probabilities(:)
       integer(int32), intent(out) :: status
       real(real64) :: maximum, normalizer
       integer(int32) :: index
@@ -718,10 +718,12 @@ contains
       ! (vocabulary, capacity): column b holds the unsmoothed-mean residual of
       ! staged token b, i.e. softmax - label_smoothing/V, minus
       ! (1 - label_smoothing) at that token's target.
-      real(real32), intent(in) :: residuals(:, :)
-      real(real32), intent(in) :: hidden_batch(:, :)
-      real(real64), intent(in) :: clip_batch(:)
-      integer(int32), intent(in) :: targets(:)
+      ! CONTIGUOUS keeps the column axpy vectorizable; without it gfortran
+      ! assumes an arbitrary stride and emits a scalar loop.
+      real(real32), contiguous, intent(in) :: residuals(:, :)
+      real(real32), contiguous, intent(in) :: hidden_batch(:, :)
+      real(real64), contiguous, intent(in) :: clip_batch(:)
+      integer(int32), contiguous, intent(in) :: targets(:)
       integer(int32), intent(in) :: batch_count
       type(neural_train_config_t), intent(in) :: config
       type(neural_train_state_t), intent(inout) :: state
