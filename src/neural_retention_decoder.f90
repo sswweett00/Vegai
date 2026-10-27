@@ -90,6 +90,14 @@ module neural_retention_decoder
    public :: neural_decoder_state_init, neural_decoder_state_destroy, neural_decoder_state_reset
    public :: neural_decoder_state_is_ready, neural_decoder_step, neural_decoder_plan
    public :: neural_decoder_step_hidden, neural_decoder_project_logits
+
+   ! Number of staged tokens the block projection consumes at a time.  It is a
+   ! compile-time constant so the per-lane accumulators live in vector registers
+   ! instead of a runtime-sized stack array: with a dynamic size the fan-out loop
+   ! degrades to load/FMA/store per element, which measured ~8x slower than the
+   ! register form.  Callers allocate the hidden block with this many extra
+   ! zeroed columns, so the last partial group reads defined values.
+   integer(int32), parameter, public :: NRD_LOGIT_BLOCK_LANES = 16_int32
    public :: neural_decoder_config_is_valid
 
 contains
@@ -578,18 +586,20 @@ contains
    ! of once per token.  The fan-out vector is the only dependency: its elements
    ! are updated once per feature and there are count of them, which is what
    ! keeps the inner loop at one vector FMA per element instead of a scalar
-   ! chain.  Writes of one token's row step by vocabulary, but each cache line is
-   ! reused by the next fifteen tokens, so the block's output stays resident.
+   ! chain.  Lanes are consumed NRD_LOGIT_BLOCK_LANES at a time and the vector is
+   ! fixed size, which is what keeps the fan-out in registers.  Writes of one
+   ! token's row step by vocabulary, but each cache line is shared by the
+   ! following tokens of the block, so the output stays resident.
    subroutine neural_decoder_project_logits(model, hidden_matrix, count, logits_matrix, status)
       type(neural_decoder_t), intent(in) :: model
       real(real32), intent(in) :: hidden_matrix(:, :)
       integer(int32), intent(in) :: count
       real(real32), intent(out) :: logits_matrix(:, :)
       integer(int32), intent(out) :: status
-      integer(int32) :: width, vocabulary_size, token, feature, slot
+      integer(int32) :: width, vocabulary_size, token, feature, lane, group, first, available
       real(real32) :: weight, bias
-      ! One accumulator per staged token, private per thread.
-      real(real32) :: accumulator(size(logits_matrix, 1))
+      ! Exactly one group of lanes: fixed size, therefore register resident.
+      real(real32) :: accumulator(NRD_LOGIT_BLOCK_LANES)
 
       status = NRD_OK
       width = model%config%width
@@ -602,20 +612,24 @@ contains
          status = NRD_ERR_INVALID_ARGUMENT
          return
       end if
-      !$omp parallel do private(token, feature, slot, weight, bias, accumulator) &
+      !$omp parallel do private(token, feature, lane, group, first, available, weight, bias, accumulator) &
       !$omp schedule(static) if(vocabulary_size >= 512_int32)
       do token = 1_int32, vocabulary_size
-         accumulator(1_int32:count) = 0.0_real32
-         do feature = 1_int32, width
-            weight = model%token_embedding(feature, token)
-            !$omp simd
-            do slot = 1_int32, count
-               accumulator(slot) = accumulator(slot) + weight * hidden_matrix(feature, slot)
-            end do
-         end do
          bias = model%output_bias(token)
-         do slot = 1_int32, count
-            logits_matrix(slot, token) = accumulator(slot) + bias
+         do group = 0_int32, (count - 1_int32) / NRD_LOGIT_BLOCK_LANES
+            first = group * NRD_LOGIT_BLOCK_LANES + 1_int32
+            available = min(NRD_LOGIT_BLOCK_LANES, count - first + 1_int32)
+            accumulator = 0.0_real32
+            do feature = 1_int32, width
+               weight = model%token_embedding(feature, token)
+               !$omp simd
+               do lane = 1_int32, NRD_LOGIT_BLOCK_LANES
+                  accumulator(lane) = accumulator(lane) + weight * hidden_matrix(feature, first + lane - 1_int32)
+               end do
+            end do
+            do lane = 1_int32, available
+               logits_matrix(first + lane - 1_int32, token) = accumulator(lane) + bias
+            end do
          end do
       end do
       !$omp end parallel do

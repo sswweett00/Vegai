@@ -453,7 +453,7 @@ contains
       workspace%batch_count = 0_int32
       if (batch_capacity > 1_int32) then
          allocate(workspace%batch_residuals(model%config%vocabulary_size, batch_capacity), &
-                  workspace%batch_hidden(model%config%width, batch_capacity), &
+                  workspace%batch_hidden(model%config%width, batch_capacity + NRD_LOGIT_BLOCK_LANES), &
                   workspace%batch_logits(batch_capacity, model%config%vocabulary_size), &
                   workspace%batch_clip(batch_capacity), workspace%batch_targets(batch_capacity), &
                   stat=allocation_status)
@@ -462,6 +462,9 @@ contains
             status = NPT_ERR_ALLOCATION
             return
          end if
+         ! The logits projection consumes a whole lane group at a time, so the
+         ! columns past the last staged token must read defined values.
+         workspace%batch_hidden = 0.0_real32
       end if
       call neural_decoder_state_init(workspace%decoder_state, model, decoder_status)
       if (decoder_status /= NRD_OK) then
