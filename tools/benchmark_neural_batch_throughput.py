@@ -450,7 +450,16 @@ def main(argv: list[str] | None = None) -> int:
         eligible = [arm for arm in candidates
                     if float(arm["heldout"]["mean_nll"]) - float(per_token["heldout"]["mean_nll"])
                     <= args.max_nll_regression]
-        batched = max(eligible or candidates, key=lambda arm: arm["reported_tokens_per_second"])
+        eligible = eligible or candidates
+        fastest = max(eligible, key=lambda arm: arm["reported_tokens_per_second"])
+        # Quality-first tie-break: a larger batch that is not materially faster
+        # should not be preferred over one that is measurably better.  "Materially"
+        # is 3%, which is above the spread between adjacent factors in the measured
+        # sweep and below any difference worth trading held-out NLL for.
+        close = [arm for arm in eligible
+                 if float(arm["reported_tokens_per_second"])
+                 >= 0.97 * float(fastest["reported_tokens_per_second"])]
+        batched = min(close, key=lambda arm: float(arm["heldout"]["mean_nll"]))
         chosen_accumulation = int(batched["gradient_accumulation"])
         report["accumulation_sweep"] = {
             arm["arm"]: {

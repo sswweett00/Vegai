@@ -675,6 +675,7 @@ contains
       ! NOVA-1 scalars: all loop invariant except the per-column step scale.
       real(real32) :: momentum_32, energy_decay_32, one_minus_energy_32, restart_32
       real(real32) :: step_rate_32, epsilon_32, width_32, energy, agreement, step_scale, gamma32, previous
+      real(real32) :: hidden_energy
       logical :: first_step
 
       status = NPT_OK
@@ -812,6 +813,12 @@ contains
          value_limit_32 = real(value_limit, real32)
          width_32 = real(width, real32)
          first_step = state%updates_completed == 0_int64
+         ! The gradient of a single prediction is r * h, so the column energy needs
+         ! no per-column reduction at all: ||g(v)||^2 = r(v)^2 ||h||^2 and ||h||^2 is
+         ! one scalar for the whole step.  The agreement still needs one dot product
+         ! per column, and it is taken with DOT_PRODUCT over the contiguous stored
+         ! velocity slice -- measured faster here than a hand-written reduction.
+         hidden_energy = dot_product(hidden, hidden) / width_32
          !$omp parallel do private(token, feature, residual, scaled_residual32, &
          !$omp gradient32, proposal32, energy, agreement, step_scale, gamma32, previous) &
          !$omp schedule(static) if(vocabulary_size >= 512_int32)
@@ -819,15 +826,8 @@ contains
             residual = probabilities(token) - smooth_mass
             if (token == target) residual = residual - (1.0_real64 - config%label_smoothing)
             scaled_residual32 = real(residual * clip_scale, real32)
-            energy = 0.0_real32
-            agreement = 0.0_real32
-            !$omp simd reduction(+:energy, agreement)
-            do feature = 1_int32, width
-               gradient32 = scaled_residual32 * hidden(feature)
-               energy = energy + gradient32 * gradient32
-               agreement = agreement + gradient32 * state%nova_u_embedding(feature, token)
-            end do
-            energy = energy / width_32
+            energy = scaled_residual32 * scaled_residual32 * hidden_energy
+            agreement = scaled_residual32 * dot_product(hidden, state%nova_u_embedding(:, token))
             if (first_step) then
                ! Initialize from the step's own gradient: no bias correction,
                ! because the first estimate is already unbiased.
@@ -1106,15 +1106,16 @@ contains
                                              residual32 * clipped_hidden(batch_index, feature)
                end do
             end do
-            energy = 0.0_real32
-            agreement = 0.0_real32
-            !$omp simd reduction(+:energy, agreement)
+            !$omp simd
             do feature = 1_int32, width
                column_gradient(feature) = column_gradient(feature) * inverse_batch_32
-               energy = energy + column_gradient(feature) * column_gradient(feature)
-               agreement = agreement + column_gradient(feature) * state%nova_u_embedding(feature, token)
             end do
-            energy = energy / width_32
+            ! DOT_PRODUCT, not a hand-written reduction: on contiguous slices the
+            ! intrinsic vectorizes with several accumulators, while the two-reduction
+            ! scalar loop it replaces stayed serial and cost more than the whole
+            ! optimizer chain (measured on the first NOVA run).
+            energy = dot_product(column_gradient, column_gradient) / width_32
+            agreement = dot_product(column_gradient, state%nova_u_embedding(:, token))
             if (first_step) then
                state%nova_energy(token) = energy
             else
