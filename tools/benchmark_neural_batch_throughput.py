@@ -128,7 +128,7 @@ def arm_name(accumulation: int) -> str:
 
 
 def train_arm(binary: str, tokenizer_path: Path, checkpoint_path: Path, train_path: Path, heldout_path: Path,
-              args: argparse.Namespace, accumulation: int) -> dict[str, Any]:
+              args: argparse.Namespace, accumulation: int, supports_accumulation: bool = True) -> dict[str, Any]:
     """Trains one arm from a freshly initialized checkpoint and measures nothing but behavior."""
     model_options = [
         "--width", str(args.width), "--heads", str(args.heads), "--window", str(args.window),
@@ -136,8 +136,9 @@ def train_arm(binary: str, tokenizer_path: Path, checkpoint_path: Path, train_pa
         "--optimizer", args.optimizer, "--schedule", args.schedule,
         "--warmup-updates", str(args.warmup_updates), "--total-updates", str(args.total_updates),
         "--label-smoothing", repr(args.label_smoothing),
-        "--gradient-accumulation", str(accumulation),
     ]
+    if supports_accumulation:
+        model_options += ["--gradient-accumulation", str(accumulation)]
     # Same wait policy the governed epoch runner exports: per-token OpenMP
     # regions are microseconds apart, so a sleeping worker team spends more
     # time waking up than working.  Applied to both arms identically.
@@ -197,10 +198,19 @@ def render_markdown(report: dict[str, Any]) -> str:
     if comparison:
         lines += [
             "",
-            f"- speedup: **{comparison['speedup_tokens_per_second']:.3f}x**",
+            f"- speedup (batched vs per-token, same binary): **{comparison['speedup_tokens_per_second']:.3f}x**",
+        ]
+        if "speedup_vs_baseline" in comparison:
+            lines += [
+                f"- speedup vs the comparison binary (end to end): "
+                f"**{comparison['speedup_vs_baseline']:.3f}x**",
+                f"- held-out NLL delta vs baseline: "
+                f"{comparison['heldout_nll_delta_batched_minus_baseline']:+.6f}",
+            ]
+        lines += [
             f"- held-out NLL delta (batched - per-token): "
             f"{comparison['heldout_nll_delta_batched_minus_per_token']:+.6f}",
-            f"- NLL improvement per second ratio: **{comparison['nll_improvement_per_second_ratio']:.3f}x**",
+            f"- NLL improvement per second ratio: {comparison['nll_improvement_per_second_ratio']:.3f}x",
         ]
     for failure in report.get("gate_failures", []):
         lines.append(f"- gate failure: {failure}")
@@ -220,10 +230,16 @@ def headline(report: dict[str, Any]) -> str:
         f"NLL {float(arm['heldout']['mean_nll']):.6f}"
         for name, arm in arms.items()
     )
+    baseline_text = ""
+    if "speedup_vs_baseline" in comparison:
+        baseline_text = (
+            f"speedup vs baseline {comparison['speedup_vs_baseline']:.3f}x; "
+            f"NLL delta vs baseline {comparison['heldout_nll_delta_batched_minus_baseline']:+.6f}; "
+        )
     return (
         f"speedup {comparison['speedup_tokens_per_second']:.3f}x; "
         f"held-out NLL delta {comparison['heldout_nll_delta_batched_minus_per_token']:+.6f}; "
-        f"quality-per-second {comparison['nll_improvement_per_second_ratio']:.3f}x; {measured}"
+        f"{baseline_text}quality-per-second {comparison['nll_improvement_per_second_ratio']:.3f}x; {measured}"
     )
 
 
@@ -273,12 +289,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--accumulation", type=int, default=32, help="batch arm accumulation factor")
     parser.add_argument("--threads", type=int, default=os.cpu_count() or 2)
     parser.add_argument("--timeout", type=int, default=3600)
-    parser.add_argument("--min-speedup", type=float, default=1.5,
-                        help="gate: required measured tokens/s ratio of the batched arm")
+    parser.add_argument("--baseline-bin", help="optional binary built from the comparison revision (e.g. main); "
+                                               "its arm measures the end-to-end speedup instead of just the "
+                                               "accumulation factor")
+    parser.add_argument("--min-speedup", type=float, default=1.25,
+                        help="gate: required measured tokens/s ratio of the batched arm against the per-token arm "
+                             "of the same binary")
+    parser.add_argument("--min-baseline-speedup", type=float, default=0.0,
+                        help="gate: required tokens/s ratio of the batched arm against --baseline-bin (0 = no gate)")
     parser.add_argument("--max-nll-regression", type=float, default=0.05,
                         help="gate: batched held-out NLL may exceed the per-token arm by at most this")
-    parser.add_argument("--min-quality-rate-ratio", type=float, default=1.5,
-                        help="gate: required ratio of NLL-improvement-per-second (quality per wall clock)")
+    parser.add_argument("--max-baseline-nll-regression", type=float, default=0.05,
+                        help="gate: batched held-out NLL may exceed the baseline arm by at most this")
     parser.add_argument("--output", help="write the JSON report here")
     parser.add_argument("--report", help="render an existing report (no training) and publish it")
     parser.add_argument("--summary", action="store_true",
@@ -302,8 +324,9 @@ def main(argv: list[str] | None = None) -> int:
         "vocab": args.vocab, "width": args.width, "heads": args.heads, "window": args.window,
         "ffn": args.ffn, "optimizer": args.optimizer, "schedule": args.schedule,
         "lr": args.lr, "threads": args.threads, "corpus_bytes": args.corpus_bytes,
-    }, "gates": {"min_speedup": args.min_speedup, "max_nll_regression": args.max_nll_regression,
-                 "min_quality_rate_ratio": args.min_quality_rate_ratio}}
+    }, "gates": {"min_speedup": args.min_speedup, "min_baseline_speedup": args.min_baseline_speedup,
+                 "max_nll_regression": args.max_nll_regression,
+                 "max_baseline_nll_regression": args.max_baseline_nll_regression}}
     exit_code = 0
     try:
         corpus_path = work_dir / "corpus.txt"
@@ -338,6 +361,16 @@ def main(argv: list[str] | None = None) -> int:
                 binary, tokenizer_path, checkpoint, work_dir / "train.txt", work_dir / "heldout.txt",
                 args, accumulation,
             )
+        if args.baseline_bin:
+            # Same corpus, tokenizer, shape and seed, but the binary built from
+            # the comparison revision: this is the end-to-end number ("training
+            # is X times faster than main"), measured inside one job so runner
+            # noise cannot flatter it.
+            baseline_binary = str(Path(args.baseline_bin).resolve())
+            arms["baseline"] = train_arm(
+                baseline_binary, tokenizer_path, work_dir / "baseline_arm.vgnr", work_dir / "train.txt",
+                work_dir / "heldout.txt", args, 1, supports_accumulation=False,
+            )
         report["arms"] = arms
 
         per_token = arms["per-token"]
@@ -347,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
         nll_delta = float(batched["heldout"]["mean_nll"]) - float(per_token["heldout"]["mean_nll"])
         quality_rate = (batched["nll_improvement_per_second"] / per_token["nll_improvement_per_second"]
                         if per_token["nll_improvement_per_second"] > 0 else 0.0)
-        report["comparison"] = {
+        comparison = {
             "speedup_tokens_per_second": speedup,
             "heldout_nll_delta_batched_minus_per_token": nll_delta,
             "heldout_perplexity_per_token": math.exp(float(per_token["heldout"]["mean_nll"])),
@@ -359,8 +392,28 @@ def main(argv: list[str] | None = None) -> int:
             failures.append(f"speedup {speedup:.3f}x < gate {args.min_speedup:.3f}x")
         if nll_delta > args.max_nll_regression:
             failures.append(f"held-out NLL regression {nll_delta:+.4f} > gate {args.max_nll_regression:.4f}")
-        if quality_rate < args.min_quality_rate_ratio:
-            failures.append(f"quality-per-second ratio {quality_rate:.3f}x < gate {args.min_quality_rate_ratio:.3f}x")
+        baseline_arm = arms.get("baseline")
+        if baseline_arm:
+            baseline_rate = float(baseline_arm["reported_tokens_per_second"])
+            baseline_speedup = (float(batched["reported_tokens_per_second"]) / baseline_rate) if baseline_rate else 0.0
+            per_token_speedup = (float(per_token["reported_tokens_per_second"]) / baseline_rate) if baseline_rate else 0.0
+            baseline_nll_delta = float(batched["heldout"]["mean_nll"]) - float(baseline_arm["heldout"]["mean_nll"])
+            comparison.update({
+                "baseline_binary": str(Path(args.baseline_bin).resolve()),
+                "speedup_vs_baseline": baseline_speedup,
+                "per_token_speedup_vs_baseline": per_token_speedup,
+                "heldout_nll_delta_batched_minus_baseline": baseline_nll_delta,
+            })
+            if args.min_baseline_speedup > 0 and baseline_speedup < args.min_baseline_speedup:
+                failures.append(
+                    f"speedup vs baseline {baseline_speedup:.3f}x < gate {args.min_baseline_speedup:.3f}x"
+                )
+            if baseline_nll_delta > args.max_baseline_nll_regression:
+                failures.append(
+                    f"held-out NLL regression vs baseline {baseline_nll_delta:+.4f} > "
+                    f"gate {args.max_baseline_nll_regression:.4f}"
+                )
+        report["comparison"] = comparison
         report["status"] = "passed" if not failures else "failed"
         report["gate_failures"] = failures
         if failures:

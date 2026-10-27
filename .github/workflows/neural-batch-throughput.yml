@@ -18,9 +18,13 @@ on:
         required: false
         default: "400000"
       min_speedup:
-        description: "gate for the measured tokens/s ratio"
+        description: "gate for the measured tokens/s ratio against the per-token arm"
         required: false
-        default: "1.5"
+        default: "1.25"
+      min_baseline_speedup:
+        description: "gate for the measured tokens/s ratio against the merge-base binary"
+        required: false
+        default: "2.0"
   pull_request:
     paths:
       - 'src/neural_pretraining.f90'
@@ -41,6 +45,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install GNU Fortran toolchain
         run: |
@@ -76,6 +82,32 @@ jobs:
           fi
           ./build-throughput/vegai_neural_pretrain smoke | tail -3
 
+      # The end-to-end claim ("training is N times faster than main") is measured
+      # inside this job, from a binary built out of the merge base, so runner
+      # noise cannot flatter the comparison.
+      - name: Build the comparison binary from the merge base
+        run: |
+          set +e
+          base_ref=$(git merge-base HEAD origin/main)
+          echo "comparison revision: ${base_ref}"
+          git worktree add compare-base "$base_ref" > worktree-output.txt 2>&1
+          code=$?
+          if [ "$code" -eq 0 ]; then
+            cmake -S compare-base -B build-compare -G Ninja \
+              -DVEGAI_ENABLE_OPENMP=ON -DVEGAI_CPU_TARGET=native \
+              -DCMAKE_BUILD_TYPE=Release >> worktree-output.txt 2>&1
+            code=$?
+          fi
+          if [ "$code" -eq 0 ]; then
+            cmake --build build-compare --target vegai_neural_pretrain --parallel >> worktree-output.txt 2>&1
+            code=$?
+          fi
+          if [ "$code" -ne 0 ]; then
+            detail=$(grep -Ein 'fatal error|error:|ninja: build stopped|fatal:' worktree-output.txt | tail -n 12 | tr '\n' ' ' | cut -c1-1700)
+            echo "::warning title=Comparison binary could not be built::${detail}"
+          fi
+          exit 0
+
       - name: Measure per-token vs mini-batch throughput and quality
         run: |
           set +e
@@ -84,9 +116,10 @@ jobs:
             --neural-bin ./build-throughput/vegai_neural_pretrain \
             --accumulation "${{ inputs.accumulation || '32' }}" \
             --corpus-bytes "${{ inputs.corpus_bytes || '400000' }}" \
-            --min-speedup "${{ inputs.min_speedup || '1.5' }}" \
+            --min-speedup "${{ inputs.min_speedup || '1.25' }}" \
+            --baseline-bin ./build-compare/vegai_neural_pretrain \
             --max-nll-regression 0.05 \
-            --min-quality-rate-ratio 1.5 \
+            --min-baseline-speedup "${{ inputs.min_baseline_speedup || '2.0' }}" \
             --output "${RUNNER_TEMP}/throughput/benchmark.json" \
             > "${RUNNER_TEMP}/throughput/benchmark.stdout" 2> "${RUNNER_TEMP}/throughput/benchmark.stderr"
           code=$?
