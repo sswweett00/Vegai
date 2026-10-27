@@ -240,6 +240,23 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"- NLL improvement per second: {comparison['nll_improvement_per_second']:.4g} nats/s "
             f"(reference arm {comparison['nll_improvement_per_second_reference']:.4g} nats/s)",
         ]
+        compared = arms.get(f"optimizer-{args.compare_optimizer}") if args.compare_optimizer else None
+        if compared:
+            compared_rate = float(compared["reported_tokens_per_second"])
+            comparison.update({
+                "compare_optimizer": args.compare_optimizer,
+                "compare_optimizer_tokens_per_second": compared_rate,
+                "compare_optimizer_heldout_mean_nll": float(compared["heldout"]["mean_nll"]),
+                "speedup_vs_compare_optimizer": (float(batched["reported_tokens_per_second"]) / compared_rate
+                                                 if compared_rate else 0.0),
+                "heldout_nll_delta_vs_compare_optimizer": (
+                    float(batched["heldout"]["mean_nll"]) - float(compared["heldout"]["mean_nll"])),
+            })
+            lines += [
+                f"- optimizer A/B (same binary, same accumulation): **{args.optimizer}** vs "
+                f"**{args.compare_optimizer}** -- rate **{comparison['speedup_vs_compare_optimizer']:.3f}x**, "
+                f"held-out NLL delta **{comparison['heldout_nll_delta_vs_compare_optimizer']:+.6f}**",
+            ]
         ratio = comparison.get("nll_improvement_per_second_ratio")
         lines += [
             (f"- NLL improvement per second ratio: **{ratio:.3f}x**" if ratio is not None
@@ -259,6 +276,16 @@ def quality_text(comparison: dict[str, Any]) -> str:
     if ratio is None:
         return f"quality-per-second {batched_rate:.4g} nats/s (reference did not improve)"
     return f"quality-per-second {ratio:.3f}x"
+
+
+def optimizer_ab_text(comparison: dict[str, Any]) -> str:
+    """Same-binary optimizer A/B, when one was measured."""
+    if "speedup_vs_compare_optimizer" not in comparison:
+        return "optimizer-ab unavailable"
+    return (
+        f"vs {comparison['compare_optimizer']} rate {comparison['speedup_vs_compare_optimizer']:.3f}x, "
+        f"NLL delta {comparison['heldout_nll_delta_vs_compare_optimizer']:+.6f}"
+    )
 
 
 def phase_text(comparison: dict[str, Any]) -> str:
@@ -294,7 +321,7 @@ def headline(report: dict[str, Any]) -> str:
         f"held-out NLL delta {comparison['heldout_nll_delta_batched_minus_per_token']:+.6f}; "
         f"{baseline_text}{quality_text(comparison)}; "
         f"evaluate-only {comparison.get('evaluate_only_tokens_per_second', 0.0):.1f} tok/s; "
-        f"{phase_text(comparison)}; {measured}"
+        f"{phase_text(comparison)}; {optimizer_ab_text(comparison)}; {measured}"
     )
 
 
@@ -339,6 +366,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="project default is nova (the native optimizer); adamw/sgd exist for comparison")
     parser.add_argument("--baseline-optimizer", default="adamw", choices=("nova", "adamw", "sgd"),
                         help="optimizer the comparison binary is asked for; older revisions do not know nova")
+    parser.add_argument("--compare-optimizer", default="adamw", choices=("", "nova", "adamw", "sgd"),
+                        help="optional arm that runs THIS binary with another optimizer at the same "
+                             "accumulation, which isolates the optimizer from everything else; "
+                             "empty string disables it")
     parser.add_argument("--schedule", default="invsqrt", choices=("constant", "invsqrt", "cosine"))
     parser.add_argument("--warmup-updates", type=int, default=100)
     parser.add_argument("--total-updates", type=int, default=0)
@@ -428,6 +459,14 @@ def main(argv: list[str] | None = None) -> int:
                 binary, tokenizer_path, checkpoint, work_dir / "train.txt", work_dir / "heldout.txt",
                 args, accumulation,
             )
+        if args.compare_optimizer and args.compare_optimizer != args.optimizer:
+            # Same binary, same seed, same corpus, same accumulation: the only
+            # difference is the optimizer, so any rate or held-out NLL difference
+            # belongs to it.
+            arms[f"optimizer-{args.compare_optimizer}"] = train_arm(
+                binary, tokenizer_path, work_dir / "compare_optimizer.vgnr", work_dir / "train.txt",
+                work_dir / "heldout.txt", args, args.accumulation, optimizer=args.compare_optimizer,
+            )
         if args.baseline_bin:
             # Same corpus, tokenizer, shape and seed, but the binary built from
             # the comparison revision: this is the end-to-end number ("training
@@ -485,6 +524,7 @@ def main(argv: list[str] | None = None) -> int:
         # "no quality gain" when it means "the reference did not learn yet".
         quality_rate = (batched_rate / reference_rate) if reference_rate > 0 else None
         comparison = {
+            "optimizer": args.optimizer,
             "accumulation": chosen_accumulation,
             "speedup_tokens_per_second": speedup,
             "heldout_nll_delta_batched_minus_per_token": nll_delta,
