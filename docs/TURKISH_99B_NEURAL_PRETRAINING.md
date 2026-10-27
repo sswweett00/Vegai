@@ -55,7 +55,7 @@ veriyi **üreten ve her aşamasını sayan** bir boru hattı olarak tasarlandı.
 |---|---|---|
 | Optimize edici | düz SGD, sabit LR 0.025 | **AdamW** (bias düzeltme, decoupled WD) + legacy SGD modu |
 | LR zamanlama | yok | warmup + inverse-sqrt / warmup + cosine / constant; update-counter'ın saf fonksiyonu |
-| Düzenlileştirme | yalnız gradyan kırpma + değer zarfı | + **label smoothing** (NLL raporu daima gerçek), AdamW weight decay |
+| Düzenlileştirme | yalnız gradyan kırpma + değer zarfı | + **label smoothing** (NLL raporu daima gerçek), AdamW weight decay (yalnız embedding'lere, `lr*wd < 1` doğrulanır; SGD modunda wd yok) |
 | Metrik | mean NLL | + perplexity, **top-1/top-5**, epoch token/sn |
 | Checkpoint | v2, yalnız parametre+imleç | **v3**: optimizer config + Adam momentleri bit-birebir; v2 geri-uyumlu yükleme (SGD semantiği korunur) |
 | Devam (resume) | moment yok | 2+checkpoint+2 ≡ one-pass **bit-birebir** (CI testi) |
@@ -81,7 +81,11 @@ sözleşmesini koruyarak genişletilebilecek şekilde yazıldı.
 
 Tokenizer → eğitimsiz baseline → **tam 1 epoch** → held-out → 10 promptluk
 üretim süiti → `evidence.json` + `RESULTS.md`. Her artefakt hash'lenir;
-prompt/response'lar düzenlenmeden yazılır.
+prompt/response'lar düzenlenmeden yazılır. `evidence.json` içindeki `config`
+bloğu optimize edicinin tam kimliğini taşır: optimizer, LR, zamanlama,
+`weight_decay` (kapsamı ile birlikte: AdamW'de yalnız embedding'ler, SGD'de
+uygulanmaz) ve `adam_beta1/beta2/adam_epsilon`. `--weight-decay` yalnız
+`--optimizer adamw` ile kabul edilir.
 
 ### 3.4 Kalite-korumalı hız çalışması (ölçüm-güdümlü A/B)
 

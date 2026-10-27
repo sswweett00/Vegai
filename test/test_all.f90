@@ -36,6 +36,7 @@ program test_all
    call test_utf8_record_stream()
    call test_neural_causal_design()
    call test_neural_continuation_checkpoint()
+   call test_adamw_optimizer_contract()
    call test_text_ingest()
    call test_fortran_control()
    call test_fortran_integrity()
@@ -943,6 +944,127 @@ contains
       open(newunit=unit, file=checkpoint_path, status='old', iostat=io_status)
       if (io_status == 0) close(unit, status='delete')
    end subroutine test_neural_continuation_checkpoint
+
+   ! AdamW is the shipped optimizer, so its contract is asserted directly:
+   ! the decoupled-decay factor must stay positive (lr*weight_decay < 1), the
+   ! AdamW-only weight decay must never be silently ignored on the legacy SGD
+   ! path, the moments must exist exactly when the optimizer is AdamW, and the
+   ! optimizer identity plus moments must survive a checkpoint round trip.
+   subroutine test_adamw_optimizer_contract()
+      type(bpe_model_t) :: bpe
+      type(neural_decoder_t) :: model, restored_model
+      type(neural_decoder_config_t) :: decoder_config
+      type(neural_train_config_t) :: config, restored_config
+      type(neural_train_state_t) :: state, sgd_state, restored_state
+      type(neural_train_metrics_t) :: before, after, update_metrics
+      integer(int32) :: status, tokens(12), index
+      integer :: unit, io_status
+      character(len=*), parameter :: checkpoint_path = 'test_adamw_contract.vgnr'
+
+      do index = 1_int32, size(tokens, kind=int32)
+         tokens(index) = modulo(index - 1_int32, 4_int32) + 1_int32
+      end do
+      call bpe_init(bpe, 1_int32, status)
+      call assert_i32_equal(status, BPE_OK, 'AdamW contract byte tokenizer initializes')
+      decoder_config = neural_decoder_config_t(vocabulary_size=256_int32, width=16_int32, heads=2_int32, &
+                                               local_window=4_int32, ffn_width=32_int32)
+      call neural_decoder_init(model, decoder_config, 424242_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'AdamW contract model initializes')
+
+      config = neural_train_config_t(learning_rate=0.003_real64, gradient_clip_norm=4.0_real64, &
+                                     embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32, &
+                                     optimizer=NPT_OPTIMIZER_ADAMW, weight_decay=0.01_real64)
+      call assert_true(neural_train_config_is_valid(config), 'default AdamW configuration is accepted')
+      ! Exactly representable binary values keep these boundary cases exact:
+      ! 0.5*2.0 = 1.0 and 0.5*3.0 = 1.5 in real64, so the decision cannot hinge
+      ! on rounding of a computed product.
+      config%learning_rate = 0.5_real64
+      config%weight_decay = 2.0_real64
+      call assert_true(.not. neural_train_config_is_valid(config), &
+                       'lr*weight_decay = 1 is rejected because decoupled decay would annihilate parameters')
+      config%weight_decay = 3.0_real64
+      call assert_true(.not. neural_train_config_is_valid(config), &
+                       'lr*weight_decay > 1 is rejected because decoupled decay would invert parameter signs')
+      config%learning_rate = 0.003_real64
+      config%weight_decay = 0.01_real64
+      config%adam_beta1 = 1.0_real64
+      call assert_true(.not. neural_train_config_is_valid(config), 'beta1 = 1 is rejected (bias correction degenerates)')
+      config%adam_beta1 = 0.9_real64
+      config%adam_beta2 = 1.0_real64
+      call assert_true(.not. neural_train_config_is_valid(config), 'beta2 = 1 is rejected')
+      config%adam_beta2 = 0.999_real64
+      config%adam_epsilon = 0.0_real64
+      call assert_true(.not. neural_train_config_is_valid(config), 'zero Adam epsilon is rejected')
+      config%adam_epsilon = 1.0e-8_real64
+      config%optimizer = NPT_OPTIMIZER_SGD
+      call assert_true(.not. neural_train_config_is_valid(config), &
+                       'SGD with a non-zero weight decay is rejected instead of silently ignoring it')
+      config%weight_decay = 0.0_real64
+      call assert_true(neural_train_config_is_valid(config), 'SGD without weight decay remains a valid legacy mode')
+
+      config = neural_train_config_t(learning_rate=0.050_real64, gradient_clip_norm=4.0_real64, &
+                                     embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32, &
+                                     optimizer=NPT_OPTIMIZER_ADAMW, weight_decay=0.01_real64)
+      call neural_train_state_init(state)
+      call neural_train_metrics_reset(before)
+      call neural_evaluate_token_sequence(model, tokens, size(tokens, kind=int32), config, before, status)
+      call assert_i32_equal(status, NPT_OK, 'AdamW baseline evaluation succeeds')
+      do index = 1_int32, 40_int32
+         call neural_train_metrics_reset(update_metrics)
+         call neural_train_token_sequence(model, tokens, size(tokens, kind=int32), config, state, update_metrics, status)
+         call assert_i32_equal(status, NPT_OK, 'AdamW teacher-forced update succeeds')
+      end do
+      call assert_true(allocated(state%adam_m_embedding) .and. allocated(state%adam_v_embedding) .and. &
+                       allocated(state%adam_m_bias) .and. allocated(state%adam_v_bias), &
+                       'AdamW allocates first/second moments for embeddings and output bias')
+      call assert_true(state%updates_completed == 40_int64 * int(size(tokens, kind=int32) - 1_int32, int64), &
+                       'AdamW counts exactly one update per teacher-forced prediction')
+      call neural_train_metrics_reset(after)
+      call neural_evaluate_token_sequence(model, tokens, size(tokens, kind=int32), config, after, status)
+      call assert_i32_equal(status, NPT_OK, 'AdamW post-update evaluation succeeds')
+      call assert_true(after%mean_nll < before%mean_nll, &
+                       'AdamW with decoupled weight decay still reduces deterministic toy NLL')
+
+      ! Checkpoint round trip must preserve the optimizer identity, its
+      ! hyperparameters and the exact moments, otherwise a resumed AdamW run
+      ! would silently change update semantics.
+      call neural_checkpoint_save(checkpoint_path, model, bpe, config, state, status)
+      call assert_i32_equal(status, NPT_OK, 'AdamW checkpoint saves')
+      call neural_checkpoint_load(checkpoint_path, bpe, restored_model, restored_config, restored_state, status)
+      call assert_i32_equal(status, NPT_OK, 'AdamW checkpoint loads')
+      call assert_true(restored_config%optimizer == NPT_OPTIMIZER_ADAMW .and. &
+                       restored_config%weight_decay == config%weight_decay .and. &
+                       restored_config%adam_beta1 == config%adam_beta1 .and. &
+                       restored_config%adam_beta2 == config%adam_beta2 .and. &
+                       restored_config%adam_epsilon == config%adam_epsilon, &
+                       'checkpoint preserves the AdamW optimizer identity and hyperparameters')
+      ! Fortran does not short-circuit .and., so never compare a possibly
+      ! unallocated array: guard the comparison instead of relying on order.
+      if (allocated(restored_state%adam_m_embedding) .and. allocated(restored_state%adam_v_embedding) .and. &
+          allocated(state%adam_m_embedding) .and. allocated(state%adam_v_embedding)) then
+         call assert_true(all(restored_state%adam_m_embedding == state%adam_m_embedding) .and. &
+                          all(restored_state%adam_v_embedding == state%adam_v_embedding), &
+                          'checkpoint preserves bit-identical AdamW moments')
+      else
+         call assert_true(.false., 'checkpoint preserves bit-identical AdamW moments')
+      end if
+
+      ! The legacy SGD mode stays available and never materializes AdamW state.
+      config%optimizer = NPT_OPTIMIZER_SGD
+      config%weight_decay = 0.0_real64
+      call neural_train_state_init(sgd_state)
+      call neural_train_metrics_reset(update_metrics)
+      call neural_train_token_sequence(model, tokens, size(tokens, kind=int32), config, sgd_state, update_metrics, status)
+      call assert_i32_equal(status, NPT_OK, 'legacy SGD update still succeeds')
+      call assert_true(.not. allocated(sgd_state%adam_m_embedding) .and. sgd_state%updates_completed > 0_int64, &
+                       'legacy SGD path keeps no AdamW moments while still advancing the cursor')
+
+      call neural_decoder_destroy(restored_model)
+      call neural_decoder_destroy(model)
+      call bpe_destroy(bpe)
+      open(newunit=unit, file=checkpoint_path, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+   end subroutine test_adamw_optimizer_contract
 
    subroutine test_text_ingest()
       type(vocabulary_t) :: vocab

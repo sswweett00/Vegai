@@ -143,6 +143,20 @@ def main() -> int:
         generation = runner.extract_generation("x\nNEURAL_GENERATION_BEGIN\nmerhaba dünya\nNEURAL_GENERATION_END\n")
         expect(generation == "merhaba dünya", "generation marker extraction is verbatim")
 
+        # The native SGD branch has no decoupled decay term, so the runner must
+        # refuse --optimizer sgd with a non-zero --weight-decay instead of
+        # recording regularisation that never runs.  This exits at argument
+        # parsing time and therefore needs no compiled binary or corpus.
+        rejected = subprocess.run(
+            [sys.executable, str(ROOT / "tools/run_neural_turkish_epoch1.py"),
+             "--neural-bin", "/nonexistent/vegai_neural_pretrain",
+             "--corpus-dir", str(tmp / "unused"), "--run-dir", str(tmp / "unused-run"),
+             "--optimizer", "sgd", "--weight-decay", "0.01"],
+            capture_output=True, text=True, check=False,
+        )
+        expect(rejected.returncode == 2 and "requires --optimizer adamw" in rejected.stderr,
+               "runner rejects weight decay on the SGD optimizer instead of ignoring it")
+
         binary = os.environ.get("VEGAI_NEURAL_BIN", "")
         if binary:
             run_dir = tmp / "run"

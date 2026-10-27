@@ -171,6 +171,11 @@ def render_results_md(evidence: dict[str, Any]) -> str:
         f"(warmup {cfg['warmup_updates']:,}), label smoothing {cfg['label_smoothing']}, seed {cfg['seed']}"
     )
     lines.append(
+        f"- Ağırlık azalması (weight decay): {cfg['weight_decay']} ({cfg.get('weight_decay_scope', 'n/a')}); "
+        f"AdamW beta1 {cfg.get('adam_beta1', 'n/a')}, beta2 {cfg.get('adam_beta2', 'n/a')}, "
+        f"eps {cfg.get('adam_epsilon', 'n/a')}"
+    )
+    lines.append(
         f"- Epoch: {epoch['eligible_records']:,} kayıt, {epoch['prediction_tokens']:,} tahmin tokenı, "
         f"{fmt(epoch['epoch_wall_seconds'])} sn, {fmt(epoch['prediction_tokens_per_second'])} token/sn"
     )
@@ -239,7 +244,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="cosine horizon in updates (estimate from measured bytes/token); 0 = omit")
     parser.add_argument("--min-lr-ratio", type=float, default=0.1)
     parser.add_argument("--label-smoothing", type=float, default=0.05)
-    parser.add_argument("--weight-decay", type=float, default=0.01)
+    # AdamW-only decoupled weight decay; the legacy SGD update has no decay
+    # term, so an explicit value there is rejected instead of silently ignored.
+    parser.add_argument("--weight-decay", type=float, default=None,
+                        help="AdamW decoupled weight decay (adamw only; default 0.01 for adamw, 0 for sgd)")
+    parser.add_argument("--beta1", type=float, default=0.9)
+    parser.add_argument("--beta2", type=float, default=0.999)
+    parser.add_argument("--adam-eps", type=float, default=1e-8)
     parser.add_argument("--seed", type=int, default=20261025)
     parser.add_argument("--generation-seed", type=int, default=7)
     parser.add_argument("--generation-tokens", type=int, default=32)
@@ -255,6 +266,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--generation-timeout-seconds", type=int, default=600)
     parser.add_argument("--prompts-file", help="optional UTF-8 file, one prompt per line")
     args = parser.parse_args(argv)
+    if args.optimizer == "sgd":
+        if args.weight_decay not in (None, 0.0):
+            # parser.error exits with a clean usage message; the native CLI
+            # rejects the same combination, so fail here rather than after the
+            # tokenizer and corpus work has already been spent.
+            parser.error("--weight-decay requires --optimizer adamw: the SGD update has no decay term")
+        args.weight_decay = 0.0
+    elif args.weight_decay is None:
+        args.weight_decay = 0.01
 
     corpus_dir = Path(args.corpus_dir)
     run_dir = Path(args.run_dir)
@@ -276,9 +296,12 @@ def main(argv: list[str] | None = None) -> int:
             "--ffn", str(args.ffn), "--seed", str(args.seed), "--lr", repr(args.lr),
             "--optimizer", args.optimizer, "--schedule", args.schedule,
             "--warmup-updates", str(args.warmup_updates),
-            "--label-smoothing", repr(args.label_smoothing), "--weight-decay", repr(args.weight_decay),
+            "--label-smoothing", repr(args.label_smoothing),
             "--min-lr-ratio", repr(args.min_lr_ratio),
+            "--beta1", repr(args.beta1), "--beta2", repr(args.beta2), "--adam-eps", repr(args.adam_eps),
         ]
+        if args.optimizer == "adamw":
+            model_options += ["--weight-decay", repr(args.weight_decay)]
         if args.total_updates:
             model_options += ["--total-updates", str(args.total_updates)]
 
@@ -439,6 +462,10 @@ def main(argv: list[str] | None = None) -> int:
                 "min_lr_ratio": args.min_lr_ratio,
                 "label_smoothing": args.label_smoothing,
                 "weight_decay": args.weight_decay,
+                "weight_decay_scope": "adamw embeddings only" if args.optimizer == "adamw" else "not applicable (sgd)",
+                "adam_beta1": args.beta1,
+                "adam_beta2": args.beta2,
+                "adam_epsilon": args.adam_eps,
                 "seed": args.seed,
                 "chunks": args.chunks,
             },

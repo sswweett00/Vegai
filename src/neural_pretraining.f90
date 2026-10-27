@@ -162,6 +162,14 @@ module neural_pretraining
 
 contains
 
+   ! Two optimizer invariants are enforced here rather than trusted from the
+   ! caller.  AdamW applies decoupled decay as theta <- (1 - lr*wd)*theta, so
+   ! lr*wd >= 1 would annihilate (or invert the sign of) every embedding while
+   ! the run still reported success; checking the peak rate is sufficient
+   ! because every implemented schedule returns rate <= peak rate.  The legacy
+   ! SGD path has no decay term at all, so a non-zero weight_decay on an SGD
+   ! configuration would be a silently ignored claim that is nevertheless
+   ! serialized into the checkpoint and the evidence report.
    pure logical function neural_train_config_is_valid(config)
       type(neural_train_config_t), intent(in) :: config
 
@@ -179,6 +187,9 @@ contains
                                      config%adam_beta2 < 1.0_real64 .and. &
                                      ieee_is_finite(config%adam_epsilon) .and. config%adam_epsilon > 0.0_real64 .and. &
                                      ieee_is_finite(config%weight_decay) .and. config%weight_decay >= 0.0_real64 .and. &
+                                     config%learning_rate * config%weight_decay < 1.0_real64 .and. &
+                                     (config%optimizer == NPT_OPTIMIZER_ADAMW .or. &
+                                      config%weight_decay == 0.0_real64) .and. &
                                      ieee_is_finite(config%label_smoothing) .and. &
                                      config%label_smoothing >= 0.0_real64 .and. config%label_smoothing < 0.5_real64 .and. &
                                      (config%lr_schedule == NPT_SCHEDULE_CONSTANT .or. &
@@ -446,6 +457,15 @@ contains
       update_index = state%updates_completed + 1_int64
       rate = neural_scheduled_learning_rate(config, update_index)
       smooth_mass = config%label_smoothing / real(vocabulary_size, real64)
+      ! Defence in depth for the decoupled-decay invariant.  Validation
+      ! rejects peak_lr*weight_decay >= 1 and no schedule exceeds the peak, so
+      ! this can only fire for a configuration mutated after validation; the
+      ! alternative is a decay_factor <= 0 that silently zeroes or inverts the
+      ! embedding it is supposed to regularise.
+      if (config%optimizer == NPT_OPTIMIZER_ADAMW .and. rate * config%weight_decay >= 1.0_real64) then
+         status = NPT_ERR_INVALID_ARGUMENT
+         return
+      end if
 
       if (config%optimizer == NPT_OPTIMIZER_ADAMW) then
          call ensure_optimizer_state(model, config, state, status)
@@ -1019,6 +1039,11 @@ contains
          status = NPT_ERR_IO
          return
       end if
+      ! Legacy SGD checkpoints may carry a non-zero, then ignored, weight decay.
+      ! Normalize that field before validation so the restored configuration
+      ! describes the update that will actually run: SGD applies no decoupled
+      ! decay at all, and the trainer now rejects such a contradictory config.
+      if (config%optimizer /= NPT_OPTIMIZER_ADAMW) config%weight_decay = 0.0_real64
       if (magic /= NEURAL_CHECKPOINT_MAGIC .or. &
           (version /= NEURAL_CHECKPOINT_VERSION .and. version /= NEURAL_CHECKPOINT_VERSION_V2) .or. &
           stored_bpe_tokens /= bpe%token_count .or. stored_bpe_merges /= bpe%merge_count .or. &

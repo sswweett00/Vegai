@@ -24,6 +24,7 @@ program vegai_neural_pretrain
    logical :: opt_dims_set = .false.
    real(real64) :: opt_lr = 0.0_real64
    real(real64) :: opt_weight_decay = 0.01_real64
+   logical :: opt_weight_decay_set = .false.
    real(real64) :: opt_beta1 = 0.9_real64
    real(real64) :: opt_beta2 = 0.999_real64
    real(real64) :: opt_adam_eps = 1.0e-8_real64
@@ -135,7 +136,7 @@ contains
             if (parse_status /= 0) call usage_and_stop()
             select case (trim(key))
             case ('--lr'); opt_lr = real_value; opt_lr_set = .true.
-            case ('--weight-decay'); opt_weight_decay = real_value
+            case ('--weight-decay'); opt_weight_decay = real_value; opt_weight_decay_set = .true.
             case ('--beta1'); opt_beta1 = real_value
             case ('--beta2'); opt_beta2 = real_value
             case ('--adam-eps'); opt_adam_eps = real_value
@@ -166,7 +167,7 @@ contains
 
    subroutine build_train_config(train_config)
       type(neural_train_config_t), intent(out) :: train_config
-      real(real64) :: peak_lr
+      real(real64) :: peak_lr, effective_weight_decay
 
       if (opt_lr_set) then
          peak_lr = opt_lr
@@ -175,14 +176,39 @@ contains
       else
          peak_lr = 0.025_real64
       end if
+      ! Decoupled weight decay exists only in the AdamW update.  An explicit
+      ! non-zero --weight-decay with --optimizer sgd would otherwise be
+      ! reported as active regularisation while doing nothing, so it is a
+      ! usage error; the AdamW-only default is simply dropped for SGD.
+      effective_weight_decay = opt_weight_decay
+      if (opt_optimizer /= NPT_OPTIMIZER_ADAMW) then
+         if (opt_weight_decay_set .and. opt_weight_decay /= 0.0_real64) then
+            write(error_unit, '(A)') 'vegai_neural_pretrain: --weight-decay requires '// &
+                                      '--optimizer adamw (the SGD update has no decay term)'
+            call usage_and_stop()
+         end if
+         effective_weight_decay = 0.0_real64
+      end if
       train_config = neural_train_config_t(learning_rate=peak_lr, gradient_clip_norm=opt_grad_clip, &
                                            embedding_value_limit=opt_embedding_limit, &
                                            maximum_tokens_per_record=opt_max_tokens_per_record, &
                                            optimizer=opt_optimizer, adam_beta1=opt_beta1, adam_beta2=opt_beta2, &
-                                           adam_epsilon=opt_adam_eps, weight_decay=opt_weight_decay, &
+                                           adam_epsilon=opt_adam_eps, weight_decay=effective_weight_decay, &
                                            label_smoothing=opt_label_smoothing, lr_schedule=opt_schedule, &
                                            warmup_updates=opt_warmup_updates, total_updates=opt_total_updates, &
                                            minimum_lr_ratio=opt_min_lr_ratio)
+      if (.not. neural_train_config_is_valid(train_config)) then
+         ! Report the offending combination here instead of surfacing a bare
+         ! library status from deep inside the first training update.  The
+         ! library rejects e.g. lr*weight_decay >= 1 (a decoupled decay factor
+         ! that would zero or invert every embedding), beta >= 1, and a cosine
+         ! schedule without a horizon above the warmup.
+         write(error_unit, '(A)') 'vegai_neural_pretrain: invalid training hyperparameters '// &
+                                   '(need lr > 0, 0 <= beta1,beta2 < 1, adam-eps > 0, '// &
+                                   '0 <= weight-decay, lr*weight-decay < 1, '// &
+                                   '0 <= label-smoothing < 0.5, and cosine total-updates > warmup-updates)'
+         call usage_and_stop()
+      end if
    end subroutine build_train_config
 
    subroutine build_decoder_config(decoder_config, vocabulary_size)
@@ -901,9 +927,11 @@ contains
       write(output_unit, '(A)') '  vegai_neural_pretrain plan CHECKPOINT TOKENIZER'
       write(output_unit, '(A)') 'Options: --width --heads --window --ffn --seed --lr --optimizer adamw|sgd '// &
                                 '--schedule constant|invsqrt|cosine --warmup-updates --total-updates --min-lr-ratio'
-      write(output_unit, '(A)') '         --weight-decay --beta1 --beta2 --adam-eps --grad-clip --embedding-limit '// &
-                                '--label-smoothing --max-tokens-per-record'
+      write(output_unit, '(A)') '         --weight-decay (adamw only) --beta1 --beta2 --adam-eps --grad-clip '// &
+                                '--embedding-limit --label-smoothing --max-tokens-per-record'
       write(output_unit, '(A)') 'The current trainer updates only tied output embeddings; it is not full BPTT.'
+      write(output_unit, '(A)') 'AdamW applies decoupled decay to the embeddings (never to the output bias) '// &
+                                'as theta <- (1 - lr*weight_decay) * theta.'
    end subroutine print_help
 
 end program vegai_neural_pretrain
