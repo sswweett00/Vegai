@@ -194,6 +194,9 @@ module neural_pretraining
       ! one energy scalar per column.  Stored in the parameter precision for the
       ! same reason the AdamW moments are: the state is read and written once per
       ! element per step, and the parameters it updates are real32.
+      ! Stored (token, feature), unlike the embedding matrix: both kernels walk
+      ! columns with the feature index innermost, so this order makes the
+      ! velocity a unit-stride stream and lets the width loops vectorize.
       real(real32), allocatable :: nova_u_embedding(:, :)
       real(real32), allocatable :: nova_u_bias(:)
       real(real32), allocatable :: nova_energy(:)
@@ -492,8 +495,8 @@ contains
             if (.not. allocated(state%nova_u_bias)) status = NPT_ERR_INCOMPATIBLE
             if (.not. allocated(state%nova_energy)) status = NPT_ERR_INCOMPATIBLE
             if (status == NPT_OK) then
-               if (size(state%nova_u_embedding, 1, kind=int32) /= model%config%width .or. &
-                   size(state%nova_u_embedding, 2, kind=int32) /= model%config%vocabulary_size .or. &
+               if (size(state%nova_u_embedding, 1, kind=int32) /= model%config%vocabulary_size .or. &
+                   size(state%nova_u_embedding, 2, kind=int32) /= model%config%width .or. &
                    size(state%nova_u_bias, kind=int32) /= model%config%vocabulary_size .or. &
                    size(state%nova_energy, kind=int32) /= model%config%vocabulary_size) then
                   status = NPT_ERR_INCOMPATIBLE
@@ -501,7 +504,7 @@ contains
             end if
             return
          end if
-         allocate(state%nova_u_embedding(model%config%width, model%config%vocabulary_size), &
+         allocate(state%nova_u_embedding(model%config%vocabulary_size, model%config%width), &
                   state%nova_u_bias(model%config%vocabulary_size), &
                   state%nova_energy(model%config%vocabulary_size), stat=allocation_status)
          if (allocation_status /= 0) then
@@ -827,7 +830,7 @@ contains
             if (token == target) residual = residual - (1.0_real64 - config%label_smoothing)
             scaled_residual32 = real(residual * clip_scale, real32)
             energy = scaled_residual32 * scaled_residual32 * hidden_energy
-            agreement = scaled_residual32 * dot_product(hidden, state%nova_u_embedding(:, token))
+            agreement = scaled_residual32 * dot_product(hidden, state%nova_u_embedding(token, :))
             if (first_step) then
                ! Initialize from the step's own gradient: no bias correction,
                ! because the first estimate is already unbiased.
@@ -843,8 +846,8 @@ contains
             !$omp simd private(previous, proposal32)
             do feature = 1_int32, width
                gradient32 = scaled_residual32 * hidden(feature)
-               previous = gamma32 * state%nova_u_embedding(feature, token) + gradient32
-               state%nova_u_embedding(feature, token) = previous
+               previous = gamma32 * state%nova_u_embedding(token, feature) + gradient32
+               state%nova_u_embedding(token, feature) = previous
                proposal32 = decay_factor_32 * model%token_embedding(feature, token) - step_scale * previous
                model%token_embedding(feature, token) = max(-value_limit_32, min(value_limit_32, proposal32))
             end do
@@ -1115,7 +1118,7 @@ contains
             ! scalar loop it replaces stayed serial and cost more than the whole
             ! optimizer chain (measured on the first NOVA run).
             energy = dot_product(column_gradient, column_gradient) / width_32
-            agreement = dot_product(column_gradient, state%nova_u_embedding(:, token))
+            agreement = dot_product(column_gradient, state%nova_u_embedding(token, :))
             if (first_step) then
                state%nova_energy(token) = energy
             else
@@ -1127,8 +1130,8 @@ contains
             if (agreement < 0.0_real32) gamma32 = momentum_32 * restart_32
             !$omp simd private(previous, proposal32)
             do feature = 1_int32, width
-               previous = gamma32 * state%nova_u_embedding(feature, token) + column_gradient(feature)
-               state%nova_u_embedding(feature, token) = previous
+               previous = gamma32 * state%nova_u_embedding(token, feature) + column_gradient(feature)
+               state%nova_u_embedding(token, feature) = previous
                proposal32 = decay_factor_32 * model%token_embedding(feature, token) - step_scale * previous
                model%token_embedding(feature, token) = max(-value_limit_32, min(value_limit_32, proposal32))
             end do
@@ -1749,8 +1752,8 @@ contains
       if (allocated(state%nova_u_embedding)) then
          if (.not. nova_state_is_present(state)) then
             optimizer_state_matches = .false.
-         else if (size(state%nova_u_embedding, 1, kind=int32) /= model%config%width .or. &
-                  size(state%nova_u_embedding, 2, kind=int32) /= model%config%vocabulary_size .or. &
+         else if (size(state%nova_u_embedding, 1, kind=int32) /= model%config%vocabulary_size .or. &
+                  size(state%nova_u_embedding, 2, kind=int32) /= model%config%width .or. &
                   size(state%nova_u_bias, kind=int32) /= model%config%vocabulary_size .or. &
                   size(state%nova_energy, kind=int32) /= model%config%vocabulary_size) then
             optimizer_state_matches = .false.
@@ -1951,7 +1954,7 @@ contains
             stored_state_optimizer = config%optimizer
          end if
          if (stored_state_optimizer == NPT_OPTIMIZER_NOVA) then
-            allocate(state%nova_u_embedding(decoder_config%width, decoder_config%vocabulary_size), &
+            allocate(state%nova_u_embedding(decoder_config%vocabulary_size, decoder_config%width), &
                      state%nova_u_bias(decoder_config%vocabulary_size), &
                      state%nova_energy(decoder_config%vocabulary_size), stat=allocation_status)
             if (allocation_status /= 0) then
