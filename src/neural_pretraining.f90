@@ -374,10 +374,10 @@ contains
          probabilities(index) = exp(real(logits(index), real64) - maximum)
       end do
       !$omp end parallel do
-      normalizer = 0.0_real64
-      do index = 1_int32, size(logits, kind=int32)
-         normalizer = normalizer + probabilities(index)
-      end do
+      ! The reduction is order-fixed (the intrinsic sums in array order), so
+      ! the distribution is identical at any thread count; writing it as a
+      ! reduction rather than a scalar loop lets the compiler vectorize it.
+      normalizer = sum(probabilities)
       if (.not. ieee_is_finite(normalizer) .or. normalizer <= tiny(1.0_real64)) then
          status = NPT_ERR_NUMERICAL
          return
@@ -892,7 +892,7 @@ contains
       integer(int32), intent(in) :: target
       real(real64), intent(out) :: loss
       integer(int32), intent(out) :: status
-      integer(int32) :: candidate, target_rank
+      integer(int32) :: target_rank
       real(real64) :: target_probability
 
       status = NPT_OK
@@ -906,13 +906,11 @@ contains
       ! Rank of the true token under the pre-update distribution.  Ties
       ! resolve to the lowest index, matching greedy argmax decoding.
       target_probability = probabilities(target)
-      target_rank = 0_int32
-      do candidate = 1_int32, size(probabilities, kind=int32)
-         if (probabilities(candidate) > target_probability .or. &
-             (probabilities(candidate) == target_probability .and. candidate < target)) then
-            target_rank = target_rank + 1_int32
-         end if
-      end do
+      ! rank = #{p_c > p_t} + #{p_c == p_t, c < t}; the two counts are array
+      ! comparisons over contiguous slices, which vectorize, instead of a
+      ! scalar scan over the whole vocabulary for every prediction.
+      target_rank = count(probabilities(target + 1_int32:) > target_probability) + &
+                    count(probabilities(:target - 1_int32) >= target_probability)
       if (target_rank == 0_int32) metrics%top1_correct = metrics%top1_correct + 1_int64
       if (target_rank < 5_int32) metrics%top5_correct = metrics%top5_correct + 1_int64
    end subroutine observe_prediction

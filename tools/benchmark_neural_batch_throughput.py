@@ -239,7 +239,8 @@ def headline(report: dict[str, Any]) -> str:
     return (
         f"speedup {comparison['speedup_tokens_per_second']:.3f}x; "
         f"held-out NLL delta {comparison['heldout_nll_delta_batched_minus_per_token']:+.6f}; "
-        f"{baseline_text}quality-per-second {comparison['nll_improvement_per_second_ratio']:.3f}x; {measured}"
+        f"{baseline_text}quality-per-second {comparison['nll_improvement_per_second_ratio']:.3f}x; "
+        f"evaluate-only {comparison.get('evaluate_only_tokens_per_second', 0.0):.1f} tok/s; {measured}"
     )
 
 
@@ -397,6 +398,13 @@ def main(argv: list[str] | None = None) -> int:
             failures.append(f"speedup {speedup:.3f}x < gate {args.min_speedup:.3f}x")
         if nll_delta > args.max_nll_regression:
             failures.append(f"held-out NLL regression {nll_delta:+.4f} > gate {args.max_nll_regression:.4f}")
+        # Forward-only reference: the held-out evaluate pass of the batched arm
+        # runs the same decoder step and softmax as training, but no update and
+        # no staging, so its rate separates "forward + scoring" from
+        # "optimizer" cost.
+        comparison["evaluate_only_tokens_per_second"] = float(
+            batched["heldout"].get("prediction_tokens_per_second", 0.0)
+        )
         baseline_arm = arms.get("baseline")
         if baseline_arm:
             baseline_rate = float(baseline_arm["reported_tokens_per_second"])
