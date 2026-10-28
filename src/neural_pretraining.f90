@@ -953,6 +953,10 @@ contains
       logical :: first_step
       ! One width-sized accumulator per vocabulary column, private per thread.
       real(real32) :: column_gradient(size(hidden_batch, 2)), column_bias_gradient
+      ! ||h_b||^2 / width for each staged prediction, computed once per step.  The
+      ! column energy is built from these instead of from a width-sized reduction
+      ! per column (see the NOVA branch).
+      real(real32) :: member_energy(size(hidden_batch, 1))
       ! Bounded by construction: the staging capacity is capped at
       ! NPT_MAX_GRADIENT_ACCUMULATION, so this block is O(width*512) reals.
       real(real32) :: clipped_hidden(size(hidden_batch, 1), size(hidden_batch, 2))
@@ -970,6 +974,9 @@ contains
       update_index = state%updates_completed + 1_int64
       rate = neural_scheduled_learning_rate(config, update_index)
       inverse_batch = 1.0_real64 / real(batch_count, real64)
+      ! Needed by every optimizer branch (the NOVA energy is a batch mean too), so
+      ! it is set here rather than inside one of them.
+      inverse_batch_32 = real(inverse_batch, real32)
       value_limit = config%embedding_value_limit
       ! The per-token clip is folded into the staged hidden vectors: the
       ! embedding gradient is clip * residual * hidden and the output-bias
@@ -981,6 +988,9 @@ contains
             clipped_hidden(batch_index, feature) = real(clip_batch(batch_index), real32) * &
                                                    hidden_batch(batch_index, feature)
          end do
+         member_energy(batch_index) = dot_product(clipped_hidden(batch_index, 1_int32:width), &
+                                                  clipped_hidden(batch_index, 1_int32:width)) / &
+                                      real(width, real32)
       end do
 
       if (config%optimizer == NPT_OPTIMIZER_ADAMW) then
@@ -1023,7 +1033,6 @@ contains
          scaled_rate_32 = real(scaled_rate, real32)
          inverse_step_scale_32 = real(inverse_step_scale, real32)
          decay_factor_32 = real(decay_factor, real32)
-         inverse_batch_32 = real(inverse_batch, real32)
          ! Loop order matters: for one vocabulary column the batch reduction is
          ! a sequence of axpy updates over the width vector, so the inner loop
          ! runs over features (contiguous, 8-wide vectorizable) and each batch
@@ -1126,13 +1135,22 @@ contains
                                              residual32 * clipped_hidden(batch_index, feature)
                end do
             end do
-            ! Both quantities are measured on the un-normalized column: the energy
-            ! of the batch mean is the raw energy over B^2, and only the SIGN of the
-            ! agreement is used, which division by a positive B cannot change.  That
-            ! keeps the whole step to two sweeps of the column (this one and the
-            ! update) instead of three; normalizing in place first measured slower.
-            energy = dot_product(column_gradient, column_gradient) * &
-                     (inverse_batch_32 * inverse_batch_32) / width_32
+            ! The column's energy is the batch mean of each prediction's own
+            ! energy, ||g_b(v)||^2 = r_b(v)^2 ||h_b||^2 for the rank-one per-token
+            ! gradient, so it costs B multiply-adds on scalars that are already in
+            ! registers -- not a width-sized reduction per column.  It is also the
+            ! quantity the per-token path already uses, so accumulation no longer
+            ! changes what the energy means: ||mean_b g_b||^2 would shrink as 1/B^2
+            ! and needed the inverse_batch^2 correction to stay comparable across
+            ! accumulation factors.
+            energy = 0.0_real32
+            do batch_index = 1_int32, batch_count
+               residual32 = residuals(token, batch_index)
+               energy = energy + residual32 * residual32 * member_energy(batch_index)
+            end do
+            energy = energy * inverse_batch_32
+            ! The agreement still needs one dot product per column, and only its
+            ! sign is used, so the column stays un-normalized.
             agreement = dot_product(column_gradient, state%nova_u_embedding(:, token))
             if (first_step) then
                state%nova_energy(token) = energy

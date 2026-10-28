@@ -260,8 +260,12 @@ rank-1: her sütun aynı `h` yönünü kendi `r(v)` katsayısıyla alır. Bu yü
 eleman başına ikinci moment, sütun başına sabit olan bir büyüklüğü
 `width × vocabulary` eleman üzerinde `sqrt`+bölme ile yeniden türetmek olur.
 NOVA-1 onu sütun düzeyinde tutar: sütunun batch üzerinden ortalama gradyanı
-`g(v)`, enerjisi `z(v) = b2·z + (1-b2)·||g(v)||²/width` (ilk adımda kendi
-gradyanından başlatılır, bu yüzden bias düzeltmesi yok), taşınan hızla
+`g(v)`, enerjisi `z(v) = b2·z + (1-b2)·mean_b(r_b(v)²·||h_b||²/width)` — yani
+her tahminin **kendi** enerjisinin batch ortalaması; `||mean_b g_b||²` gibi
+`1/B²` ile küçülmediği için birikim faktöründen bağımsız ve B=1'de token-başına
+yolun kullandığı ifadenin aynısı. Ayrıca sütun başına genişlik boyu bir
+indirgeme gerektirmiyor (`O(B)` skaler iş). İlk adımda kendi gradyanından
+başlatılır, bu yüzden bias düzeltmesi yok. Taşınan hızla
 uyumu `a(v) = g(v)·u(v)`, hız `u(v) ← γ·u(v) + g(v)` (`γ = b1`, `a(v) < 0`
 ise `γ = b1·NPT_NOVA_RESTART_DAMP`) ve adım
 `θ(:,v) ← (1 - lr·wd)·θ(:,v) - s(v)·u(v)`, `s(v) = lr/(sqrt(z(v)) + eps)`.
@@ -318,6 +322,71 @@ Denenip **ölçümle reddedilen** iki NOVA optimizasyonu (kodda not düşülmü�
 Sözleşme native testtedir: `test_nova_optimizer_contract` (kayıp düşüşü, tek
 hız dizisi, AdamW'dan küçük kaynak planı, v5 turu, parça+devam
 bit-birebirliği) ve `test_adamw_optimizer_contract` (eski yol bozulmadı).
+
+### 3.7 Darboğaz denetimi — ölçülen faz bütçesi, düzeltilenler, reddedilenler
+
+Faz bütçesi artık **her kol için** yayımlanıyor (`benchmark_neural_batch_throughput.py`
+annotation'ı: `phases <kol>[d… p… s… u… t…]`). Bu, "hangi faz darboğaz" sorusunu
+tahmin olmaktan çıkarıp ölçüme bağlıyor; aynı kodun kollar arasında ~%10–14
+oynadığı da bu tablodan görülüyor, yani tek ölçümle iddia kurulmuyor.
+
+Üretim şekli (vocab 4096 × width 96 × ffn 384 × 4 thread, N=32), aynı koşu
+(run 40663284104, hızlı sınıf runner):
+
+| faz | µs/tahmin | pay | ölçülen darboğaz |
+| --- | ---: | ---: | --- |
+| decode | 16,2 | %24 | FFN'in 768 transandantalı + 4 yoğun matris-vektör; `/8` vektör genişlikte donanım sınırına yakın |
+| project | 6,5 | %10 | E bir blokta bir kez okunuyor; kalan maliyet `(count, vocab)` çıktısında satır-aralıklı yazma |
+| score | 12,7 | %19 | softmax + true-token sıralaması, tahmin başına 5–6 kez O(vocabulary) tarama |
+| update | 31,0 | %47 | blok gradyanının **skaler hızda** biriktirilmesi (aşağıya bakın) |
+
+**Düzeltilenler**
+1. `stable_softmax`: `maxval(real(logits, real64))` her tahminde 4096 elemanlık
+   real64 geçici dizi ayırıp dolduruyordu → `real(maxval(logits), real64)`
+   (bit-birebir, geçici yok). Ayrıca bölme sonrası "hepsi sonlu mu" taraması
+   bölmenin kendi geçişine katlandı (durum bayrağı üzerinde reduction).
+   Ölçüm: bu runner'da gürültü bandında; kazanç yapısal (bir geçiş ve bir
+   ayırma eksik).
+2. Benchmark artık her kolun faz bütçesini ve optimizer A/B'sini **seçilen**
+   birikim faktöründe, dönüşümlü turların medyanıyla yayımlıyor.
+3. Uçtan uca oran artık runner sınıfına göre raporlanıyor: merge-base kolu
+   bellek-bağımlı olduğu için hızlı host'ta orantısız hızlanıyor (referans
+   sınıfta 2,1–2,5k token/sn → 3,24–3,60x; hızlı host'ta 8,5k token/sn → 1,70x).
+   Oran her iki durumda da yazılıyor; kalibrasyon bandının dışında kapı
+   "fail" değil "notice" üretiyor.
+
+**Denenip ölçümle reddedilenler** (kodda not düşülmüş)
+- **Blok gradyanını MATMUL ile kurmak** (aynı çarpım, aynı sıra — aritmetik
+  olarak birebir): rank-1 ve aralıklı ilk operand yüzünden intrinsik her sütun
+  için kopya + sonuç ayırıyor, adım başına 4096 kez. Aynı koşu içinde
+  normalize edilmiş güncelleme 61,8 → 134,2 µs/tahmin (×2,2 yavaş).
+- **FFN'i satır-paralel yapmak** (`project_rows`, `dot_product` ile satır
+  başına): aynı koşuda aynı model/şekil ile decoder adımı 79,9 → 105,8
+  µs/tahmin (%32 yavaş). Tek bloklu `MATMUL` satır başına `DOT_PRODUCT`'tan
+  iyi. İki OpenMP section'ın boş bıraktığı iki lane, kaybedilenden ucuz.
+- **Hız dizisini token-major saklamak** (daha önce, §3.6): batched kol 0,623x.
+
+**Açık kalan, ölçülmüş darboğazlar** (yapılacaklar, iddia değil)
+1. **Güncelleme fazının biriktirmesi skaler hızda.** 12,6M çarpma-toplama
+   (4096 sütun × 32 batch × 96) 4 lane'de kabaca çevrim başına bir işlem
+   hızında koşuyor; düz `!$omp simd` axpy bunu vektörleştirmiyor. Denenmesi
+   gereken sıradaki adım, biriktiriciyi sabit boyutlu (derleme zamanı) bir
+   tamponla bloğa almak — bu depoda iki kez çalışan reçete (§3.5'teki
+   "runtime boyutlu biriktirici vektörleşmiyor" notu).
+2. **NOVA'nın sütun başına kalan iç çarpımı.** Enerji artık üye enerjilerinin
+   batch ortalaması olduğu için (yukarı bakın) genişlik boyu indirgeme
+   kalmadı; uyum için sütun başına bir `dot_product` duruyor. Ölçülen sonuç
+   (enerji değişikliğinden **önce**): NOVA'nın güncelleme fazı AdamW'ninkinden
+   hızlı değildi (30,6'a karşı 18,5 µs/tahmin, aynı koşu) ve toplam oran
+   8 koşuda 0,82–1,24x, medyan ~0,93x. Yani "güncelleme fazında kanıtlanabilir
+   hız" hedefi bu hâliyle **karşılanmış değil**; enerji değişikliğinin etkisi
+   bir sonraki ölçümle doğrulanacak.
+3. **Skorlama fazının O(vocabulary) taramaları** (softmax'in 4 geçişi +
+   sıralama için iki `count`): vocab 32k'ya çıkınca faz lineer büyür.
+4. **Korpus okuma bayt bayt**: `utf8_stream_read_record` akış üzerinden tek
+   bayt okuyor; bu şekilde 833 baytlık kayıt başına ~800 okuma çağrısı var.
+   Faz bütçesinin dışında kaldığı için bu tabloda görünmüyor ama 900 MB'lık
+   hatta kayıt başına sabit bir maliyet.
 
 ## 4. Koşu tarifi
 
