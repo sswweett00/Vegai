@@ -409,14 +409,20 @@ contains
                state%retention_normalizer(:, head, scale) - gate_cached * workspace%phi_k(:, head))
             dwrite = dwrite + dot_product(ddenominator * workspace%phi_q(:, head), workspace%phi_k(:, head))
 
-            ! lambda = sigmoid(decay_logit): d/dlogit = lambda (1 - lambda).
-            gradient%decay_logit(scale) = gradient%decay_logit(scale) + &
-               ddecay * lambda * (1.0_real64 - lambda)
-            ! g = (1 - lambda) * 2 sigmoid(write_logit), with lambda treated as
-            ! the cached constant it is inside this step, so
-            ! dg/dwrite_logit = (1 - lambda) * 2 s (1 - s).
+            ! R_before was recovered as lambda * R_before, so undo the factor:
+            ! dR_after/dlambda = R_before exactly, not lambda * R_before.
+            ddecay = ddecay / max(lambda, 1.0e-12_real64)
+
+            ! The two logits are coupled: g = (1 - lambda) * 2 sigmoid(w), so a
+            ! change in decay_logit moves lambda *and*, through it, the write
+            ! strength.  dg/dlambda = -2 sigmoid(w); omitting this term makes the
+            ! analytic decay gradient disagree with a finite difference that
+            ! refreshes the cache, which is exactly what the probe caught.
             write_signoid = fbc_sigmoid(model%write_strength_logit(scale))
             dgate_raw = 2.0_real64 * write_signoid
+            gradient%decay_logit(scale) = gradient%decay_logit(scale) + &
+               (ddecay - dwrite * dgate_raw) * lambda * (1.0_real64 - lambda)
+            ! d g / d write_logit = (1 - lambda) * 2 s (1 - s).
             gradient%write_strength_logit(scale) = gradient%write_strength_logit(scale) + &
                dwrite * (1.0_real64 - lambda) * dgate_raw * (1.0_real64 - write_signoid)
          end do

@@ -130,9 +130,18 @@ jobs:
           python3 --version
           nproc
 
+      # Compiler diagnostics are surfaced as annotations too: the job log is a
+      # blob artifact that is not always retrievable, and a build failure has to
+      # name file and line without it.
       - name: Build the engine, its contract tests and the corpus CLI
         run: |
-          make context-engine prompt-engine context-tests BUILD_DIR=build-prompt-600m
+          set -o pipefail
+          if ! make context-engine prompt-engine context-tests BUILD_DIR=build-prompt-600m 2>&1 | tee build.log; then
+            grep -E 'Error:|Fatal Error|undefined reference' build.log | head -n 8 | while IFS= read -r line; do
+              echo "::error title=compile::${line}"
+            done
+            exit 1
+          fi
 
       - name: Run the engine contract suite (gradients, invariants, checkpoints)
         run: |
@@ -289,16 +298,17 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
           path: |
-            ${{ env.RUN_DIR }}/corpus-generate.json
-            ${{ env.RUN_DIR }}/corpus-verify.json
-            ${{ env.RUN_DIR }}/corpus.manifest.json
-            ${{ env.RUN_DIR }}/probe.tsv
-            ${{ env.RUN_DIR }}/probe-trained.tsv
-            ${{ env.RUN_DIR }}/probe-filter.json
-            ${{ env.RUN_DIR }}/probe.log
-            ${{ env.RUN_DIR }}/ask.log
-            ${{ env.RUN_DIR }}/train-session-*.log
-            ${{ env.RUN_DIR }}/training-sessions.log
-            ${{ env.RUN_DIR }}/training-summary.json
-            ${{ env.RUN_DIR }}/model.vgfb
+            ${{ runner.temp }}/vegai-prompt-600m/corpus-generate.json
+            ${{ runner.temp }}/vegai-prompt-600m/corpus-verify.json
+            ${{ runner.temp }}/vegai-prompt-600m/corpus.manifest.json
+            ${{ runner.temp }}/vegai-prompt-600m/probe.tsv
+            ${{ runner.temp }}/vegai-prompt-600m/probe-trained.tsv
+            ${{ runner.temp }}/vegai-prompt-600m/probe-filter.json
+            ${{ runner.temp }}/vegai-prompt-600m/probe.log
+            ${{ runner.temp }}/vegai-prompt-600m/ask.log
+            ${{ runner.temp }}/vegai-prompt-600m/train-session-*.log
+            ${{ runner.temp }}/vegai-prompt-600m/training-sessions.log
+            ${{ runner.temp }}/vegai-prompt-600m/training-summary.json
+            ${{ runner.temp }}/vegai-prompt-600m/model.vgfb
             context-tests.log
+            build.log
