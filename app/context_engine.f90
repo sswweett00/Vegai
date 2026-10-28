@@ -4,9 +4,9 @@
 !
 !  Commands
 !    plan      --window H ...                structural resource plan (JSON)
-!    inspect   CHECKPOINT                    header metadata only (JSON)
+!    inspect   --checkpoint FILE           header metadata only
 !    train     ... --checkpoint FILE         train on a synthetic stream
-!    evaluate  CHECKPOINT ...                held-out NLL / ppl / recall
+!    evaluate  --checkpoint FILE ...        held-out NLL / ppl / recall
 !    bench     ...                           per-token latency + throughput
 !    sweep     ...                           the invariance table across horizons
 !

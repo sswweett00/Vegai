@@ -214,6 +214,11 @@ contains
       real(real64) :: dslot_value_after(model%config%width)
       real(real64) :: key_before(model%config%width)
       real(real64) :: dffn_scaled(model%config%width), dattn_scaled(model%config%width)
+      ! `workspace%normalized` is reused by the FFN inside the same step, so by
+      ! the time the backward runs it holds the *FFN* normalisation.  The
+      ! Q/K/V and slot projections were computed from the attention one, so it
+      ! is rebuilt here rather than read back.
+      real(real64) :: attention_input(model%config%width)
 
       status = FBC_OK
       if (.not. fbc_model_is_ready(model) .or. .not. gradient%initialized) then
@@ -224,6 +229,7 @@ contains
          status = FBC_ERR_INVALID_ARGUMENT
          return
       end if
+      attention_input = workspace%rhat_attention * model%attention_rms
       width = model%config%width
       heads = model%config%heads
       head_width = model%head_width
@@ -325,11 +331,11 @@ contains
 
       do component = 1_int32, width
          gradient%slot_query_proj(component, :) = gradient%slot_query_proj(component, :) + &
-            dslot_query(component) * workspace%normalized
+            dslot_query(component) * attention_input
          gradient%slot_key_proj(component, :) = gradient%slot_key_proj(component, :) + &
-            dslot_key(component) * workspace%normalized
+            dslot_key(component) * attention_input
          gradient%slot_value_proj(component, :) = gradient%slot_value_proj(component, :) + &
-            dslot_value(component) * workspace%normalized
+            dslot_value(component) * attention_input
       end do
       dn = matmul(dslot_query, model%slot_query_proj) + matmul(dslot_key, model%slot_key_proj) + &
            matmul(dslot_value, model%slot_value_proj)
@@ -390,9 +396,9 @@ contains
       ! ---- 10. head projections ---------------------------------------------
       do head = 1_int32, heads
          do row = 1_int32, head_width
-            gradient%query(row, :, head) = gradient%query(row, :, head) + dq(row, head) * workspace%normalized
-            gradient%key(row, :, head) = gradient%key(row, :, head) + dk(row, head) * workspace%normalized
-            gradient%value(row, :, head) = gradient%value(row, :, head) + dvv(row, head) * workspace%normalized
+            gradient%query(row, :, head) = gradient%query(row, :, head) + dq(row, head) * attention_input
+            gradient%key(row, :, head) = gradient%key(row, :, head) + dk(row, head) * attention_input
+            gradient%value(row, :, head) = gradient%value(row, :, head) + dvv(row, head) * attention_input
          end do
          dn = dn + matmul(dq(:, head), model%query(:, :, head)) + matmul(dk(:, head), model%key(:, :, head)) + &
               matmul(dvv(:, head), model%value(:, :, head))

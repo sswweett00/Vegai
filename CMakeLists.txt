@@ -272,7 +272,7 @@ if(VEGAI_BUILD_TESTS)
     set_tests_properties(vegai_context_cli_train PROPERTIES
         TIMEOUT 300 FIXTURES_SETUP context_checkpoint)
     add_test(NAME vegai_context_cli_inspect
-             COMMAND vegai_context_engine inspect
+             COMMAND vegai_context_engine inspect --checkpoint
                      ${CMAKE_CURRENT_BINARY_DIR}/context-smoke.vgfb)
     set_tests_properties(vegai_context_cli_inspect PROPERTIES
         FIXTURES_REQUIRED context_checkpoint)

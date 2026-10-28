@@ -324,7 +324,7 @@ contains
    subroutine test_determinism
       type(fbc_config_t) :: config
       type(fbc_model_t) :: first, second, third
-      type(fbc_state_t) :: state
+      type(fbc_state_t) :: state_a, state_b, state_c
       type(fbc_workspace_t) :: workspace
       integer(int32) :: status
       real(real64) :: hidden(32), logits_a(32), logits_b(32), logits_c(32)
@@ -333,14 +333,20 @@ contains
       call fbc_model_init(first, config, 31_int64, status)
       call fbc_model_init(second, config, 31_int64, status)
       call fbc_model_init(third, config, 32_int64, status)
-      call fbc_state_init(state, first, status)
+      ! One state per model: a state carries a stream, so sharing one would feed
+      ! the second model a state that the first had already advanced.
+      call fbc_state_init(state_a, first, status)
+      call fbc_state_init(state_b, second, status)
+      call fbc_state_init(state_c, third, status)
       call fbc_workspace_init(workspace, first, status)
-      call fbc_step(first, state, workspace, 7_int32, hidden, logits_a, status)
-      call fbc_step(second, state, workspace, 7_int32, hidden, logits_b, status)
-      call fbc_step(third, state, workspace, 7_int32, hidden, logits_c, status)
+      call fbc_step(first, state_a, workspace, 7_int32, hidden, logits_a, status)
+      call fbc_step(second, state_b, workspace, 7_int32, hidden, logits_b, status)
+      call fbc_step(third, state_c, workspace, 7_int32, hidden, logits_c, status)
       call check(all(logits_a == logits_b), 'identical seeds give bit-identical logits')
       call check(any(logits_a /= logits_c), 'a different seed gives different logits')
-      call fbc_state_destroy(state)
+      call fbc_state_destroy(state_a)
+      call fbc_state_destroy(state_b)
+      call fbc_state_destroy(state_c)
       call fbc_workspace_destroy(workspace)
       call fbc_model_destroy(first)
       call fbc_model_destroy(second)
@@ -432,7 +438,7 @@ contains
          call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
          model%scale_logit(1_int32) = original
          numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
-         call check(close_enough(numeric, gradient%scale_logit(1_int32)), &
+         call report_gradient(numeric, gradient%scale_logit(1_int32), &
                     'finite difference matches the multi-scale readout gradient')
       end block
       block
@@ -443,7 +449,7 @@ contains
          call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
          model%channel_logit(3_int32) = original
          numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
-         call check(close_enough(numeric, gradient%channel_logit(3_int32)), &
+         call report_gradient(numeric, gradient%channel_logit(3_int32), &
                     'finite difference matches the slot-channel mixing gradient')
       end block
       block
@@ -454,7 +460,7 @@ contains
          call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
          model%slot_key_proj(2_int32, 3_int32) = original
          numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
-         call check(close_enough(numeric, gradient%slot_key_proj(2_int32, 3_int32)), &
+         call report_gradient(numeric, gradient%slot_key_proj(2_int32, 3_int32), &
                     'finite difference matches the slot write-key gradient (write-then-read)')
       end block
       block
@@ -465,7 +471,7 @@ contains
          call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
          model%slot_value_proj(4_int32, 1_int32) = original
          numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
-         call check(close_enough(numeric, gradient%slot_value_proj(4_int32, 1_int32)), &
+         call report_gradient(numeric, gradient%slot_value_proj(4_int32, 1_int32), &
                     'finite difference matches the slot write-value gradient')
       end block
       block
@@ -476,7 +482,7 @@ contains
          call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
          model%slot_query_proj(3_int32, 5_int32) = original
          numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
-         call check(close_enough(numeric, gradient%slot_query_proj(3_int32, 5_int32)), &
+         call report_gradient(numeric, gradient%slot_query_proj(3_int32, 5_int32), &
                     'finite difference matches the slot recall-query gradient')
       end block
       block
@@ -487,7 +493,7 @@ contains
          call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
          model%distance_bias(2_int32) = original
          numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
-         call check(close_enough(numeric, gradient%distance_bias(2_int32)), &
+         call report_gradient(numeric, gradient%distance_bias(2_int32), &
                     'finite difference matches the relative-distance bias gradient')
       end block
       block
@@ -498,7 +504,7 @@ contains
          call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
          model%ffn_gate(3_int32, 4_int32) = original
          numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
-         call check(close_enough(numeric, gradient%ffn_gate(3_int32, 4_int32)), &
+         call report_gradient(numeric, gradient%ffn_gate(3_int32, 4_int32), &
                     'finite difference matches the FFN gate gradient')
       end block
       block
@@ -509,7 +515,7 @@ contains
          call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
          model%query(2_int32, 5_int32, 1_int32) = original
          numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
-         call check(close_enough(numeric, gradient%query(2_int32, 5_int32, 1_int32)), &
+         call report_gradient(numeric, gradient%query(2_int32, 5_int32, 1_int32), &
                     'finite difference matches a query projection gradient')
       end block
       block
@@ -520,7 +526,7 @@ contains
          call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
          model%token_embedding(3_int32, 9_int32) = original
          numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
-         call check(close_enough(numeric, gradient%token_embedding(3_int32, 9_int32)), &
+         call report_gradient(numeric, gradient%token_embedding(3_int32, 9_int32), &
                     'finite difference matches the tied-embedding gradient')
       end block
 
@@ -557,13 +563,22 @@ contains
       call fbc_state_destroy(probe)
    end subroutine replay_loss
 
-   pure logical function close_enough(numeric, analytic) result(ok)
+   !> Compares one finite-difference probe with its analytic counterpart and
+   !> echoes both numbers, so a failure names the value instead of only the
+   !> parameter.
+   subroutine report_gradient(numeric, analytic, description)
       real(real64), intent(in) :: numeric, analytic
-      real(real64) :: scale
+      character(len=*), intent(in) :: description
+      real(real64) :: scale, error
 
       scale = max(1.0e-7_real64, abs(numeric) + abs(analytic))
-      ok = abs(numeric - analytic) / scale < 1.0e-4_real64
-   end function close_enough
+      error = abs(numeric - analytic) / scale
+      if (error >= 1.0e-4_real64) then
+         write(output_unit, '(A,2ES14.6,A,ES10.3)') '  gradient probe numeric/analytic ', numeric, &
+            analytic, ' relerr ', error
+      end if
+      call check(error < 1.0e-4_real64, description)
+   end subroutine report_gradient
 
    !----------------------------------------------------------------------------
    !  8. Training reduces the loss
@@ -760,8 +775,8 @@ contains
 
       ! A short-range change must still be visible, otherwise the previous check
       ! would be satisfied by a model that ignores its input entirely.
-      call probe_influence(model, state, workspace, tokens, query_position, 24_int32, 25_int32, &
-                           without_memory, status)
+      call probe_influence(model, state, workspace, tokens, query_position, query_position - 3_int32, &
+                           25_int32, without_memory, status)
       call check(without_memory > 1.0e-6_real64, &
                  'the local ring buffer does carry a token inside its window')
 
@@ -866,14 +881,18 @@ contains
 
       ! Logit equality from the freshly loaded model.
       block
-         type(fbc_state_t) :: restored_state
+         type(fbc_state_t) :: saved_state, restored_state
          real(real64) :: reference_logits(32), loaded_logits(32)
 
+         ! Both models start from an empty stream, so the comparison isolates the
+         ! parameters instead of an accumulated state.
+         call fbc_state_init(saved_state, model, status)
          call fbc_state_init(restored_state, restored, status)
-         call fbc_step(model, state, workspace, 11_int32, hidden, reference_logits, status)
+         call fbc_step(model, saved_state, workspace, 11_int32, hidden, reference_logits, status)
          call fbc_step(restored, restored_state, workspace, 11_int32, hidden, loaded_logits, status)
          call check(all(reference_logits == loaded_logits), &
                     'the reloaded model reproduces the logits of the saved one exactly')
+         call fbc_state_destroy(saved_state)
          call fbc_state_destroy(restored_state)
       end block
 
