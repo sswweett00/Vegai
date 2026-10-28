@@ -53,6 +53,14 @@ jobs:
       - name: Run the scale ladder
         run: |
           set -euo pipefail
+          # One probe run, echoed into an annotation: the job log is not always
+          # readable from outside, so the raw bytes must be visible as a check
+          # run annotation when something upstream goes wrong.
+          ./build-ladder/vegai_context_engine quality --window 8192 --local-window 32 \
+            --memory-scales 4 --memory-slots 64 --width 32 --heads 2 --ffn 64 --vocab 32 \
+            --tokens 1024 --eval-tokens 512 --train-chunk-tokens 64 \
+            --task needle --distance 256 --seed 11 > probe.txt 2>&1 || true
+          echo "::notice title=Ladder probe (last lines)::$(tr '\n' '|' < probe.txt | tail -c 900)"
           : > ladder.txt
           # One physical shape, one budget, one optimiser; only the scale count
           # and the seed move.  width/heads/ffn/vocab are fixed so the parameter
