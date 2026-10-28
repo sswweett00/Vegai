@@ -319,6 +319,72 @@ Sözleşme native testtedir: `test_nova_optimizer_contract` (kayıp düşüşü,
 hız dizisi, AdamW'dan küçük kaynak planı, v5 turu, parça+devam
 bit-birebirliği) ve `test_adamw_optimizer_contract` (eski yol bozulmadı).
 
+### 3.7 Darboğaz denetimi — ölçülen faz bütçesi, düzeltilenler, reddedilenler
+
+Faz bütçesi artık **her kol için** yayımlanıyor (annotation'da
+`phases <kol>[d… p… s… u… t…]`). Bu, "hangi faz darboğaz" sorusunu tahminden
+çıkarıp ölçüme bağlıyor; aynı kodun kollar arasında ~%10–14 oynadığı da bu
+tablodan görünüyor, yani tek ölçümle iddia kurulmuyor.
+
+Üretim şekli (vocab 4096 × width 96 × ffn 384 × 4 thread, N=32), aynı koşu
+(run 40664826946, hızlı sınıf runner):
+
+| faz | µs/tahmin | pay | ölçülen darboğaz |
+| --- | ---: | ---: | --- |
+| decode | 15,8 | %24 | FFN'in 768 transandantalı + 4 yoğun matris-vektör; `/8` vektör genişlikte donanım sınırına yakın |
+| project | 6,4 | %10 | E blok başına bir kez okunuyor; kalan maliyet `(count, vocab)` çıktısında satır-aralıklı yazma |
+| score | 12,5 | %19 | softmax + true-token sıralaması: tahmin başına 4–6 kez `O(vocabulary)` tarama |
+| update | 30,9 | %47 | blok gradyanının **skaler hızda** biriktirilmesi + optimizer'ın E ve hız dizisini akıtması |
+
+**Düzeltilenler**
+1. `stable_softmax`: `maxval(real(logits, real64))` her tahminde 4096 elemanlık
+   real64 geçici dizi ayırıp dolduruyordu → `real(maxval(logits), real64)`
+   (bit-birebir, geçici yok). Bölme sonrası "hepsi sonlu mu" taraması bölmenin
+   kendi geçişine katlandı. Ölçüm: bu runner'da gürültü bandında (aynı koşuda
+   score 8,5 → 9,3 µs, kol sırası gürültüsü ±%10); kazanç yapısal — bir geçiş
+   ve bir ayırma eksik.
+2. Benchmark her kolun faz bütçesini ve optimizer A/B'sini seçilen birikim
+   faktöründe, dönüşümlü turların medyanıyla yayımlıyor; `--compare-optimizer`
+   ile aynı ikili, aynı seed, aynı N.
+3. Uçtan uca oran artık runner sınıfına göre raporlanıyor: merge-base kolu
+   bellek-bağımlı olduğu için hızlı host'ta orantısız hızlanıyor (referans
+   sınıfta 2,1–2,5k token/sn → 3,24–3,60x; hızlı host'ta 8,5k token/sn →
+   1,70x; başka bir koşuda 2,3k token/sn → 3,51x). Oran her durumda yazılıyor;
+   kalibrasyon bandının dışında kapı "fail" değil "notice" üretiyor.
+
+**Denenip ölçümle reddedilenler** (kodda not düşülmüş)
+- **Blok gradyanını MATMUL ile kurmak** (aynı çarpım, aynı sıra): rank-1 ve
+  aralıklı ilk operand yüzünden intrinsik her sütun için kopya + sonuç ayırıyor.
+  Aynı koşu içinde normalize edilmiş güncelleme 61,8 → 134,2 µs/tahmin.
+- **FFN'i satır-paralel yapmak** (`project_rows`): aynı model/şekilde decoder
+  adımı 79,9 → 105,8 µs/tahmin (%32 yavaş).
+- **Enerjiyi üye enerjilerinden almak** (sütun başına `O(B)`): `1/B²` ölçeğiyle
+  N=128'de held-out NLL 8,43 → 10,35; ölçek kaldırılınca etkin adım `1/√B` gibi
+  küçülüyor; ikisinde de toy sözleşme B=4'te kayıp düşüşünü kaybediyor.
+  `||mean_b g_b||²` üyeler arasındaki götürümü taşıyor; büyük birikimi kararlı
+  kılan o.
+- **Hız dizisini token-major saklamak** (daha önce): batched kol 0,623x.
+
+**Açık kalan, ölçülmüş darboğazlar** (yapılacaklar, iddia değil)
+1. **Biriktirme skaler hızda.** 12,6M çarpma-toplama (4096 sütun × 32 batch ×
+   96) 4 lane'de kabaca çevrim başına bir işlem hızında; düz `!$omp simd` axpy
+   vektörleşmiyor, `MATMUL` ise ayırma yüzünden daha kötü. Sıradaki adım:
+   biriktiriciyi **derleme zamanı sabit** boyutlu bir bloğa almak (bu depoda iki
+   kez işe yarayan reçete; §3.5'teki "runtime boyutlu biriktirici
+   vektörleşmiyor" notu).
+2. **NOVA'nın sütun başına iki indirgemesi (enerji + uyum).** AdamW'da hiç
+   indirgeme yok; ölçülen güncelleme fazı NOVA 30,6 vs AdamW 18,5 µs/tahmin
+   (aynı koşu) ve 8 koşuda toplam oran 0,82–1,24x, medyan ~0,93x. Yani
+   "güncelleme fazında kanıtlanabilir hız" hedefi bu hâliyle **karşılanmış
+   değil**; NOVA'nın kanıtlanmış üstünlüğü kalitede (aynı N'de held-out NLL
+   −0,03…−0,10) ve yapıda (16 B vs 28 B durum trafiği, elemanda transandantal
+   yok).
+3. **Skorlamanın `O(vocabulary)` taramaları**: vocab 32k'ya çıkınca faz lineer
+   büyür; top-k/rank hesabı tek geçişe indirilebilir.
+4. **Korpus okuma bayt bayt**: `utf8_stream_read_record` akış üzerinden tek
+   bayt okuyor (833 baytlık kayıt ≈ 800 okuma çağrısı). Faz bütçesinin dışında
+   kaldığı için tabloda görünmüyor; 900 MB hattında kayıt başına sabit maliyet.
+
 ## 4. Koşu tarifi
 
 Probe (hız ölçümü) ve full (bütün dump boru hattı + boyutlandırılmış epoch
