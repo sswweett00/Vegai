@@ -79,7 +79,8 @@ jobs:
           ./build-ci/vegai_context_engine sweep --tokens 256 --train-chunk-tokens 32 \
             --width 32 --heads 2 --ffn 64 --vocab 32 --local-window 32 \
             --memory-scales 4 --memory-slots 64 > context-sweep.txt
-          detail=$(grep 'CONTEXT_BENCH_JSON:' context-sweep.txt | tail -1 | cut -d' ' -f2- | cut -c1-1900)
+          detail=$(grep 'CONTEXT_BENCH_JSON:' context-sweep.txt | sed 's/^CONTEXT_BENCH_JSON: //' \
+            | paste -sd'|' - | cut -c1-1900)
           {
             echo '## Fixed-budget context engine'
             echo '```text'
