@@ -380,6 +380,12 @@ contains
       answer_count = 0_int64
       correct = 0_int64
       total = 0.0_real64
+      ! Both outputs are intent(out), but `answer_accuracy` used to be assigned
+      ! only inside the masked branch: a stream with no masked answer position
+      ! then returned whatever the caller's variable happened to hold.
+      answer_accuracy = 0.0_real64
+      answer_count = 0_int64
+      mean_nll = 0.0_real64
       if (token_count + 1_int32 > size(tokens, kind=int32)) then
          status = FBT_ERR_ARGUMENT
          return

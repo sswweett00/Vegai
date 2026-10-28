@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import collections
 import json
+import math
 import statistics
 import sys
 
@@ -54,8 +55,17 @@ def group(rows: list[dict]) -> dict[tuple[str, int], list[dict]]:
 
 
 def mean_sd(values: list[float]) -> tuple[float, float]:
-    mean = statistics.mean(values)
-    deviation = statistics.stdev(values) if len(values) > 1 else 0.0
+    """Mean and sample standard deviation, ignoring non-finite entries.
+
+    `statistics` raises on NaN rather than propagating it, and a task without
+    masked answer positions has no recall to average, so finite filtering is
+    part of the contract rather than a nicety.
+    """
+    finite = [v for v in values if isinstance(v, (int, float)) and math.isfinite(v)]
+    if not finite:
+        return float("nan"), float("nan")
+    mean = statistics.mean(finite)
+    deviation = statistics.stdev(finite) if len(finite) > 1 else 0.0
     return mean, deviation
 
 
@@ -79,7 +89,7 @@ def summarise(grouped) -> dict[tuple[str, int], dict]:
 
 def recall_text(row: dict) -> str:
     """Markov has no masked answer positions, so a recall figure there is noise."""
-    if row["answers"] <= 0:
+    if row["answers"] <= 0 or not math.isfinite(row["recall_mean"]):
         return "n/a"
     return f"{row['recall_mean']:.4f}"
 
@@ -126,7 +136,7 @@ def print_compact(summary) -> None:
     for key in sorted(summary):
         task, scales = key
         row = summary[key]
-        recall = "n/a" if row["answers"] <= 0 else f"{row['recall_mean']:.3f}"
+        recall = recall_text(row)
         parts.append(
             f"{task}/s{scales}:nll={row['nll_mean']:.4f}(sd{row['nll_sd']:.4f},"
             f"{row['seeds']}seeds) recall={recall}(n={row['answers']})"
@@ -139,7 +149,7 @@ def print_recall(summary) -> None:
     for key in sorted(summary):
         task, scales = key
         row = summary[key]
-        if row["answers"] <= 0:
+        if recall_text(row) == "n/a":
             parts.append(f"{task}/s{scales}:n/a")
         else:
             parts.append(f"{task}/s{scales}:{row['recall_mean']:.4f}"

@@ -75,11 +75,18 @@ jobs:
       - name: Summarise the ladder
         run: |
           set -euo pipefail
-          python3 tools/summarise_context_ladder.py ladder.txt > ladder.md
+          # A failing summariser must name its own reason: the job log is not
+          # always readable from outside, the annotation always is.
+          if ! python3 tools/summarise_context_ladder.py ladder.txt > ladder.md 2> ladder.err; then
+            reason=$(tr '\n' ' ' < ladder.err | tail -c 600)
+            first=$(head -c 400 ladder.txt)
+            echo "::error title=Ladder summary failed::${reason} || first row: ${first}"
+            exit 1
+          fi
           cat ladder.md >> "$GITHUB_STEP_SUMMARY"
-          summary=$(python3 tools/summarise_context_ladder.py ladder.txt --compact | cut -c1-1900)
+          summary=$(python3 tools/summarise_context_ladder.py ladder.txt --compact | cut -c1-1800)
           echo "::notice title=Memory-scale ladder (held-out)::${summary}"
-          recall=$(python3 tools/summarise_context_ladder.py ladder.txt --recall | cut -c1-1900)
+          recall=$(python3 tools/summarise_context_ladder.py ladder.txt --recall | cut -c1-1800)
           echo "::notice title=Memory-scale ladder (recall)::${recall}"
 
       - name: Keep the raw rows
