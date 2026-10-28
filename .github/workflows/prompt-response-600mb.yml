@@ -44,6 +44,14 @@ on:
         description: 'Learning rate'
         required: false
         default: '0.003'
+      resume_run_id:
+        description: 'Continue the checkpoint uploaded by this earlier run id (artifact from the same workflow)'
+        required: false
+        default: ''
+      resume_start_byte:
+        description: 'Byte offset the resumed checkpoint had reached'
+        required: false
+        default: '0'
   # A narrow push trigger makes the workflow reachable from the PR branch
   # without spending a long job on unrelated changes.
   push:
@@ -86,6 +94,8 @@ jobs:
             width=32
             chunk=128
             lr=0.003
+            resume_run_id=
+            resume_start_byte=0
             mode=smoke
           else
             corpus_bytes="${{ inputs.corpus_bytes }}"
@@ -96,6 +106,8 @@ jobs:
             width="${{ inputs.width }}"
             chunk="${{ inputs.train_chunk_tokens }}"
             lr="${{ inputs.learning_rate }}"
+            resume_run_id="${{ inputs.resume_run_id }}"
+            resume_start_byte="${{ inputs.resume_start_byte }}"
             mode=dispatch
           fi
           : "${corpus_bytes:=600000000}"
@@ -106,6 +118,8 @@ jobs:
           : "${width:=32}"
           : "${chunk:=512}"
           : "${lr:=0.003}"
+          : "${resume_run_id:=}"
+          : "${resume_start_byte:=0}"
           {
             echo "MODE=$mode"
             echo "CORPUS_BYTES=$corpus_bytes"
@@ -116,6 +130,8 @@ jobs:
             echo "WIDTH=$width"
             echo "CHUNK=$chunk"
             echo "LR=$lr"
+            echo "RESUME_RUN_ID=$resume_run_id"
+            echo "START_BYTE=$resume_start_byte"
           } >> "$GITHUB_ENV"
           cat "$GITHUB_ENV"
 
@@ -163,6 +179,39 @@ jobs:
             | tee "$run_dir/corpus-verify.json"
           ls -l "$run_dir/corpus.txt"
 
+      # Continuing an earlier dispatch: the checkpoint, its byte offset and the
+      # corpus hash all have to come from that run, otherwise the model would
+      # continue on different bytes than it thinks.
+      - name: Restore the checkpoint of an earlier dispatch
+        if: ${{ inputs.resume_run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: prompt-response-600mb-evidence
+          run-id: ${{ env.RESUME_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ${{ runner.temp }}/vegai-resume
+
+      - name: Adopt the restored checkpoint
+        if: ${{ inputs.resume_run_id != '' }}
+        run: |
+          set -euo pipefail
+          restored="${RUNNER_TEMP}/vegai-resume/model.vgfb"
+          mkdir -p "${RUNNER_TEMP}/vegai-resume"
+          test -f "$restored" || { echo "::error::no model.vgfb in run ${RESUME_RUN_ID}"; exit 1; }
+          cp "$restored" "$RUN_DIR/model.vgfb"
+          restored_manifest="${RUNNER_TEMP}/vegai-resume/corpus.manifest.json"
+          if [ -f "$restored_manifest" ]; then
+            python3 - "$restored_manifest" "$RUN_DIR/corpus.manifest.json" <<'PY'
+          import json, sys
+          earlier = json.load(open(sys.argv[1], encoding='utf-8'))
+          current = json.load(open(sys.argv[2], encoding='utf-8'))
+          if earlier['sha256'] != current['sha256'] or earlier['bytes'] != current['bytes']:
+              raise SystemExit('::error::the restored run used a different corpus; refusing to continue')
+          print('corpus hash matches the earlier dispatch:', current['sha256'])
+          PY
+          fi
+          echo "resuming at byte ${START_BYTE}"
+
       # Every command that can fail here reports its own diagnostics as an
       # annotation: the job log lives in a blob store that is not always
       # retrievable, and "exit code 1" alone is not evidence.
@@ -186,7 +235,7 @@ jobs:
           echo "training target: ${target} of ${corpus_bytes} corpus bytes" | tee "$RUN_DIR/training-sessions.log"
           deadline=$(( $(date +%s) + TRAIN_MINUTES * 60 ))
           checkpoint="$RUN_DIR/model.vgfb"
-          offset=0
+          offset="${START_BYTE}"
           session=0
           # The last byte of a range can never be a target, so a range is
           # complete once it reaches target - 1.

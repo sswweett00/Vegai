@@ -736,7 +736,9 @@ contains
       character(len=*), intent(in) :: name, value_text
       logical, intent(inout) :: first
 
-      write(output_unit, '(A,A,A,A)') trim(merge(',', ' ', first)), '  "', trim(name)//'": ', value_text
+      ! MERGE(TSOURCE, FSOURCE, MASK) returns TSOURCE when MASK is true, so the
+      ! comma belongs to the *not first* branch.
+      write(output_unit, '(A,A,A,A)') trim(merge(' ', ',', first)), '  "', trim(name)//'": ', value_text
       first = .false.
    end subroutine json_member
 
