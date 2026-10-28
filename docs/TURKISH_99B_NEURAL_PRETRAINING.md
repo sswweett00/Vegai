@@ -262,13 +262,10 @@ eleman başına ikinci moment, sütun başına sabit olan bir büyüklüğü
 NOVA-1 onu sütun düzeyinde tutar: sütunun batch üzerinden ortalama gradyanı
 `g(v)`, enerjisi `z(v) = b2·z + (1-b2)·mean_b(r_b(v)²·||h_b||²/width)` — yani
 her tahminin **kendi** enerjisinin batch ortalaması; `||mean_b g_b||²` gibi
-`1/B²` ile ölçeklenir (yani adımın izlediği **ortalama** gradyanın ölçeğini
-izler; `1/B²` kaldırıldığında etkin adım `1/√B` gibi küçülüyor ve toy sözleşme
-`test_nova_optimizer_contract` B=4'te kayıp düşüşünü kaybediyordu). `||mean_b
-g_b||²`'ten farkı yalnız üyeler arası çapraz terimler, yani gürültü. B=1'de
-token-başına yolun kullandığı ifadenin aynısı ve sütun başına genişlik boyu
+`1/B²` ile küçülmediği için birikim faktöründen bağımsız ve B=1'de token-başına
+yolun kullandığı ifadenin aynısı. Ayrıca sütun başına genişlik boyu bir
 indirgeme gerektirmiyor (`O(B)` skaler iş). İlk adımda kendi gradyanından
-başlatılır, yüzden bias düzeltmesi yok. Taşınan hızla
+başlatılır, bu yüzden bias düzeltmesi yok. Taşınan hızla
 uyumu `a(v) = g(v)·u(v)`, hız `u(v) ← γ·u(v) + g(v)` (`γ = b1`, `a(v) < 0`
 ise `γ = b1·NPT_NOVA_RESTART_DAMP`) ve adım
 `θ(:,v) ← (1 - lr·wd)·θ(:,v) - s(v)·u(v)`, `s(v) = lr/(sqrt(z(v)) + eps)`.
