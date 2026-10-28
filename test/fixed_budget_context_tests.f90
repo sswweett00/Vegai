@@ -129,9 +129,20 @@ contains
       call check(effective == 8192.0_real64, 'the default effective horizon is 8192 tokens')
 
       ! And the degenerate case must stay visible: horizon = window collapses.
-      call fbc_configure_scales(small_config(8_int64), decay, effective, clamped)
-      call check(abs(decay(1_int32) - decay(size(decay, kind=int32))) < 1.0e-12_real64, &
-                 'horizon equal to the local window does collapse every scale onto one lambda')
+      ! Only the first `memory_scales` entries are written, so the comparison
+      ! uses that count rather than the extent of the scratch array.
+      block
+         type(fbc_config_t) :: degenerate
+         integer(int32) :: scales
+
+         degenerate = small_config(8_int64)
+         scales = degenerate%memory_scales
+         call fbc_configure_scales(degenerate, decay, effective, clamped)
+         call check(abs(decay(1_int32) - decay(scales)) < 1.0e-12_real64, &
+                    'horizon equal to the local window does collapse every scale onto one lambda')
+         call check(abs(effective - 8.0_real64) < 1.0e-12_real64, &
+                    'a horizon below the local window reports the window as its effective reach')
+      end block
    end subroutine test_defaults
 
    !----------------------------------------------------------------------------
