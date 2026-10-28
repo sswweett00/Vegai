@@ -16,11 +16,22 @@ görünmez. Fiziksel boyutların tamamı ayrı düğmelerdir:
 
 | Düğme | Rol | Varsayılan | Sınır |
 | --- | --- | --- | --- |
-| `--window` | mantıksal ufuk (int64) | 32 | ≥ 1, taşmada reddedilir |
+| `--window` | mantıksal ufuk (int64) | **8192** | ≥ 1, taşmada reddedilir |
 | `--local-window` | halka tampon (fiziksel) | 32 | 1..4096 |
 | `--memory-scales` | sabit bozunma ölçeği | 4 | 1..16 |
 | `--memory-slots` | sabit bellek yuvası | 64 | 1..1024 |
 | `--train-chunk-tokens` | güncelleme başına tahmin | 256 | 1..8192 |
+
+`--window` varsayılanı **8192**'dir: 32 belirteçlik fiziksel pencerenin 256
+katı. Bu, dört varsayılan ölçeğin gerçekten farklı olduğu en kısa ufuktur
+(`τ = 32 / 203 / 1290 / 8192`). Ufuk fiziksel pencereye eşit seçilirse
+(`--window 32 --local-window 32`) dört ölçek de `λ = exp(-1/32)` değerine çöker;
+bu durum sözleşme testinde ayrıca doğrulanır.
+
+`--memory-scales` varsayılanı **4**'te kalır: 8 ölçeğin kaliteyi artırdığı
+**ölçülmedi** (bkz. §8.2). Ölçüm, ölçek sayısını artırmanın bu rejimlerde
+görünür bir kazanç üretmediğini gösterdi; kanıt olmadan varsayılanı büyütmek
+yalnızca durum baytını büyütürdü.
 
 `--window` değeri boş, işaretli (`+`/`-`), sayı olmayan, sıfır, negatif veya
 int64 taşması içeren biçimlerde **reddedilir**; sessiz sarma yoktur. Aritmetik
@@ -128,6 +139,7 @@ Kaydet→yükle sonrası logitler bit düzeyinde aynıdır.
 ```
 make context-tests                     # sözleşme paketi
 make context-engine                    # CLI
+# CI: .github/workflows/context-quality.yml  (27 koşu, ölçek merdiveni)
 cmake -S . -B build -DVEGAI_BUILD_TESTS=ON && cmake --build build
 ctest --test-dir build -R vegai_context
 ```
@@ -155,20 +167,49 @@ Kullanım:
 
 Çalıştırma: `vegai_context_engine sweep`, genişlik 32 / 2 kafa / ffn 64 /
 sözlük 32 / yerel 32 / 4 ölçek / 64 yuva, 256 belirteç, Debug derleme
-(`-fcheck=all -ffpe-trap=invalid,zero,overflow`), koşu 40681155794.
+(`-fcheck=all -ffpe-trap=invalid,zero,overflow`), koşu 40758732752.
 Fiziksel yapı dört satırda da aynı; yalnızca `--window` değişiyor.
 
 | window | parametre | durum baytı | ileri işlem/tok | p50 µs | p95 µs | çıkarım tok/s | eğitim tok/s | eğitim NLL |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 32 | 15 497 | 67 072 | 43 008 | 49.211 | 59.701 | 19 908 | 6 615 | 2.6914 |
-| 8 192 | 15 497 | 67 072 | 43 008 | 49.613 | 59.551 | 19 850 | 6 753 | 2.7077 |
-| 1e6 | 15 497 | 67 072 | 43 008 | 49.652 | 59.641 | 19 852 | 6 713 | 2.7083 |
-| 1e12 | 15 497 | 67 072 | 43 008 | 49.612 | 59.060 | 19 948 | 6 810 | 2.6848 |
+| 32 | 15 497 | 67 072 | 43 008 | 52.418 | 70.041 | 18 548 | 6 721 | 2.6914 |
+| 8 192 | 15 497 | 67 072 | 43 008 | 52.228 | 62.497 | 18 911 | 6 719 | 2.7077 |
+| 1e6 | 15 497 | 67 072 | 43 008 | 52.388 | 62.407 | 18 888 | 6 693 | 2.7083 |
+| 1e12 | 15 497 | 67 072 | 43 008 | 52.168 | 61.605 | 18 986 | 6 738 | 2.6848 |
 
-`window` 32 → 1e12 (3.1e10 kat) için p50 oranı **1.008×**, çıkarım hızı oranı
-**1.002×**: ölçüm gürültüsü içinde. Mutlak süreler Debug derlemesine aittir;
-Release sayısı burada iddia edilmez. Aynı dört satır CI iş özetinde ve
-`CONTEXT_BENCH_JSON` satırlarında da yayımlanır.
+`window` 32 → 1e12 (3.1e10 kat) için p50 oranı **0.995×**, çıkarım hızı oranı
+**1.024×**: ölçüm gürültüsü içinde. Mutlak süreler Debug derlemesine aittir;
+Release sayısı burada iddia edilmez.
+
+### 8.2 Ölçek merdiveni: 8 ölçek kaliteyi artırıyor mu?
+
+`Context quality ladder` iş akışı (koşu 40758732610): 3 tohum, aynı bütçe
+(32 768 eğitim + 6 144 held-out belirteç), aynı optimize edici; yalnızca ölçek
+sayısı değişiyor. Ölçüm **ayrı** akıştan alınır, yani held-out.
+
+| görev | ölçek | parametre | durum baytı | held-out NLL | sd | 4'e göre | recall |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| markov@256 | 2 | 15 495 | 58 368 | 0.00441 | 0.00038 | −0.00001 | — |
+| markov@256 | 4 | 15 497 | 67 072 | 0.00442 | 0.00036 | temel | — |
+| markov@256 | 8 | 15 501 | 84 480 | 0.00443 | 0.00036 | +0.00001 | — |
+| needle@256 | 2 | 15 495 | 58 368 | 0.04996 | 0.00564 | −0.00009 | 0.9565 |
+| needle@256 | 4 | 15 497 | 67 072 | 0.05005 | 0.00568 | temel | 0.9565 |
+| needle@256 | 8 | 15 501 | 84 480 | 0.05011 | 0.00565 | +0.00006 | 0.9565 |
+| needle@1024 | 2 | 15 495 | 58 368 | 0.02688 | 0.00256 | −0.00002 | 0.8000 |
+| needle@1024 | 4 | 15 497 | 67 072 | 0.02690 | 0.00258 | temel | 0.8000 |
+| needle@1024 | 8 | 15 501 | 84 480 | 0.02692 | 0.00258 | +0.00002 | 0.8000 |
+
+**Karar: 8 ölçek benimsenmedi.** Farklar tohumlar arası standart sapmanın
+~1/50'si mertebesinde, yani ölçüm gürültüsü; recall dört ondalıkta birebir aynı.
+8 ölçek durum baytını %26 büyütüyor (67 072 → 84 480) ve karşılığında ölçülebilir
+bir kazanç üretmiyor. 1024 belirteç uzaklık, 32 belirteçlik halka tamponun
+erişemediği bir mesafedir; yani zor rejim de ölçüldü ve orada da fark yok.
+
+Bu sonucun sınırı: görevler 32 bin belirteçte doyuma ulaşıyor (recall 0.9565 /
+0.80) ve 64 yuvalı yuva kanalı bu mesafeleri zaten taşıyor. Daha uzun eğitim,
+daha büyük model veya merdivenin orta bandının kritik olduğu bir görev
+ölçülmedi; bu yüzden "8 ölçek asla yardım etmez" denmiyor, "bu bütçede ve bu
+görevlerde yardım etmedi" deniyor.
 
 ## 9. Sınırlar (iddia edilmeyenler)
 
@@ -180,5 +221,8 @@ Release sayısı burada iddia edilmez. Aynı dört satır CI iş özetinde ve
   gradyanları yoktur.
 - Yeni modüllerde OpenMP yönergesi yoktur; mevcut isteğe bağlı OpenMP yolu bu
   motor için kullanılmadı ve bu yüzden burada hızlanma iddiası da yoktur.
+- Ölçek merdiveni 32 bin belirteçlik bütçede ve iki görevde ölçüldü. "Daha çok
+  ölçek daha iyi" iddiası bu bütçenin dışında **kanıtlanmadı**; varsayılan 4
+  ölçek, ölçülmüş bir kazancın yokluğuna dayanır, varlığına değil.
 - Benchmark süreleri Debug yapısında ölçülür; mutlak değil göreli kanıt olarak
   okunmalıdır.
