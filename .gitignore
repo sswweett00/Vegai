@@ -45,3 +45,6 @@ __pycache__/
 /lmm-knowledge/
 /lmm-sessions/
 /lmm-runs/
+
+# Transient marker the prompt/response workflow creates in the workspace.
+.resume-marker

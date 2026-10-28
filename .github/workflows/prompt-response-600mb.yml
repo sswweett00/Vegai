@@ -78,61 +78,82 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      # A dispatch runs the configuration it was given.  A push only smoke
-      # tests the pipeline: an 8 MB corpus trained for five minutes proves the
-      # data path, the checkpoints and the scoring, without spending four
-      # hours of runner time on every commit to the workflow itself.
+      # A dispatch runs the configuration it was given.  A push runs whatever
+      # `ci/prompt-600mb.json` asks for, and falls back to a five-minute smoke
+      # run when that file is absent: an expensive job must never start by
+      # accident, and this environment cannot dispatch workflows, so a checked
+      # in configuration is how a real run is requested.
       - name: Resolve the run configuration
         run: |
           set -euo pipefail
-          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
-            corpus_bytes=2000000
-            train_bytes=0
-            train_minutes=3
-            session_minutes=2
-            facts=256
-            width=32
-            chunk=128
-            lr=0.003
-            resume_run_id=
-            resume_start_byte=0
-            mode=smoke
-          else
-            corpus_bytes="${{ inputs.corpus_bytes }}"
-            train_bytes="${{ inputs.train_bytes }}"
-            train_minutes="${{ inputs.train_minutes }}"
-            session_minutes="${{ inputs.session_minutes }}"
-            facts="${{ inputs.facts }}"
-            width="${{ inputs.width }}"
-            chunk="${{ inputs.train_chunk_tokens }}"
-            lr="${{ inputs.learning_rate }}"
-            resume_run_id="${{ inputs.resume_run_id }}"
-            resume_start_byte="${{ inputs.resume_start_byte }}"
-            mode=dispatch
-          fi
-          : "${corpus_bytes:=600000000}"
-          : "${train_bytes:=0}"
-          : "${train_minutes:=240}"
-          : "${session_minutes:=25}"
-          : "${facts:=2048}"
-          : "${width:=32}"
-          : "${chunk:=512}"
-          : "${lr:=0.003}"
-          : "${resume_run_id:=}"
-          : "${resume_start_byte:=0}"
+          config_file="ci/prompt-600mb.json"
           {
-            echo "MODE=$mode"
-            echo "CORPUS_BYTES=$corpus_bytes"
-            echo "TRAIN_BYTES=$train_bytes"
-            echo "TRAIN_MINUTES=$train_minutes"
-            echo "SESSION_MINUTES=$session_minutes"
-            echo "FACTS=$facts"
-            echo "WIDTH=$width"
-            echo "CHUNK=$chunk"
-            echo "LR=$lr"
-            echo "RESUME_RUN_ID=$resume_run_id"
-            echo "START_BYTE=$resume_start_byte"
-          } >> "$GITHUB_ENV"
+            echo "MODE=smoke"
+            echo "CORPUS_BYTES=2000000"
+            echo "TRAIN_BYTES=0"
+            echo "TRAIN_MINUTES=3"
+            echo "SESSION_MINUTES=2"
+            echo "FACTS=256"
+            echo "WIDTH=32"
+            echo "HEADS=2"
+            echo "FFN=64"
+            echo "LOCAL_WINDOW=32"
+            echo "SLOTS=64"
+            echo "CHUNK=128"
+            echo "LR=0.003"
+            echo "RESUME_RUN_ID="
+            echo "START_BYTE=0"
+          } > "$GITHUB_ENV"
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ -f "$config_file" ]; then
+            python3 - "$config_file" >> "$GITHUB_ENV" <<'PY'
+          import json, sys
+          config = json.load(open(sys.argv[1], encoding='utf-8'))
+          defaults = {
+              'corpus_bytes': 600_000_000, 'train_bytes': 0, 'train_minutes': 300,
+              'session_minutes': 25, 'facts': 2048, 'width': 32, 'heads': 2, 'ffn': 64,
+              'local_window': 32, 'memory_slots': 64, 'train_chunk_tokens': 1024,
+              'learning_rate': 0.003, 'resume_run_id': '', 'resume_start_byte': 0,
+          }
+          defaults.update(config)
+          print('MODE=dispatch')
+          print(f"CORPUS_BYTES={defaults['corpus_bytes']}")
+          print(f"TRAIN_BYTES={defaults['train_bytes']}")
+          print(f"TRAIN_MINUTES={defaults['train_minutes']}")
+          print(f"SESSION_MINUTES={defaults['session_minutes']}")
+          print(f"FACTS={defaults['facts']}")
+          print(f"WIDTH={defaults['width']}")
+          print(f"HEADS={defaults['heads']}")
+          print(f"FFN={defaults['ffn']}")
+          print(f"LOCAL_WINDOW={defaults['local_window']}")
+          print(f"SLOTS={defaults['memory_slots']}")
+          print(f"CHUNK={defaults['train_chunk_tokens']}")
+          print(f"LR={defaults['learning_rate']}")
+          print(f"RESUME_RUN_ID={defaults['resume_run_id']}")
+          print(f"START_BYTE={defaults['resume_start_byte']}")
+          PY
+          elif [ "${GITHUB_EVENT_NAME}" != "push" ]; then
+            {
+              echo "MODE=dispatch"
+              echo "CORPUS_BYTES=${{ inputs.corpus_bytes }}"
+              echo "TRAIN_BYTES=${{ inputs.train_bytes }}"
+              echo "TRAIN_MINUTES=${{ inputs.train_minutes }}"
+              echo "SESSION_MINUTES=${{ inputs.session_minutes }}"
+              echo "FACTS=${{ inputs.facts }}"
+              echo "WIDTH=${{ inputs.width }}"
+              echo "HEADS=2"
+              echo "FFN=64"
+              echo "LOCAL_WINDOW=32"
+              echo "SLOTS=64"
+              echo "CHUNK=${{ inputs.train_chunk_tokens }}"
+              echo "LR=${{ inputs.learning_rate }}"
+              echo "RESUME_RUN_ID=${{ inputs.resume_run_id }}"
+              echo "START_BYTE=${{ inputs.resume_start_byte }}"
+            } >> "$GITHUB_ENV"
+          fi
+          # The restore steps cannot read GITHUB_ENV in their `if`, so the
+          # decision is materialised as a file hashFiles() can see.
+          rm -f .resume-marker
+          if grep -q '^RESUME_RUN_ID=.' "$GITHUB_ENV"; then touch .resume-marker; fi
           cat "$GITHUB_ENV"
 
       - name: Install GNU Fortran toolchain
@@ -183,7 +204,7 @@ jobs:
       # corpus hash all have to come from that run, otherwise the model would
       # continue on different bytes than it thinks.
       - name: Restore the checkpoint of an earlier dispatch
-        if: ${{ inputs.resume_run_id != '' }}
+        if: ${{ hashFiles('.resume-marker') != '' }}
         uses: actions/download-artifact@v4
         with:
           name: prompt-response-600mb-evidence
@@ -192,7 +213,7 @@ jobs:
           path: ${{ runner.temp }}/vegai-resume
 
       - name: Adopt the restored checkpoint
-        if: ${{ inputs.resume_run_id != '' }}
+        if: ${{ hashFiles('.resume-marker') != '' }}
         run: |
           set -euo pipefail
           restored="${RUNNER_TEMP}/vegai-resume/model.vgfb"
@@ -262,6 +283,10 @@ jobs:
                  --max-seconds "$session_seconds" \
                  --train-chunk-tokens "$CHUNK" \
                  --width "$WIDTH" \
+                 --heads "$HEADS" \
+                 --ffn "$FFN" \
+                 --local-window "$LOCAL_WINDOW" \
+                 --memory-slots "$SLOTS" \
                  --lr "$LR" \
                  --progress-every 200 \
                  ${resume_args[@]+"${resume_args[@]}"} > "$session_log" 2>&1; then

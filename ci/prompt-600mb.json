@@ -1,0 +1,16 @@
+{
+  "purpose": "One full 600 MB prompt/response training pass in a single job; see docs/FIXED_BUDGET_CONTEXT_ENGINE.md section 10",
+  "corpus_bytes": 600000000,
+  "facts": 2048,
+  "width": 16,
+  "heads": 2,
+  "ffn": 32,
+  "local_window": 16,
+  "memory_slots": 32,
+  "train_chunk_tokens": 1024,
+  "learning_rate": 0.003,
+  "train_minutes": 240,
+  "session_minutes": 25,
+  "resume_run_id": "",
+  "resume_start_byte": 0
+}
