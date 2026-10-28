@@ -78,13 +78,13 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
-            corpus_bytes=8000000
+            corpus_bytes=2000000
             train_bytes=0
-            train_minutes=5
-            session_minutes=4
-            facts=512
+            train_minutes=3
+            session_minutes=2
+            facts=256
             width=32
-            chunk=512
+            chunk=128
             lr=0.003
             mode=smoke
           else
@@ -163,9 +163,20 @@ jobs:
             | tee "$run_dir/corpus-verify.json"
           ls -l "$run_dir/corpus.txt"
 
+      # Every command that can fail here reports its own diagnostics as an
+      # annotation: the job log lives in a blob store that is not always
+      # retrievable, and "exit code 1" alone is not evidence.
       - name: Train in checkpointed sessions until the budget is spent
         run: |
           set -euo pipefail
+          annotate() {
+            # $1 title, $2 file
+            if [ -f "$2" ]; then
+              local tail_text
+              tail_text=$(tail -n 12 "$2" | tr '\n' '~' | cut -c1-900)
+              echo "::error title=$1::${tail_text}"
+            fi
+          }
           corpus_bytes=$(stat -c %s "$RUN_DIR/corpus.txt")
           if [ "$TRAIN_BYTES" -gt 0 ] && [ "$TRAIN_BYTES" -lt "$corpus_bytes" ]; then
             target="$TRAIN_BYTES"
@@ -180,30 +191,40 @@ jobs:
           while [ "$offset" -lt "$target" ]; do
             now=$(date +%s)
             remaining=$(( deadline - now ))
-            if [ "$remaining" -le 120 ]; then
+            if [ "$remaining" -le 60 ]; then
               echo "time budget reached at byte ${offset}" | tee -a "$RUN_DIR/training-sessions.log"
               break
             fi
             session_seconds=$(( SESSION_MINUTES * 60 ))
             if [ "$session_seconds" -gt "$remaining" ]; then session_seconds="$remaining"; fi
             session=$(( session + 1 ))
+            session_log="$RUN_DIR/train-session-${session}.log"
             resume_args=()
             if [ -f "$checkpoint" ]; then
               resume_args=(--resume "$checkpoint" --start-byte "$offset")
             fi
-            ./build-prompt-600m/vegai_prompt_engine train \
-              --corpus "$RUN_DIR/corpus.txt" \
-              --checkpoint "$checkpoint" \
-              --bytes "$target" \
-              --max-seconds "$session_seconds" \
-              --train-chunk-tokens "$CHUNK" \
-              --width "$WIDTH" \
-              --lr "$LR" \
-              --progress-every 500 \
-              ${resume_args[@]+"${resume_args[@]}"} | tee "$RUN_DIR/train-session-${session}.log"
-            offset=$(grep -o '"end_byte": [0-9]*' "$RUN_DIR/train-session-${session}.log" | tail -n 1 | grep -o '[0-9]*')
+            if ! ./build-prompt-600m/vegai_prompt_engine train \
+                 --corpus "$RUN_DIR/corpus.txt" \
+                 --checkpoint "$checkpoint" \
+                 --bytes "$target" \
+                 --max-seconds "$session_seconds" \
+                 --train-chunk-tokens "$CHUNK" \
+                 --width "$WIDTH" \
+                 --lr "$LR" \
+                 --progress-every 200 \
+                 ${resume_args[@]+"${resume_args[@]}"} > "$session_log" 2>&1; then
+              cat "$session_log"
+              annotate "train failed in session ${session}" "$session_log"
+              exit 1
+            fi
+            grep '^progress:' "$session_log" | tail -n 2 || true
+            offset=$(grep -o '"end_byte": [0-9]*' "$session_log" | tail -n 1 | grep -o '[0-9]*' || true)
+            if [ -z "${offset:-}" ]; then
+              cat "$session_log"
+              annotate "train printed no end_byte" "$session_log"
+              exit 1
+            fi
             echo "session ${session} finished at byte ${offset}" | tee -a "$RUN_DIR/training-sessions.log"
-            if [ -z "$offset" ]; then echo "could not read end_byte from the session log"; exit 1; fi
           done
           echo "TRAINED_BYTES=${offset}" >> "$GITHUB_ENV"
           python3 - "$RUN_DIR" "$offset" <<'PY'
@@ -239,9 +260,8 @@ jobs:
               'numeric_ok': all(r['numeric_ok'] for r in records),
               'per_session': records,
           }
-          total_tokens = summary['total_tokens']
           total_seconds = max(1, summary['total_seconds'])
-          summary['tokens_per_second'] = total_tokens / total_seconds
+          summary['tokens_per_second'] = summary['total_tokens'] / total_seconds
           if summary['corpus_bytes'] and summary['tokens_per_second'] > 0:
               summary['hours_for_full_corpus'] = summary['corpus_bytes'] / summary['tokens_per_second'] / 3600.0
           (run_dir / 'training-summary.json').write_text(json.dumps(summary, indent=1) + '\n', encoding='utf-8')
@@ -254,32 +274,37 @@ jobs:
           python3 tools/build_prompt_response_corpus.py filter-probe "$RUN_DIR/corpus.txt" \
             --probe "$RUN_DIR/probe.tsv" --out "$RUN_DIR/probe-trained.tsv" \
             --trained-bytes "${TRAINED_BYTES}" | tee "$RUN_DIR/probe-filter.json"
-          ./build-prompt-600m/vegai_prompt_engine probe \
-            --checkpoint "$RUN_DIR/model.vgfb" \
-            --probe "$RUN_DIR/probe-trained.tsv" \
-            --max-new 32 | tee "$RUN_DIR/probe.log"
+          if ! ./build-prompt-600m/vegai_prompt_engine probe \
+               --checkpoint "$RUN_DIR/model.vgfb" \
+               --probe "$RUN_DIR/probe-trained.tsv" \
+               --max-new 32 > "$RUN_DIR/probe.log" 2>&1; then
+            cat "$RUN_DIR/probe.log"
+            echo "::error title=probe failed::$(tail -n 12 "$RUN_DIR/probe.log" | tr '\n' '~' | cut -c1-900)"
+            exit 1
+          fi
+          cat "$RUN_DIR/probe.log"
 
       - name: Ask the model a handful of prompts and record the responses
         run: |
           set -euo pipefail
           : > "$RUN_DIR/ask.log"
-          head -n 3 "$RUN_DIR/probe-trained.tsv" | while IFS=$'\t' read -r kind prompt expected; do
-            echo "### expected: ${expected}" >> "$RUN_DIR/ask.log"
+          ask() {
+            local kind="$1" prompt="$2" expected="$3"
+            { echo "### ${kind} | expected: ${expected}"; } >> "$RUN_DIR/ask.log"
             ./build-prompt-600m/vegai_prompt_engine ask \
-              --checkpoint "$RUN_DIR/model.vgfb" \
-              --prompt "${prompt}" --max-new 32 >> "$RUN_DIR/ask.log"
+              --checkpoint "$RUN_DIR/model.vgfb" --prompt "${prompt}" --max-new 32 >> "$RUN_DIR/ask.log" 2>&1 || {
+                echo "::error title=ask failed::$(tail -n 6 "$RUN_DIR/ask.log" | tr '\n' '~' | cut -c1-900)"
+                exit 1
+              }
+          }
+          head -n 3 "$RUN_DIR/probe-trained.tsv" | while IFS=$'\t' read -r kind prompt expected; do
+            ask "$kind" "$prompt" "$expected"
           done
           grep '^copy' "$RUN_DIR/probe-trained.tsv" | head -n 1 | while IFS=$'\t' read -r kind prompt expected; do
-            echo "### expected: ${expected}" >> "$RUN_DIR/ask.log"
-            ./build-prompt-600m/vegai_prompt_engine ask \
-              --checkpoint "$RUN_DIR/model.vgfb" \
-              --prompt "${prompt}" --max-new 32 >> "$RUN_DIR/ask.log"
+            ask "$kind" "$prompt" "$expected"
           done
           grep '^next' "$RUN_DIR/probe-trained.tsv" | head -n 1 | while IFS=$'\t' read -r kind prompt expected; do
-            echo "### expected: ${expected}" >> "$RUN_DIR/ask.log"
-            ./build-prompt-600m/vegai_prompt_engine ask \
-              --checkpoint "$RUN_DIR/model.vgfb" \
-              --prompt "${prompt}" --max-new 32 >> "$RUN_DIR/ask.log"
+            ask "$kind" "$prompt" "$expected"
           done
           cat "$RUN_DIR/ask.log"
 
