@@ -22,9 +22,9 @@
 !
 !    * keys/values of *earlier* tokens receive no gradient; the current query
 !      still receives one, because it is scored against them;
-!    * the slot *write* gate is fully trained anyway, because the forward pass
-!      writes and then reads inside the same step, which places the write on the
-!      current step's differentiable path.
+!    * both *writes* that happen before a read inside the same step are fully
+!      trained: the slot write (key, value, gate, salience) and the multi-scale
+!      retention update (phi(k), v).  Only the previous steps' writes are frozen.
 !
 !  This routine is the exact derivative of the implemented computation, which
 !  is precisely what the finite-difference contract test checks.
@@ -219,6 +219,10 @@ contains
       ! Q/K/V and slot projections were computed from the attention one, so it
       ! is rebuilt here rather than read back.
       real(real64) :: attention_input(model%config%width)
+      ! Scratch for the intra-step retention write (see stage 8).
+      real(real64) :: dphi_key(model%head_width), dvalue(model%head_width)
+      real(real64) :: dretention(model%head_width, model%head_width)
+      real(real64) :: ddenominator, decay_slope
 
       status = FBC_OK
       if (.not. fbc_model_is_ready(model) .or. .not. gradient%initialized) then
@@ -340,23 +344,48 @@ contains
       dn = matmul(dslot_query, model%slot_query_proj) + matmul(dslot_key, model%slot_key_proj) + &
            matmul(dslot_value, model%slot_value_proj)
 
-      ! ---- 8. multi-scale retention read ------------------------------------
+      ! ---- 8. multi-scale recurrent memory: read, then the intra-step write --
+      ! R <- lambda R + (1-lambda) phi(k) v^T and z <- lambda z + (1-lambda)
+      ! phi(k), and the *same* step then reads R and z.  This token's phi(k) and
+      ! v are therefore on the differentiable path and must receive gradient;
+      ! earlier tokens' writes stay frozen (depth-1 truncated BPTT), which is
+      ! the documented approximation.  Omitting this block trains a model that
+      ! silently never learns what it writes.
       dscale_alpha = 0.0_real64
+      dq = 0.0_real64
+      dk = 0.0_real64
+      dvv = 0.0_real64
       do head = 1_int32, heads
          dmem = workspace%channel_alpha(FBC_CHANNEL_RETENTION) * &
                 dc((head - 1_int32) * head_width + 1_int32:head * head_width)
          dphi = 0.0_real64
+         dphi_key = 0.0_real64
+         dvalue = 0.0_real64
          do scale = 1_int32, scales
-            dscale_alpha(scale) = dscale_alpha(scale) + dot_product(dmem, workspace%read_scale(:, head, scale))
             denominator = workspace%read_denominator(head, scale)
+            dscale_alpha(scale) = dscale_alpha(scale) + &
+                                  dot_product(dmem, workspace%read_scale(:, head, scale))
+            ! read = phi(q) . R / (phi(q) . z + epsilon)
             dnum = workspace%scale_alpha(scale) * dmem / denominator
-            dphi = dphi + matmul(state%retention_numerator(:, :, head, scale), dnum)
-            slope = -workspace%scale_alpha(scale) * &
-                    dot_product(dmem, workspace%read_scale(:, head, scale)) / denominator
-            dphi = dphi + slope * state%retention_normalizer(:, head, scale)
+            ddenominator = -workspace%scale_alpha(scale) * &
+                           dot_product(dmem, workspace%read_scale(:, head, scale)) / denominator
+            dphi = dphi + matmul(state%retention_numerator(:, :, head, scale), dnum) + &
+                   ddenominator * state%retention_normalizer(:, head, scale)
+            ! dR(i, c) = phi(q)(i) * dnum(c) and dz(i) = ddenominator * phi(q)(i).
+            do component = 1_int32, head_width
+               dretention(:, component) = workspace%phi_q(:, head) * dnum(component)
+            end do
+            decay_slope = 1.0_real64 - model%scale_decay(scale)
+            dphi_key = dphi_key + decay_slope * (matmul(dretention, workspace%v(:, head)) + &
+                                                 ddenominator * workspace%phi_q(:, head))
+            dvalue = dvalue + decay_slope * matmul(workspace%phi_k(:, head), dretention)
          end do
          do component = 1_int32, head_width
-            dq(component, head) = fbc_softplus_slope(workspace%q(component, head)) * dphi(component)
+            dq(component, head) = dq(component, head) + &
+                                  fbc_softplus_slope(workspace%q(component, head)) * dphi(component)
+            dk(component, head) = dk(component, head) + &
+                                  fbc_softplus_slope(workspace%k(component, head)) * dphi_key(component)
+            dvv(component, head) = dvv(component, head) + dvalue(component)
          end do
       end do
       moment = dot_product(workspace%scale_alpha, dscale_alpha)
@@ -375,8 +404,6 @@ contains
             weight_sum = weight_sum + workspace%local_weight(ordinal + 1_int32, head) * &
                                       dlocal_weight(ordinal + 1_int32)
          end do
-         dk(:, head) = 0.0_real64
-         dvv(:, head) = 0.0_real64
          do ordinal = 1_int32, workspace%local_count + 1_int32
             dlocal_weight(ordinal) = workspace%local_weight(ordinal, head) * (dlocal_weight(ordinal) - weight_sum)
          end do
@@ -389,8 +416,8 @@ contains
                                                         dlocal_weight(ordinal + 1_int32)
          end do
          dq(:, head) = dq(:, head) + dlocal_weight(1_int32) * workspace%k(:, head) * context_scale
-         dk(:, head) = dlocal_weight(1_int32) * workspace%q(:, head) * context_scale
-         dvv(:, head) = workspace%local_weight(1_int32, head) * dloc
+         dk(:, head) = dk(:, head) + dlocal_weight(1_int32) * workspace%q(:, head) * context_scale
+         dvv(:, head) = dvv(:, head) + workspace%local_weight(1_int32, head) * dloc
       end do
 
       ! ---- 10. head projections ---------------------------------------------

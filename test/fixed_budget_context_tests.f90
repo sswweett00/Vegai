@@ -519,6 +519,28 @@ contains
                     'finite difference matches a query projection gradient')
       end block
       block
+         original = model%value(2_int32, 3_int32, 1_int32)
+         model%value(2_int32, 3_int32, 1_int32) = original + delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, plus_loss, status)
+         model%value(2_int32, 3_int32, 1_int32) = original - delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
+         model%value(2_int32, 3_int32, 1_int32) = original
+         numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
+         call report_gradient(numeric, gradient%value(2_int32, 3_int32, 1_int32), &
+                    'finite difference matches a value projection gradient (intra-step retention write)')
+      end block
+      block
+         original = model%key(1_int32, 4_int32, 2_int32)
+         model%key(1_int32, 4_int32, 2_int32) = original + delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, plus_loss, status)
+         model%key(1_int32, 4_int32, 2_int32) = original - delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
+         model%key(1_int32, 4_int32, 2_int32) = original
+         numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
+         call report_gradient(numeric, gradient%key(1_int32, 4_int32, 2_int32), &
+                    'finite difference matches a key projection gradient (intra-step retention write)')
+      end block
+      block
          original = model%token_embedding(3_int32, 9_int32)
          model%token_embedding(3_int32, 9_int32) = original + delta
          call replay_loss(model, base, workspace, 9_int32, 5_int32, plus_loss, status)
@@ -603,7 +625,7 @@ contains
       config%vocabulary_size = 8_int32      ! a five-way deterministic successor rule
       config%width = 16_int32               ! width 32 would waste CI time here
       config%ffn_width = 32_int32
-      update_config%learning_rate = 8.0e-3_real64
+      update_config%learning_rate = 5.0e-3_real64
 
       allocate(tokens(token_count + 1_int32), mask(token_count))
       call fbc_generate_tokens(FBC_TASK_MARKOV, token_count, config%vocabulary_size, 16_int32, 3_int64, &
