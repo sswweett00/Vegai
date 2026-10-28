@@ -293,12 +293,23 @@ contains
                 '"streaming_microseconds":'//trim(r64_text(points(index)%streaming_microseconds))//'}'
          if (index < size(points, kind=int32)) line = line//','
       end do
-      line = line//'],"invariant_counters":'//merge('true', 'false', invariant_counters)//','// &
-             '"sparse_storage":'//merge('true', 'false', sparse_storage)//','// &
-             '"flat_latency":'//merge('true', 'false', flat_latency)//','// &
-             '"finite":'//merge('true', 'false', numerically_finite)//'}'
+      line = line//'],"invariant_counters":'//logical_text(invariant_counters)//','// &
+             '"sparse_storage":'//logical_text(sparse_storage)//','// &
+             '"flat_latency":'//logical_text(flat_latency)//','// &
+             '"finite":'//logical_text(numerically_finite)//'}'
       write (output_unit, '(A)') 'SPARSE_LAYER_BENCH_JSON: '//trim(line)
    end subroutine publish_json
+
+   !> JSON boolean.  MERGE requires both branches to have the same length, which
+   !> is why the padding is explicit here instead of hidden in the call site.
+   pure function logical_text(value) result(text)
+      logical, intent(in) :: value
+      character(len=5) :: padded
+      character(len=:), allocatable :: text
+
+      padded = merge('true ', 'false', value)
+      text = trim(padded)
+   end function logical_text
 
    function i64_text(value) result(text)
       integer(int64), intent(in) :: value
