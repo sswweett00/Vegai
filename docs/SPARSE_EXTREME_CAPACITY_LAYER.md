@@ -147,6 +147,30 @@ koduyla biter (dolayısıyla CTest'te bir testtir):
 Makine-okunur tek satır (`SPARSE_LAYER_BENCH_JSON: {...}`) CI annotation'ına ve
 iş özetine yazılır.
 
+### 6.1 Ölçülen sonuç (CI, `e91826b`, koşu 40669623211)
+
+Ubuntu x86-64, AMD EPYC 7763, **Debug** yapı (`-fcheck=all -ffpe-trap=...`, yani
+mutlak süreler iyimser değil kötümserdir; önemli olan oranlardır):
+
+| Nokta | `W_total` | aktif param | aktif FLOPs | sayfa | yerleşik | steady µs/adım | streaming µs/adım |
+|---|---|---|---|---|---|---|---|
+| A 16×16, k=4, cap 4 | 1.088 | 1.088 | 17.536 | 4 | 0,04 MiB | 42,40 | 42,70 |
+| B 32×32, k=8, cap 977 | 1.031.712 | 8.448 | 123.392 | 790 | 19,2 MiB | 289,03 | 364,31 |
+| C 32×32, k=8, cap 947.000 | 1.000.032.000 | 8.448 | 123.392 | 1.595 | 38,6 MiB | **290,48** | 456,27 |
+
+Kapasite B → C arasında **970×** büyürken steady adım süresi **1,005×** değişti;
+aktif parametre ve aktif FLOP sayaçları son basamağa kadar aynı kaldı; yerleşik
+bellek 19,2 MiB → 38,6 MiB oldu, yani kapasiteyle değil **dokunulan sayfa
+sayısıyla** ölçeklendi (`1.000.032.000 × 8 B = 7,45 GiB` yerine 38,6 MiB).
+
+Streaming modu 364 → 456 µs (1,25×) çıktı ve bu beklenen davranıştır: streaming
+süresi kapasiteyle değil **adım başına yeni uzman oranıyla** ölçeklenir. Aynı
+sayıda adımda C, B'den daha fazla soğuk uzmanla karşılaştı (1.595'e karşı 790
+sayfa), çünkü 947.000 uzmanlı uzayda aynı girdi akışı daha az tekrar üretir.
+Soğuk uzman üretimi uzman başına bir kez ödenen `O(in*out)` işidir; sabit
+yönlendirme dağılımına oturmuş bir katmanda bu terim sıfıra gider (steady modu
+tam olarak bunu ölçer).
+
 Çalıştırma:
 
 ```bash
