@@ -1148,7 +1148,14 @@ contains
                residual32 = residuals(token, batch_index)
                energy = energy + residual32 * residual32 * member_energy(batch_index)
             end do
-            energy = energy * inverse_batch_32
+            ! Divided by B^2, so the estimate tracks the scale of the *averaged*
+            ! gradient that the step actually follows: measured without it, the
+            ! step shrank like 1/sqrt(B) at large accumulation, which is a silent
+            ! learning-rate decay with batch size (the toy contract in
+            ! test_nova_optimizer_contract stopped reducing its NLL at B=4).  What
+            ! the member form drops relative to ||mean_b g_b||^2 is only the cross
+            ! terms between members, i.e. the noise.
+            energy = energy * (inverse_batch_32 * inverse_batch_32)
             ! The agreement still needs one dot product per column, and only its
             ! sign is used, so the column stays un-normalized.
             agreement = dot_product(column_gradient, state%nova_u_embedding(:, token))
