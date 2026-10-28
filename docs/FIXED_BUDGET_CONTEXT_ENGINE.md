@@ -153,24 +153,22 @@ Kullanım:
 
 ## 8. Ölçülen sonuçlar (CI, `VEGAI` "Fortran verification")
 
-Son ölçüm, `--window 1e12`, genişlik 32 / 2 kafa / ffn 64 / sözlük 32 /
-yerel 32 / 4 ölçek / 64 yuva, Debug derleme (`-fcheck=all -ffpe-trap=...`),
-256 belirteç:
+Çalıştırma: `vegai_context_engine sweep`, genişlik 32 / 2 kafa / ffn 64 /
+sözlük 32 / yerel 32 / 4 ölçek / 64 yuva, 256 belirteç, Debug derleme
+(`-fcheck=all -ffpe-trap=invalid,zero,overflow`), koşu 40681155794.
+Fiziksel yapı dört satırda da aynı; yalnızca `--window` değişiyor.
 
-| Ölçüm | Değer |
-| --- | --- |
-| parametre | 15 497 |
-| akış durumu | 67 072 bayt |
-| ileri işlem / belirteç | 43 008 |
-| çıkarım p50 | 48.81 µs |
-| çıkarım p95 | 52.94 µs |
-| çıkarım | 20 182 belirteç/s |
-| eğitim | 6 711 belirteç/s |
-| eğitim NLL | 2.6848 |
+| window | parametre | durum baytı | ileri işlem/tok | p50 µs | p95 µs | çıkarım tok/s | eğitim tok/s | eğitim NLL |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 32 | 15 497 | 67 072 | 43 008 | 49.211 | 59.701 | 19 908 | 6 615 | 2.6914 |
+| 8 192 | 15 497 | 67 072 | 43 008 | 49.613 | 59.551 | 19 850 | 6 753 | 2.7077 |
+| 1e6 | 15 497 | 67 072 | 43 008 | 49.652 | 59.641 | 19 852 | 6 713 | 2.7083 |
+| 1e12 | 15 497 | 67 072 | 43 008 | 49.612 | 59.060 | 19 948 | 6 810 | 2.6848 |
 
-Mutlak süreler Debug derlemesine aittir; Release'te daha düşük olur ve burada
-Release sayısı iddia edilmez. Ufuk tablosunun dört satırı CI iş özetinde ve
-`CONTEXT_BENCH_JSON` satırlarında yayımlanır.
+`window` 32 → 1e12 (3.1e10 kat) için p50 oranı **1.008×**, çıkarım hızı oranı
+**1.002×**: ölçüm gürültüsü içinde. Mutlak süreler Debug derlemesine aittir;
+Release sayısı burada iddia edilmez. Aynı dört satır CI iş özetinde ve
+`CONTEXT_BENCH_JSON` satırlarında da yayımlanır.
 
 ## 9. Sınırlar (iddia edilmeyenler)
 
