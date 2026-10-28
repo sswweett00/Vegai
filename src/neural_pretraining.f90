@@ -949,6 +949,7 @@ contains
       ! NOVA-1 scalars: loop invariant except the per-column step scale.
       real(real32) :: momentum_32, energy_decay_32, one_minus_energy_32, restart_32
       real(real32) :: step_rate_32, epsilon_32, width_32, energy, agreement, step_scale, gamma32, previous
+      real(real32) :: residual32
       logical :: first_step
       ! One width-sized accumulator per vocabulary column, private per thread.
       real(real32) :: column_gradient(size(hidden_batch, 2)), column_bias_gradient
@@ -1036,20 +1037,26 @@ contains
          ! dynamic extent gfortran stops vectorizing the axpy.  The column
          ! accumulator below has the same shape but is filled by a loop whose
          ! vector form survives, which is why the simple form is the fast one.
+         ! Forming the column with MATMUL -- the residual row against the staged
+         ! hidden block, which is the same product in the same batch order -- was
+         ! measured here too and is 2.2x slower (update 62 -> 134 us per prediction
+         ! after normalizing both runs by the evaluate-only rate, run 40661472720
+         ! against 40659379295).  A rank-one, strided first operand makes the
+         ! intrinsic copy it and allocate a result per column, 4096 times per step,
+         ! which costs more than the vectorized axpy it replaces.
          !$omp parallel do private(token, feature, batch_index, gradient, gradient32, m32, v32, proposal32, &
          !$omp column_gradient, column_bias_gradient) &
          !$omp schedule(static) if(vocabulary_size >= 512_int32)
          do token = 1_int32, vocabulary_size
-            ! The block's mean gradient column is the vector-matrix product of
-            ! the residual row with the staged hidden block.  Written as an
-            ! explicit axpy loop over batch members it measured at scalar speed
-            ! (~1 ms per step at vocab 4096 x width 96 x N=32, i.e. 12.6M
-            ! multiply-adds over four lanes at one per cycle), so the intrinsic is
-            ! used instead: MATMUL sums the same products in the same batch order,
-            ! so every element is bit-identical, but it reaches the library's
-            ! blocked/vectorized kernel.
-            column_gradient = matmul(residuals(token, 1_int32:batch_count), &
-                                     clipped_hidden(1_int32:batch_count, :))
+            column_gradient = 0.0_real32
+            do batch_index = 1_int32, batch_count
+               gradient32 = real(residuals(token, batch_index), real32)
+               !$omp simd
+               do feature = 1_int32, width
+                  column_gradient(feature) = column_gradient(feature) + &
+                                             gradient32 * clipped_hidden(batch_index, feature)
+               end do
+            end do
             column_bias_gradient = 0.0_real32
             do batch_index = 1_int32, batch_count
                column_bias_gradient = column_bias_gradient + real(residuals(token, batch_index), real32)
@@ -1103,14 +1110,22 @@ contains
          value_limit_32 = real(value_limit, real32)
          width_32 = real(width, real32)
          first_step = state%updates_completed == 0_int64
-         !$omp parallel do private(token, feature, batch_index, gradient32, &
+         !$omp parallel do private(token, feature, batch_index, residual32, gradient32, &
          !$omp proposal32, column_gradient, column_bias_gradient, energy, agreement, &
          !$omp step_scale, gamma32, previous) &
          !$omp schedule(static) if(vocabulary_size >= 512_int32)
          do token = 1_int32, vocabulary_size
-            column_gradient = matmul(residuals(token, 1_int32:batch_count), &
-                                     clipped_hidden(1_int32:batch_count, :))
-            column_bias_gradient = sum(residuals(token, 1_int32:batch_count))
+            column_gradient = 0.0_real32
+            column_bias_gradient = 0.0_real32
+            do batch_index = 1_int32, batch_count
+               residual32 = residuals(token, batch_index)
+               column_bias_gradient = column_bias_gradient + residual32
+               !$omp simd
+               do feature = 1_int32, width
+                  column_gradient(feature) = column_gradient(feature) + &
+                                             residual32 * clipped_hidden(batch_index, feature)
+               end do
+            end do
             ! Both quantities are measured on the un-normalized column: the energy
             ! of the batch mean is the raw energy over B^2, and only the SIGN of the
             ! agreement is used, which division by a positive B cannot change.  That
@@ -1155,8 +1170,15 @@ contains
          !$omp column_gradient, column_bias_gradient) &
          !$omp schedule(static) if(vocabulary_size >= 512_int32)
          do token = 1_int32, vocabulary_size
-            column_gradient = matmul(residuals(token, 1_int32:batch_count), &
-                                     clipped_hidden(1_int32:batch_count, :))
+            column_gradient = 0.0_real32
+            do batch_index = 1_int32, batch_count
+               gradient32 = real(residuals(token, batch_index), real32)
+               !$omp simd
+               do feature = 1_int32, width
+                  column_gradient(feature) = column_gradient(feature) + &
+                                             gradient32 * clipped_hidden(batch_index, feature)
+               end do
+            end do
             column_bias_gradient = 0.0_real32
             do batch_index = 1_int32, batch_count
                column_bias_gradient = column_bias_gradient + real(residuals(token, batch_index), real32)
