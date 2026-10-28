@@ -240,7 +240,7 @@ contains
       write(output_unit, '(A,I0)') 'local score ops / token        : ', plan%local_score_operations_per_token
       line = '{"schema":"vegai-fixed-budget-plan/v1","logical_horizon":'//i64_text(plan%logical_horizon)// &
              ',"effective_horizon":'//r64_text(plan%effective_horizon)// &
-             ',"horizon_clamped":'//merge('true', 'false ', plan%horizon_clamped)// &
+             ',"horizon_clamped":'//json_bool(plan%horizon_clamped)// &
              ',"local_window":'//i64_text(int(plan%local_window, int64))// &
              ',"memory_scales":'//i64_text(int(plan%memory_scales, int64))// &
              ',"memory_slots":'//i64_text(int(plan%memory_slots, int64))// &
@@ -569,6 +569,19 @@ contains
       call system_clock(ticks, rate)
       seconds = real(ticks, real64) / real(rate, real64)
    end subroutine wall_clock
+
+   !> A JSON boolean with exactly the characters it names; MERGE would require
+   !> equal-length literals and pad the shorter one.
+   function json_bool(flag) result(text)
+      logical, intent(in) :: flag
+      character(len=:), allocatable :: text
+
+      if (flag) then
+         text = 'true'
+      else
+         text = 'false'
+      end if
+   end function json_bool
 
    !> Decimal text without padding.  A fixed-length result would concatenate its
    !> trailing blanks into the JSON line, so both helpers return exactly the

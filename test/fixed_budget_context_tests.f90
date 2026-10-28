@@ -699,7 +699,7 @@ contains
                  'the multi-scale readout weights are optimised')
       call check(any(model%channel_logit /= channels_before), 'the channel mixer is optimised')
       call check(model%slot_salience_weight /= salience_before, 'the salience weight is optimised')
-      call check(model%scale_logit == model%scale_logit, 'the readout weights stay finite')
+      call check(all(model%scale_logit == model%scale_logit), 'the readout weights stay finite')
 
       deallocate(hidden, logits, dlogits)
       deallocate(tokens, mask)
