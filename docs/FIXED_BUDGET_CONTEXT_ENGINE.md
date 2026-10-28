@@ -99,10 +99,40 @@ onları kullanır: yuva yazması (anahtar, değer, geçit, önem) ve özyineleme
 güncelleme (`φ(k)`, `v`). Önceki belirteçlerin yazmaları dondurulmuştur; bu
 bilinçli ve belgelenmiş bir yaklaşımdır, "tam BPTT" olarak sunulmaz.
 
-Doğrulama: sonlu fark sözleşme testi 11 parametreyi (okuma ağırlığı, kanal
+Doğrulama: sonlu fark sözleşme testi 13 parametreyi (okuma ağırlığı, kanal
 lojistiği, iki yuva yazma projeksiyonu, yuva sorgu projeksiyonu, mesafe
-yanlılığı, FFN kapısı, sorgu, anahtar, değer, bağlı gömme) merkezi farkla
-karşılaştırır ve `1e-4` bağıl toleransla geçer.
+yanlılığı, FFN kapısı, sorgu, anahtar, değer, bağlı gömme, **öğrenilen bellek
+bozunumu ve yazma gücü**) merkezi farkla karşılaştırır ve `1e-4` bağıl
+toleransla geçer.
+
+### 4.1 Öğrenilen bellek dinamiği
+
+Ölçek başına iki parametre vardır:
+
+```
+decay_logit_j           lambda_j = clamp(sigmoid(decay_logit_j), 1e-6, 1-1e-12)
+write_strength_logit_j  g_j      = (1 - lambda_j) * 2 * sigmoid(write_strength_logit_j)
+```
+
+Yazma `R <- lambda_j R + g_j phi(k) v^T`. İki türev de aynı adımın içinde
+alınır (derinlik-1 BPTT):
+
+- `dL/dlambda_j = sum(dR . R_before)`, ve `R_before` yazma sonrası durumdan geri
+  çözülür: `R_before = (R_after - g_j phi(k) v^T) / lambda_j` — `1/lambda_j`
+  çarpanı unutulursa gradyan tam bir bozunum faktörü kadar eksik kalır;
+- iki parametre **bağlıdır**: `g_j` `lambda_j`'ye bağlı olduğu için
+  `d/d(decay_logit_j)` içinde `-2 sigmoid(w_j) * dL/dg_j` terimi de bulunur.
+  Bu terim olmadan analitik gradyan, önbelleği tazeleyen sonlu farkla
+  uyuşmaz — sözleşme testi tam olarak bunu yakaladı.
+
+Önbellek (`model%scale_decay`, `model%write_strength`) yalnızca
+`fbc_refresh_dynamics` ile tazelenir: model kurulumunda, her optimizer
+güncellemesinden sonra ve kontrol noktası yüklendikten sonra. **Belirteç
+döngüsünde transandantal yok**, ufuk hiçbir boyutta kullanılmaz.
+`fbc_learned_horizon` öğrenilen erişimi (`max_j -1/log lambda_j`) bildirir;
+başlangıçta bu değer yapılandırılan ufka eşittir, çünkü `decay_logit` eski
+merdivenden, `write_strength_logit` ise sıfırdan başlar (`g = 1 - lambda`,
+yani eski ileri geçişle **bit düzeyinde aynı**).
 
 ## 5. Optimize edici
 
@@ -124,10 +154,17 @@ transandantal yoktur.
 
 ## 6. Kontrol noktası
 
-`VGFB0001` sürüm 1. İçerik: sözlük/genişlik/kafa/ffn/yerel pencere/ölçek/yuva,
+`VGFB0001` sihirli dizesi, **sürüm 2**. İçerik: sözlük/genişlik/kafa/ffn/yerel
+pencere/ölçek/yuva,
 **mantıksal ufuk**, etkin ufuk ve kırpma bayrağı, RMS epsilon, yuva bozunması ve
 sıcaklığı, güncelleme ve belirteç sayaçları, optimize edici hiper-parametreleri,
 tüm parametre yükü ve tüm optimize edici durumu.
+
+Sürüm 2, öğrenilen dinamiği (ölçek başına `decay_logit` ve
+`write_strength_logit`) ve onların optimizer momentumunu ekler. Sürüm 1
+dosyaları okunabilir ama **dönüştürülmez**: `FBT_ERR_VERSION` (−1506) ile
+reddedilir, çünkü o dosyada bu iki parametrenin değeri yoktur ve uydurulacak bir
+değer modeli sessizce değiştirirdi. Yükleme sonunda önbellek yeniden kurulur.
 
 Eski `VGNR0001` (neural_pretrain v5) kontrol noktaları **dönüştürülmez**:
 `FBT_ERR_LEGACY` (−1503) ile reddedilir ve eski ikili dosyayla açılması
@@ -226,3 +263,16 @@ görevlerde yardım etmedi" deniyor.
   ölçek, ölçülmüş bir kazancın yokluğuna dayanır, varlığına değil.
 - Benchmark süreleri Debug yapısında ölçülür; mutlak değil göreli kanıt olarak
   okunmalıdır.
+
+## 10. 600 MB prompt/response ön-eğitimi
+
+Ayrı bir boru hattı, aynı motor: bayt düzeyinde tokenizasyon, dosyadan akış,
+oturum zinciri ve prompt → yanıt ölçümü.
+Ayrıntı: [`PROMPT_RESPONSE_PRETRAINING.md`](PROMPT_RESPONSE_PRETRAINING.md).
+
+- korpus: `tools/build_prompt_response_corpus.py` (deterministik, manifest +
+  SHA-256, 600 000 000 bayt varsayılan),
+- eğitim/ölçüm: `app/prompt_engine.f90` (`train`, `ask`, `probe`),
+- kanıt: `.github/workflows/prompt-response-600mb.yml`,
+- gerçek koşu isteği: `ci/prompt-600mb.json` (dispatch yetkisi olmayan
+  ortamlar için push tabanlı istek).
