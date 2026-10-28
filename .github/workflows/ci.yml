@@ -72,6 +72,26 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::notice title=Sparse layer capacity invariance::${detail}"
 
+      - name: Measure fixed-budget context invariance (window 32 -> 1e12)
+        run: |
+          set -euo pipefail
+          ./build-ci/vegai_context_tests | tee context-tests.txt
+          ./build-ci/vegai_context_engine sweep --tokens 256 --train-chunk-tokens 32 \
+            --width 32 --heads 2 --ffn 64 --vocab 32 --local-window 32 \
+            --memory-scales 4 --memory-slots 64 > context-sweep.txt
+          detail=$(grep 'CONTEXT_BENCH_JSON:' context-sweep.txt | tail -1 | cut -d' ' -f2- | cut -c1-1900)
+          {
+            echo '## Fixed-budget context engine'
+            echo '```text'
+            cat context-tests.txt
+            grep -v 'CONTEXT_BENCH_JSON:' context-sweep.txt
+            echo '```'
+            echo '```json'
+            grep 'CONTEXT_BENCH_JSON:' context-sweep.txt | sed 's/^CONTEXT_BENCH_JSON: //'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Fixed-budget context invariance::${detail}"
+
       - name: Surface native test diagnostics on failure
         if: failure()
         run: |
