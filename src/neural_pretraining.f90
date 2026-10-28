@@ -1131,6 +1131,16 @@ contains
             ! agreement is used, which division by a positive B cannot change.  That
             ! keeps the whole step to two sweeps of the column (this one and the
             ! update) instead of three; normalizing in place first measured slower.
+            !
+            ! The energy reduction was also replaced by the members' own energies
+            ! (mean_b r_b(v)^2 ||h_b||^2, B scalar operations instead of a
+            ! width-sized reduction) and that is measurably wrong for this rule:
+            ! with the 1/B^2 rescaling the held-out NLL at N=128 went 8.43 -> 10.35
+            ! (run 40664826946), and the native toy contract stopped reducing its
+            ! NLL at B=4 with or without the rescaling (verify run 40664826759).
+            ! ||mean_b g_b||^2 carries the cancellation between members, and that
+            ! cancellation is what keeps a large accumulation factor stable; the
+            ! member form has no way to see it.
             energy = dot_product(column_gradient, column_gradient) * &
                      (inverse_batch_32 * inverse_batch_32) / width_32
             agreement = dot_product(column_gradient, state%nova_u_embedding(:, token))
