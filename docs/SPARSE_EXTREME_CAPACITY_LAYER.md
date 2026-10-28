@@ -163,6 +163,10 @@ aktif parametre ve aktif FLOP sayaçları son basamağa kadar aynı kaldı; yerl
 bellek 19,2 MiB → 38,6 MiB oldu, yani kapasiteyle değil **dokunulan sayfa
 sayısıyla** ölçeklendi (`1.000.032.000 × 8 B = 7,45 GiB` yerine 38,6 MiB).
 
+Tekrar (koşu 40670901969, aynı kod): B 296,34 µs, C 288,54 µs → oran **0,974×**;
+streaming 369,5 → 468,8 µs (1,27×). İki koşulda da steady oranı 1,00 ± 0,03
+bandında, yani ölçüm gürültüsü kadar.
+
 Streaming modu 364 → 456 µs (1,25×) çıktı ve bu beklenen davranıştır: streaming
 süresi kapasiteyle değil **adım başına yeni uzman oranıyla** ölçeklenir. Aynı
 sayıda adımda C, B'den daha fazla soğuk uzmanla karşılaştı (1.595'e karşı 790
