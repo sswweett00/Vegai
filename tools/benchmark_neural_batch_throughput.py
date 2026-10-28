@@ -201,6 +201,16 @@ def train_arm(binary: str, tokenizer_path: Path, checkpoint_path: Path, train_pa
     }
 
 
+def arm_phase_microseconds(arm: dict[str, Any]) -> dict[str, float]:
+    """Per-prediction cost of each trainer phase, from the arm's own counters."""
+    phase_seconds = (arm.get("epoch") or {}).get("phase_seconds", {}) or {}
+    predictions = int((arm.get("epoch") or {}).get("prediction_tokens", 0) or 0)
+    if not phase_seconds or predictions <= 0:
+        return {}
+    return {name: (float(phase_seconds.get(name, 0.0)) / predictions) * 1.0e6
+            for name in ("decode", "project", "score", "update")}
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     """Human-readable summary of one report (also used as the CI step summary)."""
     lines = [f"### Neural update A/B: {report.get('status')}", ""]
@@ -220,6 +230,16 @@ def render_markdown(report: dict[str, Any]) -> str:
                 f"| {name} | {float(arm['reported_tokens_per_second']):.1f} | "
                 f"{float(arm['heldout']['mean_nll']):.6f} | {float(arm['heldout']['perplexity']):.3f} | "
                 f"{float(arm['controller_wall_seconds']):.1f} |"
+            )
+    phase_rows = [(name, arm_phase_microseconds(arm)) for name, arm in arms.items()]
+    phase_rows = [(name, phases) for name, phases in phase_rows if phases]
+    if phase_rows:
+        lines += ["", "| Arm | decode us/token | project | score | update | total |",
+                  "|---|---:|---:|---:|---:|---:|"]
+        for name, phases in phase_rows:
+            lines.append(
+                f"| {name} | {phases['decode']:.1f} | {phases['project']:.1f} | {phases['score']:.1f} | "
+                f"{phases['update']:.1f} | {sum(phases.values()):.1f} |"
             )
     comparison = report.get("comparison", {})
     if comparison:

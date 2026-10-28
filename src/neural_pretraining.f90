@@ -431,6 +431,7 @@ contains
       real(real64) :: maximum, normalizer
       real(real64) :: partial_sums(NPT_SOFTMAX_BLOCKS)
       integer(int32) :: index, block, block_size
+      logical :: finite
 
       status = NPT_OK
       if (size(logits, kind=int32) <= 0_int32 .or. size(probabilities, kind=int32) /= size(logits, kind=int32) .or. &
@@ -439,7 +440,12 @@ contains
          return
       end if
       block_size = (size(logits, kind=int32) + NPT_SOFTMAX_BLOCKS - 1_int32) / NPT_SOFTMAX_BLOCKS
-      maximum = maxval(real(logits, real64))
+      ! MAXVAL of the real32 logits, converted once.  The previous form converted
+      ! the whole vocabulary to real64 first, allocating and filling a
+      ! (vocabulary)-element temporary on every prediction; the maximum of the
+      ! exact real32 values converted afterwards is the same number, bit for bit,
+      ! because the comparison is exact in either precision.
+      maximum = real(maxval(logits), real64)
       ! Exponentials are independent per token, so the optional parallel
       ! fill stores bit-identical values, and the blocked normalizer below has a
       ! fixed combine order, so the distribution is identical at any thread count.
@@ -471,12 +477,19 @@ contains
          return
       end if
       ! Elementwise, so it can be parallelized without touching a single value.
-      !$omp parallel do schedule(static) if(size(probabilities) >= 1024)
+      ! The finiteness contract is checked inside the same pass rather than by a
+      ! second full scan of the distribution: after a finite positive normalizer
+      ! every quotient is finite, so this is a guard, not a filter, and folding it
+      ! in keeps the number of passes over the vocabulary unchanged from the
+      ! division alone.  The reduction carries the status flag only, never a value.
+      finite = .true.
+      !$omp parallel do schedule(static) reduction(.and.: finite) if(size(probabilities) >= 1024)
       do index = 1_int32, size(logits, kind=int32)
          probabilities(index) = probabilities(index) / normalizer
+         finite = finite .and. ieee_is_finite(probabilities(index))
       end do
       !$omp end parallel do
-      if (.not. all(ieee_is_finite(probabilities))) status = NPT_ERR_NUMERICAL
+      if (.not. finite) status = NPT_ERR_NUMERICAL
    end subroutine stable_softmax
 
    subroutine ensure_optimizer_state(model, config, state, status)

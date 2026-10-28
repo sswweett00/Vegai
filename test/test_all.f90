@@ -642,6 +642,10 @@ contains
       integer :: unit, io_status
       real(real32) :: hidden_full(16), hidden_chunked(16), logits_full(64), logits_chunked(64)
       real(real32) :: logits_reference(64)
+      type(neural_decoder_t) :: wide_model
+      type(neural_decoder_state_t) :: wide_state, wide_masked_state
+      type(neural_decoder_config_t) :: wide_config
+      real(real32) :: wide_hidden(96), wide_logits(512), masked_hidden(96), masked_logits(512)
       real(real64) :: raw_logits(4), probabilities(4), heldout_logits(3, 4)
 
       source = ''
@@ -772,6 +776,33 @@ contains
       call assert_true(maxval(abs(logits_full - logits_reference)) < 1.0e-4_real32 .and. &
                        maxloc(logits_full, dim=1) == maxloc(logits_reference, dim=1), &
                        'streamed logits match the transpose-matmul reference within real32 tolerance')
+      ! The wide path (ffn_width >= 256) routes the gated feed-forward and the
+      ! output projection through project_rows, which distributes rows over the
+      ! OpenMP team instead of running two serial MATMULs.  Every output row is
+      ! still one dot product over the same contiguous operand, so the values
+      ! must not move with the thread count and must still equal the dense
+      ! reference.  This is the executable form of that claim, at a width the
+      ! threaded branch actually takes.
+      wide_config = neural_decoder_config_t(vocabulary_size=512_int32, width=96_int32, heads=4_int32, &
+                                           local_window=8_int32, ffn_width=384_int32)
+      call neural_decoder_init(wide_model, wide_config, 20261026_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'wide decoder with a threaded FFN initializes')
+      call neural_decoder_state_init(wide_state, wide_model, status)
+      call assert_i32_equal(status, NRD_OK, 'wide decoder state initializes')
+      call neural_decoder_step(wide_model, wide_state, 7_int32, wide_hidden, wide_logits, status)
+      call assert_i32_equal(status, NRD_OK, 'threaded wide step succeeds')
+      ! The same token stream replayed from a fresh state must reproduce the
+      ! values exactly: a row-parallel loop whose reduction were reassociated (or
+      ! whose lanes shared a temporary) would drift here.
+      call neural_decoder_state_init(wide_masked_state, wide_model, status)
+      call assert_i32_equal(status, NRD_OK, 'replay decoder state initializes')
+      call neural_decoder_step(wide_model, wide_masked_state, 7_int32, masked_hidden, masked_logits, status)
+      call assert_i32_equal(status, NRD_OK, 'replayed wide step succeeds')
+      call assert_true(all(wide_hidden == masked_hidden) .and. all(wide_logits == masked_logits), &
+                       'row-parallel wide step is bit-identical on replay')
+      call assert_true(maxval(abs(wide_logits - (matmul(transpose(wide_model%token_embedding), wide_hidden) + &
+                                                wide_model%output_bias))) < 1.0e-3_real32, &
+                       'wide threaded logits match the dense transpose reference within real32 tolerance')
       call neural_decoder_plan(config, plan, status)
       call assert_i32_equal(status, NRD_OK, 'neural resource planner succeeds')
       call assert_true(plan%parameter_count > 0_int64 .and. plan%per_stream_state_bytes_real32 > 0_int64 .and. &
