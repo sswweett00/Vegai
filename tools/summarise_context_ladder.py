@@ -24,7 +24,7 @@ import math
 import statistics
 import sys
 
-TASK_NAMES = {1: "needle", 2: "markov"}
+TASK_NAMES = {1: "markov", 2: "needle"}   # matches FBC_TASK_MARKOV / FBC_TASK_NEEDLE
 BASELINE_SCALES = 4
 
 # The budget axis that must be identical for a comparison to mean anything.

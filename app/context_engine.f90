@@ -288,8 +288,8 @@ contains
       write(output_unit, '(A,I0)') 'local window           : ', meta%local_window
       write(output_unit, '(A,I0)') 'memory scales          : ', meta%memory_scales
       write(output_unit, '(A,I0)') 'memory slots           : ', meta%memory_slots
-      write(output_unit, '(A,I0)') 'width/heads/ffn/vocab  : ', meta%width, '/', meta%heads, '/', &
-         meta%ffn_width, '/', meta%vocabulary_size
+      write(output_unit, '(A,I0,A,I0,A,I0,A,I0)') 'width/heads/ffn/vocab  : ', meta%width, '/', &
+         meta%heads, '/', meta%ffn_width, '/', meta%vocabulary_size
       write(output_unit, '(A,I0,A,I0)') 'updates/tokens         : ', meta%updates, '/', meta%tokens
    end subroutine command_inspect
 
@@ -614,7 +614,8 @@ contains
          plan%memory_slots
       write(output_unit, '(A,I0)') 'parameters             : ', plan%parameter_count
       write(output_unit, '(A,I0)') 'stream state bytes     : ', plan%state_bytes_real64
-      write(output_unit, '(A,I0,A,I0)') 'train / held-out tokens: ', int(train_tokens, int64), held_out_tokens
+      write(output_unit, '(A,I0,A,I0)') 'train / held-out tokens: ', int(train_tokens, int64), '/', &
+         int(held_out_tokens, int64)
       write(output_unit, '(A,F0.4)') 'train nll (in-sample)  : ', train_nll
       write(output_unit, '(A,F0.4)') 'held-out nll           : ', eval_nll
       write(output_unit, '(A,F0.4,A,I0,A)') 'held-out remote recall : ', recall, ' over ', answer_count, &

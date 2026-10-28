@@ -50,20 +50,15 @@ jobs:
       - name: Build the engine (Release)
         run: make context-engine BUILD_DIR=build-ladder
 
-      - name: Run the scale ladder
+      # One step, not two: the ladder and its summary run in the same shell and
+      # the same directory, and a row-count assertion makes an empty measurement
+      # loud instead of silent.
+      - name: Run the scale ladder and summarise it
         run: |
           set -euo pipefail
-          # One probe run, echoed into an annotation: the job log is not always
-          # readable from outside, so the raw bytes must be visible as a check
-          # run annotation when something upstream goes wrong.
-          ./build-ladder/vegai_context_engine quality --window 8192 --local-window 32 \
-            --memory-scales 4 --memory-slots 64 --width 32 --heads 2 --ffn 64 --vocab 32 \
-            --tokens 1024 --eval-tokens 512 --train-chunk-tokens 64 \
-            --task needle --distance 256 --seed 11 > probe.txt 2>&1 || true
-          echo "::notice title=Ladder probe (last lines)::$(tr '\n' '|' < probe.txt | tail -c 900)"
           : > ladder.txt
           # One physical shape, one budget, one optimiser; only the scale count
-          # and the seed move.  width/heads/ffn/vocab are fixed so the parameter
+          # and the seed move.  width/heads/ffn/vocab are fixed, so the parameter
           # difference is only the tiny scale_logit vector.
           for task in needle markov; do
             for scales in 2 4 8; do
@@ -73,24 +68,20 @@ jobs:
                   --memory-scales "$scales" --width 32 --heads 2 --ffn 64 --vocab 32 \
                   --tokens 32768 --eval-tokens 6144 --train-chunk-tokens 64 \
                   --task "$task" --distance 256 --seed "$seed" --eval-seed 991 \
-                  | grep 'CONTEXT_QUALITY_JSON:' | sed 's/^CONTEXT_QUALITY_JSON: //' \
-                  >> ladder.txt
+                  > "run-${task}-${scales}-${seed}.txt" 2>&1
+                grep 'CONTEXT_QUALITY_JSON:' "run-${task}-${scales}-${seed}.txt" \
+                  | sed 's/^CONTEXT_QUALITY_JSON: //' >> ladder.txt
               done
             done
           done
-          wc -l ladder.txt
-
-      - name: Summarise the ladder
-        run: |
-          set -euo pipefail
-          # A failing summariser must name its own reason: the job log is not
-          # always readable from outside, the annotation always is.
-          if ! python3 tools/summarise_context_ladder.py ladder.txt > ladder.md 2> ladder.err; then
-            reason=$(tr '\n' ' ' < ladder.err | tail -c 600)
-            first=$(head -c 400 ladder.txt)
-            echo "::error title=Ladder summary failed::${reason} || first row: ${first}"
+          rows=$(wc -l < ladder.txt)
+          echo "::notice title=Ladder rows::${rows} rows; first=$(head -n 1 ladder.txt | cut -c1-400)"
+          if [ "$rows" -lt 18 ]; then
+            echo "::error title=Ladder incomplete::only ${rows} of 18 runs produced a row; see the attached per-run output"
+            tail -n 4 "run-needle-2-11.txt" || true
             exit 1
           fi
+          python3 tools/summarise_context_ladder.py ladder.txt > ladder.md
           cat ladder.md >> "$GITHUB_STEP_SUMMARY"
           summary=$(python3 tools/summarise_context_ladder.py ladder.txt --compact | cut -c1-1800)
           echo "::notice title=Memory-scale ladder (held-out)::${summary}"
@@ -101,5 +92,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: context-quality-ladder
-          path: ladder.txt
+          path: |
+            ladder.txt
+            run-*.txt
           if-no-files-found: error
