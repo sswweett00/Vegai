@@ -73,7 +73,8 @@ contains
       config%learning_rate = 1.0e-3_real64
    end function base_config
 
-   pure function probe_input(seed) result(input)
+   !> Not pure: `mix` advances its argument, which a pure function may not do.
+   function probe_input(seed) result(input)
       integer(int64), intent(in) :: seed
       real(real64) :: input(12)
       integer(int32) :: index
@@ -85,7 +86,7 @@ contains
       end do
    end function probe_input
 
-   pure function mix(state) result(word)
+   function mix(state) result(word)
       integer(int64), intent(inout) :: state
       integer(int64) :: word
 

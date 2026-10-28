@@ -200,8 +200,13 @@ contains
 
    !> splitmix64: a bijective 64-bit mixer.  Used for the router hyperplanes,
    !> for every expert's virtual initial weights and for the benchmark inputs.
-   !> Marked `pure` (not `simple`) for the compiler-support reason in the header.
-   pure function splitmix64(state) result(value)
+   !>
+   !> This one is a *stream* generator: it advances its argument, and Fortran
+   !> requires every dummy of a pure function to be `intent(in)`, so it cannot be
+   !> pure -- a `pure` prefix here would be an illegal interface, not a style
+   !> choice.  The side-effect-free variant for use inside `pure` expressions is
+   !> `splitmix64_of` below.  All callers are ordinary (non-pure) procedures.
+   function splitmix64(state) result(value)
       integer(int64), intent(inout) :: state
       integer(int64) :: value
 
@@ -529,8 +534,7 @@ contains
       bytes = bytes + router_bytes + int(layer%table_size, int64) * 4_int64
    end function resident_bytes_of
 
-   pure integer(int64) function real64_bytes() result(bytes)
-      integer(int64) :: bytes
+   integer(int64) function real64_bytes() result(bytes)
 
       bytes = storage_size(1.0_real64) / 8_int64
    end function real64_bytes
@@ -766,7 +770,7 @@ contains
       type(sparse_page_t), intent(in) :: page
       real(real64), intent(in) :: input(:)
       real(real64), intent(out) :: output(:)
-      integer(int32) :: column
+      integer(int32) :: column, row
 
       output = page%bias
       do column = 1_int32, size(page%weight, 2, kind=int32)

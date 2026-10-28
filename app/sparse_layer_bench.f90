@@ -241,7 +241,9 @@ contains
       end do
    end subroutine deterministic_vector
 
-   pure function mix_word(state) result(word)
+   !> Not pure: it advances `state`, and a pure function may only have
+   !> `intent(in)` dummies.  Its caller is an ordinary subroutine.
+   function mix_word(state) result(word)
       integer(int64), intent(inout) :: state
       integer(int64) :: word
       integer(int64), parameter :: gamma = int(z'9E3779B97F4A7C15', int64)
