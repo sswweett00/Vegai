@@ -190,16 +190,30 @@ contains
       integer(int32) :: head, scale, component, slot, ordinal, channel, position, row
       real(real64) :: context_scale, slot_scale, moment, weight_sum, slope
       real(real64) :: gate, tanh_value, sigmoid_value, write_slope, denominator, salience_moment
-      real(real64) :: dn(width), dc(width), dr(width), dx(width)
-      real(real64) :: dv_ffn(ffn), dh_ffn(ffn), du_ffn(ffn), dn2(width)
-      real(real64) :: dq(head_width, heads), dk(head_width, heads), dvv(head_width, heads)
-      real(real64) :: dloc(head_width), dmem(head_width), dphi(head_width), dnum(head_width)
+      ! Automatic arrays, sized from the *dummy* model and workspace rather than
+      ! from the local copies below: a local variable is not a specification
+      ! expression, so it cannot bound a declaration.  Nothing here allocates on
+      ! the heap, so one step costs no allocator traffic.
+      real(real64) :: dn(model%config%width), dc(model%config%width)
+      real(real64) :: dr(model%config%width), dx(model%config%width)
+      real(real64) :: dv_ffn(model%config%ffn_width), dh_ffn(model%config%ffn_width)
+      real(real64) :: du_ffn(model%config%ffn_width), dn2(model%config%width)
+      real(real64) :: dq(model%head_width, model%config%heads)
+      real(real64) :: dk(model%head_width, model%config%heads)
+      real(real64) :: dvv(model%head_width, model%config%heads)
+      real(real64) :: dloc(model%head_width), dmem(model%head_width)
+      real(real64) :: dphi(model%head_width), dnum(model%head_width)
       real(real64) :: dlocal_weight(workspace%local_count + 1_int32)
       real(real64) :: dchannel(FBC_CHANNEL_COUNT), dcontext(FBC_CHANNEL_COUNT)
-      real(real64) :: dslot_query(width), dslot_key(width), dslot_value(width), dslot_read(width)
-      real(real64) :: dslot_read_score(slots), dsalience(slots), dscale_alpha(scales)
-      real(real64) :: dslot_key_after(width), dslot_value_after(width), key_before(width)
-      real(real64) :: dffn_scaled(width), dattn_scaled(width)
+      real(real64) :: dslot_query(model%config%width), dslot_key(model%config%width)
+      real(real64) :: dslot_value(model%config%width), dslot_read(model%config%width)
+      real(real64) :: dslot_read_score(model%config%memory_slots)
+      real(real64) :: dsalience(model%config%memory_slots)
+      real(real64) :: dscale_alpha(model%config%memory_scales)
+      real(real64) :: dslot_key_after(model%config%width)
+      real(real64) :: dslot_value_after(model%config%width)
+      real(real64) :: key_before(model%config%width)
+      real(real64) :: dffn_scaled(model%config%width), dattn_scaled(model%config%width)
 
       status = FBC_OK
       if (.not. fbc_model_is_ready(model) .or. .not. gradient%initialized) then
@@ -245,6 +259,10 @@ contains
          dffn_scaled(component) = dn2(component) * model%ffn_rms(component)
       end do
       call rmsnorm_backward(dffn_scaled, workspace%rhat_ffn, workspace%inverse_rms_ffn, dr)
+      ! hidden = attention_residual + ffn_output * gated, so attention_residual
+      ! receives the direct d(hidden) *and* the through-FFN gradient.  Step 2
+      ! stored the former in `dr`; step 3 overwrote it, so add it back here.
+      dr = dr + dn
 
       ! ---- 4. attention residual and the output projection ------------------
       gradient%attention_output = gradient%attention_output + fbc_outer(dr, workspace%combined)
@@ -384,10 +402,13 @@ contains
       do component = 1_int32, width
          dattn_scaled(component) = dn(component) * model%attention_rms(component)
       end do
-      call rmsnorm_backward(dattn_scaled, workspace%rhat_attention, workspace%inverse_rms_attention, dx)
+      ! `dx` already holds d(x) from the residual branch; the normalization
+      ! branch adds to it, so the RMSNorm backward writes into a scratch array
+      ! (`dn2` is dead by now) and the two are summed below.
+      call rmsnorm_backward(dattn_scaled, workspace%rhat_attention, workspace%inverse_rms_attention, dn2)
       do component = 1_int32, width
          gradient%token_embedding(component, workspace%token) = &
-            gradient%token_embedding(component, workspace%token) + dx(component)
+            gradient%token_embedding(component, workspace%token) + dx(component) + dn2(component)
       end do
    end subroutine fbc_step_backward
 

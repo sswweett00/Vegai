@@ -544,7 +544,11 @@ contains
       real(real64), intent(out) :: loss
       integer(int32), intent(out) :: status
       type(fbc_state_t) :: probe
-      real(real64) :: hidden(8), logits(16), dlogits(16)
+      ! Sized from the dummy model: a specification expression, so this is an
+      ! automatic array and costs no heap traffic.
+      real(real64) :: hidden(model%config%width)
+      real(real64) :: logits(model%config%vocabulary_size)
+      real(real64) :: dlogits(model%config%vocabulary_size)
 
       call fbc_state_init(probe, model, status)
       probe = base
@@ -851,8 +855,8 @@ contains
                  'every memory weight survives the round trip bit for bit')
       call check(all(restored%token_embedding == model%token_embedding) .and. &
                  all(restored%ffn_gate == model%ffn_gate), 'the rest of the parameters too')
-      call check(restored%horizon_clamped .eqv. model%horizon_clamped .and. &
-                 abs(restored%effective_horizon - model%effective_horizon) == 0.0_real64, &
+      call check((restored%horizon_clamped .eqv. model%horizon_clamped) .and. &
+                 (abs(restored%effective_horizon - model%effective_horizon) == 0.0_real64), &
                  'the effective horizon and clamp flag survive the round trip')
       call check(restored%config%logical_horizon == config%logical_horizon .and. &
                  restored%config%local_window == config%local_window .and. &
