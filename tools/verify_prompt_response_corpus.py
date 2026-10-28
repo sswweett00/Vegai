@@ -35,6 +35,7 @@ from build_prompt_response_corpus import (  # noqa: E402
     verify,
 )
 from summarise_prompt_response_run import SummaryError, summarise  # noqa: E402
+from report_prompt_response_evidence import collect, examples, render  # noqa: E402
 
 FAILURES: list[str] = []
 
@@ -94,6 +95,46 @@ def check_run_summary(directory: Path) -> None:
         check(False, "an unparseable session report is refused")
     except SummaryError:
         pass
+
+
+def check_evidence_report(directory: Path) -> None:
+    """The evidence report must read the engine's own reports and say what is
+    missing instead of inventing a number."""
+    run = directory / "evidence"
+    run.mkdir()
+    (run / "corpus-generate.json").write_text(json.dumps(
+        {"bytes": 400_000, "documents": 700, "sha256": "deadbeef"}), encoding="utf-8")
+    (run / "corpus-verify.json").write_text(json.dumps(
+        {"bytes": 400_000, "documents": 700, "facts": 64}), encoding="utf-8")
+    (run / "training-summary.json").write_text(json.dumps({
+        "sessions": 2, "corpus_bytes": 400_000, "end_byte": 400_000, "corpus_fraction": 1.0,
+        "total_tokens": 1_000_000, "total_seconds": 50, "tokens_per_second": 20_000.0,
+        "hours_for_full_corpus": 0.006, "numeric_ok": True, "parameters": 22_897,
+        "learned_reach_start": 8192.0, "learned_reach_end": 8000.0,
+        "loss_curve": [{"session": 1, "mean_nll": 2.0}, {"session": 2, "mean_nll": 1.5}],
+    }), encoding="utf-8")
+    (run / "probe.log").write_text(
+        'PROBE_EXAMPLES [\n  {"kind": "fact", "prompt": "Soru: a nedir? Cevap: ", '
+        '"expected": "b", "response": "b"}\n]\n'
+        'PROBE_JSON {\n  "rows": 2,\n  "fact": {"correct": 1, "accuracy": 0.5, "n": 2},\n'
+        '  "copy": {"correct": 0, "accuracy": 0.0, "n": 0},\n'
+        '  "next": {"correct": 0, "accuracy": 0.0, "n": 0},\n  "accuracy": 0.5\n}\n',
+        encoding="utf-8")
+    text = render(collect(run))
+    joined = "\n".join(text)
+    check(any("corpus: 400,000 bytes" in line for line in text), "the report names the corpus size")
+    check(any("deadbeef" in line for line in text), "the report keeps the corpus hash")
+    check(any("probe fact: 1/2" in line for line in text), "the report keeps the probe counts")
+    check(any("-> 8000.0 tokens" in line for line in text), "the report keeps the learned reach")
+    check("Soru: a nedir?" in joined, "the report keeps a real prompt/response pair")
+
+    empty = directory / "evidence-empty"
+    empty.mkdir()
+    missing = "\n".join(render(collect(empty)))
+    check("training: report missing" in missing,
+          "a missing training report is reported as missing, not as zero")
+    check(examples("PROBE_EXAMPLES [\n  {\"a\": 1}\n]\n") == [{"a": 1}],
+          "the example parser reads a closed array")
 
 
 def main() -> int:
@@ -161,6 +202,7 @@ def main() -> int:
             pass
 
         check_run_summary(root)
+        check_evidence_report(root)
 
     if FAILURES:
         print(f"{len(FAILURES)} prompt/response corpus contract checks failed")

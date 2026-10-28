@@ -334,6 +334,28 @@ jobs:
           done
           cat "$RUN_DIR/ask.log"
 
+      # The numbers have to survive outside the artifact store, so the whole
+      # evidence block is also emitted as annotations.
+      - name: Summarise the evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          if python3 tools/report_prompt_response_evidence.py "$RUN_DIR" > "$RUN_DIR/evidence.log" 2>&1; then
+            cat "$RUN_DIR/evidence.log"
+            line_number=0
+            while IFS= read -r line; do
+              line_number=$(( line_number + 1 ))
+              if [ "$line_number" -le 3 ]; then
+                echo "::notice title=evidence ${line_number}::${line}"
+              else
+                echo "::notice title=evidence::${line}"
+              fi
+            done < "$RUN_DIR/evidence.log"
+          else
+            cat "$RUN_DIR/evidence.log"
+            echo "::error title=evidence summary failed::$(tail -n 6 "$RUN_DIR/evidence.log" | tr '\n' '~' | cut -c1-900)"
+          fi
+
       - name: Collect the evidence bundle
         if: always()
         run: |
@@ -356,6 +378,8 @@ jobs:
             ${{ runner.temp }}/vegai-prompt-600m/probe-trained.tsv
             ${{ runner.temp }}/vegai-prompt-600m/probe-filter.json
             ${{ runner.temp }}/vegai-prompt-600m/probe.log
+            ${{ runner.temp }}/vegai-prompt-600m/evidence.log
+            ${{ runner.temp }}/vegai-prompt-600m/summary.log
             ${{ runner.temp }}/vegai-prompt-600m/ask.log
             ${{ runner.temp }}/vegai-prompt-600m/train-session-*.log
             ${{ runner.temp }}/vegai-prompt-600m/training-sessions.log
