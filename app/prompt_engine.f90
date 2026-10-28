@@ -405,8 +405,8 @@ contains
       write(output_unit, '(A,I0)') '  "consumed_bytes": ', stopped_at - start_byte
       write(output_unit, '(A,F0.4)') '  "file_fraction": ', &
          real(stopped_at, real64) / real(max(1_int64, file_size(corpus)), real64)
-      write(output_unit, '(A,L1)') '  "bounded_by_bytes": ', bounded
-      write(output_unit, '(A,L1)') '  "whole_file": ', stopped_at >= file_size(corpus)
+      write(output_unit, '(A,A)') '  "bounded_by_bytes": ', logical_text(bounded)
+      write(output_unit, '(A,A)') '  "whole_file": ', logical_text(stopped_at >= file_size(corpus))
       write(output_unit, '(A,I0)') '  "updates": ', metrics%updates
       write(output_unit, '(A,I0)') '  "tokens": ', metrics%tokens
       write(output_unit, '(A,I0)') '  "session_updates": ', session_updates
@@ -417,7 +417,7 @@ contains
       write(output_unit, '(A,I0)') '  "seconds": ', elapsed
       write(output_unit, '(A,F0.1)') '  "learned_reach": ', fbc_learned_horizon(model)
       write(output_unit, '(A,I0)') '  "parameters": ', fbc_parameter_count(config)
-      write(output_unit, '(A,L1)') '  "numeric_ok": ', metrics%numeric_ok
+      write(output_unit, '(A,A)') '  "numeric_ok": ', logical_text(metrics%numeric_ok)
       write(output_unit, '(A)') '}'
       if (stopped_at < file_size(corpus)) then
          write(output_unit, '(A,I0,A,I0,A)') 'note: partial pass: reached byte ', stopped_at, ' of ', &
@@ -711,6 +711,19 @@ contains
       random_state = ieor(random_state, shiftl(random_state, 17_int64))
       value = real(iand(abs(random_state), int(z'7FFFFFFF', int64)), real64) / 2147483648.0_real64
    end function next_uniform
+
+   !> JSON has no Fortran logical literal: `L1` would emit T/F, which is not
+   !> parseable.  Every flag in these reports goes through here.
+   pure function logical_text(flag) result(text)
+      logical, intent(in) :: flag
+      character(len=5) :: text
+
+      if (flag) then
+         text = 'true '
+      else
+         text = 'false'
+      end if
+   end function logical_text
 
    pure function score(hits, total) result(value)
       integer(int32), intent(in) :: hits, total

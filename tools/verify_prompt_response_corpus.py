@@ -34,6 +34,7 @@ from build_prompt_response_corpus import (  # noqa: E402
     generate,
     verify,
 )
+from summarise_prompt_response_run import SummaryError, summarise  # noqa: E402
 
 FAILURES: list[str] = []
 
@@ -42,6 +43,57 @@ def check(condition: bool, description: str) -> None:
     if not condition:
         FAILURES.append(description)
         print(f"FAIL {description}")
+
+
+def session_record(index: int, end_byte: int, corpus_bytes: int) -> dict:
+    return {
+        "corpus": "corpus.txt",
+        "corpus_bytes": corpus_bytes,
+        "start_byte": end_byte - 100,
+        "end_byte": end_byte,
+        "consumed_bytes": 100,
+        "file_fraction": end_byte / corpus_bytes,
+        "bounded_by_bytes": False,
+        "whole_file": False,
+        "updates": index * 2,
+        "tokens": index * 100,
+        "session_updates": 2,
+        "session_tokens": 100,
+        "mean_nll": 5.0 - index,
+        "session_mean_nll": 5.0 - index,
+        "tokens_per_second": 50.0,
+        "seconds": 2,
+        "learned_reach": 8192.0,
+        "parameters": 15497,
+        "numeric_ok": True,
+    }
+
+
+def check_run_summary(directory: Path) -> None:
+    """The session-report summariser must reject junk and aggregate real blocks."""
+    run = directory / "run"
+    run.mkdir()
+    for index, end_byte in enumerate((100, 200), start=1):
+        block = json.dumps(session_record(index, end_byte, 2_000_000), indent=2)
+        (run / f"train-session-{index}.log").write_text(
+            "progress: bytes 100 updates 2\nCORPUS_TRAIN_JSON " + block + "\n", encoding="utf-8")
+    summary = summarise(run)
+    check(summary["sessions"] == 2, "the summariser sees both sessions")
+    check(summary["total_tokens"] == 200, "the summariser adds the session tokens up")
+    check(abs(summary["tokens_per_second"] - 50.0) < 1.0e-9,
+          "throughput is total tokens over total seconds")
+    check(summary["learned_reach_end"] == 8192.0, "the summary keeps the learned reach")
+    check(len(summary["loss_curve"]) == 2, "the summary keeps a loss curve")
+
+    broken = directory / "broken"
+    broken.mkdir()
+    (broken / "train-session-1.log").write_text(
+        'CORPUS_TRAIN_JSON {"corpus_bytes": 10, "numeric_ok": T}\n', encoding="utf-8")
+    try:
+        summarise(broken)
+        check(False, "an unparseable session report is refused")
+    except SummaryError:
+        pass
 
 
 def main() -> int:
@@ -107,6 +159,8 @@ def main() -> int:
             check(False, "regenerating without --overwrite is refused")
         except CorpusError:
             pass
+
+        check_run_summary(root)
 
     if FAILURES:
         print(f"{len(FAILURES)} prompt/response corpus contract checks failed")
