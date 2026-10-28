@@ -33,6 +33,7 @@
 !==============================================================================
 program prompt_engine
    use, intrinsic :: iso_fortran_env, only: int8, int32, int64, real64, output_unit, error_unit
+   use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
    use fixed_budget_context
    use fixed_budget_backward
    use fixed_budget_optimizer
@@ -297,7 +298,7 @@ contains
       integer(int64) :: consumed, file_bytes, stopped_at, started, now, elapsed
       integer(int64) :: tokens_before, updates_before, session_tokens, session_updates
       real(real64) :: loss, rate, session_rate, session_loss
-      logical :: bounded
+      logical :: bounded, first_field
 
       if (len_trim(corpus) == 0) call usage_and_stop('train needs --corpus')
       if (len_trim(checkpoint) == 0) call usage_and_stop('train needs --checkpoint')
@@ -397,31 +398,33 @@ contains
       rate = real(session_tokens, real64) / real(elapsed, real64)
       session_rate = rate
       session_loss = metrics%loss_sum / real(max(1_int64, metrics%tokens), real64)
+      first_field = .true.
       write(output_unit, '(A)') 'CORPUS_TRAIN_JSON {'
-      write(output_unit, '(A,A,A)') '  "corpus": "', trim(corpus), '",'
-      write(output_unit, '(A,I0)') '  "corpus_bytes": ', file_size(corpus)
-      write(output_unit, '(A,I0)') '  "start_byte": ', start_byte
-      write(output_unit, '(A,I0)') '  "end_byte": ', stopped_at
-      write(output_unit, '(A,I0)') '  "consumed_bytes": ', stopped_at - start_byte
-      write(output_unit, '(A,F0.4)') '  "file_fraction": ', &
-         real(stopped_at, real64) / real(max(1_int64, file_size(corpus)), real64)
-      write(output_unit, '(A,A)') '  "bounded_by_bytes": ', logical_text(bounded)
-      write(output_unit, '(A,A)') '  "whole_file": ', logical_text(stopped_at >= file_size(corpus))
-      write(output_unit, '(A,I0)') '  "updates": ', metrics%updates
-      write(output_unit, '(A,I0)') '  "tokens": ', metrics%tokens
-      write(output_unit, '(A,I0)') '  "session_updates": ', session_updates
-      write(output_unit, '(A,I0)') '  "session_tokens": ', session_tokens
-      write(output_unit, '(A,F0.6)') '  "mean_nll": ', loss
-      write(output_unit, '(A,F0.6)') '  "session_mean_nll": ', session_loss
-      write(output_unit, '(A,F0.3)') '  "tokens_per_second": ', session_rate
-      write(output_unit, '(A,I0)') '  "seconds": ', elapsed
-      write(output_unit, '(A,F0.1)') '  "learned_reach": ', fbc_learned_horizon(model)
-      write(output_unit, '(A,I0)') '  "parameters": ', fbc_parameter_count(config)
-      write(output_unit, '(A,A)') '  "numeric_ok": ', logical_text(metrics%numeric_ok)
+      call field_text('corpus', trim(corpus), first_field)
+      call field_int('corpus_bytes', file_size(corpus), first_field)
+      call field_int('start_byte', start_byte, first_field)
+      call field_int('end_byte', stopped_at, first_field)
+      call field_int('consumed_bytes', stopped_at - start_byte, first_field)
+      call field_real('file_fraction', real(stopped_at, real64) / &
+                      real(max(1_int64, file_size(corpus)), real64), first_field)
+      call field_bool('bounded_by_bytes', bounded, first_field)
+      call field_bool('whole_file', stopped_at >= file_size(corpus), first_field)
+      call field_int('updates', metrics%updates, first_field)
+      call field_int('tokens', metrics%tokens, first_field)
+      call field_int('session_updates', session_updates, first_field)
+      call field_int('session_tokens', session_tokens, first_field)
+      call field_real('mean_nll', loss, first_field)
+      call field_real('session_mean_nll', session_loss, first_field)
+      call field_real('tokens_per_second', session_rate, first_field)
+      call field_int('seconds', elapsed, first_field)
+      call field_real('learned_reach', fbc_learned_horizon(model), first_field)
+      call field_int('parameters', fbc_parameter_count(config), first_field)
+      call field_bool('numeric_ok', metrics%numeric_ok, first_field)
+      write(output_unit, '(A)') ''
       write(output_unit, '(A)') '}'
       if (stopped_at < file_size(corpus)) then
-         write(output_unit, '(A,I0,A,I0,A)') 'note: partial pass: reached byte ', stopped_at, ' of ', &
-            file_size(corpus), ''
+         write(output_unit, '(A,I0,A,I0)') 'note: partial pass: reached byte ', stopped_at, ' of ', &
+            file_size(corpus)
       end if
 
       call fbc_model_destroy(model)
@@ -465,6 +468,7 @@ contains
       character(len=MAX_RESPONSE) :: response
       integer(int32) :: status, length
       integer(int64) :: random_state
+      logical :: first_field
 
       if (len_trim(checkpoint) == 0) call usage_and_stop('ask needs --checkpoint')
       if (len_trim(prompt) == 0) call usage_and_stop('ask needs --prompt')
@@ -479,10 +483,12 @@ contains
       random_state = seed * 6364136223846793005_int64 + 1442695040888963407_int64
       call respond(model, state, workspace, prompt, max_new, temperature, random_state, response, length)
 
+      first_field = .true.
       write(output_unit, '(A)') 'PROMPT_RESPONSE_JSON {'
-      write(output_unit, '(A,A,A)') '  "prompt": "', trim(json_escape(trim(prompt))), '",'
-      write(output_unit, '(A,A,A)') '  "response": "', trim(json_escape(response(1_int32:length))), '",'
-      write(output_unit, '(A,F0.1)') '  "learned_reach": ', fbc_learned_horizon(model)
+      call field_text('prompt', trim(prompt), first_field)
+      call field_text('response', response(1_int32:length), first_field)
+      call field_real('learned_reach', fbc_learned_horizon(model), first_field)
+      write(output_unit, '(A)') ''
       write(output_unit, '(A)') '}'
 
       call fbc_model_destroy(model)
@@ -512,6 +518,7 @@ contains
       integer(int32) :: status, unit_number, io_status, length, rows
       integer(int32) :: fact_total, fact_hit, copy_total, copy_hit, next_total, next_hit
       integer(int64) :: random_state
+      logical :: first_field
 
       if (len_trim(checkpoint) == 0) call usage_and_stop('probe needs --checkpoint')
       call load_model(checkpoint, model, optimizer, loaded_config, counters)
@@ -561,18 +568,17 @@ contains
       write(output_unit, '(A)') ''
       write(output_unit, '(A)') ']'
 
+      first_field = .true.
       write(output_unit, '(A)') 'PROBE_JSON {'
-      write(output_unit, '(A,A,A)') '  "probe_file": "', trim(probe_file), '",'
-      write(output_unit, '(A,I0)') '  "rows": ', rows
-      write(output_unit, '(A,I0,A,F0.4,A,I0,A)') '  "fact": {"correct": ', fact_hit, ', "accuracy": ', &
-         score(fact_hit, fact_total), ', "n": ', fact_total, '},'
-      write(output_unit, '(A,I0,A,F0.4,A,I0,A)') '  "copy": {"correct": ', copy_hit, ', "accuracy": ', &
-         score(copy_hit, copy_total), ', "n": ', copy_total, '},'
-      write(output_unit, '(A,I0,A,F0.4,A,I0,A)') '  "next": {"correct": ', next_hit, ', "accuracy": ', &
-         score(next_hit, next_total), ', "n": ', next_total, '},'
-      write(output_unit, '(A,F0.4)') '  "accuracy": ', score(fact_hit + copy_hit + next_hit, &
-         fact_total + copy_total + next_total)
-      write(output_unit, '(A,F0.1)') '  "learned_reach": ', fbc_learned_horizon(model)
+      call field_text('probe_file', trim(probe_file), first_field)
+      call field_int('rows', int(rows, int64), first_field)
+      call field_family('fact', fact_hit, fact_total, first_field)
+      call field_family('copy', copy_hit, copy_total, first_field)
+      call field_family('next', next_hit, next_total, first_field)
+      call field_real('accuracy', score(fact_hit + copy_hit + next_hit, &
+                      fact_total + copy_total + next_total), first_field)
+      call field_real('learned_reach', fbc_learned_horizon(model), first_field)
+      write(output_unit, '(A)') ''
       write(output_unit, '(A)') '}'
 
       call fbc_model_destroy(model)
@@ -712,19 +718,6 @@ contains
       value = real(iand(abs(random_state), int(z'7FFFFFFF', int64)), real64) / 2147483648.0_real64
    end function next_uniform
 
-   !> JSON has no Fortran logical literal: `L1` would emit T/F, which is not
-   !> parseable.  Every flag in these reports goes through here.
-   pure function logical_text(flag) result(text)
-      logical, intent(in) :: flag
-      character(len=5) :: text
-
-      if (flag) then
-         text = 'true '
-      else
-         text = 'false'
-      end if
-   end function logical_text
-
    pure function score(hits, total) result(value)
       integer(int32), intent(in) :: hits, total
       real(real64) :: value
@@ -735,6 +728,95 @@ contains
          value = real(hits, real64) / real(total, real64)
       end if
    end function score
+
+   !> One `"name": value` member of the enclosing object.  The separators are
+   !> emitted here rather than appended to every value, because a missing comma
+   !> is invisible to Fortran and fatal to every JSON reader.
+   subroutine json_member(name, value_text, first)
+      character(len=*), intent(in) :: name, value_text
+      logical, intent(inout) :: first
+
+      write(output_unit, '(A,A,A,A)') trim(merge(',', ' ', first)), '  "', trim(name)//'": ', value_text
+      first = .false.
+   end subroutine json_member
+
+   subroutine field_int(name, value, first)
+      character(len=*), intent(in) :: name
+      integer(int64), intent(in) :: value
+      logical, intent(inout) :: first
+      character(len=32) :: text
+
+      write(text, '(I0)') value
+      call json_member(name, trim(text), first)
+   end subroutine field_int
+
+   subroutine field_real(name, value, first)
+      character(len=*), intent(in) :: name
+      real(real64), intent(in) :: value
+      logical, intent(inout) :: first
+      character(len=64) :: scratch, text
+
+      ! Fortran writes 0.5 as ".500000"; JSON needs a leading zero.  A
+      ! non-finite value is not representable in JSON at all, so it becomes
+      ! null instead of a token that breaks the reader.
+      if (.not. ieee_is_finite(value)) then
+         call json_member(name, 'null', first)
+         return
+      end if
+      write(scratch, '(F0.6)') value
+      scratch = adjustl(scratch)
+      if (scratch(1:1) == '.') then
+         text = '0'//trim(scratch)
+      else if (scratch(1:2) == '-.') then
+         text = '-0'//trim(scratch(2:))
+      else
+         text = trim(scratch)
+      end if
+      call json_member(name, trim(text), first)
+   end subroutine field_real
+
+   subroutine field_bool(name, value, first)
+      character(len=*), intent(in) :: name
+      logical, intent(in) :: value
+      logical, intent(inout) :: first
+
+      if (value) then
+         call json_member(name, 'true', first)
+      else
+         call json_member(name, 'false', first)
+      end if
+   end subroutine field_bool
+
+   !> `"fact": {"correct": n, "accuracy": r, "n": n}` -- one probe family.
+   subroutine field_family(name, hits, total, first)
+      character(len=*), intent(in) :: name
+      integer(int32), intent(in) :: hits, total
+      logical, intent(inout) :: first
+      character(len=96) :: text, hits_text, total_text, score_text
+      real(real64) :: value
+      character(len=64) :: scratch
+
+      write(hits_text, '(I0)') hits
+      write(total_text, '(I0)') total
+      value = score(hits, total)
+      write(scratch, '(F0.6)') value
+      scratch = adjustl(scratch)
+      if (scratch(1:1) == '.') then
+         score_text = '0'//trim(scratch)
+      else
+         score_text = trim(scratch)
+      end if
+      text = '{"correct": '//trim(hits_text)//', "accuracy": '//trim(score_text)// &
+             ', "n": '//trim(total_text)//'}'
+      call json_member(name, trim(text), first)
+   end subroutine field_family
+
+   subroutine field_text(name, value, first)
+      character(len=*), intent(in) :: name, value
+      logical, intent(inout) :: first
+
+      call json_member(name, '"'//trim(json_escape(value))//'"', first)
+   end subroutine field_text
 
    pure function json_escape(text) result(escaped)
       character(len=*), intent(in) :: text

@@ -188,7 +188,9 @@ jobs:
           checkpoint="$RUN_DIR/model.vgfb"
           offset=0
           session=0
-          while [ "$offset" -lt "$target" ]; do
+          # The last byte of a range can never be a target, so a range is
+          # complete once it reaches target - 1.
+          while [ $(( offset + 1 )) -lt "$target" ]; do
             previous="$offset"
             now=$(date +%s)
             remaining=$(( deadline - now ))
