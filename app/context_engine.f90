@@ -628,7 +628,8 @@ contains
          ',"local_window":'//i64_text(int(plan%local_window, int64))// &
          ',"parameters":'//i64_text(plan%parameter_count)// &
          ',"state_bytes":'//i64_text(plan%state_bytes_real64)// &
-         ',"task":'//i64_text(int(task, int64))//',"seed":'//i64_text(seed)// &
+         ',"task":'//i64_text(int(task, int64))// &
+         ',"distance":'//i64_text(int(distance, int64))//',"seed":'//i64_text(seed)// &
          ',"eval_seed":'//i64_text(eval_seed)// &
          ',"train_tokens":'//i64_text(int(train_tokens, int64))// &
          ',"eval_tokens":'//i64_text(int(held_out_tokens, int64))// &

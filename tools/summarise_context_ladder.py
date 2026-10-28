@@ -31,7 +31,7 @@ BASELINE_SCALES = 4
 # `parameters` and `state_bytes` are deliberately *not* in this list: they are
 # expected to grow with the scale count (scale_logit has one entry per scale,
 # and the recurrent state has one matrix per scale per head).
-BUDGET_KEYS = ("horizon", "local_window", "memory_slots", "train_tokens", "eval_tokens")
+BUDGET_KEYS = ("horizon", "local_window", "memory_slots", "train_tokens", "eval_tokens", "distance")
 
 
 def load(path: str) -> list[dict]:
@@ -46,11 +46,16 @@ def load(path: str) -> list[dict]:
     return rows
 
 
-def group(rows: list[dict]) -> dict[tuple[str, int], list[dict]]:
-    grouped: dict[tuple[str, int], list[dict]] = collections.defaultdict(list)
+def group(rows: list[dict]) -> dict[tuple[str, int, int], list[dict]]:
+    """One group per (task, distance, scale count).
+
+    The distance belongs to the key: a needle task at 256 tokens and the same
+    task at 1024 are different problems and must not be averaged together.
+    """
+    grouped: dict[tuple[str, int, int], list[dict]] = collections.defaultdict(list)
     for row in rows:
         task = TASK_NAMES.get(row["task"], str(row["task"]))
-        grouped[(task, int(row["memory_scales"]))].append(row)
+        grouped[(task, int(row.get("distance", 0)), int(row["memory_scales"]))].append(row)
     return grouped
 
 
@@ -94,9 +99,9 @@ def recall_text(row: dict) -> str:
     return f"{row['recall_mean']:.4f}"
 
 
-def delta(summary, task: str, scales: int) -> str:
-    base = summary.get((task, BASELINE_SCALES))
-    current = summary.get((task, scales))
+def delta(summary, task: str, distance: int, scales: int) -> str:
+    base = summary.get((task, distance, BASELINE_SCALES))
+    current = summary.get((task, distance, scales))
     if base is None or current is None or scales == BASELINE_SCALES:
         return "baseline"
     change = current["nll_mean"] - base["nll_mean"]
@@ -110,22 +115,27 @@ def print_markdown(summary, grouped) -> None:
     print()
     print("## Memory-scale ladder (held-out, identical budget)")
 
-    budgets = {tuple(run[key] for key in BUDGET_KEYS) for runs in grouped.values() for run in runs}
-    if len(budgets) > 1:
+    # Per-group, not global: different task/distance groups are meant to differ.
+    mismatched = [
+        key for key, runs in grouped.items()
+        if len({tuple(run[k] for k in BUDGET_KEYS) for run in runs}) > 1
+    ]
+    if mismatched:
         print()
         print("> WARNING: the runs do not share one budget; the comparison is invalid.")
     print()
     print("Parameter and state-byte columns grow by construction: one extra decay")
     print("scale adds one `scale_logit` entry and one recurrent matrix per head.")
     print()
-    print("| task | scales | params | state bytes | held-out NLL | sd | delta vs 4 | recall |")
-    print("| --- | --- | --- | --- | --- | --- | --- | --- |")
+    print("| task | distance | scales | params | state bytes | held-out NLL | sd "
+          "| delta vs 4 | recall |")
+    print("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for key in sorted(summary):
-        task, scales = key
+        task, distance, scales = key
         row = summary[key]
         print(
-            f"| {task} | {scales} | {row['parameters']} | {row['state_bytes']} "
-            f"| {row['nll_mean']:.4f} | {row['nll_sd']:.4f} | {delta(summary, task, scales)} "
+            f"| {task} | {distance} | {scales} | {row['parameters']} | {row['state_bytes']} "
+            f"| {row['nll_mean']:.4f} | {row['nll_sd']:.4f} | {delta(summary, task, distance, scales)} "
             f"| {recall_text(row)} |"
         )
     print()
@@ -134,11 +144,11 @@ def print_markdown(summary, grouped) -> None:
 def print_compact(summary) -> None:
     parts = []
     for key in sorted(summary):
-        task, scales = key
+        task, distance, scales = key
         row = summary[key]
         recall = recall_text(row)
         parts.append(
-            f"{task}/s{scales}:nll={row['nll_mean']:.4f}(sd{row['nll_sd']:.4f},"
+            f"{task}@{distance}/s{scales}:nll={row['nll_mean']:.5f}(sd{row['nll_sd']:.5f},"
             f"{row['seeds']}seeds) recall={recall}(n={row['answers']})"
         )
     print(" ".join(parts))
@@ -147,12 +157,12 @@ def print_compact(summary) -> None:
 def print_recall(summary) -> None:
     parts = []
     for key in sorted(summary):
-        task, scales = key
+        task, distance, scales = key
         row = summary[key]
         if recall_text(row) == "n/a":
-            parts.append(f"{task}/s{scales}:n/a")
+            parts.append(f"{task}@{distance}/s{scales}:n/a")
         else:
-            parts.append(f"{task}/s{scales}:{row['recall_mean']:.4f}"
+            parts.append(f"{task}@{distance}/s{scales}:{row['recall_mean']:.4f}"
                          f"(sd{row['recall_sd']:.4f},n={row['answers']})")
     print(" ".join(parts))
 

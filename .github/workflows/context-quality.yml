@@ -60,25 +60,34 @@ jobs:
           # One physical shape, one budget, one optimiser; only the scale count
           # and the seed move.  width/heads/ffn/vocab are fixed, so the parameter
           # difference is only the tiny scale_logit vector.
-          for task in needle markov; do
+          # Two needle distances and the successor task.  256 sits at the edge
+          # of what a single slow scale can carry; 1024 cannot be reached by the
+          # 32-token ring buffer at all, which is where extra decay scales would
+          # have to earn their state bytes.
+          combos="needle:256 needle:1024 markov:256"
+          expected=0
+          for combo in $combos; do
+            task=${combo%%:*}
+            distance=${combo##*:}
             for scales in 2 4 8; do
               for seed in 11 12 13; do
+                out="run-${task}-d${distance}-s${scales}-seed${seed}.txt"
                 ./build-ladder/vegai_context_engine quality \
                   --window 8192 --local-window 32 --memory-slots 64 \
                   --memory-scales "$scales" --width 32 --heads 2 --ffn 64 --vocab 32 \
                   --tokens 32768 --eval-tokens 6144 --train-chunk-tokens 64 \
-                  --task "$task" --distance 256 --seed "$seed" --eval-seed 991 \
-                  > "run-${task}-${scales}-${seed}.txt" 2>&1
-                grep 'CONTEXT_QUALITY_JSON:' "run-${task}-${scales}-${seed}.txt" \
-                  | sed 's/^CONTEXT_QUALITY_JSON: //' >> ladder.txt
+                  --task "$task" --distance "$distance" --seed "$seed" --eval-seed 991 \
+                  > "$out" 2>&1
+                grep 'CONTEXT_QUALITY_JSON:' "$out" | sed 's/^CONTEXT_QUALITY_JSON: //' >> ladder.txt
+                expected=$((expected + 1))
               done
             done
           done
           rows=$(wc -l < ladder.txt)
-          echo "::notice title=Ladder rows::${rows} rows; first=$(head -n 1 ladder.txt | cut -c1-400)"
-          if [ "$rows" -lt 18 ]; then
-            echo "::error title=Ladder incomplete::only ${rows} of 18 runs produced a row; see the attached per-run output"
-            tail -n 4 "run-needle-2-11.txt" || true
+          echo "::notice title=Ladder rows::${rows} of ${expected}; first=$(head -n 1 ladder.txt | cut -c1-300)"
+          if [ "$rows" -lt "$expected" ]; then
+            echo "::error title=Ladder incomplete::only ${rows} of ${expected} runs produced a row; see the attached per-run output"
+            for stray in run-*.txt; do tail -n 2 "$stray"; done || true
             exit 1
           fi
           python3 tools/summarise_context_ladder.py ladder.txt > ladder.md
