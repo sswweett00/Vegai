@@ -189,6 +189,7 @@ jobs:
           offset=0
           session=0
           while [ "$offset" -lt "$target" ]; do
+            previous="$offset"
             now=$(date +%s)
             remaining=$(( deadline - now ))
             if [ "$remaining" -le 60 ]; then
@@ -223,6 +224,11 @@ jobs:
               cat "$session_log"
               annotate "train printed no end_byte" "$session_log"
               exit 1
+            fi
+            if [ "$offset" -le "$previous" ]; then
+              echo "no progress in session ${session} (still at byte ${offset}); stopping" \
+                | tee -a "$RUN_DIR/training-sessions.log"
+              break
             fi
             echo "session ${session} finished at byte ${offset}" | tee -a "$RUN_DIR/training-sessions.log"
           done

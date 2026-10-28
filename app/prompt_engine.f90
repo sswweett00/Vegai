@@ -306,9 +306,10 @@ contains
       file_bytes = file_size(corpus)
       bounded = byte_limit > 0_int64 .and. byte_limit < file_bytes
       if (bounded) file_bytes = byte_limit
-      if (start_byte >= file_bytes) call usage_and_stop('--start-byte is at or past the training end')
-      if (file_bytes - start_byte < 2_int64) &
-         call usage_and_stop('the training range is too short to predict one byte')
+      if (start_byte > file_bytes) call usage_and_stop('--start-byte is past the training end')
+      ! A range of zero or one byte has nothing to predict.  That is not an
+      ! error: it is what a chained session sees once it has reached the end,
+      ! and reporting an empty session is more useful than failing the run.
 
       if (len_trim(resume) > 0) then
          ! Continue an existing run.  The checkpoint carries the model, the
