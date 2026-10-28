@@ -85,6 +85,10 @@ module fixed_budget_context
    ! Largest decay time real64 can still distinguish from "no decay" once a
    ! repeatable scale j has lambda = exp(-1/tau): 1/tau must stay above eps/2.
    real(real64), parameter, public :: FBC_MAX_HORIZON = 4.0e15_real64
+   !> Bounds on a *learned* decay.  The upper bound keeps the decrement
+   !> representable; the lower bound keeps `-1/log(lambda)` finite.
+   real(real64), parameter, public :: FBC_MIN_DECAY = 1.0e-6_real64
+   real(real64), parameter, public :: FBC_MAX_DECAY = 1.0_real64 - 1.0e-12_real64
    real(real64), parameter, public :: FBC_MIN_HORIZON = 1.0_real64
 
    integer(int32), parameter, public :: FBC_MAX_LOCAL_WINDOW = 4096_int32
@@ -146,7 +150,17 @@ module fixed_budget_context
       integer(int32) :: head_width = 0_int32
       real(real64) :: effective_horizon = 0.0_real64
       logical :: horizon_clamped = .false.
+      ! Cached, ready-to-use memory dynamics.  Both are derived from the two
+      ! logit vectors below and are refreshed once per optimiser update (never
+      ! per token), so a step performs no transcendental work for them.
       real(real64), allocatable :: scale_decay(:)                    ! (scale) lambda_j
+      real(real64), allocatable :: write_strength(:)                 ! (scale) g_j
+      ! Learnable dynamics.  `scale_decay` is only their initialisation hint:
+      ! the logical horizon seeds it and the optimiser is then free to move both
+      ! the decay and the write strength, so the model learns its own memory
+      ! horizon instead of being pinned to one.
+      real(real64), allocatable :: decay_logit(:)                    ! (scale)
+      real(real64), allocatable :: write_strength_logit(:)           ! (scale)
       real(real64), allocatable :: token_embedding(:, :)             ! (width, vocab)
       real(real64), allocatable :: output_bias(:)                    ! (vocab)
       real(real64), allocatable :: query(:, :, :)                    ! (dh, width, head)
@@ -237,6 +251,7 @@ module fixed_budget_context
    public :: fbc_workspace_init, fbc_workspace_destroy
    public :: fbc_plan, fbc_step, fbc_sigmoid, fbc_softplus, fbc_softplus_slope, fbc_parameter_count
    public :: fbc_configure_scales, fbc_state_bytes, fbc_parse_horizon, fbc_parse_count
+   public :: fbc_refresh_dynamics, fbc_learned_horizon
 
 contains
 
@@ -316,6 +331,59 @@ contains
       if (config%slot_temperature <= 0.0_real64) return
       valid = .true.
    end function fbc_config_is_valid
+
+   !> log(p / (1 - p)) without dividing by zero at the edges.
+   pure real(real64) function fbc_logit_of_probability(probability) result(logit)
+      real(real64), intent(in) :: probability
+      real(real64), parameter :: floor = 1.0e-15_real64
+
+      logit = log(max(probability, floor) / max(1.0_real64 - probability, floor))
+   end function fbc_logit_of_probability
+
+   !> Recomputes the cached memory dynamics from the learnable logits.
+   !>
+   !> Called at init, after every optimiser update and after a checkpoint load --
+   !> *not* in the token loop.  A step therefore reads two plain arrays, so the
+   !> per-token cost of learnable dynamics is zero, and `--window` still appears
+   !> in no loop bound.
+   !>
+   !>   lambda_j = sigmoid(decay_logit_j), clamped to [0.5, 1 - 1e-12]
+   !>   g_j      = (1 - lambda_j) * 2 * sigmoid(write_logit_j)
+   !>
+   !> The clamp keeps `lambda` a probability with a representable decrement; the
+   !> factor 2 * sigmoid(.) is exactly 1 at the initial write logit of 0, so the
+   !> initial model writes with strength (1 - lambda) as before.
+   subroutine fbc_refresh_dynamics(model)
+      type(fbc_model_t), intent(inout) :: model
+      integer(int32) :: scale
+
+      if (.not. allocated(model%decay_logit)) return
+      do scale = 1_int32, size(model%decay_logit, kind=int32)
+         model%scale_decay(scale) = min(FBC_MAX_DECAY, max(FBC_MIN_DECAY, &
+                                        fbc_sigmoid(model%decay_logit(scale))))
+         model%write_strength(scale) = (1.0_real64 - model%scale_decay(scale)) * &
+                                       2.0_real64 * fbc_sigmoid(model%write_strength_logit(scale))
+      end do
+   end subroutine fbc_refresh_dynamics
+
+   !> The memory reach the *current* weights actually give, in tokens.
+   !>
+   !> It is `-1 / log(lambda)` of the slowest scale, i.e. the decay time
+   !> constant, not a storage guarantee.  It is reported next to the configured
+   !> horizon because training may lengthen or shorten it.
+   pure real(real64) function fbc_learned_horizon(model) result(horizon)
+      type(fbc_model_t), intent(in) :: model
+      integer(int32) :: scale
+      real(real64) :: decay, tau
+
+      horizon = 1.0_real64
+      if (.not. allocated(model%scale_decay)) return
+      do scale = 1_int32, size(model%scale_decay, kind=int32)
+         decay = min(FBC_MAX_DECAY, max(FBC_MIN_DECAY, model%scale_decay(scale)))
+         tau = -1.0_real64 / log(decay)
+         horizon = max(horizon, tau)
+      end do
+   end function fbc_learned_horizon
 
    !> Derives the per-scale decay constants from the logical horizon.
    !>
@@ -432,6 +500,8 @@ contains
               allocated(model%attention_rms) .and. allocated(model%ffn_rms) .and. &
               allocated(model%ffn_gate) .and. allocated(model%ffn_value) .and. &
               allocated(model%ffn_output) .and. allocated(model%distance_bias) .and. &
+              allocated(model%decay_logit) .and. allocated(model%write_strength_logit) .and. &
+              allocated(model%write_strength) .and. &
               allocated(model%scale_logit) .and. allocated(model%channel_logit) .and. &
               allocated(model%slot_query_proj) .and. allocated(model%slot_key_proj) .and. &
               allocated(model%slot_value_proj) .and. allocated(model%slot_read_proj) .and. &
@@ -521,6 +591,9 @@ contains
       model%config = config
       model%head_width = head_width
       allocate(model%scale_decay(config%memory_scales), &
+               model%write_strength(config%memory_scales), &
+               model%decay_logit(config%memory_scales), &
+               model%write_strength_logit(config%memory_scales), &
                model%token_embedding(config%width, config%vocabulary_size), &
                model%output_bias(config%vocabulary_size), &
                model%query(head_width, config%width, config%heads), &
@@ -566,14 +639,26 @@ contains
       model%scale_logit = 0.0_real64
       model%channel_logit = 0.0_real64
       model%slot_salience_weight = 0.0_real64
+      ! Initialise the learnable dynamics so that the very first step behaves
+      ! exactly like the fixed ladder this model replaced: lambda_j from the
+      ! horizon, and write strength (1 - lambda_j).  Anything else would make the
+      ! improvement a silent behaviour change.
       call fbc_configure_scales(config, model%scale_decay, model%effective_horizon, model%horizon_clamped)
+      do head = 1_int32, config%memory_scales
+         model%decay_logit(head) = fbc_logit_of_probability(model%scale_decay(head))
+      end do
+      model%write_strength_logit = 0.0_real64
       model%initialized = .true.
+      call fbc_refresh_dynamics(model)
    end subroutine fbc_model_init
 
    subroutine fbc_model_destroy(model)
       type(fbc_model_t), intent(inout) :: model
 
       if (allocated(model%scale_decay)) deallocate(model%scale_decay)
+      if (allocated(model%write_strength)) deallocate(model%write_strength)
+      if (allocated(model%decay_logit)) deallocate(model%decay_logit)
+      if (allocated(model%write_strength_logit)) deallocate(model%write_strength_logit)
       if (allocated(model%token_embedding)) deallocate(model%token_embedding)
       if (allocated(model%output_bias)) deallocate(model%output_bias)
       if (allocated(model%query)) deallocate(model%query)
@@ -788,6 +873,8 @@ contains
       count = width * vocab + vocab + 3_int64 * heads * head_width * width + width * width + 2_int64 * width
       ! gated FFN (gate, value, output) + distance bias + scale/channel logits
       count = count + 3_int64 * width * ffn + window + 1_int64 + scales + FBC_CHANNEL_COUNT
+      ! learnable memory dynamics: one decay logit and one write logit per scale
+      count = count + 2_int64 * scales
       ! slot projections (query, write key, write value, read output) + salience weight
       count = count + 4_int64 * width * width + 1_int64
    end function fbc_parameter_count
@@ -863,7 +950,7 @@ contains
       integer(int32) :: width, heads, head_width, scales, slots, window, ffn
       integer(int32) :: head, scale, component, slot, ordinal, position, channel
       real(real64) :: score, maximum, normalizer, weight, denominator, inverse_rms, mean_square
-      real(real64) :: scale_factor, slot_scale, gate, salience, context_scale
+      real(real64) :: scale_factor, slot_scale, gate, salience, context_scale, write_gate
 
       status = FBC_OK
       if (.not. fbc_model_is_ready(model) .or. .not. fbc_state_is_ready(state, model)) then
@@ -954,15 +1041,18 @@ contains
       do head = 1_int32, heads
          do scale = 1_int32, scales
             scale_factor = model%scale_decay(scale)
-            ! R <- lambda R + (1 - lambda) phi(k) v^T, column-major over the
-            ! output feature so the inner loop is contiguous.
+            write_gate = model%write_strength(scale)
+            ! R <- lambda R + g phi(k) v^T, column-major over the output feature
+            ! so the inner loop is contiguous.  lambda and the write strength g
+            ! are both learned; both are cached, so this loop evaluates no
+            ! transcendental.
             do component = 1_int32, head_width
                state%retention_numerator(:, component, head, scale) = &
                   scale_factor * state%retention_numerator(:, component, head, scale) + &
-                  (1.0_real64 - scale_factor) * workspace%phi_k(:, head) * workspace%v(component, head)
+                  write_gate * workspace%phi_k(:, head) * workspace%v(component, head)
             end do
             state%retention_normalizer(:, head, scale) = scale_factor * state%retention_normalizer(:, head, scale) + &
-                                                         (1.0_real64 - scale_factor) * workspace%phi_k(:, head)
+                                                         write_gate * workspace%phi_k(:, head)
             denominator = dot_product(workspace%phi_q(:, head), state%retention_normalizer(:, head, scale)) + &
                           model%config%rms_epsilon
             if (.not. ieee_is_finite(denominator) .or. denominator <= 0.0_real64) then

@@ -55,6 +55,9 @@ SPARSE_TEST_SOURCES := test/sparse_layer_tests.f90
 CONTEXT_SOURCES := src/fixed_budget_context.f90 src/fixed_budget_backward.f90 \
                    src/fixed_budget_optimizer.f90 src/fixed_budget_training.f90
 CONTEXT_APP := app/context_engine.f90
+# Byte-level corpus trainer + prompt/response CLI: the same library, a
+# streaming data path instead of the synthetic stream.
+PROMPT_APP := app/prompt_engine.f90
 CONTEXT_TEST_SOURCES := test/fixed_budget_context_tests.f90
 ENGINE := $(BUILD_DIR)/hds_engine
 PRETRAIN := $(BUILD_DIR)/vegai_pretrain
@@ -68,6 +71,7 @@ CONTROL := $(BUILD_DIR)/vegai_control
 SPARSE_BENCH := $(BUILD_DIR)/vegai_sparse_layer_bench
 SPARSE_TESTS := $(BUILD_DIR)/vegai_sparse_layer_tests
 CONTEXT_ENGINE := $(BUILD_DIR)/vegai_context_engine
+PROMPT_ENGINE := $(BUILD_DIR)/vegai_prompt_engine
 CONTEXT_TESTS := $(BUILD_DIR)/vegai_context_tests
 TEST_BINARY := $(BUILD_DIR)/vegai_tests
 # Runtime-only exact-size benchmark artifacts are intentionally ignored by Git.
@@ -79,10 +83,10 @@ FIXTURE_9MIB_REPORT ?= pretraining-runs/synthetic_hdc_9mib.json
 # remain ignored. Prefer the dedicated GitHub workflow for CI-hosted evidence.
 CONTINUOUS_900_RUN_DIR ?= pretraining-runs/synthetic_900mb_then_90mb
 
-.PHONY: all engine pretrain causal-lm neural-lm neural-pretrain field chat dialogue-eval control context-engine context-tests test fortran-check portable-runtime-check run run-pretrain run-causal-lm run-neural-lm run-neural-pretrain run-field run-chat run-control check field-check sparse-bench sparse-tests optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check turkish-dialogue-data-check quality-check continuous-quality-check attested-pretrain-check lookup-cache-compare fixture-9mib verify-fixture-9mib pretrain-9mib pretrain-900mb-continuous clean clean-all debug portable native portable-test native-test
+.PHONY: all engine pretrain causal-lm neural-lm neural-pretrain field chat dialogue-eval control context-engine prompt-engine context-tests test fortran-check portable-runtime-check run run-pretrain run-causal-lm run-neural-lm run-neural-pretrain run-field run-chat run-control check field-check sparse-bench sparse-tests optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check turkish-dialogue-data-check quality-check continuous-quality-check prompt-corpus-check attested-pretrain-check lookup-cache-compare fixture-9mib verify-fixture-9mib pretrain-9mib pretrain-900mb-continuous clean clean-all debug portable native portable-test native-test
 
 # Default target: portable optimized GNU binaries without host-only ISA flags.
-all: engine pretrain causal-lm neural-lm neural-pretrain field chat dialogue-eval control sparse-bench context-engine
+all: engine pretrain causal-lm neural-lm neural-pretrain field chat dialogue-eval control sparse-bench context-engine prompt-engine
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)/mod
@@ -147,6 +151,11 @@ context-engine: $(CONTEXT_ENGINE)
 
 $(CONTEXT_ENGINE): $(CONTEXT_SOURCES) $(CONTEXT_APP) | $(BUILD_DIR)
 	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(CONTEXT_SOURCES) $(CONTEXT_APP) -o $@ $(LDFLAGS)
+
+prompt-engine: $(PROMPT_ENGINE)
+
+$(PROMPT_ENGINE): $(CONTEXT_SOURCES) $(PROMPT_APP) | $(BUILD_DIR)
+	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(CONTEXT_SOURCES) $(PROMPT_APP) -o $@ $(LDFLAGS)
 
 context-tests: $(CONTEXT_TESTS)
 	$(CONTEXT_TESTS)
@@ -251,6 +260,13 @@ optimizer-check:
 # LMM/operator plans. This verifies the control plane, not a model's reasoning.
 tool-check:
 	python3 tools/verify_lmm_tool_orchestrator.py
+	python3 tools/verify_prompt_response_corpus.py
+
+# The 600 MB prompt/response corpus generator is pure Python, so its contract
+# (exact byte count, determinism, manifest, probe families) is checked without a
+# Fortran toolchain.
+prompt-corpus-check:
+	python3 tools/verify_prompt_response_corpus.py
 
 # Immutable shadow/canary release state, aggregate-only telemetry, conservative
 # promotion/rollback, privacy and artifact-provenance control-plane contract.

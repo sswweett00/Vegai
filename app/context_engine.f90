@@ -281,6 +281,11 @@ contains
          write(error_unit, '(A)') 'this is a legacy VGNR checkpoint; use vegai_neural_pretrain for it'
          stop 1_int32
       end if
+      if (status == FBT_ERR_VERSION) then
+         write(error_unit, '(A,I0,A)') 'this checkpoint uses format version ', meta%format_version, &
+            ', which this model shape cannot read; it is not converted silently'
+         stop 1_int32
+      end if
       if (status /= FBT_OK) call usage_and_stop('cannot read checkpoint header')
       write(output_unit, '(A)') '== checkpoint =='
       write(output_unit, '(A,I0)') 'logical horizon        : ', meta%logical_horizon
@@ -292,6 +297,7 @@ contains
       write(output_unit, '(A,I0,A,I0,A,I0,A,I0)') 'width/heads/ffn/vocab  : ', meta%width, '/', &
          meta%heads, '/', meta%ffn_width, '/', meta%vocabulary_size
       write(output_unit, '(A,I0,A,I0)') 'updates/tokens         : ', meta%updates, '/', meta%tokens
+      write(output_unit, '(A,I0)') 'format version         : ', meta%format_version
    end subroutine command_inspect
 
    !----------------------------------------------------------------------------
@@ -353,6 +359,7 @@ contains
       write(output_unit, '(A,F0.1)') 'tokens/s            : ', &
          real(metrics%tokens, real64) / max(elapsed, 1.0e-9_real64)
       write(output_unit, '(A,F0.6)') 'last gradient norm  : ', metrics%last_gradient_norm
+      write(output_unit, '(A,F0.1,A)') 'learned reach       : ', fbc_learned_horizon(model), ' tokens'
       write(output_unit, '(A,A)') 'checkpoint          : ', trim(path)
 
       call fbc_model_destroy(model)
@@ -384,6 +391,10 @@ contains
          write(error_unit, '(A)') 'legacy VGNR checkpoint: load it with vegai_neural_pretrain'
          stop 1_int32
       end if
+      if (status == FBT_ERR_VERSION) then
+         write(error_unit, '(A)') 'this checkpoint predates the learnable memory dynamics; retrain it'
+         stop 1_int32
+      end if
       if (status /= FBT_OK) call usage_and_stop('cannot load checkpoint')
       token_count = int(min(token_budget, 20000000_int64), int32)
       allocate(tokens(token_count + 1_int32), answer_mask(token_count))
@@ -402,6 +413,7 @@ contains
       write(output_unit, '(A,F0.6)') 'mean nll            : ', mean_nll
       write(output_unit, '(A,F0.2)') 'perplexity          : ', exp(min(mean_nll, 50.0_real64))
       write(output_unit, '(A,F0.4,A,I0,A)') 'remote recall       : ', accuracy, ' over ', answer_count, ' queries'
+      write(output_unit, '(A,F0.1,A)') 'learned reach       : ', fbc_learned_horizon(model), ' tokens'
       call fbc_model_destroy(model)
       call fbc_optimizer_destroy(optimizer)
       call fbc_state_destroy(state)
@@ -621,6 +633,7 @@ contains
       write(output_unit, '(A,A)') 'held-out nll           : ', r64_text(eval_nll)
       write(output_unit, '(A,A,A,I0,A)') 'held-out remote recall : ', r64_text(recall), ' over ', &
          answer_count, ' queries'
+      write(output_unit, '(A,F0.1)') 'learned reach (tokens) : ', fbc_learned_horizon(model)
       write(output_unit, '(A,A,A)') 'training seconds       : ', r64_text(elapsed), ' s'
       write(output_unit, '(A)') 'CONTEXT_QUALITY_JSON: {"horizon":'//i64_text(plan%logical_horizon)// &
          ',"memory_scales":'//i64_text(int(plan%memory_scales, int64))// &
@@ -633,6 +646,7 @@ contains
          ',"eval_seed":'//i64_text(eval_seed)// &
          ',"train_tokens":'//i64_text(int(train_tokens, int64))// &
          ',"eval_tokens":'//i64_text(int(held_out_tokens, int64))// &
+         ',"learned_reach":'//r64_text(fbc_learned_horizon(model))// &
          ',"train_nll":'//r64_text(train_nll)//',"eval_nll":'//r64_text(eval_nll)// &
          ',"recall":'//r64_text(recall)//',"answers":'//i64_text(answer_count)//'}'
 

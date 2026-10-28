@@ -128,6 +128,26 @@ contains
       call check(.not. clamped, 'the default horizon needs no arithmetic clamping')
       call check(effective == 8192.0_real64, 'the default effective horizon is 8192 tokens')
 
+      ! The learnable dynamics must start at the ladder they replaced, otherwise
+      ! the improvement would be a silent behaviour change.
+      block
+         type(fbc_model_t) :: model
+         integer(int32) :: status, scale_index
+         logical :: matches
+
+         call fbc_model_init(model, config, 4242_int64, status)
+         matches = .true.
+         do scale_index = 1_int32, config%memory_scales
+            if (abs(model%scale_decay(scale_index) - decay(scale_index)) > 1.0e-12_real64) matches = .false.
+            if (abs(model%write_strength(scale_index) - (1.0_real64 - decay(scale_index))) > 1.0e-12_real64) &
+               matches = .false.
+         end do
+         call check(matches, 'learned dynamics start exactly at lambda_j and 1 - lambda_j')
+         call check(abs(fbc_learned_horizon(model) - effective) / effective < 0.01_real64, &
+                    'the learned reach starts at the configured horizon')
+         call fbc_model_destroy(model)
+      end block
+
       ! And the degenerate case must stay visible: horizon = window collapses.
       ! Only the first `memory_scales` entries are written, so the comparison
       ! uses that count rather than the extent of the scratch array.
@@ -535,6 +555,34 @@ contains
                     'finite difference matches the slot recall-query gradient')
       end block
       block
+         original = model%decay_logit(1_int32)
+         model%decay_logit(1_int32) = original + delta
+         call fbc_refresh_dynamics(model)
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, plus_loss, status)
+         model%decay_logit(1_int32) = original - delta
+         call fbc_refresh_dynamics(model)
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
+         model%decay_logit(1_int32) = original
+         call fbc_refresh_dynamics(model)
+         numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
+         call report_gradient(numeric, gradient%decay_logit(1_int32), &
+                    'finite difference matches the learned decay gradient')
+      end block
+      block
+         original = model%write_strength_logit(2_int32)
+         model%write_strength_logit(2_int32) = original + delta
+         call fbc_refresh_dynamics(model)
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, plus_loss, status)
+         model%write_strength_logit(2_int32) = original - delta
+         call fbc_refresh_dynamics(model)
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
+         model%write_strength_logit(2_int32) = original
+         call fbc_refresh_dynamics(model)
+         numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
+         call report_gradient(numeric, gradient%write_strength_logit(2_int32), &
+                    'finite difference matches the learned write-strength gradient')
+      end block
+      block
          original = model%distance_bias(2_int32)
          model%distance_bias(2_int32) = original + delta
          call replay_loss(model, base, workspace, 9_int32, 5_int32, plus_loss, status)
@@ -728,6 +776,7 @@ contains
       integer(int32), allocatable :: tokens(:)
       logical, allocatable :: mask(:)
       real(real64) :: slots_before(32, 16), scales_before(3), channels_before(3), salience_before
+      real(real64) :: decays_before(3), writes_before(3)
       real(real64), allocatable :: hidden(:), logits(:), dlogits(:)
       real(real64) :: loss, norm
 
@@ -775,11 +824,17 @@ contains
                  'both normalization scales receive a gradient')
       call check(abs(gradient%slot_salience_weight) > 0.0_real64, &
                  'the slot salience weight receives a gradient')
+      call check(sum(abs(gradient%decay_logit)) > 0.0_real64, &
+                 'the memory decay logits receive a gradient')
+      call check(sum(abs(gradient%write_strength_logit)) > 0.0_real64, &
+                 'the memory write-strength logits receive a gradient')
       norm = fbc_gradient_norm(gradient)
       call check(norm > 0.0_real64 .and. norm == norm, 'the gradient norm is finite and positive')
 
       slots_before = state%slot_key(1_int32:32, 1_int32:16)
       scales_before = model%scale_logit
+      decays_before = model%decay_logit
+      writes_before = model%write_strength_logit
       channels_before = model%channel_logit
       salience_before = model%slot_salience_weight
       call fbc_train_stream(model, optimizer, state, tokens, token_count, chunk, update_config, &
@@ -791,6 +846,8 @@ contains
                  'the multi-scale readout weights are optimised')
       call check(any(model%channel_logit /= channels_before), 'the channel mixer is optimised')
       call check(model%slot_salience_weight /= salience_before, 'the salience weight is optimised')
+      call check(any(model%decay_logit /= decays_before), 'the memory decay is optimised')
+      call check(any(model%write_strength_logit /= writes_before), 'the memory write strength is optimised')
       call check(all(model%scale_logit == model%scale_logit), 'the readout weights stay finite')
 
       deallocate(hidden, logits, dlogits)
@@ -941,6 +998,10 @@ contains
                  'optimizer hyper-parameters survive the round trip')
       call check(abs(restored%slot_salience_weight - model%slot_salience_weight) == 0.0_real64, &
                  'the salience weight survives the round trip')
+      call check(all(restored%decay_logit == model%decay_logit) .and. &
+                 all(restored%write_strength_logit == model%write_strength_logit) .and. &
+                 all(restored%write_strength == model%write_strength), &
+                 'the learnable memory dynamics survive the round trip')
       call check(all(restored%scale_logit == model%scale_logit) .and. &
                  all(restored%channel_logit == model%channel_logit) .and. &
                  all(restored%slot_key_proj == model%slot_key_proj), &

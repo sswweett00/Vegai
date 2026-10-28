@@ -72,6 +72,10 @@ module fixed_budget_optimizer
       real(real64), allocatable :: velocity_distance_bias(:)
       real(real64) :: energy_distance_bias = 0.0_real64
       real(real64), allocatable :: velocity_scale_logit(:)
+      real(real64), allocatable :: velocity_decay_logit(:)
+      real(real64) :: energy_decay_logit = 0.0_real64
+      real(real64), allocatable :: velocity_write_strength_logit(:)
+      real(real64) :: energy_write_strength_logit = 0.0_real64
       real(real64) :: energy_scale_logit = 0.0_real64
       real(real64), allocatable :: velocity_channel_logit(:)
       real(real64) :: energy_channel_logit = 0.0_real64
@@ -130,6 +134,8 @@ contains
                optimizer%energy_ffn_output(ffn), stat=allocation_status)
       allocate(optimizer%velocity_distance_bias(window_plus_one), stat=allocation_status)
       allocate(optimizer%velocity_scale_logit(scales), stat=allocation_status)
+      allocate(optimizer%velocity_decay_logit(scales), stat=allocation_status)
+      allocate(optimizer%velocity_write_strength_logit(scales), stat=allocation_status)
       allocate(optimizer%velocity_channel_logit(nchannels), stat=allocation_status)
       allocate(optimizer%velocity_slot_query_proj(width, width), &
                optimizer%energy_slot_query_proj(width), stat=allocation_status)
@@ -177,6 +183,10 @@ contains
       optimizer%velocity_distance_bias = 0.0_real64
       optimizer%energy_distance_bias = 0.0_real64
       optimizer%velocity_scale_logit = 0.0_real64
+      optimizer%velocity_decay_logit = 0.0_real64
+      optimizer%energy_decay_logit = 0.0_real64
+      optimizer%velocity_write_strength_logit = 0.0_real64
+      optimizer%energy_write_strength_logit = 0.0_real64
       optimizer%energy_scale_logit = 0.0_real64
       optimizer%velocity_channel_logit = 0.0_real64
       optimizer%energy_channel_logit = 0.0_real64
@@ -214,6 +224,8 @@ contains
       if (allocated(optimizer%energy_ffn_output)) deallocate(optimizer%energy_ffn_output)
       if (allocated(optimizer%velocity_distance_bias)) deallocate(optimizer%velocity_distance_bias)
       if (allocated(optimizer%velocity_scale_logit)) deallocate(optimizer%velocity_scale_logit)
+      if (allocated(optimizer%velocity_decay_logit)) deallocate(optimizer%velocity_decay_logit)
+      if (allocated(optimizer%velocity_write_strength_logit)) deallocate(optimizer%velocity_write_strength_logit)
       if (allocated(optimizer%velocity_channel_logit)) deallocate(optimizer%velocity_channel_logit)
       if (allocated(optimizer%velocity_slot_query_proj)) deallocate(optimizer%velocity_slot_query_proj)
       if (allocated(optimizer%energy_slot_query_proj)) deallocate(optimizer%energy_slot_query_proj)
@@ -278,6 +290,11 @@ contains
                        optimizer%energy_distance_bias, config, parameter_updates)
       call nova_vector(model%scale_logit, gradient%scale_logit, optimizer%velocity_scale_logit, &
                        optimizer%energy_scale_logit, config, parameter_updates)
+      call nova_vector(model%decay_logit, gradient%decay_logit, optimizer%velocity_decay_logit, &
+                       optimizer%energy_decay_logit, config, parameter_updates)
+      call nova_vector(model%write_strength_logit, gradient%write_strength_logit, &
+                       optimizer%velocity_write_strength_logit, &
+                       optimizer%energy_write_strength_logit, config, parameter_updates)
       call nova_vector(model%channel_logit, gradient%channel_logit, optimizer%velocity_channel_logit, &
                        optimizer%energy_channel_logit, config, parameter_updates)
       call nova_columns(model%slot_query_proj, gradient%slot_query_proj, optimizer%velocity_slot_query_proj, &

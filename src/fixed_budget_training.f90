@@ -46,10 +46,16 @@ module fixed_budget_training
    integer(int32), parameter, public :: FBT_ERR_LEGACY = -1503_int32
    integer(int32), parameter, public :: FBT_ERR_ARGUMENT = -1504_int32
    integer(int32), parameter, public :: FBT_ERR_NUMERIC = -1505_int32
+   !> A checkpoint of a known but older format: readable, not convertible.
+   integer(int32), parameter, public :: FBT_ERR_VERSION = -1506_int32
 
    character(len=8), parameter, public :: FBC_CHECKPOINT_MAGIC = 'VGFB0001'
    character(len=8), parameter, public :: FBC_LEGACY_MAGIC = 'VGNR0001'
-   integer(int32), parameter, public :: FBC_CHECKPOINT_VERSION = 1_int32
+   !> Version 2 adds the learnable memory dynamics (a decay logit and a write
+   !> logit per scale).  A v1 file has no value for them, and inventing one
+   !> would silently change the model, so v1 is refused rather than converted.
+   integer(int32), parameter, public :: FBC_CHECKPOINT_VERSION = 2_int32
+   integer(int32), parameter, public :: FBC_CHECKPOINT_MIN_VERSION = 1_int32
 
    ! Synthetic tasks.  They exist because the contract under test is structural
    ! (does the state carry information across a distance the local window cannot
@@ -79,6 +85,8 @@ module fixed_budget_training
       integer(int64) :: tokens = 0_int64
       real(real64) :: effective_horizon = 0.0_real64
       logical :: horizon_clamped = .false.
+      integer(int32) :: format_version = FBC_CHECKPOINT_VERSION
+      logical :: convertible = .true.
    end type fbc_checkpoint_meta_t
 
    public :: fbc_loss_and_gradient, fbc_train_stream, fbc_evaluate_stream
@@ -318,6 +326,10 @@ contains
             deallocate(logits, hidden, dlogits)
             return
          end if
+         ! The cached dynamics are a pure function of the logits, so refresh them
+         ! once per optimiser update: forward and backward keep reading arrays
+         ! and the token loop evaluates no transcendental for them.
+         call fbc_refresh_dynamics(model)
          metrics%updates = metrics%updates + 1_int64
          metrics%parameter_updates = metrics%parameter_updates + parameter_updates
          position = position + chunk_tokens
@@ -343,6 +355,8 @@ contains
       gradient%ffn_output = gradient%ffn_output * scale
       gradient%distance_bias = gradient%distance_bias * scale
       gradient%scale_logit = gradient%scale_logit * scale
+      gradient%decay_logit = gradient%decay_logit * scale
+      gradient%write_strength_logit = gradient%write_strength_logit * scale
       gradient%channel_logit = gradient%channel_logit * scale
       gradient%slot_query_proj = gradient%slot_query_proj * scale
       gradient%slot_key_proj = gradient%slot_key_proj * scale
@@ -498,6 +512,8 @@ contains
       if (io_status == 0) write(unit, iostat=io_status) model%ffn_output
       if (io_status == 0) write(unit, iostat=io_status) model%distance_bias
       if (io_status == 0) write(unit, iostat=io_status) model%scale_logit
+      if (io_status == 0) write(unit, iostat=io_status) model%decay_logit
+      if (io_status == 0) write(unit, iostat=io_status) model%write_strength_logit
       if (io_status == 0) write(unit, iostat=io_status) model%channel_logit
       if (io_status == 0) write(unit, iostat=io_status) model%slot_query_proj
       if (io_status == 0) write(unit, iostat=io_status) model%slot_key_proj
@@ -524,6 +540,8 @@ contains
       if (io_status == 0) read(unit, iostat=io_status) model%ffn_output
       if (io_status == 0) read(unit, iostat=io_status) model%distance_bias
       if (io_status == 0) read(unit, iostat=io_status) model%scale_logit
+      if (io_status == 0) read(unit, iostat=io_status) model%decay_logit
+      if (io_status == 0) read(unit, iostat=io_status) model%write_strength_logit
       if (io_status == 0) read(unit, iostat=io_status) model%channel_logit
       if (io_status == 0) read(unit, iostat=io_status) model%slot_query_proj
       if (io_status == 0) read(unit, iostat=io_status) model%slot_key_proj
@@ -554,6 +572,10 @@ contains
       if (io_status == 0) write(unit, iostat=io_status) optimizer%velocity_distance_bias, &
                                                         optimizer%energy_distance_bias
       if (io_status == 0) write(unit, iostat=io_status) optimizer%velocity_scale_logit, optimizer%energy_scale_logit
+      if (io_status == 0) write(unit, iostat=io_status) optimizer%velocity_decay_logit, &
+                                                        optimizer%energy_decay_logit
+      if (io_status == 0) write(unit, iostat=io_status) optimizer%velocity_write_strength_logit, &
+                                                        optimizer%energy_write_strength_logit
       if (io_status == 0) write(unit, iostat=io_status) optimizer%velocity_channel_logit, &
                                                         optimizer%energy_channel_logit
       if (io_status == 0) write(unit, iostat=io_status) optimizer%velocity_slot_query_proj, &
@@ -590,6 +612,10 @@ contains
       if (io_status == 0) read(unit, iostat=io_status) optimizer%velocity_distance_bias, &
                                                        optimizer%energy_distance_bias
       if (io_status == 0) read(unit, iostat=io_status) optimizer%velocity_scale_logit, optimizer%energy_scale_logit
+      if (io_status == 0) read(unit, iostat=io_status) optimizer%velocity_decay_logit, &
+                                                       optimizer%energy_decay_logit
+      if (io_status == 0) read(unit, iostat=io_status) optimizer%velocity_write_strength_logit, &
+                                                       optimizer%energy_write_strength_logit
       if (io_status == 0) read(unit, iostat=io_status) optimizer%velocity_channel_logit, &
                                                        optimizer%energy_channel_logit
       if (io_status == 0) read(unit, iostat=io_status) optimizer%velocity_slot_query_proj, &
@@ -656,9 +682,21 @@ contains
          return
       end if
       read(unit, iostat=io_status) version
-      if (io_status /= 0 .or. version /= FBC_CHECKPOINT_VERSION) then
+      if (io_status /= 0) then
          close(unit)
          status = FBT_ERR_FORMAT
+         return
+      end if
+      if (version < FBC_CHECKPOINT_MIN_VERSION .or. version > FBC_CHECKPOINT_VERSION) then
+         close(unit)
+         status = FBT_ERR_FORMAT
+         return
+      end if
+      if (version < FBC_CHECKPOINT_VERSION) then
+         ! A readable older format that cannot describe this model: refused, not
+         ! converted, so an old file can never be silently reinterpreted.
+         close(unit)
+         status = FBT_ERR_VERSION
          return
       end if
       read(unit, iostat=io_status) config%vocabulary_size, config%width, config%heads, config%ffn_width, &
@@ -700,6 +738,9 @@ contains
          status = FBT_ERR_FORMAT
          return
       end if
+      ! The cached dynamics are derived from the logits that were just read, so
+      ! the cache has to be rebuilt before the model is used again.
+      call fbc_refresh_dynamics(model)
    end subroutine fbc_checkpoint_load
 
    !> Reads only the header, for `inspect`.
@@ -739,7 +780,8 @@ contains
          return
       end if
       read(unit, iostat=io_status) version
-      if (io_status == 0 .and. version == FBC_CHECKPOINT_VERSION) then
+      if (io_status == 0 .and. version >= FBC_CHECKPOINT_MIN_VERSION .and. &
+          version <= FBC_CHECKPOINT_VERSION) then
          read(unit, iostat=io_status) meta%vocabulary_size, meta%width, meta%heads, meta%ffn_width, &
                                       meta%local_window, meta%memory_scales, meta%memory_slots, &
                                       meta%logical_horizon, rms_epsilon, slot_decay, slot_temperature
@@ -748,11 +790,19 @@ contains
       if (io_status == 0) read(unit, iostat=io_status) clamped_flag
       if (io_status == 0) read(unit, iostat=io_status) meta%updates, meta%tokens
       close(unit)
-      if (io_status /= 0 .or. version /= FBC_CHECKPOINT_VERSION) then
+      if (io_status /= 0 .or. version < FBC_CHECKPOINT_MIN_VERSION .or. &
+          version > FBC_CHECKPOINT_VERSION) then
          status = FBT_ERR_FORMAT
          return
       end if
       meta%horizon_clamped = clamped_flag /= 0_int32
+      ! An older format is reported as such: readable metadata, not convertible.
+      if (version < FBC_CHECKPOINT_VERSION) then
+         meta%format_version = version
+         meta%convertible = .false.
+         status = FBT_ERR_VERSION
+         return
+      end if
    end subroutine fbc_checkpoint_meta_read
 
 end module fixed_budget_training

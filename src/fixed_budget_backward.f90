@@ -51,6 +51,8 @@ module fixed_budget_backward
       real(real64), allocatable :: ffn_output(:, :)
       real(real64), allocatable :: distance_bias(:)
       real(real64), allocatable :: scale_logit(:)
+      real(real64), allocatable :: decay_logit(:)
+      real(real64), allocatable :: write_strength_logit(:)
       real(real64), allocatable :: channel_logit(:)
       real(real64), allocatable :: slot_query_proj(:, :)
       real(real64), allocatable :: slot_key_proj(:, :)
@@ -89,6 +91,8 @@ contains
                gradient%ffn_output(size(model%ffn_output, 1), size(model%ffn_output, 2)), &
                gradient%distance_bias(size(model%distance_bias)), &
                gradient%scale_logit(size(model%scale_logit)), &
+               gradient%decay_logit(size(model%decay_logit)), &
+               gradient%write_strength_logit(size(model%write_strength_logit)), &
                gradient%channel_logit(size(model%channel_logit)), &
                gradient%slot_query_proj(size(model%slot_query_proj, 1), size(model%slot_query_proj, 2)), &
                gradient%slot_key_proj(size(model%slot_key_proj, 1), size(model%slot_key_proj, 2)), &
@@ -121,6 +125,8 @@ contains
       gradient%ffn_output = 0.0_real64
       gradient%distance_bias = 0.0_real64
       gradient%scale_logit = 0.0_real64
+      gradient%decay_logit = 0.0_real64
+      gradient%write_strength_logit = 0.0_real64
       gradient%channel_logit = 0.0_real64
       gradient%slot_query_proj = 0.0_real64
       gradient%slot_key_proj = 0.0_real64
@@ -145,6 +151,8 @@ contains
       if (allocated(gradient%ffn_output)) deallocate(gradient%ffn_output)
       if (allocated(gradient%distance_bias)) deallocate(gradient%distance_bias)
       if (allocated(gradient%scale_logit)) deallocate(gradient%scale_logit)
+      if (allocated(gradient%decay_logit)) deallocate(gradient%decay_logit)
+      if (allocated(gradient%write_strength_logit)) deallocate(gradient%write_strength_logit)
       if (allocated(gradient%channel_logit)) deallocate(gradient%channel_logit)
       if (allocated(gradient%slot_query_proj)) deallocate(gradient%slot_query_proj)
       if (allocated(gradient%slot_key_proj)) deallocate(gradient%slot_key_proj)
@@ -167,6 +175,7 @@ contains
                 sum(gradient%attention_output**2) + sum(gradient%attention_rms**2) + &
                 sum(gradient%ffn_rms**2) + sum(gradient%ffn_gate**2) + sum(gradient%ffn_value**2) + &
                 sum(gradient%ffn_output**2) + sum(gradient%distance_bias**2) + &
+                sum(gradient%decay_logit**2) + sum(gradient%write_strength_logit**2) + &
                 sum(gradient%scale_logit**2) + sum(gradient%channel_logit**2) + &
                 sum(gradient%slot_query_proj**2) + sum(gradient%slot_key_proj**2) + &
                 sum(gradient%slot_value_proj**2) + sum(gradient%slot_read_proj**2) + &
@@ -223,6 +232,7 @@ contains
       real(real64) :: dphi_key(model%head_width), dvalue(model%head_width)
       real(real64) :: dretention(model%head_width, model%head_width)
       real(real64) :: ddenominator, decay_slope
+      real(real64) :: ddecay, dwrite, dgate_raw, lambda, gate_cached, write_signoid
 
       status = FBC_OK
       if (.not. fbc_model_is_ready(model) .or. .not. gradient%initialized) then
@@ -375,10 +385,40 @@ contains
             do component = 1_int32, head_width
                dretention(:, component) = workspace%phi_q(:, head) * dnum(component)
             end do
-            decay_slope = 1.0_real64 - model%scale_decay(scale)
-            dphi_key = dphi_key + decay_slope * (matmul(dretention, workspace%v(:, head)) + &
+            ! R_after = lambda R_before + g phi(k) v^T
+            ! z_after = lambda z_before + g phi(k)
+            ! so dR_after/dg = phi(k) v^T and dR_after/dlambda = R_before.  The
+            ! state dummy holds the post-write state, so R_before is recovered
+            ! from the deltas, exactly as the slot write does below.
+            lambda = model%scale_decay(scale)
+            gate_cached = model%write_strength(scale)
+            dphi_key = dphi_key + gate_cached * (matmul(dretention, workspace%v(:, head)) + &
                                                  ddenominator * workspace%phi_q(:, head))
-            dvalue = dvalue + decay_slope * matmul(workspace%phi_k(:, head), dretention)
+            dvalue = dvalue + gate_cached * matmul(workspace%phi_k(:, head), dretention)
+            ddecay = 0.0_real64
+            dwrite = 0.0_real64
+            do component = 1_int32, head_width
+               ! Columns of the numerator: rank-one write on column `component`.
+               ddecay = ddecay + dot_product(dretention(:, component), &
+                  state%retention_numerator(:, component, head, scale) - &
+                  gate_cached * workspace%phi_k(:, head) * workspace%v(component, head))
+               dwrite = dwrite + dot_product(dretention(:, component), &
+                  workspace%phi_k(:, head)) * workspace%v(component, head)
+            end do
+            ddecay = ddecay + dot_product(ddenominator * workspace%phi_q(:, head), &
+               state%retention_normalizer(:, head, scale) - gate_cached * workspace%phi_k(:, head))
+            dwrite = dwrite + dot_product(ddenominator * workspace%phi_q(:, head), workspace%phi_k(:, head))
+
+            ! lambda = sigmoid(decay_logit): d/dlogit = lambda (1 - lambda).
+            gradient%decay_logit(scale) = gradient%decay_logit(scale) + &
+               ddecay * lambda * (1.0_real64 - lambda)
+            ! g = (1 - lambda) * 2 sigmoid(write_logit), with lambda treated as
+            ! the cached constant it is inside this step, so
+            ! dg/dwrite_logit = (1 - lambda) * 2 s (1 - s).
+            write_signoid = fbc_sigmoid(model%write_strength_logit(scale))
+            dgate_raw = 2.0_real64 * write_signoid
+            gradient%write_strength_logit(scale) = gradient%write_strength_logit(scale) + &
+               dwrite * (1.0_real64 - lambda) * dgate_raw * (1.0_real64 - write_signoid)
          end do
          do component = 1_int32, head_width
             dq(component, head) = dq(component, head) + &

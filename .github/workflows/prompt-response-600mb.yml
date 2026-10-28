@@ -1,0 +1,304 @@
+name: Prompt/response evidence on the 600 MB corpus
+
+# Trains the fixed-budget context engine on a byte-exact 600 MB Turkish
+# prompt/response corpus and scores prompt -> response afterwards.  Everything
+# here is reproducible: the corpus is generated from a seed, its SHA-256 is
+# verified before training starts, and the training sessions are checkpointed
+# so a long run can continue instead of restarting.
+#
+# The job is dispatched manually because it is expensive.  Inputs let a caller
+# shrink the budget for a smoke run, or raise it to the whole corpus.
+
+on:
+  workflow_dispatch:
+    inputs:
+      corpus_bytes:
+        description: 'Corpus size in bytes (default 600000000 = 600 MB)'
+        required: false
+        default: '600000000'
+      train_bytes:
+        description: 'How many corpus bytes to train on (0 = the whole corpus)'
+        required: false
+        default: '0'
+      train_minutes:
+        description: 'Wall-clock budget for training in this dispatch'
+        required: false
+        default: '240'
+      session_minutes:
+        description: 'Length of one checkpointed training session'
+        required: false
+        default: '25'
+      facts:
+        description: 'Number of distinct fact bindings in the corpus'
+        required: false
+        default: '2048'
+      width:
+        description: 'Model width'
+        required: false
+        default: '32'
+      train_chunk_tokens:
+        description: 'Predictions per optimiser update (also the streaming block size)'
+        required: false
+        default: '512'
+      learning_rate:
+        description: 'Learning rate'
+        required: false
+        default: '0.003'
+  # A narrow push trigger makes the workflow reachable from the PR branch
+  # without spending a long job on unrelated changes.
+  push:
+    branches: [arena/b8096ea0-vegai]
+    paths:
+      - '.github/workflows/prompt-response-600mb.yml'
+      - 'tools/build_prompt_response_corpus.py'
+      - 'app/prompt_engine.f90'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prompt-response-600mb-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prompt-response-600mb:
+    name: 600 MB corpus, streamed training, prompt/response scoring
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      # A dispatch runs the configuration it was given.  A push only smoke
+      # tests the pipeline: an 8 MB corpus trained for five minutes proves the
+      # data path, the checkpoints and the scoring, without spending four
+      # hours of runner time on every commit to the workflow itself.
+      - name: Resolve the run configuration
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            corpus_bytes=8000000
+            train_bytes=0
+            train_minutes=5
+            session_minutes=4
+            facts=512
+            width=32
+            chunk=512
+            lr=0.003
+            mode=smoke
+          else
+            corpus_bytes="${{ inputs.corpus_bytes }}"
+            train_bytes="${{ inputs.train_bytes }}"
+            train_minutes="${{ inputs.train_minutes }}"
+            session_minutes="${{ inputs.session_minutes }}"
+            facts="${{ inputs.facts }}"
+            width="${{ inputs.width }}"
+            chunk="${{ inputs.train_chunk_tokens }}"
+            lr="${{ inputs.learning_rate }}"
+            mode=dispatch
+          fi
+          : "${corpus_bytes:=600000000}"
+          : "${train_bytes:=0}"
+          : "${train_minutes:=240}"
+          : "${session_minutes:=25}"
+          : "${facts:=2048}"
+          : "${width:=32}"
+          : "${chunk:=512}"
+          : "${lr:=0.003}"
+          {
+            echo "MODE=$mode"
+            echo "CORPUS_BYTES=$corpus_bytes"
+            echo "TRAIN_BYTES=$train_bytes"
+            echo "TRAIN_MINUTES=$train_minutes"
+            echo "SESSION_MINUTES=$session_minutes"
+            echo "FACTS=$facts"
+            echo "WIDTH=$width"
+            echo "CHUNK=$chunk"
+            echo "LR=$lr"
+          } >> "$GITHUB_ENV"
+          cat "$GITHUB_ENV"
+
+      - name: Install GNU Fortran toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gfortran
+
+      - name: Report the toolchain
+        run: |
+          gfortran --version | head -n 1
+          python3 --version
+          nproc
+
+      - name: Build the engine, its contract tests and the corpus CLI
+        run: |
+          make context-engine prompt-engine context-tests BUILD_DIR=build-prompt-600m
+
+      - name: Run the engine contract suite (gradients, invariants, checkpoints)
+        run: |
+          make context-tests BUILD_DIR=build-prompt-600m 2>&1 | tee context-tests.log
+
+      - name: Generate and verify the corpus
+        run: |
+          set -euo pipefail
+          run_dir="${RUNNER_TEMP}/vegai-prompt-600m"
+          mkdir -p "$run_dir"
+          echo "RUN_DIR=$run_dir" >> "$GITHUB_ENV"
+          python3 tools/build_prompt_response_corpus.py generate \
+            "$run_dir/corpus.txt" \
+            --bytes "$CORPUS_BYTES" \
+            --facts "$FACTS" \
+            --probe-out "$run_dir/probe.tsv" \
+            --overwrite | tee "$run_dir/corpus-generate.json"
+          python3 tools/build_prompt_response_corpus.py verify "$run_dir/corpus.txt" \
+            | tee "$run_dir/corpus-verify.json"
+          ls -l "$run_dir/corpus.txt"
+
+      - name: Train in checkpointed sessions until the budget is spent
+        run: |
+          set -euo pipefail
+          corpus_bytes=$(stat -c %s "$RUN_DIR/corpus.txt")
+          if [ "$TRAIN_BYTES" -gt 0 ] && [ "$TRAIN_BYTES" -lt "$corpus_bytes" ]; then
+            target="$TRAIN_BYTES"
+          else
+            target="$corpus_bytes"
+          fi
+          echo "training target: ${target} of ${corpus_bytes} corpus bytes" | tee "$RUN_DIR/training-sessions.log"
+          deadline=$(( $(date +%s) + TRAIN_MINUTES * 60 ))
+          checkpoint="$RUN_DIR/model.vgfb"
+          offset=0
+          session=0
+          while [ "$offset" -lt "$target" ]; do
+            now=$(date +%s)
+            remaining=$(( deadline - now ))
+            if [ "$remaining" -le 120 ]; then
+              echo "time budget reached at byte ${offset}" | tee -a "$RUN_DIR/training-sessions.log"
+              break
+            fi
+            session_seconds=$(( SESSION_MINUTES * 60 ))
+            if [ "$session_seconds" -gt "$remaining" ]; then session_seconds="$remaining"; fi
+            session=$(( session + 1 ))
+            resume_args=()
+            if [ -f "$checkpoint" ]; then
+              resume_args=(--resume "$checkpoint" --start-byte "$offset")
+            fi
+            ./build-prompt-600m/vegai_prompt_engine train \
+              --corpus "$RUN_DIR/corpus.txt" \
+              --checkpoint "$checkpoint" \
+              --bytes "$target" \
+              --max-seconds "$session_seconds" \
+              --train-chunk-tokens "$CHUNK" \
+              --width "$WIDTH" \
+              --lr "$LR" \
+              --progress-every 500 \
+              ${resume_args[@]+"${resume_args[@]}"} | tee "$RUN_DIR/train-session-${session}.log"
+            offset=$(grep -o '"end_byte": [0-9]*' "$RUN_DIR/train-session-${session}.log" | tail -n 1 | grep -o '[0-9]*')
+            echo "session ${session} finished at byte ${offset}" | tee -a "$RUN_DIR/training-sessions.log"
+            if [ -z "$offset" ]; then echo "could not read end_byte from the session log"; exit 1; fi
+          done
+          echo "TRAINED_BYTES=${offset}" >> "$GITHUB_ENV"
+          python3 - "$RUN_DIR" "$offset" <<'PY'
+          import json, pathlib, sys
+          run_dir = pathlib.Path(sys.argv[1])
+          end = int(sys.argv[2])
+          sessions = sorted(run_dir.glob('train-session-*.log'))
+          records = []
+          for path in sessions:
+              text = path.read_text(encoding='utf-8', errors='replace')
+              start = text.find('CORPUS_TRAIN_JSON {')
+              if start < 0:
+                  continue
+              body = text[start + len('CORPUS_TRAIN_JSON '):]
+              depth, end_index = 0, None
+              for index, ch in enumerate(body):
+                  if ch == '{':
+                      depth += 1
+                  elif ch == '}':
+                      depth -= 1
+                      if depth == 0:
+                          end_index = index + 1
+                          break
+              if end_index:
+                  records.append(json.loads(body[:end_index]))
+          summary = {
+              'sessions': len(records),
+              'end_byte': end,
+              'corpus_bytes': records[-1]['corpus_bytes'] if records else None,
+              'total_tokens': sum(r['session_tokens'] for r in records),
+              'total_seconds': sum(r['seconds'] for r in records),
+              'mean_nll_last_session': records[-1]['mean_nll'] if records else None,
+              'numeric_ok': all(r['numeric_ok'] for r in records),
+              'per_session': records,
+          }
+          total_tokens = summary['total_tokens']
+          total_seconds = max(1, summary['total_seconds'])
+          summary['tokens_per_second'] = total_tokens / total_seconds
+          if summary['corpus_bytes'] and summary['tokens_per_second'] > 0:
+              summary['hours_for_full_corpus'] = summary['corpus_bytes'] / summary['tokens_per_second'] / 3600.0
+          (run_dir / 'training-summary.json').write_text(json.dumps(summary, indent=1) + '\n', encoding='utf-8')
+          print(json.dumps({k: v for k, v in summary.items() if k != 'per_session'}, indent=1))
+          PY
+
+      - name: Score prompt/response pairs on facts the run actually saw
+        run: |
+          set -euo pipefail
+          python3 tools/build_prompt_response_corpus.py filter-probe "$RUN_DIR/corpus.txt" \
+            --probe "$RUN_DIR/probe.tsv" --out "$RUN_DIR/probe-trained.tsv" \
+            --trained-bytes "${TRAINED_BYTES}" | tee "$RUN_DIR/probe-filter.json"
+          ./build-prompt-600m/vegai_prompt_engine probe \
+            --checkpoint "$RUN_DIR/model.vgfb" \
+            --probe "$RUN_DIR/probe-trained.tsv" \
+            --max-new 32 | tee "$RUN_DIR/probe.log"
+
+      - name: Ask the model a handful of prompts and record the responses
+        run: |
+          set -euo pipefail
+          : > "$RUN_DIR/ask.log"
+          head -n 3 "$RUN_DIR/probe-trained.tsv" | while IFS=$'\t' read -r kind prompt expected; do
+            echo "### expected: ${expected}" >> "$RUN_DIR/ask.log"
+            ./build-prompt-600m/vegai_prompt_engine ask \
+              --checkpoint "$RUN_DIR/model.vgfb" \
+              --prompt "${prompt}" --max-new 32 >> "$RUN_DIR/ask.log"
+          done
+          grep '^copy' "$RUN_DIR/probe-trained.tsv" | head -n 1 | while IFS=$'\t' read -r kind prompt expected; do
+            echo "### expected: ${expected}" >> "$RUN_DIR/ask.log"
+            ./build-prompt-600m/vegai_prompt_engine ask \
+              --checkpoint "$RUN_DIR/model.vgfb" \
+              --prompt "${prompt}" --max-new 32 >> "$RUN_DIR/ask.log"
+          done
+          grep '^next' "$RUN_DIR/probe-trained.tsv" | head -n 1 | while IFS=$'\t' read -r kind prompt expected; do
+            echo "### expected: ${expected}" >> "$RUN_DIR/ask.log"
+            ./build-prompt-600m/vegai_prompt_engine ask \
+              --checkpoint "$RUN_DIR/model.vgfb" \
+              --prompt "${prompt}" --max-new 32 >> "$RUN_DIR/ask.log"
+          done
+          cat "$RUN_DIR/ask.log"
+
+      - name: Collect the evidence bundle
+        if: always()
+        run: |
+          set -euo pipefail
+          ls -l "$RUN_DIR" || true
+          du -sh "$RUN_DIR" || true
+
+      - name: Upload the evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prompt-response-600mb-evidence
+          if-no-files-found: warn
+          retention-days: 30
+          path: |
+            ${{ env.RUN_DIR }}/corpus-generate.json
+            ${{ env.RUN_DIR }}/corpus-verify.json
+            ${{ env.RUN_DIR }}/corpus.manifest.json
+            ${{ env.RUN_DIR }}/probe.tsv
+            ${{ env.RUN_DIR }}/probe-trained.tsv
+            ${{ env.RUN_DIR }}/probe-filter.json
+            ${{ env.RUN_DIR }}/probe.log
+            ${{ env.RUN_DIR }}/ask.log
+            ${{ env.RUN_DIR }}/train-session-*.log
+            ${{ env.RUN_DIR }}/training-sessions.log
+            ${{ env.RUN_DIR }}/training-summary.json
+            ${{ env.RUN_DIR }}/model.vgfb
+            context-tests.log

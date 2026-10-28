@@ -197,6 +197,14 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
     target_compile_options(vegai_context_engine PRIVATE -ffree-line-length-none)
 endif()
 
+# Byte-level corpus trainer and prompt/response CLI: the same library with a
+# streaming data path.  No network, no tokenizer, no vocab file.
+add_executable(vegai_prompt_engine app/prompt_engine.f90)
+target_link_libraries(vegai_prompt_engine PRIVATE vegai_context)
+if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(vegai_prompt_engine PRIVATE -ffree-line-length-none)
+endif()
+
 if(VEGAI_BUILD_TESTS)
     include(CTest)
     enable_testing()
