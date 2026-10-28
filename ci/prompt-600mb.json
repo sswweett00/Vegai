@@ -1,4 +1,6 @@
 {
+  "enabled": false,
+  "note": "Set enabled=true to request a real run on the next push that touches the workflow, the corpus tool or app/prompt_engine.f90. Leave it false otherwise: a real run occupies the runner for hours.",
   "purpose": "One full 600 MB prompt/response training pass in a single job; see docs/FIXED_BUDGET_CONTEXT_ENGINE.md section 10",
   "corpus_bytes": 600000000,
   "facts": 2048,

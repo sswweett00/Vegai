@@ -58,6 +58,10 @@ on:
     branches: [arena/b8096ea0-vegai]
     paths:
       - '.github/workflows/prompt-response-600mb.yml'
+      # The checked-in request file is itself a reason to run: flipping
+      # `enabled` to true (or adding a resume offset) is how a real pass is
+      # asked for from an environment that cannot dispatch workflows.
+      - 'ci/prompt-600mb.json'
       - 'tools/build_prompt_response_corpus.py'
       - 'app/prompt_engine.f90'
 
@@ -108,6 +112,11 @@ jobs:
             python3 - "$config_file" >> "$GITHUB_ENV" <<'PY'
           import json, sys
           config = json.load(open(sys.argv[1], encoding='utf-8'))
+          if not config.get('enabled', False):
+              # A configuration file that does not ask to run must not spend a
+              # job: `enabled` has no default on purpose.
+              print('MODE=smoke-disabled-config', file=sys.stderr)
+              raise SystemExit(0)
           defaults = {
               'corpus_bytes': 600_000_000, 'train_bytes': 0, 'train_minutes': 300,
               'session_minutes': 25, 'facts': 2048, 'width': 32, 'heads': 2, 'ffn': 64,
