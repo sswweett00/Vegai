@@ -534,7 +534,9 @@ contains
       bytes = bytes + router_bytes + int(layer%table_size, int64) * 4_int64
    end function resident_bytes_of
 
-   integer(int64) function real64_bytes() result(bytes)
+   !> Pure, because it has no dummy arguments and no side effect: `bytes` is the
+   !> result name and must not be declared again in the specification part.
+   pure integer(int64) function real64_bytes() result(bytes)
 
       bytes = storage_size(1.0_real64) / 8_int64
    end function real64_bytes
