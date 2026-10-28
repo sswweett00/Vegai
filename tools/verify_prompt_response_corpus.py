@@ -124,7 +124,7 @@ def check_evidence_report(directory: Path) -> None:
     joined = "\n".join(text)
     check(any("corpus: 400,000 bytes" in line for line in text), "the report names the corpus size")
     check(any("deadbeef" in line for line in text), "the report keeps the corpus hash")
-    check(any("probe fact: 1/2" in line for line in text), "the report keeps the probe counts")
+    check(any("probe fact: exact 1/2" in line for line in text), "the report keeps the probe counts")
     check(any("-> 8000.0 tokens" in line for line in text), "the report keeps the learned reach")
     check("Soru: a nedir?" in joined, "the report keeps a real prompt/response pair")
 

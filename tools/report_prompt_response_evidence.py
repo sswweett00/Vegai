@@ -150,9 +150,16 @@ def render(evidence: dict) -> list[str]:
     if probe:
         for family in ("fact", "copy", "next"):
             entry = probe.get(family) or {}
-            lines.append(f"probe {family}: {entry.get('correct', 0)}/{entry.get('n', 0)} "
-                         f"({entry.get('accuracy', 0.0):.3f})")
-        lines.append(f"probe overall: {probe.get('accuracy', 0.0):.3f} over {probe.get('rows', 0)} rows")
+            detail = ""
+            if entry.get("correct_bytes") is not None:
+                detail = (f"; next-byte accuracy {entry.get('byte_accuracy', 0.0):.3f} over "
+                          f"{entry.get('correct_bytes', 0)} bytes")
+                if entry.get("mean_nll") is not None:
+                    detail += f", teacher-forced nll {entry['mean_nll']:.4f}"
+            lines.append(f"probe {family}: exact {entry.get('correct', 0)}/{entry.get('n', 0)} "
+                         f"({entry.get('accuracy', 0.0):.3f}){detail}")
+        lines.append(f"probe overall: exact {probe.get('accuracy', 0.0):.3f}, next-byte "
+                     f"{probe.get('byte_accuracy', 0.0):.3f} over {probe.get('rows', 0)} rows")
     else:
         lines.append("probe: report missing")
 

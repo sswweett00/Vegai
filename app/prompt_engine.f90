@@ -517,8 +517,14 @@ contains
       character(len=MAX_PROMPT) :: prompt
       integer(int32) :: status, unit_number, io_status, length, rows
       integer(int32) :: fact_total, fact_hit, copy_total, copy_hit, next_total, next_hit
+      integer(int32) :: fact_bytes, fact_byte_hits, copy_bytes, copy_byte_hits
+      integer(int32) :: next_bytes, next_byte_hits
+      real(real64) :: fact_nll, copy_nll, next_nll
       integer(int64) :: random_state
       logical :: first_field
+      character(len=MAX_RESPONSE) :: scoring
+      integer(int32) :: scoring_bytes, scoring_hits
+      real(real64) :: scoring_nll
 
       if (len_trim(checkpoint) == 0) call usage_and_stop('probe needs --checkpoint')
       call load_model(checkpoint, model, optimizer, loaded_config, counters)
@@ -533,6 +539,9 @@ contains
       fact_total = 0; fact_hit = 0
       copy_total = 0; copy_hit = 0
       next_total = 0; next_hit = 0
+      fact_bytes = 0; fact_byte_hits = 0; fact_nll = 0.0_real64
+      copy_bytes = 0; copy_byte_hits = 0; copy_nll = 0.0_real64
+      next_bytes = 0; next_byte_hits = 0; next_nll = 0.0_real64
       rows = 0_int32
       random_state = seed * 6364136223846793005_int64 + 1442695040888963407_int64
       write(output_unit, '(A)') 'PROBE_EXAMPLES ['
@@ -546,22 +555,41 @@ contains
          if (len_trim(prompt) == 0 .or. len_trim(expected) == 0) cycle
          rows = rows + 1_int32
          call respond(model, state, workspace, prompt, max_new, temperature, random_state, response, length)
+         ! Exact match on a greedy continuation is the headline number, but a
+         ! tiny model that emits one wrong byte scores zero there while clearly
+         ! ranking the right bytes above the rest.  The teacher-forced figures
+         ! below say how often the *next byte* was right and how surprised the
+         ! model was by the expected continuation, so the probe is informative
+         ! even when the exact-match rate is zero.
+         call score_continuation(model, state, workspace, prompt, expected, &
+                                 scoring, scoring_bytes, scoring_hits, scoring_nll)
          select case (trim(kind))
          case ('fact')
             fact_total = fact_total + 1_int32
             if (trim(response(1_int32:length)) == trim(expected)) fact_hit = fact_hit + 1_int32
+            fact_bytes = fact_bytes + scoring_bytes
+            fact_byte_hits = fact_byte_hits + scoring_hits
+            fact_nll = fact_nll + scoring_nll
          case ('copy')
             copy_total = copy_total + 1_int32
             if (trim(response(1_int32:length)) == trim(expected)) copy_hit = copy_hit + 1_int32
+            copy_bytes = copy_bytes + scoring_bytes
+            copy_byte_hits = copy_byte_hits + scoring_hits
+            copy_nll = copy_nll + scoring_nll
          case ('next')
             next_total = next_total + 1_int32
             if (trim(response(1_int32:length)) == trim(expected)) next_hit = next_hit + 1_int32
+            next_bytes = next_bytes + scoring_bytes
+            next_byte_hits = next_byte_hits + scoring_hits
+            next_nll = next_nll + scoring_nll
          end select
          if (rows <= 8_int32) then
             if (rows > 1_int32) write(output_unit, '(A)') ','
             write(output_unit, '(A,A,A,A,A,A,A)', advance='no') '  {"kind": "', trim(kind), '", "prompt": "', &
                trim(json_escape(trim(prompt))), '", "expected": "', trim(json_escape(trim(expected))), '", '
-            write(output_unit, '(A,A,A)', advance='no') '"response": "', trim(json_escape(response(1_int32:length))), '"}'
+            write(output_unit, '(A,A,A,A,A)', advance='no') '"response": "', &
+               trim(json_escape(response(1_int32:length))), '", "greedy": "', &
+               trim(json_escape(trim(scoring))), '"}'
          end if
       end do
       close(unit_number)
@@ -572,11 +600,13 @@ contains
       write(output_unit, '(A)') 'PROBE_JSON {'
       call field_text('probe_file', trim(probe_file), first_field)
       call field_int('rows', int(rows, int64), first_field)
-      call field_family('fact', fact_hit, fact_total, first_field)
-      call field_family('copy', copy_hit, copy_total, first_field)
-      call field_family('next', next_hit, next_total, first_field)
+      call field_family('fact', fact_hit, fact_total, fact_byte_hits, fact_bytes, fact_nll, first_field)
+      call field_family('copy', copy_hit, copy_total, copy_byte_hits, copy_bytes, copy_nll, first_field)
+      call field_family('next', next_hit, next_total, next_byte_hits, next_bytes, next_nll, first_field)
       call field_real('accuracy', score(fact_hit + copy_hit + next_hit, &
                       fact_total + copy_total + next_total), first_field)
+      call field_real('byte_accuracy', score(fact_byte_hits + copy_byte_hits + next_byte_hits, &
+                      fact_bytes + copy_bytes + next_bytes), first_field)
       call field_real('learned_reach', fbc_learned_horizon(model), first_field)
       write(output_unit, '(A)') ''
       write(output_unit, '(A)') '}'
@@ -672,6 +702,56 @@ contains
       text = transfer(signed, text)
    end function byte_character
 
+   !> Teacher-forced score of one expected response given the prompt.
+   !>
+   !> The prompt is fed first, so the logits after its last byte are the model's
+   !> prediction for the first expected byte.  Then each expected byte is fed
+   !> back (teacher forcing) and the next prediction is scored, so the outputs
+   !> are: the continuation the model would have written greedily, how many
+   !> bytes it ranked first, and the total negative log-likelihood of the true
+   !> continuation.  The greedy text repeats what `respond` produced for the
+   !> same prompt, which is the exact-match number, and the other two say how
+   !> close the model was when it did not match exactly.
+   subroutine score_continuation(model, state, workspace, prompt, expected, greedy, byte_total, &
+                                 byte_hits, nll)
+      type(fbc_model_t), intent(in) :: model
+      type(fbc_state_t), intent(inout) :: state
+      type(fbc_workspace_t), intent(inout) :: workspace
+      character(len=*), intent(in) :: prompt, expected
+      character(len=*), intent(out) :: greedy
+      integer(int32), intent(out) :: byte_total, byte_hits
+      real(real64), intent(out) :: nll
+      integer(int32) :: status, index, target, produced
+      real(real64), allocatable :: logits(:), hidden(:), dlogits(:)
+      real(real64) :: loss
+
+      allocate(logits(model%config%vocabulary_size), hidden(model%config%width), &
+               dlogits(model%config%vocabulary_size))
+      call fbc_state_reset(state, model, status)
+      greedy = ''
+      byte_total = 0_int32
+      byte_hits = 0_int32
+      nll = 0.0_real64
+      produced = 0_int32
+      do index = 1_int32, len(prompt)
+         call fbc_step(model, state, workspace, byte_of(prompt(index:index)), hidden, logits, status)
+      end do
+      do index = 1_int32, len_trim(expected)
+         target = byte_of(expected(index:index))
+         call fbc_loss_and_gradient(logits, target, dlogits, loss, status)
+         if (status /= FBC_OK) exit
+         nll = nll + loss
+         byte_total = byte_total + 1_int32
+         if (argmax_token(logits) == target) byte_hits = byte_hits + 1_int32
+         if (produced < len(greedy)) then
+            produced = produced + 1_int32
+            greedy(produced:produced) = byte_character(argmax_token(logits))
+         end if
+         call fbc_step(model, state, workspace, target, hidden, logits, status)
+      end do
+      deallocate(logits, hidden, dlogits)
+   end subroutine score_continuation
+
    pure function argmax_token(logits) result(token)
       real(real64), intent(in) :: logits(:)
       integer(int32) :: token, index
@@ -752,17 +832,15 @@ contains
       call json_member(name, trim(text), first)
    end subroutine field_int
 
-   subroutine field_real(name, value, first)
-      character(len=*), intent(in) :: name
+   !> Fortran writes 0.5 as ".500000" and JSON needs a leading zero; a
+   !> non-finite value is not representable in JSON at all, so it becomes null.
+   subroutine json_real_text(value, text)
       real(real64), intent(in) :: value
-      logical, intent(inout) :: first
-      character(len=64) :: scratch, text
+      character(len=*), intent(out) :: text
+      character(len=64) :: scratch
 
-      ! Fortran writes 0.5 as ".500000"; JSON needs a leading zero.  A
-      ! non-finite value is not representable in JSON at all, so it becomes
-      ! null instead of a token that breaks the reader.
       if (.not. ieee_is_finite(value)) then
-         call json_member(name, 'null', first)
+         text = 'null'
          return
       end if
       write(scratch, '(F0.6)') value
@@ -774,6 +852,22 @@ contains
       else
          text = trim(scratch)
       end if
+   end subroutine json_real_text
+
+   function int_text(value) result(text)
+      integer(int32), intent(in) :: value
+      character(len=16) :: text
+
+      write(text, '(I0)') value
+   end function int_text
+
+   subroutine field_real(name, value, first)
+      character(len=*), intent(in) :: name
+      real(real64), intent(in) :: value
+      logical, intent(inout) :: first
+      character(len=32) :: text
+
+      call json_real_text(value, text)
       call json_member(name, trim(text), first)
    end subroutine field_real
 
@@ -790,26 +884,27 @@ contains
    end subroutine field_bool
 
    !> `"fact": {"correct": n, "accuracy": r, "n": n}` -- one probe family.
-   subroutine field_family(name, hits, total, first)
+   subroutine field_family(name, hits, total, byte_hits, byte_total, nll_total, first)
       character(len=*), intent(in) :: name
-      integer(int32), intent(in) :: hits, total
+      integer(int32), intent(in) :: hits, total, byte_hits, byte_total
+      real(real64), intent(in) :: nll_total
       logical, intent(inout) :: first
-      character(len=96) :: text, hits_text, total_text, score_text
-      real(real64) :: value
-      character(len=64) :: scratch
+      character(len=256) :: text, byte_text
+      character(len=32) :: score_text, byte_score_text, nll_text
 
-      write(hits_text, '(I0)') hits
-      write(total_text, '(I0)') total
-      value = score(hits, total)
-      write(scratch, '(F0.6)') value
-      scratch = adjustl(scratch)
-      if (scratch(1:1) == '.') then
-         score_text = '0'//trim(scratch)
+      write(byte_text, '(I0)') byte_total
+      call json_real_text(score(hits, total), score_text)
+      call json_real_text(score(byte_hits, byte_total), byte_score_text)
+      if (byte_total > 0_int32) then
+         call json_real_text(nll_total / real(byte_total, real64), nll_text)
       else
-         score_text = trim(scratch)
+         nll_text = 'null'
       end if
-      text = '{"correct": '//trim(hits_text)//', "accuracy": '//trim(score_text)// &
-             ', "n": '//trim(total_text)//'}'
+      text = '{"correct": '//int_text(hits)//', "accuracy": '//trim(score_text)// &
+             ', "n": '//int_text(total)// &
+             ', "correct_bytes": '//trim(byte_text)// &
+             ', "byte_accuracy": '//trim(byte_score_text)// &
+             ', "mean_nll": '//trim(nll_text)//'}'
       call json_member(name, trim(text), first)
    end subroutine field_family
 
