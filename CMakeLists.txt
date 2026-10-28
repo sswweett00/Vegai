@@ -42,6 +42,7 @@ add_library(vegai_hds STATIC
     src/fortran_integrity.f90
     src/fortran_quality_gate.f90
     src/fortran_control.f90
+    src/sparse_expert_layer.f90
 )
 
 set_target_properties(vegai_hds PROPERTIES
@@ -148,6 +149,12 @@ target_link_libraries(vegai_dialogue_eval PRIVATE vegai_hds)
 add_executable(vegai_control app/control.f90)
 target_link_libraries(vegai_control PRIVATE vegai_hds)
 
+# Extreme-capacity sparse expert layer: an LSH-routed, hash-materialised layer
+# whose active parameters, active FLOPs and per-step wall clock do not depend on
+# total capacity.  The benchmark is the in-engine proof of that invariance.
+add_executable(vegai_sparse_layer_bench app/sparse_layer_bench.f90)
+target_link_libraries(vegai_sparse_layer_bench PRIVATE vegai_hds)
+
 if(VEGAI_BUILD_TESTS)
     include(CTest)
     enable_testing()
@@ -163,6 +170,19 @@ if(VEGAI_BUILD_TESTS)
     endif()
 
     add_test(NAME vegai_fortran_properties COMMAND vegai_tests)
+
+    # Contract tests for the sparse layer: routing determinism, page locality,
+    # update locality, replay determinism, capacity invariance, trainability.
+    add_executable(vegai_sparse_layer_tests test/sparse_layer_tests.f90)
+    target_link_libraries(vegai_sparse_layer_tests PRIVATE vegai_hds)
+    if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(vegai_sparse_layer_tests PRIVATE -ffree-line-length-none)
+    endif()
+    add_test(NAME vegai_sparse_layer_contract COMMAND vegai_sparse_layer_tests)
+    # The benchmark asserts flat latency across 1e3 -> 1e9 parameters, so it is a
+    # test as well as a measurement: a regression in step complexity fails it.
+    add_test(NAME vegai_sparse_layer_bench COMMAND vegai_sparse_layer_bench)
+    set_tests_properties(vegai_sparse_layer_bench PROPERTIES TIMEOUT 300)
     # The default native control-plane contract contains no Python process:
     # profile/report rendering, bounded resource arithmetic, and a real
     # same-host vocabulary/train/checkpoint/load smoke all run in Fortran.

@@ -35,7 +35,8 @@ SOURCES := src/hyper_types.f90 src/tokenless_field.f90 src/text_tokenizer.f90 sr
            src/symbolic_memory.f90 src/resonator_network.f90 src/reasoning_core.f90 \
            src/hdc_pretraining.f90 src/turkish_text.f90 src/dialogue_retrieval.f90 src/fortran_integrity.f90 \
            src/fortran_quality_gate.f90 \
-           src/fortran_control.f90
+           src/fortran_control.f90 \
+           src/sparse_expert_layer.f90
 APP := app/main.f90
 PRETRAIN_APP := app/pretrain.f90
 CAUSAL_LM_APP := app/causal_lm.f90
@@ -45,7 +46,9 @@ FIELD_APP := app/field.f90
 CHAT_APP := app/chat.f90
 DIALOGUE_EVAL_APP := app/dialogue_eval.f90
 CONTROL_APP := app/control.f90
+SPARSE_APP := app/sparse_layer_bench.f90
 TEST_SOURCES := test/test_support.f90 test/test_all.f90
+SPARSE_TEST_SOURCES := test/sparse_layer_tests.f90
 ENGINE := $(BUILD_DIR)/hds_engine
 PRETRAIN := $(BUILD_DIR)/vegai_pretrain
 CAUSAL_LM := $(BUILD_DIR)/vegai_causal_lm
@@ -55,6 +58,8 @@ FIELD := $(BUILD_DIR)/vegai_field
 CHAT := $(BUILD_DIR)/vegai_chat
 DIALOGUE_EVAL := $(BUILD_DIR)/vegai_dialogue_eval
 CONTROL := $(BUILD_DIR)/vegai_control
+SPARSE_BENCH := $(BUILD_DIR)/vegai_sparse_layer_bench
+SPARSE_TESTS := $(BUILD_DIR)/vegai_sparse_layer_tests
 TEST_BINARY := $(BUILD_DIR)/vegai_tests
 # Runtime-only exact-size benchmark artifacts are intentionally ignored by Git.
 FIXTURE_9MIB_CORPUS ?= corpora/synthetic_hdc_9mib.txt
@@ -65,10 +70,10 @@ FIXTURE_9MIB_REPORT ?= pretraining-runs/synthetic_hdc_9mib.json
 # remain ignored. Prefer the dedicated GitHub workflow for CI-hosted evidence.
 CONTINUOUS_900_RUN_DIR ?= pretraining-runs/synthetic_900mb_then_90mb
 
-.PHONY: all engine pretrain causal-lm neural-lm neural-pretrain field chat dialogue-eval control test fortran-check portable-runtime-check run run-pretrain run-causal-lm run-neural-lm run-neural-pretrain run-field run-chat run-control check field-check optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check turkish-dialogue-data-check quality-check continuous-quality-check attested-pretrain-check lookup-cache-compare fixture-9mib verify-fixture-9mib pretrain-9mib pretrain-900mb-continuous clean clean-all debug portable native portable-test native-test
+.PHONY: all engine pretrain causal-lm neural-lm neural-pretrain field chat dialogue-eval control test fortran-check portable-runtime-check run run-pretrain run-causal-lm run-neural-lm run-neural-pretrain run-field run-chat run-control check field-check sparse-bench sparse-tests optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check turkish-dialogue-data-check quality-check continuous-quality-check attested-pretrain-check lookup-cache-compare fixture-9mib verify-fixture-9mib pretrain-9mib pretrain-900mb-continuous clean clean-all debug portable native portable-test native-test
 
 # Default target: portable optimized GNU binaries without host-only ISA flags.
-all: engine pretrain causal-lm neural-lm neural-pretrain field chat dialogue-eval control
+all: engine pretrain causal-lm neural-lm neural-pretrain field chat dialogue-eval control sparse-bench
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)/mod
@@ -118,6 +123,17 @@ control: $(CONTROL)
 $(CONTROL): $(SOURCES) $(CONTROL_APP) | $(BUILD_DIR)
 	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(SOURCES) $(CONTROL_APP) -o $@ $(LDFLAGS)
 
+sparse-bench: $(SPARSE_BENCH)
+
+$(SPARSE_BENCH): $(SOURCES) $(SPARSE_APP) | $(BUILD_DIR)
+	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(SOURCES) $(SPARSE_APP) -o $@ $(LDFLAGS)
+
+sparse-tests: $(SPARSE_TESTS)
+	$(SPARSE_TESTS)
+
+$(SPARSE_TESTS): $(SOURCES) $(SPARSE_TEST_SOURCES) | $(BUILD_DIR)
+	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(SOURCES) $(SPARSE_TEST_SOURCES) -o $@ $(LDFLAGS)
+
 $(TEST_BINARY): $(SOURCES) $(TEST_SOURCES) | $(BUILD_DIR)
 	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(SOURCES) $(TEST_SOURCES) -o $@ $(LDFLAGS)
 
@@ -126,8 +142,9 @@ test: $(TEST_BINARY)
 
 # Default Fortran-only verification: no Python interpreter, shell inventory,
 # or optional accelerator SDK is invoked by these executable paths.
-fortran-check: $(TEST_BINARY) $(CONTROL)
+fortran-check: $(TEST_BINARY) $(CONTROL) $(SPARSE_TESTS)
 	OMP_NUM_THREADS=$${OMP_NUM_THREADS:-2} $(TEST_BINARY)
+	OMP_NUM_THREADS=$${OMP_NUM_THREADS:-2} $(SPARSE_TESTS)
 	$(CONTROL) profile --format json
 	OMP_NUM_THREADS=$${OMP_NUM_THREADS:-2} $(CONTROL) smoke examples/corpus/toy_hdc_corpus.txt \
 	  "$(BUILD_DIR)/fortran-control-smoke.vgai"
