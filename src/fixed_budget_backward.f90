@@ -235,7 +235,8 @@ contains
       gradient%output_bias = gradient%output_bias + dlogits
       do component = 1_int32, width
          gradient%token_embedding(component, workspace%token) = &
-            gradient%token_embedding(component, workspace%token) + workspace%hidden(component) * dlogits
+            gradient%token_embedding(component, workspace%token) + &
+            workspace%hidden(component) * dlogits(workspace%token)
       end do
       dn = matmul(model%token_embedding, dlogits)
 
