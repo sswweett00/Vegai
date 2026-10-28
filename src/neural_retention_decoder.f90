@@ -386,22 +386,6 @@ contains
       end do
    end subroutine project_heads
 
-   ! Row-parallel dense product: row r of the output is the dot product of row r
-   ! of the weights with the input, exactly as MATMUL forms it, but spread over
-   ! the team.  Only used where the caller's own guard has already decided the
-   ! shape is big enough for the fork to pay for itself.
-   subroutine project_rows(weights, input, output)
-      real(real32), intent(in) :: weights(:, :), input(:)
-      real(real32), intent(out) :: output(:)
-      integer :: row
-
-      !$omp parallel do schedule(static) private(row)
-      do row = 1, size(weights, 1)
-         output(row) = dot_product(weights(row, :), input)
-      end do
-      !$omp end parallel do
-   end subroutine project_rows
-
    pure integer(int32) function cache_position(state, ordinal) result(position)
       type(neural_decoder_state_t), intent(in) :: state
       integer(int32), intent(in) :: ordinal
@@ -566,27 +550,25 @@ contains
       call rms_normalize(residual, model%ffn_rms, model%config%rms_epsilon, attention_normalized, local_status)
       if (local_status /= NRD_OK) then; status = local_status; return; end if
       ! 384 sigmoid + 384 tanh per token is the transcendental bill of the
-      ! gate.  Fusing them (tanh(x) = 2*sigmoid(2x) - 1, or a one-exponential
+      ! gate.
+      ! The two branches were also parallelised per row (project_rows, a
+      ! !$omp parallel do of dot_product over the rows of each gated branch and of
+      ! the output projection) on the theory that two sections leave half of a
+      ! four-thread team idle.  Measured in one run against the commit before it,
+      ! the decoder step got 32% slower (79.9 -> 105.8 us per prediction in the
+      ! baseline and per-token arms of run 40662831639, the same model and shape),
+      ! which is beyond the ~14% drift the same code shows between arms of one
+      ! run.  Per-row DOT_PRODUCT calls lose to the single blocked MATMUL above.  Fusing them (tanh(x) = 2*sigmoid(2x) - 1, or a one-exponential
       ! tanh) does not pay here: see the note above on the same measurement.
       ! The two gated branches are independent; their product is the widest
       ! dense work of a step, so they are the natural place to use the second
       ! thread.  Same MATMUL, same operands, disjoint results.
-      ! When the team runs anyway, the FFN is the one place with enough work to
-      ! use all of it: 2 x ffn_width x width multiply-adds, against 96 for a
-      ! head projection.  Capping this at two sections left the other lanes idle
-      ! for the widest dense region of the step, so the two gated branches are
-      ! split into row ranges and distributed over the team.  Each row of a
-      ! gated branch is an independent length-width dot product, so every output
-      ! element is computed by the same expression in the same order as before:
-      ! the result is bit-identical at any thread count, and the same holds for
-      ! the output projection below.
-      if (model%config%ffn_width >= 256) then
-         call project_rows(model%ffn_gate, attention_normalized, gate)
-         call project_rows(model%ffn_value, attention_normalized, value_gate)
-      else
-         gate = matmul(model%ffn_gate, attention_normalized)
-         value_gate = matmul(model%ffn_value, attention_normalized)
-      end if
+      !$omp parallel sections if(model%config%ffn_width >= 256)
+      !$omp section
+      gate = matmul(model%ffn_gate, attention_normalized)
+      !$omp section
+      value_gate = matmul(model%ffn_value, attention_normalized)
+      !$omp end parallel sections
       ! Elementwise and independent, and it is the transcendental bill of the
       ! step (one sigmoid plus one tanh per FFN lane), so it is spread over the
       ! team as well.  Each lane keeps its own expression, so the values do not
@@ -596,12 +578,7 @@ contains
          ffn_input(component) = stable_sigmoid(gate(component)) * tanh(value_gate(component))
       end do
       !$omp end parallel do
-      if (model%config%ffn_width >= 256) then
-         call project_rows(model%ffn_output, ffn_input, hidden)
-         hidden = residual + hidden
-      else
-         hidden = residual + matmul(model%ffn_output, ffn_input)
-      end if
+      hidden = residual + matmul(model%ffn_output, ffn_input)
       if (.not. all(ieee_is_finite(hidden))) then
          status = NRD_ERR_NUMERIC
          return
