@@ -58,11 +58,13 @@ jobs:
       - name: Measure sparse extreme-capacity invariance (1e3 -> 1e9 parameters)
         run: |
           set -euo pipefail
+          ./build-ci/vegai_sparse_layer_tests | tee sparse-layer-tests.txt
           ./build-ci/vegai_sparse_layer_bench | tee sparse-layer-bench.txt
           detail=$(grep 'SPARSE_LAYER_BENCH_JSON:' sparse-layer-bench.txt | cut -d' ' -f2- | cut -c1-1900)
           {
             echo '## Sparse extreme-capacity layer'
             echo '```text'
+            cat sparse-layer-tests.txt
             cat sparse-layer-bench.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
