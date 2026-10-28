@@ -291,7 +291,7 @@ contains
       type(fbc_gradient_t) :: gradient
       type(fbc_optimizer_t) :: optimizer
       type(fbc_metrics_t) :: metrics
-      integer(int32) :: status, unit_number, io_status, block_bytes
+      integer(int32) :: status, unit_number, io_status, block_bytes, block_tokens
       integer(int32), allocatable :: tokens(:)
       integer(int8), allocatable :: raw(:)
       integer(int64) :: consumed, file_bytes, stopped_at, started, now, elapsed
@@ -307,8 +307,8 @@ contains
       bounded = byte_limit > 0_int64 .and. byte_limit < file_bytes
       if (bounded) file_bytes = byte_limit
       if (start_byte >= file_bytes) call usage_and_stop('--start-byte is at or past the training end')
-      if (file_bytes - start_byte < int(chunk, int64) + 1_int64) &
-         call usage_and_stop('the training range is smaller than one block')
+      if (file_bytes - start_byte < 2_int64) &
+         call usage_and_stop('the training range is too short to predict one byte')
 
       if (len_trim(resume) > 0) then
          ! Continue an existing run.  The checkpoint carries the model, the
@@ -344,25 +344,29 @@ contains
       updates_before = metrics%updates
       metrics%numeric_ok = .true.
       call wall_clock(started)
-      do while (consumed + int(chunk, int64) <= file_bytes)
+      do while (consumed + 1_int64 < file_bytes)
+         ! The last block of a range may be shorter than --train-chunk-tokens:
+         ! consuming the tail is what makes a chained set of sessions cover the
+         ! whole file instead of stopping one block short of the end.
+         block_tokens = int(min(int(chunk, int64), file_bytes - consumed - 1_int64), int32)
          if (max_updates > 0_int64 .and. metrics%updates >= max_updates) exit
          if (max_seconds > 0_int64) then
             call wall_clock(now)
             if (now - started >= max_seconds) exit
          end if
          ! Explicit position: the block overlap is expressed once, here.
-         read(unit_number, pos=consumed + 1_int64, iostat=io_status) raw(1_int32:chunk + 1_int32)
+         read(unit_number, pos=consumed + 1_int64, iostat=io_status) raw(1_int32:block_tokens + 1_int32)
          if (io_status /= 0) exit
-         do block_bytes = 1_int32, chunk + 1_int32
+         do block_bytes = 1_int32, block_tokens + 1_int32
             tokens(block_bytes) = iand(int(raw(block_bytes), int32), 255_int32)
          end do
-         call fbc_train_stream(model, optimizer, state, tokens, chunk, chunk, update_config, &
-                              workspace, gradient, metrics, status)
+         call fbc_train_stream(model, optimizer, state, tokens, block_tokens, block_tokens, &
+                              update_config, workspace, gradient, metrics, status)
          if (status /= FBT_OK) then
             write(error_unit, '(A,I0,A,I0)') 'training stopped at byte ', consumed, ' with status ', status
             exit
          end if
-         consumed = consumed + int(chunk, int64)
+         consumed = consumed + int(block_tokens, int64)
          if (progress_every > 0_int64 .and. mod(metrics%updates, progress_every) == 0_int64) then
             call wall_clock(now)
             write(output_unit, '(A,I0,A,I0,A,F0.4,A,F0.1,A,I0)') 'progress: bytes ', consumed, &
