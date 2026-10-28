@@ -233,11 +233,15 @@ jobs:
             echo "session ${session} finished at byte ${offset}" | tee -a "$RUN_DIR/training-sessions.log"
           done
           echo "TRAINED_BYTES=${offset}" >> "$GITHUB_ENV"
-          python3 tools/summarise_prompt_response_run.py "$RUN_DIR" \
-            --output "$RUN_DIR/training-summary.json" || {
-              echo "::error title=summary failed::$(ls -l "$RUN_DIR" | tr '\n' '~' | cut -c1-900)"
-              exit 1
-            }
+          if ! python3 tools/summarise_prompt_response_run.py "$RUN_DIR" \
+                 --output "$RUN_DIR/training-summary.json" > "$RUN_DIR/summary.log" 2>&1; then
+            cat "$RUN_DIR/summary.log"
+            echo "::error title=summary failed::$(tail -n 12 "$RUN_DIR/summary.log" | tr '\n' '~' | cut -c1-900)"
+            for session_file in "$RUN_DIR"/train-session-*.log; do
+              echo "::error title=session $(basename "$session_file")::$(tail -c 700 "$session_file" | tr '\n' '~')"
+            done
+            exit 1
+          fi
 
       - name: Score prompt/response pairs on facts the run actually saw
         run: |
