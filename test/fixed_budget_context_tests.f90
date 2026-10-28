@@ -592,7 +592,7 @@ contains
       type(fbc_gradient_t) :: gradient
       type(fbc_optimizer_t) :: optimizer
       type(fbc_metrics_t) :: metrics
-      integer(int32), parameter :: token_count = 4096_int32, chunk = 32_int32
+      integer(int32), parameter :: token_count = 6144_int32, chunk = 16_int32
       integer(int32) :: status
       integer(int32), allocatable :: tokens(:)
       logical, allocatable :: mask(:)
@@ -603,7 +603,7 @@ contains
       config%vocabulary_size = 8_int32      ! a five-way deterministic successor rule
       config%width = 16_int32               ! width 32 would waste CI time here
       config%ffn_width = 32_int32
-      update_config%learning_rate = 5.0e-3_real64
+      update_config%learning_rate = 8.0e-3_real64
 
       allocate(tokens(token_count + 1_int32), mask(token_count))
       call fbc_generate_tokens(FBC_TASK_MARKOV, token_count, config%vocabulary_size, 16_int32, 3_int64, &
@@ -653,7 +653,7 @@ contains
       type(fbc_optimizer_t) :: optimizer
       type(fbc_metrics_t) :: metrics
       integer(int32), parameter :: token_count = 128_int32, chunk = 32_int32
-      integer(int32) :: status
+      integer(int32) :: status, index
       integer(int32), allocatable :: tokens(:)
       logical, allocatable :: mask(:)
       real(real64) :: slots_before(32, 16), scales_before(3), channels_before(3), salience_before
@@ -675,11 +675,17 @@ contains
       call fbc_optimizer_init(optimizer, config, status)
       allocate(hidden(config%width), logits(config%vocabulary_size), dlogits(config%vocabulary_size))
 
+      ! Warm the stream first: a fresh store has every slot identical, so the
+      ! read is then independent of the keys and their gradient is exactly zero
+      ! for a legitimate reason. Four tokens make the slots distinct.
+      do index = 1_int32, 4
+         call fbc_step(model, state, workspace, tokens(index), hidden, logits, status)
+      end do
       ! One single-token backward proves that every new component sits on a
       ! differentiable path, including the slot write (write-then-read).
       call fbc_gradient_zero(gradient)
-      call fbc_step(model, state, workspace, tokens(1_int32), hidden, logits, status)
-      call fbc_loss_and_gradient(logits, tokens(2_int32), dlogits, loss, status)
+      call fbc_step(model, state, workspace, tokens(5_int32), hidden, logits, status)
+      call fbc_loss_and_gradient(logits, tokens(6_int32), dlogits, loss, status)
       call fbc_step_backward(model, state, workspace, dlogits, gradient, status)
       call check(sum(abs(gradient%slot_key_proj)) > 0.0_real64, &
                  'the slot write-key projection receives a gradient')
