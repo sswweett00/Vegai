@@ -72,6 +72,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::notice title=Sparse layer capacity invariance::${detail}"
 
+      # The scale ladder lives in .github/workflows/context-quality.yml: it
+      # needs 18 training runs and its own check run, and this job is already
+      # the correctness gate rather than the quality benchmark.
       - name: Measure fixed-budget context invariance (window 32 -> 1e12)
         run: |
           set -euo pipefail
@@ -92,59 +95,6 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::notice title=Fixed-budget context invariance::${detail}"
-
-      - name: Compare memory-scale counts at an equal budget
-        run: |
-          set -euo pipefail
-          : > context-quality.txt
-          for task in needle markov; do
-            for scales in 2 4 8; do
-              for seed in 11 12 13; do
-                ./build-ci/vegai_context_engine quality \
-                  --window 8192 --local-window 32 --memory-slots 64 \
-                  --memory-scales "$scales" --width 32 --heads 2 --ffn 64 --vocab 32 \
-                  --tokens 32768 --eval-tokens 6144 --train-chunk-tokens 64 \
-                  --task "$task" --distance 256 --seed "$seed" --eval-seed 991 \
-                  | grep 'CONTEXT_QUALITY_JSON:' | sed 's/^CONTEXT_QUALITY_JSON: //' \
-                  >> context-quality.txt
-              done
-            done
-          done
-          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
-          import collections, json, statistics
-          rows = [json.loads(line) for line in open('context-quality.txt') if line.strip()]
-          grouped = collections.defaultdict(list)
-          for row in rows:
-              grouped[(row['task'], row['memory_scales'])].append(row)
-          print()
-          print('## Memory-scale ladder (held-out, 3 seeds)')
-          print()
-          print('| task | scales | params | state bytes | held-out NLL (mean) | NLL (sd) | recall |')
-          print('| --- | --- | --- | --- | --- | --- | --- |')
-          names = {1: 'needle', 2: 'markov'}
-          for key in sorted(grouped):
-              task, scales = key
-              runs = grouped[key]
-              nll = [r['eval_nll'] for r in runs]
-              recall = [r['recall'] for r in runs]
-              print(f"| {names.get(task, task)} | {scales} | {runs[0]['parameters']} | "
-                    f"{runs[0]['state_bytes']} | {statistics.mean(nll):.4f} | "
-                    f"{(statistics.stdev(nll) if len(nll) > 1 else 0.0):.4f} | "
-                    f"{statistics.mean(recall):.4f} |")
-          print()
-          print('```json')
-          for line in open('context-quality.txt'):
-              print(line.strip())
-          print('```')
-          PY
-          detail=$(python3 -c "
-          import collections, json, statistics
-          rows=[json.loads(l) for l in open('context-quality.txt') if l.strip()]
-          g=collections.defaultdict(list)
-          for r in rows: g[(r['task'], r['memory_scales'])].append(r['eval_nll'])
-          print(' '.join(f'{t}/s{s}:{statistics.mean(v):.4f}' for (t,s),v in sorted(g.items())))
-          " | cut -c1-1900)
-          echo "::notice title=Memory-scale ladder (held-out nll)::${detail}"
 
       - name: Surface native test diagnostics on failure
         if: failure()
