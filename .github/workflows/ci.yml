@@ -43,8 +43,10 @@ jobs:
           else
             # Avoid losing the actual compiler error to GitHub's log-size
             # truncation when parallel builds also emit legacy warnings.
-            grep -Ein 'fatal error|error:|warning:|ninja: build stopped' compile-output.txt | tail -n 160 || true
-            detail=$(grep -Ein 'fatal error|error:|ninja: build stopped' compile-output.txt | tail -n 12 | tr '\n' ' ' | cut -c1-1900)
+            # gfortran writes "src/file.f90:line:col:" *before* the message, so
+            # the leading context is what names the file and the source line.
+            grep -Ein -B3 -A1 'fatal error|error:|warning:|ninja: build stopped' compile-output.txt | tail -n 160 || true
+            detail=$(grep -Ein -B3 -A1 'fatal error|error:|ninja: build stopped' compile-output.txt | tail -n 24 | tr '\n' ' ' | cut -c1-1900)
             if [ -z "$detail" ]; then
               detail=$(tail -n 24 compile-output.txt | tr '\n' ' ' | cut -c1-1900)
             fi
