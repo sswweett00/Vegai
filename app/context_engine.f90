@@ -9,6 +9,8 @@
 !    evaluate  --checkpoint FILE ...        held-out NLL / ppl / recall
 !    bench     ...                           per-token latency + throughput
 !    sweep     ...                           the invariance table across horizons
+!    quality   ...                           train, then measure held-out NLL
+!                                            and remote recall on a fresh stream
 !
 !  Option semantics (deliberately separated)
 !    --window              logical context horizon, int64, tokens.  It only
@@ -38,7 +40,7 @@ program context_engine
    character(len=32) :: command
    type(fbc_config_t) :: config
    type(fbc_update_config_t) :: update_config
-   integer(int64) :: seed, token_budget
+   integer(int64) :: seed, token_budget, eval_budget, eval_seed
    integer(int32) :: task, distance, chunk_tokens, status
    character(len=512) :: checkpoint_path
    logical :: have_checkpoint
@@ -54,18 +56,24 @@ program context_engine
    config%local_window = 32_int32
    config%memory_scales = 4_int32
    config%memory_slots = 64_int32
-   config%logical_horizon = 32_int64
+   ! 8192 = 32-token physical window x 256.  With four scales this is the
+   ! shortest horizon whose decay ladder is genuinely multi-scale
+   ! (tau = 32 / 203 / 1290 / 8192); at horizon = local window all four scales
+   ! collapse onto the same lambda.
+   config%logical_horizon = 8192_int64
    update_config%learning_rate = 1.0e-3_real64
    seed = 20261028_int64
    token_budget = 4096_int64
+   eval_budget = 2048_int64
+   eval_seed = 991_int64
    task = FBC_TASK_NEEDLE
    distance = 64_int32
    chunk_tokens = 256_int32
    checkpoint_path = ''
    have_checkpoint = .false.
 
-   call parse_options(config, update_config, seed, token_budget, task, distance, chunk_tokens, &
-                      checkpoint_path, have_checkpoint)
+   call parse_options(config, update_config, seed, token_budget, eval_budget, eval_seed, task, &
+                      distance, chunk_tokens, checkpoint_path, have_checkpoint)
 
    select case (trim(command))
    case ('plan')
@@ -83,7 +91,10 @@ program context_engine
    case ('bench')
       call command_bench(config, update_config, seed, token_budget, task, distance, chunk_tokens)
    case ('sweep')
-      call command_sweep(update_config, seed, token_budget, task, distance, chunk_tokens)
+      call command_sweep(config, update_config, seed, token_budget, task, distance, chunk_tokens)
+   case ('quality')
+      call command_quality(config, update_config, seed, token_budget, eval_budget, eval_seed, task, &
+                           distance, chunk_tokens)
    case default
       call usage_and_stop('unknown command '//trim(command))
    end select
@@ -98,14 +109,15 @@ contains
    end subroutine read_command
 
    subroutine print_usage_and_stop()
-      write(output_unit, '(A)') 'usage: context_engine <plan|inspect|train|evaluate|bench|sweep> [options]'
-      write(output_unit, '(A)') '  --window N              logical horizon in tokens (int64, >= 1)'
+      write(output_unit, '(A)') 'usage: context_engine <plan|inspect|train|evaluate|bench|sweep|quality> [options]'
+      write(output_unit, '(A)') '  --window N              logical horizon in tokens (int64, >= 1, default 8192)'
       write(output_unit, '(A)') '  --local-window N        physical ring buffer, 1..4096 (default 32)'
       write(output_unit, '(A)') '  --memory-scales N       fixed decay scales, 1..16 (default 4)'
       write(output_unit, '(A)') '  --memory-slots N        fixed information slots, 1..1024 (default 64)'
       write(output_unit, '(A)') '  --train-chunk-tokens N  predictions per update, 1..8192 (default 256)'
       write(output_unit, '(A)') '  --width N --heads N --ffn N --vocab N'
       write(output_unit, '(A)') '  --seed N --lr X --tokens N --task markov|needle --distance N'
+      write(output_unit, '(A)') '  --eval-tokens N --eval-seed N   held-out stream for `quality`'
       write(output_unit, '(A)') '  --checkpoint FILE'
       stop 0
    end subroutine print_usage_and_stop
@@ -119,11 +131,11 @@ contains
 
    !> Parses trailing `--key value` pairs.  Unknown keys and malformed values
    !> are usage errors; nothing is silently ignored.
-   subroutine parse_options(config, update_config, seed, token_budget, task, distance, chunk_tokens, &
-                            checkpoint_path, have_checkpoint)
+   subroutine parse_options(config, update_config, seed, token_budget, eval_budget, eval_seed, task, &
+                            distance, chunk_tokens, checkpoint_path, have_checkpoint)
       type(fbc_config_t), intent(inout) :: config
       type(fbc_update_config_t), intent(inout) :: update_config
-      integer(int64), intent(inout) :: seed, token_budget
+      integer(int64), intent(inout) :: seed, token_budget, eval_budget, eval_seed
       integer(int32), intent(inout) :: task, distance, chunk_tokens
       character(len=*), intent(inout) :: checkpoint_path
       logical, intent(inout) :: have_checkpoint
@@ -131,8 +143,8 @@ contains
 
       index = 2_int32
       do while (index <= command_argument_count())
-         call parse_pair(index, config, update_config, seed, token_budget, task, distance, chunk_tokens, &
-                         checkpoint_path, have_checkpoint, parse_status)
+         call parse_pair(index, config, update_config, seed, token_budget, eval_budget, eval_seed, task, &
+                         distance, chunk_tokens, checkpoint_path, have_checkpoint, parse_status)
          if (parse_status /= 0_int32) call usage_and_stop('malformed or unknown option')
          index = index + 2_int32
       end do
@@ -141,12 +153,12 @@ contains
          call usage_and_stop('--train-chunk-tokens out of range')
    end subroutine parse_options
 
-   subroutine parse_pair(index, config, update_config, seed, token_budget, task, distance, chunk_tokens, &
-                         checkpoint_path, have_checkpoint, parse_status)
+   subroutine parse_pair(index, config, update_config, seed, token_budget, eval_budget, eval_seed, task, &
+                         distance, chunk_tokens, checkpoint_path, have_checkpoint, parse_status)
       integer(int32), intent(in) :: index
       type(fbc_config_t), intent(inout) :: config
       type(fbc_update_config_t), intent(inout) :: update_config
-      integer(int64), intent(inout) :: seed, token_budget
+      integer(int64), intent(inout) :: seed, token_budget, eval_budget, eval_seed
       integer(int32), intent(inout) :: task, distance, chunk_tokens
       character(len=*), intent(inout) :: checkpoint_path
       logical, intent(inout) :: have_checkpoint
@@ -184,8 +196,12 @@ contains
          call fbc_parse_count(value, 1_int32, 1000000_int32, distance, parse_status)
       case ('--tokens')
          call fbc_parse_horizon(value, token_budget, parse_status)
+      case ('--eval-tokens')
+         call fbc_parse_horizon(value, eval_budget, parse_status)
       case ('--seed')
          read(value, *, iostat=parse_status) seed
+      case ('--eval-seed')
+         read(value, *, iostat=parse_status) eval_seed
       case ('--lr')
          read(value, *, iostat=parse_status) update_config%learning_rate
          if (parse_status == 0 .and. (update_config%learning_rate <= 0.0_real64 .or. &
@@ -514,8 +530,122 @@ contains
       end if
    end subroutine run_benchmark
 
-   !> The evidence table: identical physical shapes, four horizons.
-   subroutine command_sweep(update_config, seed, token_budget, task, distance, chunk_tokens)
+   !----------------------------------------------------------------------------
+   !  quality: train, then measure a held-out stream
+   !----------------------------------------------------------------------------
+
+   !> Trains on one synthetic stream and measures a *different* one.  The two
+   !> streams come from different seeds, so the reported NLL is held-out and the
+   !> recall counts answers the optimiser never saw.  One machine line per run
+   !> (`CONTEXT_QUALITY_JSON`) so a scale ladder can be compared by parsing.
+   !>
+   !> Everything that could differ between two runs is printed: horizon, physical
+   !> shape, parameter count, stream-state bytes and the token budgets.  A
+   !> comparison that changes one of those is not a comparison of what it claims.
+   subroutine command_quality(config, update_config, seed, token_budget, eval_budget, eval_seed, &
+                              task, distance, chunk_tokens)
+      type(fbc_config_t), intent(in) :: config
+      type(fbc_update_config_t), intent(in) :: update_config
+      integer(int64), intent(in) :: seed, token_budget, eval_budget, eval_seed
+      integer(int32), intent(in) :: task, distance, chunk_tokens
+      type(fbc_model_t) :: model
+      type(fbc_state_t) :: state
+      type(fbc_workspace_t) :: workspace
+      type(fbc_gradient_t) :: gradient
+      type(fbc_optimizer_t) :: optimizer
+      type(fbc_metrics_t) :: metrics
+      type(fbc_plan_t) :: plan
+      integer(int32) :: status, train_tokens, held_out_tokens
+      integer(int32), allocatable :: tokens(:)
+      logical, allocatable :: answer_mask(:)
+      real(real64) :: started, elapsed, train_nll, eval_nll, recall
+      integer(int64) :: answer_count
+
+      if (.not. fbc_config_is_valid(config)) call usage_and_stop('configuration is not valid')
+      call fbc_plan(config, plan)
+      train_tokens = int(min(token_budget, 20000000_int64), int32)
+      held_out_tokens = int(min(eval_budget, 20000000_int64), int32)
+      call fbc_model_init(model, config, seed, status)
+      if (status /= FBC_OK) call usage_and_stop('model initialisation failed')
+      call fbc_state_init(state, model, status)
+      if (status /= FBC_OK) call usage_and_stop('stream state allocation failed')
+      call fbc_workspace_init(workspace, model, status)
+      if (status /= FBC_OK) call usage_and_stop('workspace allocation failed')
+      call fbc_gradient_init(gradient, model, status)
+      if (status /= FBC_OK) call usage_and_stop('gradient allocation failed')
+      call fbc_optimizer_init(optimizer, config, status)
+      if (status /= 0_int32) call usage_and_stop('optimizer allocation failed')
+
+      ! ---- training stream -------------------------------------------------
+      allocate(tokens(train_tokens + 1_int32), answer_mask(train_tokens))
+      call fbc_generate_tokens(task, train_tokens, config%vocabulary_size, distance, seed, &
+                               tokens(1_int32:train_tokens), answer_mask, status)
+      if (status /= FBC_OK) call usage_and_stop('token generation failed for this vocabulary/distance')
+      tokens(train_tokens + 1_int32) = 1_int32
+      call wall_clock(started)
+      call fbc_train_stream(model, optimizer, state, tokens, train_tokens, chunk_tokens, update_config, &
+                            workspace, gradient, metrics, status)
+      call wall_clock(elapsed)
+      elapsed = elapsed - started
+      if (status /= FBT_OK) then
+         write(error_unit, '(A,I0)') 'training failed, status ', status
+         stop 1_int32
+      end if
+      train_nll = metrics%loss_sum / real(max(1_int64, metrics%tokens), real64)
+      deallocate(tokens, answer_mask)
+
+      ! ---- held-out stream --------------------------------------------------
+      allocate(tokens(held_out_tokens + 1_int32), answer_mask(held_out_tokens))
+      call fbc_generate_tokens(task, held_out_tokens, config%vocabulary_size, distance, eval_seed, &
+                               tokens(1_int32:held_out_tokens), answer_mask, status)
+      if (status /= FBC_OK) call usage_and_stop('held-out token generation failed')
+      tokens(held_out_tokens + 1_int32) = 1_int32
+      call fbc_state_reset(state, model, status)
+      call fbc_evaluate_stream(model, state, tokens, held_out_tokens, answer_mask, workspace, eval_nll, &
+                               recall, answer_count, status)
+      if (status /= FBT_OK) then
+         write(error_unit, '(A,I0)') 'evaluation failed, status ', status
+         stop 1_int32
+      end if
+
+      write(output_unit, '(A)') '== fixed-budget context quality =='
+      write(output_unit, '(A,I0)') 'logical horizon        : ', plan%logical_horizon
+      write(output_unit, '(A,I0,A,I0)') 'memory scales / slots  : ', plan%memory_scales, '/', &
+         plan%memory_slots
+      write(output_unit, '(A,I0)') 'parameters             : ', plan%parameter_count
+      write(output_unit, '(A,I0)') 'stream state bytes     : ', plan%state_bytes_real64
+      write(output_unit, '(A,I0,A,I0)') 'train / held-out tokens: ', int(train_tokens, int64), held_out_tokens
+      write(output_unit, '(A,F0.4)') 'train nll (in-sample)  : ', train_nll
+      write(output_unit, '(A,F0.4)') 'held-out nll           : ', eval_nll
+      write(output_unit, '(A,F0.4,A,I0,A)') 'held-out remote recall : ', recall, ' over ', answer_count, &
+         ' queries'
+      write(output_unit, '(A,F0.2,A)') 'training seconds       : ', elapsed, ' s'
+      write(output_unit, '(A)') 'CONTEXT_QUALITY_JSON: {"horizon":'//i64_text(plan%logical_horizon)// &
+         ',"memory_scales":'//i64_text(int(plan%memory_scales, int64))// &
+         ',"memory_slots":'//i64_text(int(plan%memory_slots, int64))// &
+         ',"local_window":'//i64_text(int(plan%local_window, int64))// &
+         ',"parameters":'//i64_text(plan%parameter_count)// &
+         ',"state_bytes":'//i64_text(plan%state_bytes_real64)// &
+         ',"task":'//i64_text(int(task, int64))//',"seed":'//i64_text(seed)// &
+         ',"eval_seed":'//i64_text(eval_seed)// &
+         ',"train_tokens":'//i64_text(int(train_tokens, int64))// &
+         ',"eval_tokens":'//i64_text(int(held_out_tokens, int64))// &
+         ',"train_nll":'//r64_text(train_nll)//',"eval_nll":'//r64_text(eval_nll)// &
+         ',"recall":'//r64_text(recall)//',"answers":'//i64_text(answer_count)//'}'
+
+      call fbc_model_destroy(model)
+      call fbc_state_destroy(state)
+      call fbc_workspace_destroy(workspace)
+      call fbc_gradient_destroy(gradient)
+      call fbc_optimizer_destroy(optimizer)
+      deallocate(tokens, answer_mask)
+   end subroutine command_quality
+
+   !> The evidence table: one physical shape, four horizons.  Every option the
+   !> caller set (width, local window, scales, slots) is kept; only the horizon
+   !> moves, because only the horizon is supposed to cost nothing.
+   subroutine command_sweep(template, update_config, seed, token_budget, task, distance, chunk_tokens)
+      type(fbc_config_t), intent(in) :: template
       type(fbc_update_config_t), intent(in) :: update_config
       integer(int64), intent(in) :: seed, token_budget
       integer(int32), intent(in) :: task, distance, chunk_tokens
@@ -524,13 +654,7 @@ contains
       integer(int32) :: index
 
       do index = 1_int32, size(horizons, kind=int32)
-         config%vocabulary_size = 32_int32
-         config%width = 32_int32
-         config%heads = 2_int32
-         config%ffn_width = 64_int32
-         config%local_window = 32_int32
-         config%memory_scales = 4_int32
-         config%memory_slots = 64_int32
+         config = template
          config%logical_horizon = horizons(index)
          call run_benchmark(config, update_config, seed, token_budget, task, distance, chunk_tokens, .true.)
       end do

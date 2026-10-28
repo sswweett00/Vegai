@@ -256,6 +256,27 @@ if(VEGAI_BUILD_TESTS)
              COMMAND vegai_context_engine plan --local-window 999999)
     set_tests_properties(vegai_context_cli_rejects_bad_local_window PROPERTIES WILL_FAIL TRUE)
 
+    # The default horizon is a design decision and is asserted, not assumed.
+    add_test(NAME vegai_context_cli_plan_defaults
+             COMMAND vegai_context_engine plan)
+    set_tests_properties(vegai_context_cli_plan_defaults PROPERTIES
+        PASS_REGULAR_EXPRESSION "\"logical_horizon\":8192")
+
+    # Train, then measure a held-out stream: NLL and remote recall.  Two runs so
+    # the wider decay ladder (--memory-scales 8) is exercised on the real path.
+    add_test(NAME vegai_context_cli_quality
+             COMMAND vegai_context_engine quality --tokens 512 --eval-tokens 256
+                     --train-chunk-tokens 32 --width 16 --heads 2 --ffn 32 --vocab 16
+                     --local-window 8 --memory-scales 2 --memory-slots 8 --distance 32)
+    set_tests_properties(vegai_context_cli_quality PROPERTIES TIMEOUT 600
+        PASS_REGULAR_EXPRESSION "CONTEXT_QUALITY_JSON: ")
+    add_test(NAME vegai_context_cli_quality_scales8
+             COMMAND vegai_context_engine quality --tokens 512 --eval-tokens 256
+                     --train-chunk-tokens 32 --width 16 --heads 2 --ffn 32 --vocab 16
+                     --local-window 8 --memory-scales 8 --memory-slots 8 --distance 32)
+    set_tests_properties(vegai_context_cli_quality_scales8 PROPERTIES TIMEOUT 600
+        PASS_REGULAR_EXPRESSION "\"memory_scales\":8")
+
     # Sweep: identical physical shape across four horizons.
     add_test(NAME vegai_context_cli_sweep
              COMMAND vegai_context_engine sweep --tokens 96 --train-chunk-tokens 16

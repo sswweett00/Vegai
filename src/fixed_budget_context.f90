@@ -105,7 +105,10 @@ module fixed_budget_context
       integer(int32) :: memory_scales = 4_int32
       integer(int32) :: memory_slots = 64_int32
       ! Semantic reach, in tokens.  int64 because 1e12 does not fit an int32.
-      integer(int64) :: logical_horizon = 32_int64
+      ! The default matches a 32-token physical window times 256, which is the
+      ! shortest horizon at which the four default scales are genuinely
+      ! distinct: tau = 32 / 203 / 1290 / 8192 instead of four copies of 32.
+      integer(int64) :: logical_horizon = 8192_int64
       real(real64) :: rms_epsilon = 1.0e-6_real64
       ! Decay of the slot salience accumulator (a fixed hyper-parameter, not a
       ! horizon function: it describes how fast "importance" is forgotten).

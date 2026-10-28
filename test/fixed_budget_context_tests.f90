@@ -33,6 +33,7 @@ program fixed_budget_context_tests
 
    integer(int32) :: checks = 0_int32, failures = 0_int32
 
+   call test_defaults
    call test_option_parsing
    call test_horizon_invariance
    call test_no_future_leakage
@@ -95,6 +96,43 @@ contains
       config%memory_slots = 16_int32
       config%logical_horizon = horizon
    end function small_config
+
+   !----------------------------------------------------------------------------
+   !  0. Defaults
+   !----------------------------------------------------------------------------
+   !> The default horizon is pinned here because it is a design decision, not an
+   !> accident: at 8192 with a 32-token physical window the four default scales
+   !> are 32 / 203 / 1290 / 8192.  At horizon = local_window all four collapse to
+   !> the same lambda and the multi-scale channel is dead weight.
+   subroutine test_defaults
+      type(fbc_config_t) :: config
+      real(real64) :: decay(8)
+      real(real64) :: effective
+      logical :: clamped
+      integer(int32) :: index
+      logical :: distinct
+
+      config = fbc_config_t()
+      call check(config%logical_horizon == 8192_int64, 'the default logical horizon is 8192')
+      call check(config%local_window == 32_int32, 'the default physical window is 32')
+      call check(config%memory_scales >= 2_int32, 'the default is multi-scale')
+      call check(fbc_config_is_valid(config), 'the default configuration is valid')
+
+      ! The default ladder must actually be a ladder.
+      call fbc_configure_scales(config, decay, effective, clamped)
+      distinct = .true.
+      do index = 2_int32, config%memory_scales
+         if (abs(decay(index) - decay(index - 1_int32)) < 1.0e-9_real64) distinct = .false.
+      end do
+      call check(distinct, 'the default scales are genuinely distinct decay constants')
+      call check(.not. clamped, 'the default horizon needs no arithmetic clamping')
+      call check(effective == 8192.0_real64, 'the default effective horizon is 8192 tokens')
+
+      ! And the degenerate case must stay visible: horizon = window collapses.
+      call fbc_configure_scales(small_config(8_int64), decay, effective, clamped)
+      call check(abs(decay(1_int32) - decay(size(decay, kind=int32))) < 1.0e-12_real64, &
+                 'horizon equal to the local window does collapse every scale onto one lambda')
+   end subroutine test_defaults
 
    !----------------------------------------------------------------------------
    !  1. Strict option parsing
