@@ -109,7 +109,9 @@ yoktur (HTTP 403), bu yüzden **gerçek koşu `ci/prompt-600mb.json` dosyasıyla
 istenir**: push geldiğinde workflow bu dosyayı okur; dosya yoksa beş dakikalık
 bir duman testi koşar. Aynı dosya `resume_run_id` / `resume_start_byte` alanları
 ile **önceki bir koşunun kontrol noktasından devam** edebilir; devam ederken
-korpus SHA-256'sı eşleşmezse koşu reddedilir.
+korpus SHA-256'sı eşleşmezse koşu reddedilir. Dosya `enabled: true` demedikçe koşu başlatılmaz:
+varsayılan `false`'tur, çünkü gerçek bir geçiş saatler sürer ve kazara
+tetiklenmemelidir.
 
 ## 5. Ölçüm: ne sayılıyor
 
