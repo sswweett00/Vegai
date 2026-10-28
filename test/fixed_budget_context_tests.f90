@@ -625,7 +625,7 @@ contains
       config%vocabulary_size = 8_int32      ! a five-way deterministic successor rule
       config%width = 16_int32               ! width 32 would waste CI time here
       config%ffn_width = 32_int32
-      update_config%learning_rate = 5.0e-3_real64
+      update_config%learning_rate = 2.0e-3_real64
 
       allocate(tokens(token_count + 1_int32), mask(token_count))
       call fbc_generate_tokens(FBC_TASK_MARKOV, token_count, config%vocabulary_size, 16_int32, 3_int64, &

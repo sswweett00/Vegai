@@ -9,8 +9,14 @@
 !      e_c   <- rho e_c + (1 - rho) mean(g_c * g_c)        per-column energy
 !      a     <- <g_c, v_c>                                 agreement probe
 !      gamma <- momentum  (momentum * restart_damp when a < 0)
-!      v_c   <- gamma v_c + g_c
+!      v_c   <- gamma v_c + (1 - gamma) g_c                momentum as an EMA
 !      p_c   <- (1 - lr * wd) p_c - lr * v_c / (sqrt(e_c) + eps)
+!
+!  The momentum is an exponential moving average, not a running sum: a sum
+!  amplifies the displacement by 1/(1 - momentum) = 10x, which makes the
+!  learning rate mean ten times what it says.  With the EMA the displacement
+!  per update is of the order of the learning rate whatever the gradient scale,
+!  because the energy is estimated from the same gradients.
 !
 !  State is one velocity array plus one energy per column, not the two full
 !  moment arrays AdamW needs, and there is no per-element transcendental.
@@ -30,7 +36,7 @@ module fixed_budget_optimizer
    !> describe the update rule, not the context architecture, so a checkpoint
    !> can carry a new optimiser setting without redefining the model.
    type, public :: fbc_update_config_t
-      real(real64) :: learning_rate = 3.0e-3_real64
+      real(real64) :: learning_rate = 1.0e-3_real64
       real(real64) :: momentum = 0.9_real64
       real(real64) :: energy_decay = 0.95_real64
       real(real64) :: restart_damp = 0.5_real64
@@ -309,7 +315,8 @@ contains
          if (agreement < 0.0_real64) gamma = config%momentum * config%restart_damp
          step = config%learning_rate / (sqrt(max(energy(column), 0.0_real64)) + config%epsilon)
          do row = 1_int32, size(parameter, 1, kind=int32)
-            velocity(row, column) = gamma * velocity(row, column) + grad(row, column)
+            velocity(row, column) = gamma * velocity(row, column) + &
+                                    (1.0_real64 - config%momentum) * grad(row, column)
             parameter(row, column) = (1.0_real64 - config%learning_rate * config%weight_decay) * &
                                      parameter(row, column) - step * velocity(row, column)
          end do
@@ -332,7 +339,7 @@ contains
       gamma = config%momentum
       if (agreement < 0.0_real64) gamma = config%momentum * config%restart_damp
       step = config%learning_rate / (sqrt(max(energy, 0.0_real64)) + config%epsilon)
-      velocity = gamma * velocity + grad
+      velocity = gamma * velocity + (1.0_real64 - config%momentum) * grad
       parameter = (1.0_real64 - config%learning_rate * config%weight_decay) * parameter - step * velocity
       parameter_updates = parameter_updates + int(size(parameter, kind=int32), int64)
    end subroutine nova_vector
@@ -350,7 +357,7 @@ contains
       gamma = config%momentum
       if (agreement < 0.0_real64) gamma = config%momentum * config%restart_damp
       step = config%learning_rate / (sqrt(max(energy, 0.0_real64)) + config%epsilon)
-      velocity = gamma * velocity + grad
+      velocity = gamma * velocity + (1.0_real64 - config%momentum) * grad
       parameter = (1.0_real64 - config%learning_rate * config%weight_decay) * parameter - step * velocity
       parameter_updates = parameter_updates + 1_int64
    end subroutine nova_scalar

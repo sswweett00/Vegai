@@ -55,7 +55,7 @@ program context_engine
    config%memory_scales = 4_int32
    config%memory_slots = 64_int32
    config%logical_horizon = 32_int64
-   update_config%learning_rate = 3.0e-3_real64
+   update_config%learning_rate = 1.0e-3_real64
    seed = 20261028_int64
    token_budget = 4096_int64
    task = FBC_TASK_NEEDLE
