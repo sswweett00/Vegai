@@ -29,6 +29,7 @@
 !==============================================================================
 program context_engine
    use, intrinsic :: iso_fortran_env, only: int32, int64, real64, output_unit, error_unit
+   use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
    use fixed_budget_context
    use fixed_budget_backward
    use fixed_budget_optimizer
@@ -616,11 +617,11 @@ contains
       write(output_unit, '(A,I0)') 'stream state bytes     : ', plan%state_bytes_real64
       write(output_unit, '(A,I0,A,I0)') 'train / held-out tokens: ', int(train_tokens, int64), '/', &
          int(held_out_tokens, int64)
-      write(output_unit, '(A,F0.4)') 'train nll (in-sample)  : ', train_nll
-      write(output_unit, '(A,F0.4)') 'held-out nll           : ', eval_nll
-      write(output_unit, '(A,F0.4,A,I0,A)') 'held-out remote recall : ', recall, ' over ', answer_count, &
-         ' queries'
-      write(output_unit, '(A,F0.2,A)') 'training seconds       : ', elapsed, ' s'
+      write(output_unit, '(A,A)') 'train nll (in-sample)  : ', r64_text(train_nll)
+      write(output_unit, '(A,A)') 'held-out nll           : ', r64_text(eval_nll)
+      write(output_unit, '(A,A,A,I0,A)') 'held-out remote recall : ', r64_text(recall), ' over ', &
+         answer_count, ' queries'
+      write(output_unit, '(A,A,A)') 'training seconds       : ', r64_text(elapsed), ' s'
       write(output_unit, '(A)') 'CONTEXT_QUALITY_JSON: {"horizon":'//i64_text(plan%logical_horizon)// &
          ',"memory_scales":'//i64_text(int(plan%memory_scales, int64))// &
          ',"memory_slots":'//i64_text(int(plan%memory_slots, int64))// &
@@ -720,13 +721,41 @@ contains
       text = trim(buffer)
    end function i64_text
 
+   !> A JSON number for `value`.
+   !>
+   !> gfortran's `F0.d` writes a fractional value without its leading zero
+   !> (`.0764`), which is not a JSON number, so the zero is restored.  JSON also
+   !> has no NaN or infinity, so a non-finite value becomes `null` rather than an
+   !> unparseable token.  Values below the fixed-point resolution switch to
+   !> exponential form, which JSON accepts.
    function r64_text(value) result(text)
       real(real64), intent(in) :: value
       character(len=:), allocatable :: text
-      character(len=48) :: buffer
+      character(len=64) :: buffer
+      character(len=:), allocatable :: trimmed
 
-      write(buffer, '(F0.4)') value
-      text = trim(buffer)
+      if (.not. ieee_is_finite(value)) then
+         text = 'null'
+         return
+      end if
+      if (value /= 0.0_real64 .and. abs(value) < 1.0e-4_real64) then
+         write(buffer, '(ES16.8)') value
+         text = trim(adjustl(buffer))
+         return
+      end if
+      write(buffer, '(F0.6)') value
+      trimmed = trim(adjustl(buffer))
+      if (trimmed(1:1) == '.') then
+         text = '0'//trimmed
+      else if (len(trimmed) >= 2) then
+         if (trimmed(1:2) == '-.') then
+            text = '-0'//trimmed(2:)
+         else
+            text = trimmed
+         end if
+      else
+         text = trimmed
+      end if
    end function r64_text
 
 end program context_engine

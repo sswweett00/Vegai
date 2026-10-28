@@ -268,8 +268,10 @@ if(VEGAI_BUILD_TESTS)
              COMMAND vegai_context_engine quality --tokens 512 --eval-tokens 256
                      --train-chunk-tokens 32 --width 16 --heads 2 --ffn 32 --vocab 16
                      --local-window 8 --memory-scales 2 --memory-slots 8 --distance 32)
+    # The machine line must be parseable JSON: a fractional value has to keep its
+    # leading zero, which gfortran's F0.d drops unless the writer restores it.
     set_tests_properties(vegai_context_cli_quality PROPERTIES TIMEOUT 600
-        PASS_REGULAR_EXPRESSION "CONTEXT_QUALITY_JSON: ")
+        PASS_REGULAR_EXPRESSION "CONTEXT_QUALITY_JSON: .*\"eval_nll\":[-0-9]")
     add_test(NAME vegai_context_cli_quality_scales8
              COMMAND vegai_context_engine quality --tokens 512 --eval-tokens 256
                      --train-chunk-tokens 32 --width 16 --heads 2 --ffn 32 --vocab 16
