@@ -49,6 +49,13 @@ CONTROL_APP := app/control.f90
 SPARSE_APP := app/sparse_layer_bench.f90
 TEST_SOURCES := test/test_support.f90 test/test_all.f90
 SPARSE_TEST_SOURCES := test/sparse_layer_tests.f90
+# Fixed-budget context engine: its own library, its own CLI, its own contract
+# suite.  Kept separate from the HDC stack so it can be built and diagnosed on
+# its own (`make context-engine context-tests`).
+CONTEXT_SOURCES := src/fixed_budget_context.f90 src/fixed_budget_backward.f90 \
+                   src/fixed_budget_optimizer.f90 src/fixed_budget_training.f90
+CONTEXT_APP := app/context_engine.f90
+CONTEXT_TEST_SOURCES := test/fixed_budget_context_tests.f90
 ENGINE := $(BUILD_DIR)/hds_engine
 PRETRAIN := $(BUILD_DIR)/vegai_pretrain
 CAUSAL_LM := $(BUILD_DIR)/vegai_causal_lm
@@ -60,6 +67,8 @@ DIALOGUE_EVAL := $(BUILD_DIR)/vegai_dialogue_eval
 CONTROL := $(BUILD_DIR)/vegai_control
 SPARSE_BENCH := $(BUILD_DIR)/vegai_sparse_layer_bench
 SPARSE_TESTS := $(BUILD_DIR)/vegai_sparse_layer_tests
+CONTEXT_ENGINE := $(BUILD_DIR)/vegai_context_engine
+CONTEXT_TESTS := $(BUILD_DIR)/vegai_context_tests
 TEST_BINARY := $(BUILD_DIR)/vegai_tests
 # Runtime-only exact-size benchmark artifacts are intentionally ignored by Git.
 FIXTURE_9MIB_CORPUS ?= corpora/synthetic_hdc_9mib.txt
@@ -70,10 +79,10 @@ FIXTURE_9MIB_REPORT ?= pretraining-runs/synthetic_hdc_9mib.json
 # remain ignored. Prefer the dedicated GitHub workflow for CI-hosted evidence.
 CONTINUOUS_900_RUN_DIR ?= pretraining-runs/synthetic_900mb_then_90mb
 
-.PHONY: all engine pretrain causal-lm neural-lm neural-pretrain field chat dialogue-eval control test fortran-check portable-runtime-check run run-pretrain run-causal-lm run-neural-lm run-neural-pretrain run-field run-chat run-control check field-check sparse-bench sparse-tests optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check turkish-dialogue-data-check quality-check continuous-quality-check attested-pretrain-check lookup-cache-compare fixture-9mib verify-fixture-9mib pretrain-9mib pretrain-900mb-continuous clean clean-all debug portable native portable-test native-test
+.PHONY: all engine pretrain causal-lm neural-lm neural-pretrain field chat dialogue-eval control context-engine context-tests test fortran-check portable-runtime-check run run-pretrain run-causal-lm run-neural-lm run-neural-pretrain run-field run-chat run-control check field-check sparse-bench sparse-tests optimizer-check tool-check release-check release-registry-check data-check capability-check lmm-check dialogue-check turkish-dialogue-data-check quality-check continuous-quality-check attested-pretrain-check lookup-cache-compare fixture-9mib verify-fixture-9mib pretrain-9mib pretrain-900mb-continuous clean clean-all debug portable native portable-test native-test
 
 # Default target: portable optimized GNU binaries without host-only ISA flags.
-all: engine pretrain causal-lm neural-lm neural-pretrain field chat dialogue-eval control sparse-bench
+all: engine pretrain causal-lm neural-lm neural-pretrain field chat dialogue-eval control sparse-bench context-engine
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)/mod
@@ -133,6 +142,17 @@ sparse-tests: $(SPARSE_TESTS)
 
 $(SPARSE_TESTS): $(SOURCES) $(SPARSE_TEST_SOURCES) | $(BUILD_DIR)
 	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(SOURCES) $(SPARSE_TEST_SOURCES) -o $@ $(LDFLAGS)
+
+context-engine: $(CONTEXT_ENGINE)
+
+$(CONTEXT_ENGINE): $(CONTEXT_SOURCES) $(CONTEXT_APP) | $(BUILD_DIR)
+	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(CONTEXT_SOURCES) $(CONTEXT_APP) -o $@ $(LDFLAGS)
+
+context-tests: $(CONTEXT_TESTS)
+	$(CONTEXT_TESTS)
+
+$(CONTEXT_TESTS): $(CONTEXT_SOURCES) $(CONTEXT_TEST_SOURCES) | $(BUILD_DIR)
+	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(CONTEXT_SOURCES) $(CONTEXT_TEST_SOURCES) -o $@ $(LDFLAGS)
 
 $(TEST_BINARY): $(SOURCES) $(TEST_SOURCES) | $(BUILD_DIR)
 	$(FC) $(FFLAGS) -J$(BUILD_DIR)/mod -I$(BUILD_DIR)/mod $(SOURCES) $(TEST_SOURCES) -o $@ $(LDFLAGS)

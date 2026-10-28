@@ -155,6 +155,48 @@ target_link_libraries(vegai_control PRIVATE vegai_hds)
 add_executable(vegai_sparse_layer_bench app/sparse_layer_bench.f90)
 target_link_libraries(vegai_sparse_layer_bench PRIVATE vegai_hds)
 
+# ---------------------------------------------------------------------------
+# Fixed-budget context engine.
+#
+# Exact causal attention over a physical ring buffer, multi-scale recurrent
+# memory and a fixed-capacity slot store, with learnable fixed-cost gating.  The
+# logical horizon (--window) is a *semantic* knob: it selects the recurrent
+# decay constants and appears in no allocation, no loop bound and no attention
+# scan length.  It lives in its own library so it compiles and is diagnosed
+# independently of the HDC stack, and so its tests can be run on their own.
+# ---------------------------------------------------------------------------
+add_library(vegai_context STATIC
+    src/fixed_budget_context.f90
+    src/fixed_budget_backward.f90
+    src/fixed_budget_optimizer.f90
+    src/fixed_budget_training.f90
+)
+set_target_properties(vegai_context PROPERTIES
+    Fortran_MODULE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules-context"
+)
+target_include_directories(vegai_context PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/modules-context>
+)
+if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(vegai_context PUBLIC -std=f2023)
+    target_compile_options(vegai_context PRIVATE
+        -Wall -Wextra -Wimplicit-interface -Wcharacter-truncation
+        -ffree-line-length-none
+    )
+elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
+    if(WIN32)
+        target_compile_options(vegai_context PUBLIC /stand:f23)
+    else()
+        target_compile_options(vegai_context PUBLIC -stand f23)
+    endif()
+endif()
+
+add_executable(vegai_context_engine app/context_engine.f90)
+target_link_libraries(vegai_context_engine PRIVATE vegai_context)
+if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(vegai_context_engine PRIVATE -ffree-line-length-none)
+endif()
+
 if(VEGAI_BUILD_TESTS)
     include(CTest)
     enable_testing()
@@ -183,6 +225,62 @@ if(VEGAI_BUILD_TESTS)
     # test as well as a measurement: a regression in step complexity fails it.
     add_test(NAME vegai_sparse_layer_bench COMMAND vegai_sparse_layer_bench)
     set_tests_properties(vegai_sparse_layer_bench PROPERTIES TIMEOUT 300)
+
+    # Fixed-budget context engine contract suite: option parsing, horizon
+    # invariance of every structural counter, no future leakage, chunk/stream
+    # equivalence, determinism, long-stream finiteness, a finite-difference
+    # check of the analytic backward pass, loss decrease under training, memory
+    # component training, 93-token remote influence, and the checkpoint
+    # round trip including explicit legacy rejection.
+    add_executable(vegai_context_tests test/fixed_budget_context_tests.f90)
+    target_link_libraries(vegai_context_tests PRIVATE vegai_context)
+    if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(vegai_context_tests PRIVATE -ffree-line-length-none)
+    endif()
+    add_test(NAME vegai_context_contract COMMAND vegai_context_tests)
+    set_tests_properties(vegai_context_contract PROPERTIES TIMEOUT 900)
+
+    # The CLI is part of the contract: a bad horizon must fail loudly, and the
+    # plan/sweep/bench lines must be machine readable.
+    add_test(NAME vegai_context_cli_plan
+             COMMAND vegai_context_engine plan --window 32)
+    add_test(NAME vegai_context_cli_plan_huge_window
+             COMMAND vegai_context_engine plan --window 1000000000000)
+    add_test(NAME vegai_context_cli_rejects_zero_window
+             COMMAND vegai_context_engine plan --window 0)
+    set_tests_properties(vegai_context_cli_rejects_zero_window PROPERTIES WILL_FAIL TRUE)
+    add_test(NAME vegai_context_cli_rejects_negative_window
+             COMMAND vegai_context_engine plan --window -8)
+    set_tests_properties(vegai_context_cli_rejects_negative_window PROPERTIES WILL_FAIL TRUE)
+    add_test(NAME vegai_context_cli_rejects_bad_local_window
+             COMMAND vegai_context_engine plan --local-window 999999)
+    set_tests_properties(vegai_context_cli_rejects_bad_local_window PROPERTIES WILL_FAIL TRUE)
+
+    # Sweep: identical physical shape across four horizons.
+    add_test(NAME vegai_context_cli_sweep
+             COMMAND vegai_context_engine sweep --tokens 96 --train-chunk-tokens 16
+                     --width 16 --heads 2 --ffn 32 --vocab 16
+                     --local-window 8 --memory-scales 2 --memory-slots 8)
+    set_tests_properties(vegai_context_cli_sweep PROPERTIES TIMEOUT 300)
+
+    # Train -> inspect -> evaluate round trip through a real checkpoint file.
+    add_test(NAME vegai_context_cli_train
+             COMMAND vegai_context_engine train --tokens 256 --train-chunk-tokens 32
+                     --width 16 --heads 2 --ffn 32 --vocab 16 --local-window 8
+                     --memory-scales 2 --memory-slots 8 --window 1000000
+                     --checkpoint ${CMAKE_CURRENT_BINARY_DIR}/context-smoke.vgfb)
+    set_tests_properties(vegai_context_cli_train PROPERTIES
+        TIMEOUT 300 FIXTURES_SETUP context_checkpoint)
+    add_test(NAME vegai_context_cli_inspect
+             COMMAND vegai_context_engine inspect
+                     ${CMAKE_CURRENT_BINARY_DIR}/context-smoke.vgfb)
+    set_tests_properties(vegai_context_cli_inspect PROPERTIES
+        FIXTURES_REQUIRED context_checkpoint)
+    add_test(NAME vegai_context_cli_evaluate
+             COMMAND vegai_context_engine evaluate --tokens 256 --task needle --distance 32
+                     --checkpoint ${CMAKE_CURRENT_BINARY_DIR}/context-smoke.vgfb)
+    set_tests_properties(vegai_context_cli_evaluate PROPERTIES
+        TIMEOUT 300 FIXTURES_REQUIRED context_checkpoint)
     # The default native control-plane contract contains no Python process:
     # profile/report rendering, bounded resource arithmetic, and a real
     # same-host vocabulary/train/checkpoint/load smoke all run in Fortran.
