@@ -369,10 +369,86 @@ pozisyonunda dağılım düzgüne yakın. Bunun nedeni ölçülebilir: şablon
 yerleşiminde içerik baytları akışın ~%20'si, geri kalanı sabit metin; ortalama
 kayıp şablonlarla düşüyor ve bağ üzerindeki gradyan seyreltik kalıyor.
 
+### 8.6 Bağ yerleşimi ve üç çıkarım hatası
+
+Şablon yerleşiminde bağ öğrenilemiyordu, çünkü kaybın çoğu şablonlardan
+geliyordu. `--layout bindings` korpusu yalnızca bağ satırlarından üretir:
+
+```
+S: <özne> -> <yanıt>
+```
+
+Çerçeve 7 bayt; beş baytlık bir özne için yanıt özneden 12 bayt sonra başlar ve
+akışın yaklaşık yarısı, ancak bağı arayarak tahmin edilebilecek içeriktir.
+Şablon yerleşimi değişmedi ve kayıtlı hash'leri bayt bayt aynı üretiyor
+(20 MB / 64 olgu → `ed1f6dfd…`).
+
+**Run 40899844910 (commit `935002c`, 100 dk, taze model):** 51 069 184 token,
+4 oturum, 8 512 token/s, kayıp 0.2509 → 0.1960 → 0.1769 → **0.1670**,
+86 465 parametre; öğrenilen erişim 3 969.8 → 1 110.2. Bu koşunun raporladığı
+probe sayıları (tam eşleşme 0/32, sonraki-bayt 0.000) hâlâ hatalı çıkarım
+yolundan geldi; aşağıdaki üç hata düzeltildikten sonra aynı ağırlıklar ölçüldü.
+
+Sırayla bulunan üç hata — hepsi **çıkarımda**, eğitimde değil:
+
+1. **Dolgu.** `respond`/`score_continuation` soruyu `len(prompt)` ile
+   yürüyordu; `prompt` sabit uzunlukta bir tampona bağlı olduğu için model her
+   sorudan sonra yüzlerce dolgu boşluğu okuyordu. Sonuç: bütün sorular aynı
+   cevabı veriyordu.
+2. **Sondaki anlamlı boşluk.** `len_trim(prompt)` çözümü de yanlıştı: bu
+   korpustaki her çerçeve bir boşlukla bitiyor (`"… Cevap: "`,
+   `"S: <özne> -> "`) ve `len_trim` tam o boşluğu atıyor. Model doğru şekilde
+   boşluk tahmin ediyor, ölçüm bunu yanlış ilk yanıt baytı sayıyordu. Çözüm:
+   uzunluk **dizgenin yanında** taşınır (`split_row` alan uzunluğunu,
+   `get_command_argument` argüman uzunluğunu verir).
+3. **İndeks kayması.** `argmax_token` ve `sample_token` logit indeksinden 1
+   çıkarıyordu; oysa motor bir token'ı `token_embedding(:, token)` ile gömer ve
+   kayıp `dlogits(token)` türevini alır, yani **indeks = bayt değeri**. Bu
+   yüzden üretilen her bayt modelin seçtiğinin bir eksiğiydi ve
+   `argmax == target` hiçbir zaman doğru olamıyordu.
+
+Bu üçü, ölçümün kendi kendisiyle çelişmesinden yakalandı: aynı logit dizisi
+yanıt baytları için **0.002** NLL (yani neredeyse kesin ve doğru) verirken
+sonraki-bayt doğruluğu 0.000 ve tam eşleşme 0/32 idi. Doğru bir olasılık
+dağılımı ile sıfır isabet aynı dizi için aynı anda doğru olamaz.
+
+**Düzeltilmiş ölçüm — run 40921692429 (commit `cacf09c`, aynı ağırlıklar, eğitim
+yok):**
+
+| Ölçüm | Değer |
+| --- | --- |
+| Korpus | 600 000 000 bayt, 32 bağ, `sha256 03bde545…b9360` |
+| Model | 86 465 parametre, 51 069 184 token eğitilmiş |
+| Probe `fact` tam eşleşme | **32/32 (1.000)** |
+| Probe sonraki-bayt | **1.000**, NLL **0.002** |
+| Genel | tam eşleşme 1.000, sonraki-bayt 1.000 |
+
+```
+S: töşklüt ->   sümesar      (beklenen sümesar)
+S: bördıs  ->   laskokvir    (beklenen laskokvir)
+S: sıkül   ->   desnuknen    (beklenen desnuknen)
+```
+
+Yani model, eğitildiği bağların tamamını soru-cevap olarak doğru yanıtlıyor.
+Bunun ne olduğu ve ne olmadığı §9'da.
+
+Regresyon koruması: `tools/verify_prompt_response_corpus.py --ask-log FILE`
+bütün soruların aynı cevabı verdiği bir günlüğü reddeder; iş akışı bunu ask
+adımından sonra çalıştırır ve artık ne ayrıştırdığını da yazar.
+
 ## 9. Sınırlar
 
 - Korpus **sentetiktir**; model bu veriyle Türkçe "öğrenmez", bu korpusun
   istatistiğini öğrenir.
+- §8.6'daki 32/32, **32 yapay bağın** öğrenildiğini gösterir: `S: <özne> ->`
+  istemine karşılık gelen yanıtı üretmek. Bu bir dil yeteneği değil, ölçülebilir
+  bir arama/ezber yeteneğidir; 2048 bağlı şablon korpusunda ve 8 001
+  parametreli modelde aynı şey ölçülemedi (§7).
+- 600 MB'ın **tamamı** bu koşuda tüketilmedi: 51 069 184 bayt (%8.5). Bağ
+  yerleşiminde her satır bağımsız olduğu için kalan bayt aynı 32 bağı
+  yineliyor; rapordaki oran yine de açıkça yazıyor.
+- §7 ve §8.5'te raporlanan bütün "prompt → yanıt" sayıları, yukarıdaki üç
+  hata nedeniyle **modeli değil ölçüm yolunu** ölçüyordu.
 - 600 MB tek bir koşuda tüketilemeyecek kadar uzunsa koşu **kaldığı yeri
   söyler** ve zincirleme devam eder; hiçbir yerde "tamamlandı" denmez.
 - Bayt düzeyi modelleme, 2048 olgu bağını küçük bir durumda tutmayı

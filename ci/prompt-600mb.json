@@ -1,8 +1,8 @@
 {
   "enabled": true,
-  "note": "Same bindings checkpoint, fourth scoring pass. The measurements have been correct since the argmax fix (fact exact 32/32, next-byte 1.000, nll 0.002); what still failed was the ask-log gate, which could not parse the engine's own JSON because every member but the first begins with the separator (',  \"response\": ...'). The parser and its fixtures now use that shape. No training: train_minutes=1 stops the session loop immediately.",
-  "purpose": "Final inference measurement on the bindings checkpoint; see docs/PROMPT_RESPONSE_PRETRAINING.md section 8.6",
-  "layout": "bindings",
+  "note": "Re-scores the template-layout checkpoint (run 40860680347, byte 118,847,232) through the fully corrected inference path. The conclusion drafted for that checkpoint -- 'it learned the templates but not the binding' -- was drawn from a measurement taken while the path still dropped the frame's trailing space and shifted every byte, so it has to be re-taken before it can be stated. Template layout, 32 facts, 332 probe rows, no training.",
+  "purpose": "Check the template-layout checkpoint with a trustworthy tool; see docs/PROMPT_RESPONSE_PRETRAINING.md section 8.5",
+  "layout": "templates",
   "corpus_bytes": 600000000,
   "facts": 32,
   "width": 64,
@@ -14,9 +14,9 @@
   "learning_rate": 0.0003,
   "train_minutes": 1,
   "session_minutes": 25,
-  "reset_every": 2048,
+  "reset_every": 0,
   "warmup_bytes": 0,
-  "resume_run_id": "40899844910",
-  "resume_start_byte": 51069184,
-  "label": "fixed-eval-5-bindings"
+  "resume_run_id": "40860680347",
+  "resume_start_byte": 118847232,
+  "label": "template-check-fixed-path"
 }
