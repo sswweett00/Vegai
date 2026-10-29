@@ -227,27 +227,22 @@ jobs:
         if: ${{ hashFiles('.resume-marker') != '' }}
         run: |
           set -euo pipefail
-          mkdir -p "${RUNNER_TEMP}/vegai-resume"
-          # v4 extracts an artifact into the given path, but the layout has
-          # changed between major versions, so the file is located rather than
-          # assumed: a hard-coded path silently broke one evaluation run.
-          restored=$(find "${RUNNER_TEMP}/vegai-resume" -name model.vgfb -type f | head -n 1)
-          if [ -z "${restored:-}" ]; then
-            echo "::error title=no checkpoint::$(find "${RUNNER_TEMP}/vegai-resume" -maxdepth 3 | head -n 12 | tr '\n' '~')"
+          directory="${RUNNER_TEMP}/vegai-resume"
+          mkdir -p "$directory"
+          echo "artifact contents:"
+          find "$directory" -maxdepth 4 | head -n 40
+          checkpoint=$(find "$directory" -type f -name 'model.vgfb' | head -n 1 || true)
+          manifest=$(find "$directory" -type f -name 'corpus.manifest.json' | head -n 1 || true)
+          if [ -z "${checkpoint:-}" ]; then
+            echo "::error title=no checkpoint in the artifact::run ${RESUME_RUN_ID} has no model.vgfb"
             exit 1
           fi
-          cp "$restored" "$RUN_DIR/model.vgfb"
-          echo "restored checkpoint: ${restored}"
-          restored_manifest=$(find "${RUNNER_TEMP}/vegai-resume" -name corpus.manifest.json -type f | head -n 1 || true)"
-          if [ -f "$restored_manifest" ]; then
-            python3 - "$restored_manifest" "$RUN_DIR/corpus.manifest.json" <<'PY'
-          import json, sys
-          earlier = json.load(open(sys.argv[1], encoding='utf-8'))
-          current = json.load(open(sys.argv[2], encoding='utf-8'))
-          if earlier['sha256'] != current['sha256'] or earlier['bytes'] != current['bytes']:
-              raise SystemExit('::error::the restored run used a different corpus; refusing to continue')
-          print('corpus hash matches the earlier dispatch:', current['sha256'])
-          PY
+          cp "$checkpoint" "$RUN_DIR/model.vgfb"
+          if [ -n "${manifest:-}" ]; then
+            python3 tools/verify_restored_corpus.py "$manifest" "$RUN_DIR/corpus.manifest.json"
+          else
+            echo "::error title=no corpus manifest::the restored artifact has no corpus.manifest.json"
+            exit 1
           fi
           echo "resuming at byte ${START_BYTE}"
 
