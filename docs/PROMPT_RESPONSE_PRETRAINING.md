@@ -448,21 +448,102 @@ Regresyon koruması: `tools/verify_prompt_response_corpus.py --ask-log FILE`
 bütün soruların aynı cevabı verdiği bir günlüğü reddeder; iş akışı bunu ask
 adımından sonra çalıştırır ve artık ne ayrıştırdığını da yazar.
 
+### 8.7 Kalite geçişi: girdiye bağımlı geçit ve öğrenilebilir bağ tablosu
+
+§8.6'daki 32/32 **ezberlenmiş** bağlar üzerindeydi: 32 bağlı korpusta model
+`S: <özne> ->` istemine karşılık gelen yanıtı eksiksiz üretiyor. §8.5'teki
+şablon yerleşimi ise 5/32'de kalıyordu. İki fark var ve ikisi de bu geçişte
+ele alındı:
+
+1. **Bağ tablosu 2 048 satırdı.** 86 bin parametreli bir model 2 048 satırlık
+   bir tabloyu tutamaz; 32 satırlık bir tablo ise tutulabilir. Bu yüzden bu
+   geçiş `--facts 32` ile üretilen korpusu kullanır.
+2. **Kanal karışımı girdiden bağımsızdı.** Hangi kanaldan ne kadar
+   okunacağını söyleyen üç kanal lojistiği ve dört ölçek lojistiği, modelin
+   *sabit* parametreleriydi: bir adım "şimdi yerel pencereye bakmalıyım" ya da
+   "şimdi yinelemeli bellekten okumalıyım" diyemiyordu. Commit `bf86b75` bu
+   lojistiklere girdinin öğrenilmiş bir izdüşümünü ekler
+   (`channel_gate_proj`, `scale_gate_proj`); davranış sıfır ağırlıkta eski
+   statik lojistiklerle birebir aynıdır, yani bu bir yeniden yorumlama değil
+   eklemedir. Ayrıntı ve gradyan türetmesi
+   [`FIXED_BUDGET_CONTEXT_ENGINE.md`](FIXED_BUDGET_CONTEXT_ENGINE.md) §2 ve §4.
+
+Buna ek olarak, bu optimizasyon kuralı RMS ile normalize edildiği için ilerleme
+token sayısından çok **güncelleme sayısıyla** sınırlı; bu yüzden güncelleme
+boyu 512'den 256'ya indirildi (aynı duvar saati, iki kat güncelleme) ve fiziksel
+pencere 16'dan 48'e çıkarıldı, yani özne artık yerel pencerenin içinde.
+
+**Sıcak durum kontrolü (negatif sonuç, kayda geçiyor).** "Belki bağlam yok
+değil, ama soğuk başlangıç yüzünden kullanılamıyor" hipotezi ölçüldü: aynı
+şablon kontrol noktası, probe koşusundan önce duruma 512 bayt korpus
+akıtılarak yeniden puanlandı (run 40896847438: `warmup_bytes` 0 → 512, eğitim
+yok). Fark yok: `fact` NLL 14.316 → 13.866, sonraki-bayt 0.023 → 0.023,
+tam eşleşme 0/128 → 0/128. Yani sorun durumun soğuk olması değildi.
+
+**Run 40927789891 (commit `816a4cc`, talep dosyası `ci/prompt-600mb.json`,
+225 dakika, taze model):**
+
+| Ölçüm | Değer |
+| --- | --- |
+| Korpus | 600 000 000 bayt, 1 025 843 belge, 32 bağ, `sha256 8061d786…32e2` |
+| Tüketilen | **160 455 168** token (%26.7), 9 oturum, 11 886 token/s |
+| Parametre | 86 913 (geçit +448) |
+| Eğitim NLL (oturum ortalamaları) | 0.3591 → 0.2510 → 0.2067 → 0.1833 → 0.1677 → 0.1568 → 0.1488 → 0.1425 → **0.1376** |
+| Öğrenilen erişim | 5 499.1 → 4 934.7 token |
+| Probe `fact` | tam eşleşme **32/32 (1.000)**, sonraki-bayt **1.000**, NLL **0.006** |
+| Probe `copy` | 0/200, sonraki-bayt 0.190, NLL 9.013 |
+| Probe `next` | 0/100, sonraki-bayt 0.033, NLL 11.468 |
+| Genel | tam eşleşme 0.096, sonraki-bayt 0.251 |
+
+`ask` adımının günlüğü (greedy, `--max-new 32`), üç ayrı soru:
+
+```
+Soru: töşklüt nedir? Cevap:  ->  sümesar      (beklenen sümesar)
+Soru: bördıs  nedir? Cevap:  ->  laskokvir    (beklenen laskokvir)
+Soru: sıkül   nedir? Cevap:  ->  desnuknen    (beklenen desnuknen)
+```
+
+Yani model, **kendi eğitim korpusundaki 32 bağın tamamını**, soru cümlesi
+biçiminde ve tek bir sıfırdan eğitimle doğru yanıtlıyor; üç soru da tam
+eşleşiyor, greedy ile örneklemeli çıktı aynı. §8.5'te "şablon yerleşiminde
+5/32'de kalıyor" diye kaydedilen sınır, bu yapılandırmada kalktı.
+
+**Ne ölçülmedi ve neden.** Bu geçişte dört şey birlikte değişti: bağ sayısı
+(2 048 → 32), kapasite (8 001 → 86 913), fiziksel pencere (16 → 48) ve kanal
+geçidi. Bu yüzden **32/32'yi tek başına geçide atfetmek yanlış olur**: ablasyon
+(aynı şekil, geçit yok) koşulmadı. Ölçülen şey paketin kendisidir: bu bütçede
+şablon yerleşiminde soru-cevap öğrenilebiliyor.
+
+**Bağlamdan hesaplama hâlâ yok.** `copy` ailesi görülmemiş bir değeri
+kopyalamayı ister ve 0/200'de kaldı; sonraki-bayt 0.173 → 0.190 arttı, bu
+gürültü düzeyinde bir kıpırdama, bir yetenek değil. `next` (harf kaydırma)
+0.033'te. (Bu iki aile farklı yapılandırmalar arasında karşılaştırılıyor:
+önceki ölçüm 2 048 bağlı, 8 001 parametreli, 16 pencereli bir modelindi; o
+yüzden 0.173 → 0.190 farkı bir kazanç olarak değil, **aynı büyüklük
+mertebesinde kaldı** diye okunmalı.) Model, **kendi tablosundaki** bağı getiriyor;
+**bağlamda verilen yeni bir diziyi** kullanamıyor. §9 bunu olduğu gibi yazıyor.
+
 ## 9. Sınırlar
 
 - Korpus **sentetiktir**; model bu veriyle Türkçe "öğrenmez", bu korpusun
   istatistiğini öğrenir.
-- §8.6'daki 32/32, **32 yapay bağın** öğrenildiğini gösterir: `S: <özne> ->`
-  istemine karşılık gelen yanıtı üretmek. Bu bir dil yeteneği değil, ölçülebilir
-  bir arama/ezber yeteneğidir; 2048 bağlı korpusta ve 8 001 parametreli modelde
-  aynı şey ölçülemedi (§7).
+- §8.6 ve §8.7'deki 32/32 (ve §8.7'deki 32 bağ, şablon yerleşimi), **32 yapay
+  bağın** öğrenildiğini gösterir: `S: <özne> ->` ya da `Soru: <özne> nedir?
+  Cevap: ` istemine karşılık gelen yanıtı üretmek. Bu bir dil yeteneği değil,
+  ölçülebilir bir ezber/arama yeteneğidir; 2 048 bağlı korpusta ve 8 001
+  parametreli modelde aynı şey ölçülemedi (§7, §8.5).
 - Ezberlenen bağı getirmek ile **bağlamda verilen** yeni bir diziyi kullanmak
   ayrı yetenekler ve ikincisi bu bütçede yok: `copy` (görülmemiş değeri kopyala)
-  %17, `next` (harf kaydırma) %3.5 (§8.5). Bu, mimarinin 86 bin parametrede
-  bağlamdan hesaplama yapamadığını gösterir; ölçüm bunu olduğu gibi raporlar.
-- 600 MB'ın **tamamı** bu koşuda tüketilmedi: 51 069 184 bayt (%8.5). Bağ
-  yerleşiminde her satır bağımsız olduğu için kalan bayt aynı 32 bağı
-  yineliyor; rapordaki oran yine de açıkça yazıyor.
+  sonraki-bayt 0.190, tam eşleşme 0/200; `next` (harf kaydırma) 0.033, 0/100
+  (§8.7). Bu, mimarinin 87 bin parametrede bağlamdan hesaplama yapamadığını
+  gösterir; ölçüm bunu olduğu gibi raporlar.
+- §8.7'deki kazanç **tek bir değişkene atfedilemez**: bağ sayısı, kapasite,
+  fiziksel pencere ve kanal geçidi aynı geçişte değişti. Ablasyon (aynı şekil,
+  geçit yok) koşulmadı; "geçit 32/32'yi getirdi" cümlesi bu belgede **yok**.
+- 600 MB'ın **tamamı** hiçbir koşuda tüketilmedi: bağ yerleşiminde 51 069 184
+  bayt (%8.5), şablon kalite geçişinde 160 455 168 bayt (%26.7). 32 bağlı
+  korpusta kalan bayt aynı tabloyu yineliyor; oran yine de açıkça yazıyor ve
+  hiçbir yerde "600 MB tamamlandı" denmiyor.
 - §7 ve §8.5'te raporlanan bütün "prompt → yanıt" sayıları, yukarıdaki üç
   hata nedeniyle **modeli değil ölçüm yolunu** ölçüyordu.
 - 600 MB tek bir koşuda tüketilemeyecek kadar uzunsa koşu **kaldığı yeri

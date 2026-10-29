@@ -58,7 +58,18 @@ kontrol noktası başlığında `horizon_clamped` alanıyla **bildirilir**.
    Tam geçmiş taraması yoktur.
 
 Kanallar üç öğrenilebilir lojistik üzerinden softmax ile karıştırılır; bu
-karışım da eğitilir.
+karışım da eğitilir. Karışım **girdiye bağımlıdır**: her kanal lojistiği
+`channel_logit(c) + channel_gate_proj(c, :) · x` biçimindedir ve ölçek
+karışımı için aynısı `scale_gate_proj` ile yapılır; burada `x`, adımın
+normalleştirilmiş girdisidir (q/k/v, yuva projeksiyonları ve FFN'in okuduğu
+vektör). Böylece model "bu adımda yerel pencereye mi, yoksa özyinelemeli
+belleğe mi bakmalıyım" kararını verebilir. Her iki projeksiyon **tam olarak
+sıfırdan** başlar; sıfırda davranış eski statik lojistiklerle birebir aynıdır,
+yani bu bir yeniden yorumlama değil eklemedir. Maliyet belirteç başına
+`(3 + ölçek) × genişlik` çarpım-toplamıdır: ek ayırma yok, kendi `exp`'i yok,
+ufka bağlı hiçbir sınır yok. Eğim, bir softmax'ın girdiye göre afin
+lojistiklerinde iki yolludur ve ikisi de uygulanır: geçit satırları
+`dL/dlojistik · x` alır, paylaşılan girdi ise `Σ dL/dlojistik · W` alır.
 
 **Dürüst ufuk raporu.** "Etkin ufuk" bir bozunma erişimidir, kayıpsız depolama
 değildir. Özyinelemeli bellek üstel bir ortalamadır: uzak belirteçler unutulur,
@@ -79,7 +90,11 @@ farklı ufukta (32, 8192, 1e6, 1e12) **birebir eşit** olarak doğrular:
 
 CI'da ölçülen yapı (genişlik 32, 2 kafa, ffn 64, sözlük 32, yerel 32, 4 ölçek,
 64 yuva): **15 497 parametre**, **67 072 bayt akış durumu**, belirteç başına
-**43 008** ileri işlem — her ufukta aynı.
+**43 008** ileri işlem — her ufukta aynı. (Bu sayılar girdiye bağımlı geçitten
+önceki koşunun kaydıdır; geçit aynı şekilde parametre sayısını
+`(3 + ölçek) × genişlik` = 224 artırır ve belirteç başına ileri işleme
+`2 × 224` ekler. Durum baytı değişmez, çünkü geçit öğrenilen bir parametredir,
+akan durum değil.)
 
 ## 4. Eğitim: gerçek gradyanlar
 
@@ -90,7 +105,10 @@ CI'da ölçülen yapı (genişlik 32, 2 kafa, ffn 64, sözlük 32, yerel 32, 4 �
 - dikkat q/k/v projeksiyonları, dikkat çıkış projeksiyonu,
 - FFN kapı/değer/çıkış projeksiyonları,
 - her iki RMSNorm ölçeği,
-- çok ölçekli okuma ağırlıkları (`scale_logit`), kanal karışımı,
+- çok ölçekli okuma ağırlıkları (`scale_logit`) ve girdiye bağımlı ölçek
+  geçidi (`scale_gate_proj`),
+- kanal karışımı (`channel_logit`) ve girdiye bağımlı kanal geçidi
+  (`channel_gate_proj`),
 - dört yuva projeksiyonu ve yuva önem ağırlığı,
 - mesafe yanlılığı.
 
@@ -99,11 +117,13 @@ onları kullanır: yuva yazması (anahtar, değer, geçit, önem) ve özyineleme
 güncelleme (`φ(k)`, `v`). Önceki belirteçlerin yazmaları dondurulmuştur; bu
 bilinçli ve belgelenmiş bir yaklaşımdır, "tam BPTT" olarak sunulmaz.
 
-Doğrulama: sonlu fark sözleşme testi 13 parametreyi (okuma ağırlığı, kanal
+Doğrulama: sonlu fark sözleşme testi 15 parametreyi (okuma ağırlığı, kanal
 lojistiği, iki yuva yazma projeksiyonu, yuva sorgu projeksiyonu, mesafe
 yanlılığı, FFN kapısı, sorgu, anahtar, değer, bağlı gömme, **öğrenilen bellek
-bozunumu ve yazma gücü**) merkezi farkla karşılaştırır ve `1e-4` bağıl
-toleransla geçer.
+bozunumu ve yazma gücü**, **girdiye bağımlı kanal ve ölçek geçitleri**)
+merkezi farkla karşılaştırır ve `1e-4` bağıl toleransla geçer. Ayrıca geçidin
+sıfır başlatmada sıfırdan farklı eğim aldığı, eğitimde gerçekten **hareket
+ettiği** ve kontrol noktasından birebir geri yüklendiği ayrı kontrollerdir.
 
 ### 4.1 Öğrenilen bellek dinamiği
 
@@ -154,17 +174,22 @@ transandantal yoktur.
 
 ## 6. Kontrol noktası
 
-`VGFB0001` sihirli dizesi, **sürüm 2**. İçerik: sözlük/genişlik/kafa/ffn/yerel
+`VGFB0001` sihirli dizesi, **sürüm 3**. İçerik: sözlük/genişlik/kafa/ffn/yerel
 pencere/ölçek/yuva,
 **mantıksal ufuk**, etkin ufuk ve kırpma bayrağı, RMS epsilon, yuva bozunması ve
 sıcaklığı, güncelleme ve belirteç sayaçları, optimize edici hiper-parametreleri,
 tüm parametre yükü ve tüm optimize edici durumu.
 
 Sürüm 2, öğrenilen dinamiği (ölçek başına `decay_logit` ve
-`write_strength_logit`) ve onların optimizer momentumunu ekler. Sürüm 1
+`write_strength_logit`) ve onların optimizer momentumunu ekler. Sürüm 3 ise
+girdiye bağımlı iki geçit projeksiyonunu (`channel_gate_proj`,
+`scale_gate_proj`) ekler; yük 21 diziden 23 diziye çıkar. Sürüm 1 ve 2
 dosyaları okunabilir ama **dönüştürülmez**: `FBT_ERR_VERSION` (−1506) ile
-reddedilir, çünkü o dosyada bu iki parametrenin değeri yoktur ve uydurulacak bir
-değer modeli sessizce değiştirirdi. Yükleme sonunda önbellek yeniden kurulur.
+reddedilir, çünkü o dosyalarda yeni parametrelerin değeri yoktur ve
+uydurulacak bir değer (örneğin sıfır geçit) modeli sessizce değiştirirdi.
+Sürüm 2 reddi ayrı bir testtir: başlık yazılır, hem yükleyicinin hem başlık
+okuyucusunun `FBT_ERR_VERSION` döndürdüğü ve başlığın gerçek sürüm numarasını
+koruduğu doğrulanır. Yükleme sonunda önbellek yeniden kurulur.
 
 Eski `VGNR0001` (neural_pretrain v5) kontrol noktaları **dönüştürülmez**:
 `FBT_ERR_LEGACY` (−1503) ile reddedilir ve eski ikili dosyayla açılması
