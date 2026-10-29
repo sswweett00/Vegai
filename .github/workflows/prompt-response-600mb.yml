@@ -36,6 +36,22 @@ on:
         description: 'Model width'
         required: false
         default: '32'
+      heads:
+        description: 'Attention heads (width must divide evenly)'
+        required: false
+        default: '2'
+      ffn:
+        description: 'Feed-forward width'
+        required: false
+        default: '64'
+      local_window:
+        description: 'Physical ring buffer for the exact causal attention'
+        required: false
+        default: '32'
+      memory_slots:
+        description: 'Fixed number of information slots'
+        required: false
+        default: '64'
       train_chunk_tokens:
         description: 'Predictions per optimiser update (also the streaming block size)'
         required: false
@@ -151,10 +167,12 @@ jobs:
               echo "SESSION_MINUTES=${{ inputs.session_minutes }}"
               echo "FACTS=${{ inputs.facts }}"
               echo "WIDTH=${{ inputs.width }}"
-              echo "HEADS=2"
-              echo "FFN=64"
-              echo "LOCAL_WINDOW=32"
-              echo "SLOTS=64"
+              # A dispatch describes the whole shape: hard-coding heads, ffn,
+              # window or slots here would silently ignore the caller.
+              echo "HEADS=${{ inputs.heads }}"
+              echo "FFN=${{ inputs.ffn }}"
+              echo "LOCAL_WINDOW=${{ inputs.local_window }}"
+              echo "SLOTS=${{ inputs.memory_slots }}"
               echo "CHUNK=${{ inputs.train_chunk_tokens }}"
               echo "LR=${{ inputs.learning_rate }}"
               echo "RESUME_RUN_ID=${{ inputs.resume_run_id }}"
