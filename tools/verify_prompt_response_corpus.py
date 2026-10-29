@@ -101,6 +101,16 @@ def check_run_summary(directory: Path) -> None:
 ASK_HEADER = "### {kind} | expected: {expected}\n"
 
 
+def ask_block(kind: str, prompt: str, expected: str, response: str) -> str:
+    """One ask as the engine writes it: `,` starts the member that follows it."""
+    return (ASK_HEADER.format(kind=kind, expected=expected)
+            + "PROMPT_RESPONSE_JSON {\n"
+            + f'  "prompt": "{prompt}"\n'
+            + f',  "response": "{response}"\n'
+            + ',  "warmup_bytes": 0\n'
+            + "\n}\n")
+
+
 def parse_ask_log(text: str) -> list[dict]:
     """Pull the prompt/response objects out of an `ask.log`.
 
@@ -112,7 +122,12 @@ def parse_ask_log(text: str) -> list[dict]:
         body = block.split("}", 1)[0]
         record: dict = {}
         for line in body.splitlines():
-            line = line.strip().rstrip(",")
+            line = line.strip()
+            # The engine writes the separator at the *start* of every member but
+            # the first (`,\n  "name": value`), so a line can begin with a comma.
+            if line.startswith(","):
+                line = line[1:].strip()
+            line = line.rstrip(",")
             if not line.startswith('"'):
                 continue
             key, _, value = line.partition(": ")
@@ -140,30 +155,17 @@ def check_ask_responses(directory: Path) -> None:
         ("fact", "Soru: c nedir? Cevap: ", "d", "qqq"),
         ("copy", "Tekrar et: e. Sonuc: ", "e", "ee"),
     ]
-    log = "".join(
-        ASK_HEADER.format(kind=kind, expected=expected)
-        + "PROMPT_RESPONSE_JSON {\n"
-        + f'  "prompt": "{prompt}",\n'
-        + f'  "response": "{response}",\n'
-        + '  "warmup_bytes": 0\n'
-        + "}\n"
-        for kind, prompt, expected, response in entries
-    )
+    log = "".join(ask_block(*entry) for entry in entries)
     (run / "ask.log").write_text(log, encoding="utf-8")
     parsed = parse_ask_log(log)
     check(len(parsed) == 3, "every ask block is parsed")
     check(len({entry["response"] for entry in parsed}) == 3,
           "three different prompts do not collapse into one response")
+    check(parsed[0]["response"] == "zzz",
+          "the separator that starts a member does not leak into its value")
 
-    degenerate = "".join(
-        ASK_HEADER.format(kind=kind, expected=expected)
-        + "PROMPT_RESPONSE_JSON {\n"
-        + f'  "prompt": "{prompt}",\n'
-        + '  "response": "`\u00e2RRR",\n'
-        + '  "warmup_bytes": 0\n'
-        + "}\n"
-        for kind, prompt, expected, _ in entries
-    )
+    degenerate = "".join(ask_block(kind, prompt, expected, "kkkk")
+                         for kind, prompt, expected, _ in entries)
     collapsed = {entry["response"] for entry in parse_ask_log(degenerate)}
     check(len(collapsed) == 1,
           "the identical-response signature is detectable, which is what this check guards")
