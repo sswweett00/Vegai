@@ -1,8 +1,8 @@
 {
-  "enabled": false,
-  "note": "Recorded runs (docs/PROMPT_RESPONSE_PRETRAINING.md section 8): 40857056713 calibration (7,985 tok/s, 86,449 parameters); 40860680347 template quality pass (118,847,232 tokens, loss 0.1557); 40896847438 warm-up test (rejected the hypothesis); 40899100386 / 40916867071 / 40919515918 the three inference bugs found and fixed; 40899844910 bindings pass (51,069,184 tokens, loss 0.1670); 40921692429 the corrected measurement (fact exact 32/32, next-byte 1.000, nll 0.002); 40923834013 the template checkpoint re-measured with a trustworthy tool (fact 5/32, next-byte 0.851). Set enabled=true to request another pass on the next push that touches the workflow, the corpus tool, app/prompt_engine.f90 or this file; leave it false otherwise, a real pass occupies the runner for hours.",
-  "purpose": "Reference configuration for the measured passes; the layout and shape knobs are read from here by both triggers",
-  "layout": "bindings",
+  "enabled": true,
+  "note": "Recorded runs (docs/PROMPT_RESPONSE_PRETRAINING.md sections 8-9): 40857056713 calibration; 40860680347 template quality pass (118,847,232 tokens, loss 0.1557); 40896847438 warm-up test; 40899100386 / 40916867071 / 40919515918 the three inference bugs; 40899844910 bindings pass (51,069,184 tokens, loss 0.1670); 40921692429 the corrected measurement (fact exact 32/32, next-byte 1.000); 40923834013 the template checkpoint re-measured (fact 5/32, copy 0.173, next 0.035); 40925939018 the stale default config. The pass requested here changes the learning problem rather than the inference path: 32 bindings instead of 2048 (eight thousand parameters cannot hold a 2048-row table), a 64-wide model with the input-dependent channel/scale gate, and half the chunk so the same token budget buys twice as many optimiser updates. Set enabled=false to stop requesting passes.",
+  "purpose": "Quality pass: can this architecture answer 32 of its own bindings end to end",
+  "layout": "templates",
   "corpus_bytes": 600000000,
   "facts": 32,
   "width": 64,
@@ -12,11 +12,11 @@
   "memory_slots": 64,
   "train_chunk_tokens": 256,
   "learning_rate": 0.0003,
-  "train_minutes": 100,
+  "train_minutes": 225,
   "session_minutes": 25,
-  "reset_every": 2048,
+  "reset_every": 4096,
   "warmup_bytes": 0,
   "resume_run_id": "",
   "resume_start_byte": 0,
-  "label": "bindings-w64-facts32"
+  "label": "quality-w64-facts32-gated"
 }

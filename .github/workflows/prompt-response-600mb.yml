@@ -92,6 +92,11 @@ on:
       - 'ci/prompt-600mb.json'
       - 'tools/build_prompt_response_corpus.py'
       - 'app/prompt_engine.f90'
+      # An architecture change invalidates every measured number below it, so
+      # the engine sources are a reason to re-measure too.  With `enabled` left
+      # false this costs one short smoke run and no training budget.
+      - 'src/fixed_budget_*.f90'
+      - 'test/fixed_budget_context_tests.f90'
 
 permissions:
   contents: read
