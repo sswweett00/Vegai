@@ -116,7 +116,9 @@ def parse_ask_log(text: str) -> list[dict]:
             if not line.startswith('"'):
                 continue
             key, _, value = line.partition(": ")
-            record[key.strip('"')] = value.strip().strip('"')
+            # Members before the last one end with `",`, so the quote has to come
+            # off the right end before the comma does, not the other way round.
+            record[key.strip('"')] = value.strip().rstrip(",").strip().strip('"')
         entries.append(record)
     return entries
 
@@ -236,12 +238,19 @@ def main() -> int:
         if not path.is_file():
             print(f"missing ask log: {path}")
             return 2
-        problems = check_ask_log_text(path.read_text(encoding="utf-8", errors="replace"))
+        text = path.read_text(encoding="utf-8", errors="replace")
+        problems = check_ask_log_text(text)
         for problem in problems:
             print(f"FAIL {problem}")
+        # Always say what was parsed: the job log is not always retrievable, and
+        # a gate that only says "failed" costs a whole run to chase.
+        entries = parse_ask_log(text)
+        print(f"blocks {len(text.split('PROMPT_RESPONSE_JSON {')[1:])}, parsed {len(entries)}")
+        for index, entry in enumerate(entries, start=1):
+            print(f"  [{index}] prompt={entry.get('prompt')!r} response={entry.get('response')!r}")
         if problems:
             return 1
-        print(f"ask log ok: {len(parse_ask_log(path.read_text(encoding='utf-8', errors='replace')))} responses")
+        print("ask log ok: " + " | ".join(str(entry.get("response")) for entry in entries))
         return 0
 
     with tempfile.TemporaryDirectory() as directory:

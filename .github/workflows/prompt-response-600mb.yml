@@ -435,7 +435,14 @@ jobs:
           # A prompt the model never saw is indistinguishable from a prompt it
           # cannot answer, except that the first one answers everything the same
           # way.  Fail the step instead of publishing that as a result.
-          python3 tools/verify_prompt_response_corpus.py --ask-log "$RUN_DIR/ask.log"
+          if ! python3 tools/verify_prompt_response_corpus.py --ask-log "$RUN_DIR/ask.log" \
+                 > "$RUN_DIR/ask-check.log" 2>&1; then
+            cat "$RUN_DIR/ask-check.log"
+            echo "::error title=ask log gate::$(tr '\n' '~' < "$RUN_DIR/ask-check.log" | cut -c1-1200)"
+            echo "::error title=ask log tail::$(tail -c 600 "$RUN_DIR/ask.log" | tr '\n' '~')"
+            exit 1
+          fi
+          cat "$RUN_DIR/ask-check.log"
 
       # The numbers have to survive outside the artifact store, so the whole
       # evidence block is also emitted as annotations.
@@ -487,6 +494,7 @@ jobs:
             ${{ runner.temp }}/vegai-prompt-600m/evidence.log
             ${{ runner.temp }}/vegai-prompt-600m/summary.log
             ${{ runner.temp }}/vegai-prompt-600m/ask.log
+            ${{ runner.temp }}/vegai-prompt-600m/ask-check.log
             ${{ runner.temp }}/vegai-prompt-600m/train-session-*.log
             ${{ runner.temp }}/vegai-prompt-600m/training-sessions.log
             ${{ runner.temp }}/vegai-prompt-600m/training-summary.json
