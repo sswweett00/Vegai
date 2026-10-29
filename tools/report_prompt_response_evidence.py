@@ -138,6 +138,9 @@ def render(evidence: dict) -> list[str]:
             first, last = curve[0], curve[-1]
             lines.append(f"loss: {first['mean_nll']:.4f} after session 1 -> {last['mean_nll']:.4f} "
                          f"after session {len(curve)}")
+            # The whole curve, because a first-to-last pair hides a rise in the
+            # middle and a training run has to be judged on its trend.
+            lines.append("loss curve: " + ", ".join(f"{record['mean_nll']:.4f}" for record in curve))
         hours = training.get("hours_for_full_corpus")
         if hours:
             lines.append(f"projection: the whole corpus would take {hours:.2f} h at the measured rate")

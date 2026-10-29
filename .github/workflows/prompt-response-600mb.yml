@@ -107,6 +107,7 @@ jobs:
             echo "LR=0.003"
             echo "RESUME_RUN_ID="
             echo "START_BYTE=0"
+            echo "RUN_LABEL="
           } > "$GITHUB_ENV"
           if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ -f "$config_file" ]; then
             python3 - "$config_file" >> "$GITHUB_ENV" <<'PY'
@@ -117,6 +118,7 @@ jobs:
               # job: `enabled` has no default on purpose.
               print('MODE=smoke-disabled-config', file=sys.stderr)
               raise SystemExit(0)
+          print(f"RUN_LABEL={config.get('label', '')}")
           defaults = {
               'corpus_bytes': 600_000_000, 'train_bytes': 0, 'train_minutes': 300,
               'session_minutes': 25, 'facts': 2048, 'width': 32, 'heads': 2, 'ffn': 64,
@@ -375,6 +377,9 @@ jobs:
         run: |
           set -euo pipefail
           if python3 tools/report_prompt_response_evidence.py "$RUN_DIR" > "$RUN_DIR/evidence.log" 2>&1; then
+            if [ -n "${RUN_LABEL:-}" ]; then
+              echo "run label: ${RUN_LABEL}" | tee -a "$RUN_DIR/evidence.log" >/dev/null
+            fi
             cat "$RUN_DIR/evidence.log"
             line_number=0
             while IFS= read -r line; do
