@@ -231,9 +231,8 @@ Bulgular (ölçümün desteklediği kadar):
    ```
 
    Tam eşleşme 0/500; sonraki-bayt doğruluğu %3.3, şans düzeyi %0.39. Yani
-   model şansın ~8 katı, ama üretim çöküyor. Sıradaki deney açık: **kapasite**
-   (genişlik 32/64) ve **önbelleğe alınmış çözümleme** (beam/ölçekli örnekleme),
-   ikisi de bu belgenin kapsamı dışında bırakıldı.
+   model şansın ~8 katı, ama üretim çöküyor. Bu iki geçişin sınırları §8'de
+   ölçülerek ayrıştırıldı; sıradaki deney orada.
 
 ### 7.4 Duman testi (her push, 2 MB)
 
@@ -248,7 +247,68 @@ oturum raporları, `probe.log`, `ask.log`, `training-summary.json`,
 `evidence.log`). Sayılar ayrıca **annotation** olarak yayınlanır, çünkü bu
 ortamda artifact deposu okunamıyor; sonuç kaybolmasın diye.
 
-## 8. Sınırlar
+## 8. Kalite geçişi: iki geçiş neden başarısızdı, ne değişti
+
+§7'deki iki tam geçiş 600 MB'ı tüketti ve kaybı düşürdü, ama tek bir prompt'a
+bile doğru yanıt üretmedi. Bu bölüm o sonucu ölçerek ayırıyor: eksik olan veri
+miktarı değil, **kapasite ve güncelleme sayısı**.
+
+### 8.1 Teşhis
+
+Üç ayrı ölçüm, üç ayrı sınırı gösteriyor:
+
+1. **Pencere soru iskeletinden kısaydı.** Korpusun soru biçimi
+   `Soru: <özne> nedir? Cevap: `; altı baytlık bir özne için bu **27 bayt**.
+   §7'deki iki gerçek geçiş `--local-window 16` ile koştu, yani model yanıtın
+   ilk baytını üretirken özne *çoktan* yerel dikkat penceresinin dışındaydı.
+   Yerel kanal bağlamı taşıyamıyordu; geriye yalnızca iki yinelemeli kanal
+   kalıyordu ve 8 001 parametre onlara yetmiyordu.
+2. **Model 8 001 parametreydi** (genişlik 16, ffn 32). 2 048 olgu bağını
+   tutmak için bu, ölçümle de görülen büyüklükte bir eksik.
+3. **Güncelleme sayısı azdı.** Nova-1 kuralı RMS ile normalize edildiği için
+   her güncelleme her parametreyi yaklaşık `lr` kadar oynatır; ilerleme
+   *token* sayısından çok *güncelleme* sayısıyla sınırlıdır.
+
+### 8.2 Kalibrasyon geçişi (run 40857056713, commit `df8207a`)
+
+Uzun bir geçiş harcamadan önce şekli ölçen kısa koşu: 20 MB korpus, 64 olgu,
+genişlik 64 / ffn 192 (86 449 parametre), fiziksel pencere 32, 512 token'lık
+güncelleme, `lr = 3e-4`, 20 dakika.
+
+| Ölçüm | Değer |
+| --- | --- |
+| Korpus | 20 000 000 bayt, 34 275 belge, 64 olgu, `sha256 ed1f6dfd…fbe4` |
+| Tüketilen | 9 582 080 token, 2 oturum |
+| Hız | 7 985 token/s |
+| Parametre | 86 449 |
+| Eğitim NLL | 0.9222 → **0.6369** |
+| Öğrenilen erişim | 8 197.2 → 8 200.8 |
+| Probe tam eşleşme | fact 0/64, copy 0/200, next 0/100 |
+| Probe sonraki-bayt | fact 0.048, copy 0.062, next 0.020, genel 0.052 |
+
+Kayıp, "çerçeve + dolgu öğrenildi, içerik rastgele" tabanının altına indi:
+yani model sözcüklerin *biçimini* öğrendi (hece yapısı, UTF-8 devam baytları),
+ama **hangi** sözcük olduğunu taşımadı. 20 dakikada ~19 bin güncelleme vardı;
+bu, RMS ile normalize edilmiş adım bütçesinde dağılımdan yeni çıkılan nokta.
+
+### 8.3 Kalite geçişi
+
+Değişenler — hepsi ölçülebilir, hiçbiri gizli değil:
+
+| | §7 geçişleri | Kalite geçişi |
+| --- | --- | --- |
+| Parametre | 8 001 | **86 449** |
+| Genişlik / ffn | 16 / 32 | **64 / 192** |
+| Yerel pencere | 16 (soru iskeletinden kısa) | **48** |
+| Olgu bağı | 2 048 | **32** |
+| Güncelleme başına token | 1 024 | **256** |
+| Öğrenme oranı | 3e-4 | 3e-4 |
+
+Borç kalan yan: korpus 600 MB olarak aynı üreticiden geliyor, ama koşu süre
+bütçesiyle sınırlı; tüketilen bayt miktarı raporda açıkça yazıyor ve
+"tamamlandı" denmiyor.
+
+## 9. Sınırlar
 
 - Korpus **sentetiktir**; model bu veriyle Türkçe "öğrenmez", bu korpusun
   istatistiğini öğrenir.

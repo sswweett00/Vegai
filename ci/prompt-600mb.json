@@ -1,7 +1,7 @@
 {
   "enabled": true,
-  "note": "Quality pass: same 600 MB corpus generator as the two recorded passes, but width 64 / ffn 192 (86,449 parameters instead of 8,001), a 48-byte physical window, 32 fact bindings instead of 2048, and 256 tokens per optimiser update so the same wall-clock buys roughly twice as many updates. The calibration pass (20 MB, run 40857056713) measured 7,985 tokens/second at this shape and a loss that fell 0.9222 -> 0.6369 without any exact match, which is what an update-starved run looks like: the adaptive step moves every parameter by about the learning rate per update, so 19k updates only barely left the uniform distribution.",
-  "purpose": "Quality pass with the calibration shape; see docs/PROMPT_RESPONSE_PRETRAINING.md section 8",
+  "note": "Diagnostic run, no training: the checkpoint of run 40860680347 is restored and scored twice in effect -- the probe and the asks now stream 512 bytes of the corpus into the recurrent state before each prompt. Training ends at byte 118,847,232, so train_minutes=1 makes the session loop stop immediately and only the evaluation steps run. The point is to test one hypothesis with a measurement: run 40860680347 reached a training loss of 0.156 while its probe nll was 14.3, and every prompt was answered from a cold state, which is a regime training never visits.",
+  "purpose": "Cold-state versus warm-state evaluation of the quality-pass checkpoint; see docs/PROMPT_RESPONSE_PRETRAINING.md section 8.4",
   "corpus_bytes": 600000000,
   "facts": 32,
   "width": 64,
@@ -11,9 +11,11 @@
   "memory_slots": 64,
   "train_chunk_tokens": 256,
   "learning_rate": 0.0003,
-  "train_minutes": 235,
+  "train_minutes": 1,
   "session_minutes": 25,
-  "resume_run_id": "",
-  "resume_start_byte": 0,
-  "label": "quality-w64-facts32-chunk256"
+  "reset_every": 2048,
+  "warmup_bytes": 512,
+  "resume_run_id": "40860680347",
+  "resume_start_byte": 118847232,
+  "label": "warm-eval-w64-facts32"
 }

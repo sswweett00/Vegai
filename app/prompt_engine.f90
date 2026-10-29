@@ -44,6 +44,7 @@ program prompt_engine
    integer(int32), parameter :: MAX_PROMPT = 8192_int32
    integer(int32), parameter :: MAX_RESPONSE = 256_int32
    integer(int32), parameter :: MAX_PROBE_ROWS = 4096_int32
+   integer(int64), parameter :: MAX_WARMUP = 65536_int64
    integer(int32), parameter :: DOT = 46_int32
    integer(int32), parameter :: NEWLINE = 10_int32
 
@@ -52,9 +53,16 @@ program prompt_engine
    type(fbc_update_config_t) :: update_config
    character(len=1024) :: corpus_path, checkpoint_path, probe_path, prompt_text, resume_path
    logical :: learning_rate_given
-   integer(int64) :: seed, byte_limit, start_byte, max_updates, max_seconds, progress_every
+   integer(int64) :: seed, byte_limit, start_byte, max_updates, max_seconds, progress_every, reset_every
    integer(int32) :: chunk_tokens, max_new
    real(real64) :: temperature
+   ! Bytes a probe or an ask streams into the recurrent state before the prompt.
+   ! Training never sees a cold state after its first token, so a with-context
+   ! evaluation is the only one that measures the same regime; see docs.
+   character(len=1024) :: warmup_path
+   integer(int64) :: warmup_bytes
+   integer(int32), allocatable :: warmup_tokens(:)
+   integer(int32) :: warmup_count
 
    call read_command(command)
    if (len_trim(command) == 0) call usage_and_stop('missing command')
@@ -83,6 +91,10 @@ program prompt_engine
    probe_path = 'probe.tsv'
    prompt_text = ''
    resume_path = ''
+   warmup_path = ''
+   warmup_bytes = 0_int64
+   warmup_count = 0_int32
+   reset_every = 0_int64
    learning_rate_given = .false.
 
    call parse_options()
@@ -91,7 +103,7 @@ program prompt_engine
    case ('train')
       call command_train(config, update_config, seed, trim(corpus_path), trim(checkpoint_path), &
                          trim(resume_path), chunk_tokens, start_byte, byte_limit, max_updates, &
-                         max_seconds, progress_every, learning_rate_given)
+                         max_seconds, progress_every, learning_rate_given, reset_every)
    case ('ask')
       call command_ask(trim(checkpoint_path), prompt_text, max_new, temperature, seed)
    case ('probe')
@@ -116,8 +128,10 @@ contains
       write(output_unit, '(A)') '         [--max-seconds S] [--train-chunk-tokens N] [--width N]'
       write(output_unit, '(A)') '         [--heads N] [--ffn N] [--window H] [--local-window N]'
       write(output_unit, '(A)') '         [--memory-scales N] [--memory-slots N] [--lr R] [--seed N]'
+      write(output_unit, '(A)') '         [--reset-every N]'
       write(output_unit, '(A)') '  ask    --checkpoint FILE --prompt TEXT  [--max-new N] [--temperature R]'
       write(output_unit, '(A)') '  probe  --checkpoint FILE --probe FILE   [--max-new N] [--temperature R]'
+      write(output_unit, '(A)') '         [--warmup-bytes N] [--warmup-from FILE]'
       write(output_unit, '(A)') ''
       write(output_unit, '(A)') '  Tokens are bytes: token id = byte value, vocabulary 256.'
       write(output_unit, '(A)') '  --bytes 0 (default) consumes the whole file.'
@@ -229,6 +243,17 @@ contains
             index = index + 1_int32
             call get_arg(index, key)
             temperature = parse_real64(key, '--temperature')
+         case ('--warmup-bytes')
+            index = index + 1_int32
+            call get_arg(index, key)
+            warmup_bytes = parse_int64(key, '--warmup-bytes')
+         case ('--warmup-from')
+            index = index + 1_int32
+            call get_arg(index, warmup_path)
+         case ('--reset-every')
+            index = index + 1_int32
+            call get_arg(index, key)
+            reset_every = parse_int64(key, '--reset-every')
          case default
             call usage_and_stop('unknown option: '//trim(key))
          end select
@@ -238,6 +263,9 @@ contains
       if (max_new < 1 .or. max_new > MAX_RESPONSE) call usage_and_stop('--max-new is out of range')
       if (chunk_tokens < 1 .or. chunk_tokens > FBC_MAX_CHUNK_TOKENS) &
          call usage_and_stop('--train-chunk-tokens is out of range')
+      if (warmup_bytes < 0_int64 .or. warmup_bytes > MAX_WARMUP) &
+         call usage_and_stop('--warmup-bytes is out of range')
+      if (reset_every < 0_int64) call usage_and_stop('--reset-every is out of range')
    end subroutine parse_options
 
    subroutine get_arg(index, value)
@@ -278,10 +306,17 @@ contains
    !  train -- stream a corpus file as bytes
    !---------------------------------------------------------------------------
    subroutine command_train(config, update_config, seed, corpus, checkpoint, resume, chunk, start_byte, &
-                            byte_limit, max_updates, max_seconds, progress_every, learning_rate_given)
+                            byte_limit, max_updates, max_seconds, progress_every, learning_rate_given, &
+                            reset_every)
       type(fbc_config_t), intent(in) :: config
       type(fbc_update_config_t), intent(inout) :: update_config
       integer(int64), intent(in) :: seed, start_byte, byte_limit, max_updates, max_seconds, progress_every
+      !> Reset the recurrent state every this many tokens (0 = never).  Training
+      !> only ever saw a warm state -- the memory channels are empty for the
+      !> first tokens of a stream and filled afterwards -- while every prompt is
+      !> answered from a cold one.  Resetting on a fixed period puts both regimes
+      !> in the training distribution instead of leaving the cold one unseen.
+      integer(int64), intent(in) :: reset_every
       character(len=*), intent(in) :: corpus, checkpoint, resume
       logical, intent(in) :: learning_rate_given
       integer(int32), intent(in) :: chunk
@@ -295,7 +330,7 @@ contains
       integer(int32) :: status, unit_number, io_status, block_bytes, block_tokens
       integer(int32), allocatable :: tokens(:)
       integer(int8), allocatable :: raw(:)
-      integer(int64) :: consumed, file_bytes, stopped_at, started, now, elapsed
+      integer(int64) :: consumed, file_bytes, stopped_at, started, now, elapsed, since_reset
       integer(int64) :: tokens_before, updates_before, session_tokens, session_updates
       real(real64) :: loss, rate, session_rate, session_loss
       logical :: bounded, first_field
@@ -342,6 +377,7 @@ contains
 
       allocate(raw(chunk + 1_int32), tokens(chunk + 1_int32))
       consumed = start_byte
+      since_reset = 0_int64
       tokens_before = metrics%tokens
       updates_before = metrics%updates
       metrics%numeric_ok = .true.
@@ -369,6 +405,15 @@ contains
             exit
          end if
          consumed = consumed + int(block_tokens, int64)
+         since_reset = since_reset + int(block_tokens, int64)
+         if (reset_every > 0_int64 .and. since_reset >= reset_every) then
+            call fbc_state_reset(state, model, status)
+            if (status /= FBC_OK) then
+               write(error_unit, '(A,I0)') 'stream reset failed, status ', status
+               exit
+            end if
+            since_reset = 0_int64
+         end if
          if (progress_every > 0_int64 .and. mod(metrics%updates, progress_every) == 0_int64) then
             call wall_clock(now)
             write(output_unit, '(A,I0,A,I0,A,F0.4,A,F0.1,A,I0)') 'progress: bytes ', consumed, &
@@ -419,6 +464,7 @@ contains
       call field_int('seconds', elapsed, first_field)
       call field_real('learned_reach', fbc_learned_horizon(model), first_field)
       call field_int('parameters', fbc_parameter_count(config), first_field)
+      call field_int('reset_every', reset_every, first_field)
       call field_bool('numeric_ok', metrics%numeric_ok, first_field)
       write(output_unit, '(A)') ''
       write(output_unit, '(A)') '}'
@@ -479,6 +525,7 @@ contains
       if (status /= FBC_OK) call usage_and_stop('stream state allocation failed')
       call fbc_workspace_init(workspace, model, status)
       if (status /= FBC_OK) call usage_and_stop('workspace allocation failed')
+      call load_warmup(trim(warmup_path), trim(corpus_path), warmup_bytes)
 
       random_state = seed * 6364136223846793005_int64 + 1442695040888963407_int64
       call respond(model, state, workspace, prompt, max_new, temperature, random_state, response, length)
@@ -487,6 +534,7 @@ contains
       write(output_unit, '(A)') 'PROMPT_RESPONSE_JSON {'
       call field_text('prompt', trim(prompt), first_field)
       call field_text('response', response(1_int32:length), first_field)
+      call field_int('warmup_bytes', int(warmup_count, int64), first_field)
       call field_real('learned_reach', fbc_learned_horizon(model), first_field)
       write(output_unit, '(A)') ''
       write(output_unit, '(A)') '}'
@@ -532,6 +580,7 @@ contains
       if (status /= FBC_OK) call usage_and_stop('stream state allocation failed')
       call fbc_workspace_init(workspace, model, status)
       if (status /= FBC_OK) call usage_and_stop('workspace allocation failed')
+      call load_warmup(trim(warmup_path), trim(corpus_path), warmup_bytes)
 
       open(newunit=unit_number, file=probe_file, action='read', status='old', iostat=io_status)
       if (io_status /= 0) call usage_and_stop('cannot open the probe file: '//trim(probe_file))
@@ -599,6 +648,7 @@ contains
       first_field = .true.
       write(output_unit, '(A)') 'PROBE_JSON {'
       call field_text('probe_file', trim(probe_file), first_field)
+      call field_int('warmup_bytes', int(warmup_count, int64), first_field)
       call field_int('rows', int(rows, int64), first_field)
       call field_family('fact', fact_hit, fact_total, fact_byte_hits, fact_bytes, fact_nll, first_field)
       call field_family('copy', copy_hit, copy_total, copy_byte_hits, copy_bytes, copy_nll, first_field)
@@ -655,6 +705,10 @@ contains
       call fbc_state_reset(state, model, status)
       response = ''
       length = 0_int32
+
+      do index = 1_int32, warmup_count
+         call fbc_step(model, state, workspace, warmup_tokens(index), hidden, logits, status)
+      end do
 
       do index = 1_int32, len(prompt)
          call fbc_step(model, state, workspace, byte_of(prompt(index:index)), hidden, logits, status)
@@ -733,6 +787,9 @@ contains
       byte_hits = 0_int32
       nll = 0.0_real64
       produced = 0_int32
+      do index = 1_int32, warmup_count
+         call fbc_step(model, state, workspace, warmup_tokens(index), hidden, logits, status)
+      end do
       do index = 1_int32, len(prompt)
          call fbc_step(model, state, workspace, byte_of(prompt(index:index)), hidden, logits, status)
       end do
@@ -961,6 +1018,40 @@ contains
       prompt = line(first + 1_int32:second - 1_int32)
       expected = line(second + 1_int32:len_trim(line))
    end subroutine split_row
+
+   !> Reads the bytes a prompt is preceded by.  A streaming model is trained
+   !> with a state that has already consumed text; a prompt presented to an
+   !> empty state asks it a question in a regime it never saw, and the answers
+   !> differ by orders of magnitude in likelihood.  `--warmup-bytes N` streams N
+   !> bytes of a corpus prefix into the state before every prompt, so the
+   !> measurement is taken in the training regime.
+   subroutine load_warmup(path, fallback_path, nbytes)
+      character(len=*), intent(in) :: path, fallback_path
+      integer(int64), intent(in) :: nbytes
+      character(len=1024) :: source
+      integer(int32) :: unit_number, io_status, index, wanted
+      integer(int8), allocatable :: raw(:)
+
+      warmup_count = 0_int32
+      if (nbytes <= 0_int64) return
+      source = path
+      if (len_trim(source) == 0) source = fallback_path
+      if (len_trim(source) == 0) call usage_and_stop('--warmup-bytes needs --warmup-from or --corpus')
+      wanted = int(min(nbytes, file_size(trim(source))), int32)
+      if (wanted <= 0_int32) return
+      allocate(raw(wanted), warmup_tokens(wanted))
+      open(newunit=unit_number, file=trim(source), access='stream', form='unformatted', &
+           action='read', status='old', iostat=io_status)
+      if (io_status /= 0) call usage_and_stop('cannot open the warm-up text: '//trim(source))
+      read(unit_number, iostat=io_status) raw
+      close(unit_number)
+      if (io_status /= 0) call usage_and_stop('cannot read the warm-up text: '//trim(source))
+      do index = 1_int32, wanted
+         warmup_tokens(index) = iand(int(raw(index), int32), 255_int32)
+      end do
+      warmup_count = wanted
+      deallocate(raw)
+   end subroutine load_warmup
 
    function file_size(path) result(bytes)
       character(len=*), intent(in) :: path

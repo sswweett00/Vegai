@@ -68,6 +68,14 @@ on:
         description: 'Byte offset the resumed checkpoint had reached'
         required: false
         default: '0'
+      reset_every:
+        description: 'Reset the recurrent state every N tokens (0 = never)'
+        required: false
+        default: '0'
+      warmup_bytes:
+        description: 'Bytes of corpus streamed into the state before each prompt (0 = cold)'
+        required: false
+        default: '0'
   # A narrow push trigger makes the workflow reachable from the PR branch
   # without spending a long job on unrelated changes.
   push:
@@ -123,6 +131,8 @@ jobs:
             echo "LR=0.003"
             echo "RESUME_RUN_ID="
             echo "START_BYTE=0"
+            echo "RESET_EVERY=0"
+            echo "WARMUP_BYTES=0"
             echo "RUN_LABEL="
           } > "$GITHUB_ENV"
           if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ -f "$config_file" ]; then
@@ -140,6 +150,7 @@ jobs:
               'session_minutes': 25, 'facts': 2048, 'width': 32, 'heads': 2, 'ffn': 64,
               'local_window': 32, 'memory_slots': 64, 'train_chunk_tokens': 1024,
               'learning_rate': 0.003, 'resume_run_id': '', 'resume_start_byte': 0,
+              'reset_every': 0, 'warmup_bytes': 0,
           }
           defaults.update(config)
           print('MODE=dispatch')
@@ -157,6 +168,8 @@ jobs:
           print(f"LR={defaults['learning_rate']}")
           print(f"RESUME_RUN_ID={defaults['resume_run_id']}")
           print(f"START_BYTE={defaults['resume_start_byte']}")
+          print(f"RESET_EVERY={defaults['reset_every']}")
+          print(f"WARMUP_BYTES={defaults['warmup_bytes']}")
           PY
           elif [ "${GITHUB_EVENT_NAME}" != "push" ]; then
             {
@@ -177,6 +190,8 @@ jobs:
               echo "LR=${{ inputs.learning_rate }}"
               echo "RESUME_RUN_ID=${{ inputs.resume_run_id }}"
               echo "START_BYTE=${{ inputs.resume_start_byte }}"
+              echo "RESET_EVERY=${{ inputs.reset_every }}"
+              echo "WARMUP_BYTES=${{ inputs.warmup_bytes }}"
             } >> "$GITHUB_ENV"
           fi
           # The restore steps cannot read GITHUB_ENV in their `if`, so the
@@ -319,6 +334,7 @@ jobs:
                  --local-window "$LOCAL_WINDOW" \
                  --memory-slots "$SLOTS" \
                  --lr "$LR" \
+                 --reset-every "$RESET_EVERY" \
                  --progress-every 200 \
                  ${resume_args[@]+"${resume_args[@]}"} > "$session_log" 2>&1; then
               cat "$session_log"
@@ -366,6 +382,8 @@ jobs:
           if ! ./build-prompt-600m/vegai_prompt_engine probe \
                --checkpoint "$RUN_DIR/model.vgfb" \
                --probe "$RUN_DIR/probe-trained.tsv" \
+               --warmup-bytes "$WARMUP_BYTES" \
+               --warmup-from "$RUN_DIR/corpus.txt" \
                --max-new 32 > "$RUN_DIR/probe.log" 2>&1; then
             cat "$RUN_DIR/probe.log"
             echo "::error title=probe failed::$(tail -n 12 "$RUN_DIR/probe.log" | tr '\n' '~' | cut -c1-900)"
@@ -381,7 +399,9 @@ jobs:
             local kind="$1" prompt="$2" expected="$3"
             { echo "### ${kind} | expected: ${expected}"; } >> "$RUN_DIR/ask.log"
             ./build-prompt-600m/vegai_prompt_engine ask \
-              --checkpoint "$RUN_DIR/model.vgfb" --prompt "${prompt}" --max-new 32 >> "$RUN_DIR/ask.log" 2>&1 || {
+              --checkpoint "$RUN_DIR/model.vgfb" --prompt "${prompt}" \
+              --warmup-bytes "$WARMUP_BYTES" --warmup-from "$RUN_DIR/corpus.txt" \
+              --max-new 32 >> "$RUN_DIR/ask.log" 2>&1 || {
                 echo "::error title=ask failed::$(tail -n 6 "$RUN_DIR/ask.log" | tr '\n' '~' | cut -c1-900)"
                 exit 1
               }
