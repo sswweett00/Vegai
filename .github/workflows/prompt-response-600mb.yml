@@ -228,6 +228,11 @@ jobs:
         run: |
           make context-tests BUILD_DIR=build-prompt-600m 2>&1 | tee context-tests.log
 
+      # The corpus generator and the ask-log gate are pure Python, so their
+      # contract is checked here too instead of only in the lint workflow.
+      - name: Check the corpus and evidence contracts
+        run: python3 tools/verify_prompt_response_corpus.py
+
       - name: Generate and verify the corpus
         run: |
           set -euo pipefail
@@ -416,6 +421,10 @@ jobs:
             ask "$kind" "$prompt" "$expected"
           done
           cat "$RUN_DIR/ask.log"
+          # A prompt the model never saw is indistinguishable from a prompt it
+          # cannot answer, except that the first one answers everything the same
+          # way.  Fail the step instead of publishing that as a result.
+          python3 tools/verify_prompt_response_corpus.py --ask-log "$RUN_DIR/ask.log"
 
       # The numbers have to survive outside the artifact store, so the whole
       # evidence block is also emitted as annotations.

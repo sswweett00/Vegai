@@ -1,7 +1,7 @@
 {
   "enabled": true,
-  "note": "Diagnostic run, no training: the checkpoint of run 40860680347 is restored and scored twice in effect -- the probe and the asks now stream 512 bytes of the corpus into the recurrent state before each prompt. Training ends at byte 118,847,232, so train_minutes=1 makes the session loop stop immediately and only the evaluation steps run. The point is to test one hypothesis with a measurement: run 40860680347 reached a training loss of 0.156 while its probe nll was 14.3, and every prompt was answered from a cold state, which is a regime training never visits.",
-  "purpose": "Cold-state versus warm-state evaluation of the quality-pass checkpoint; see docs/PROMPT_RESPONSE_PRETRAINING.md section 8.4",
+  "note": "Re-evaluation of the quality-pass checkpoint with the padding bug fixed: `respond` and `score_continuation` measured the prompt buffer with len() instead of len_trim(), so every prompt was followed by ~1000 padding spaces before the model was asked to continue. That is why all three asks returned the same bytes and why a model with a training loss of 0.156 scored a probe nll of 13.9. No training happens here (train_minutes=1 stops the session loop immediately): the checkpoint of run 40860680347 at byte 118,847,232 is restored and scored again.",
+  "purpose": "Measure the same checkpoint through the fixed inference path; see docs/PROMPT_RESPONSE_PRETRAINING.md section 8.5",
   "corpus_bytes": 600000000,
   "facts": 32,
   "width": 64,
@@ -13,9 +13,9 @@
   "learning_rate": 0.0003,
   "train_minutes": 1,
   "session_minutes": 25,
-  "reset_every": 2048,
-  "warmup_bytes": 512,
+  "reset_every": 0,
+  "warmup_bytes": 0,
   "resume_run_id": "40860680347",
   "resume_start_byte": 118847232,
-  "label": "warm-eval-w64-facts32"
+  "label": "fixed-eval-w64-facts32"
 }

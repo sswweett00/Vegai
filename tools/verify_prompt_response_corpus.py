@@ -97,6 +97,75 @@ def check_run_summary(directory: Path) -> None:
         pass
 
 
+ASK_HEADER = "### {kind} | expected: {expected}\n"
+
+
+def parse_ask_log(text: str) -> list[dict]:
+    """Pull the prompt/response objects out of an `ask.log`.
+
+    The log interleaves a human header per prompt with one PROMPT_RESPONSE_JSON
+    block, so the blocks are collected the same way the evidence report does it.
+    """
+    entries: list[dict] = []
+    for block in text.split("PROMPT_RESPONSE_JSON {")[1:]:
+        body = block.split("}", 1)[0]
+        record: dict = {}
+        for line in body.splitlines():
+            line = line.strip().rstrip(",")
+            if not line.startswith('"'):
+                continue
+            key, _, value = line.partition(": ")
+            record[key.strip('"')] = value.strip().strip('"')
+        entries.append(record)
+    return entries
+
+
+def check_ask_responses(directory: Path) -> None:
+    """A prompt that is answered independently of its content is a bug.
+
+    The prompt is passed to `respond` through a fixed-length buffer.  When that
+    buffer was measured with `len()` instead of `len_trim()`, every ask was
+    preceded by hundreds of padding spaces and all prompts produced one and the
+    same response: the signature is that the responses are identical even though
+    the prompts and their expected answers are not.  Journal-shaped logs must
+    fail that test, so a regression cannot pass unnoticed again.
+    """
+    run = directory / "ask-check"
+    run.mkdir()
+    entries = [
+        ("fact", "Soru: a nedir? Cevap: ", "b", "zzz"),
+        ("fact", "Soru: c nedir? Cevap: ", "d", "qqq"),
+        ("copy", "Tekrar et: e. Sonuc: ", "e", "ee"),
+    ]
+    log = "".join(
+        ASK_HEADER.format(kind=kind, expected=expected)
+        + "PROMPT_RESPONSE_JSON {\n"
+        + f'  "prompt": "{prompt}",\n'
+        + f'  "response": "{response}",\n'
+        + '  "warmup_bytes": 0\n'
+        + "}\n"
+        for kind, prompt, expected, response in entries
+    )
+    (run / "ask.log").write_text(log, encoding="utf-8")
+    parsed = parse_ask_log(log)
+    check(len(parsed) == 3, "every ask block is parsed")
+    check(len({entry["response"] for entry in parsed}) == 3,
+          "three different prompts do not collapse into one response")
+
+    degenerate = "".join(
+        ASK_HEADER.format(kind=kind, expected=expected)
+        + "PROMPT_RESPONSE_JSON {\n"
+        + f'  "prompt": "{prompt}",\n'
+        + '  "response": "`\u00e2RRR",\n'
+        + '  "warmup_bytes": 0\n'
+        + "}\n"
+        for kind, prompt, expected, _ in entries
+    )
+    collapsed = {entry["response"] for entry in parse_ask_log(degenerate)}
+    check(len(collapsed) == 1,
+          "the identical-response signature is detectable, which is what this check guards")
+
+
 def check_evidence_report(directory: Path) -> None:
     """The evidence report must read the engine's own reports and say what is
     missing instead of inventing a number."""
@@ -137,7 +206,43 @@ def check_evidence_report(directory: Path) -> None:
           "the example parser reads a closed array")
 
 
+def check_ask_log_text(text: str) -> list[str]:
+    """Problems with a real `ask.log`, empty when it looks like a working model.
+
+    One response per prompt is the contract; the same response for every prompt
+    means the model never saw the prompt, which is exactly what a padding bug or
+    a state leak looks like from the outside.
+    """
+    entries = parse_ask_log(text)
+    problems: list[str] = []
+    if len(entries) < 2:
+        problems.append(f"ask.log has {len(entries)} response block(s); at least two are needed")
+        return problems
+    if any(not entry.get("response") for entry in entries):
+        problems.append("ask.log has a block with an empty response")
+    if len({entry.get("response") for entry in entries}) == 1:
+        problems.append("every prompt produced the same response, so the prompt was not used")
+    return problems
+
+
 def main() -> int:
+    if "--ask-log" in sys.argv:
+        index = sys.argv.index("--ask-log")
+        if index + 1 >= len(sys.argv):
+            print("usage: verify_prompt_response_corpus.py [--ask-log FILE]")
+            return 2
+        path = Path(sys.argv[index + 1])
+        if not path.is_file():
+            print(f"missing ask log: {path}")
+            return 2
+        problems = check_ask_log_text(path.read_text(encoding="utf-8", errors="replace"))
+        for problem in problems:
+            print(f"FAIL {problem}")
+        if problems:
+            return 1
+        print(f"ask log ok: {len(parse_ask_log(path.read_text(encoding='utf-8', errors='replace')))} responses")
+        return 0
+
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         target = 400_000
@@ -202,6 +307,14 @@ def main() -> int:
             pass
 
         check_run_summary(root)
+        check_ask_responses(root)
+        good = ("### fact | expected: b\nPROMPT_RESPONSE_JSON {\n"
+                '  "prompt": "Soru: a nedir? Cevap: ",\n  "response": "b"\n}\n'
+                "### fact | expected: d\nPROMPT_RESPONSE_JSON {\n"
+                '  "prompt": "Soru: c nedir? Cevap: ",\n  "response": "d"\n}\n')
+        check(check_ask_log_text(good) == [], "a healthy ask log passes the live check")
+        check(check_ask_log_text(good.replace('"response": "d"', '"response": "b"')) != [],
+              "an ask log whose prompts all answer the same byte is rejected")
         check_evidence_report(root)
 
     if FAILURES:

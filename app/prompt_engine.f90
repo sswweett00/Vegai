@@ -710,7 +710,10 @@ contains
          call fbc_step(model, state, workspace, warmup_tokens(index), hidden, logits, status)
       end do
 
-      do index = 1_int32, len(prompt)
+      ! len_trim, not len: the dummy argument is bound to a fixed-length buffer,
+      ! so len() would stream the padding as real tokens and the model would
+      ! answer a prompt followed by a thousand spaces.
+      do index = 1_int32, len_trim(prompt)
          call fbc_step(model, state, workspace, byte_of(prompt(index:index)), hidden, logits, status)
       end do
 
@@ -790,7 +793,7 @@ contains
       do index = 1_int32, warmup_count
          call fbc_step(model, state, workspace, warmup_tokens(index), hidden, logits, status)
       end do
-      do index = 1_int32, len(prompt)
+      do index = 1_int32, len_trim(prompt)
          call fbc_step(model, state, workspace, byte_of(prompt(index:index)), hidden, logits, status)
       end do
       do index = 1_int32, len_trim(expected)
