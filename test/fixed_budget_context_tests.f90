@@ -465,9 +465,9 @@ contains
    !> from a frozen state (depth-1 truncated BPTT).  So a central difference of
    !> exactly that one-step loss, taken from the same frozen state, must match
    !> the analytic gradient.  Eight parameters are probed, one per block of the
-   !> network: readout weight, channel logit, the two slot write projections,
-   !> the slot query projection, the distance bias, an FFN projection and the
-   !> tied embedding.
+   !> network: readout weight, channel logit, the input-dependent channel and
+   !> scale gates, the two slot write projections, the slot query projection,
+   !> the distance bias, an FFN projection and the tied embedding.
    subroutine test_gradient_check
       type(fbc_config_t) :: config
       type(fbc_model_t) :: model
@@ -520,6 +520,31 @@ contains
          numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
          call report_gradient(numeric, gradient%channel_logit(3_int32), &
                     'finite difference matches the slot-channel mixing gradient')
+      end block
+      block
+         ! The input-dependent channel gate: logit(c) = channel_logit(c) +
+         ! channel_gate_proj(c, :) . normalized, so a row of the projection and
+         ! the shared bias must both verify against the same step.
+         original = model%channel_gate_proj(FBC_CHANNEL_RETENTION, 2_int32)
+         model%channel_gate_proj(FBC_CHANNEL_RETENTION, 2_int32) = original + delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, plus_loss, status)
+         model%channel_gate_proj(FBC_CHANNEL_RETENTION, 2_int32) = original - delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
+         model%channel_gate_proj(FBC_CHANNEL_RETENTION, 2_int32) = original
+         numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
+         call report_gradient(numeric, gradient%channel_gate_proj(FBC_CHANNEL_RETENTION, 2_int32), &
+                    'finite difference matches the input-dependent channel gate gradient')
+      end block
+      block
+         original = model%scale_gate_proj(1_int32, 3_int32)
+         model%scale_gate_proj(1_int32, 3_int32) = original + delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, plus_loss, status)
+         model%scale_gate_proj(1_int32, 3_int32) = original - delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
+         model%scale_gate_proj(1_int32, 3_int32) = original
+         numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
+         call report_gradient(numeric, gradient%scale_gate_proj(1_int32, 3_int32), &
+                    'finite difference matches the input-dependent scale gate gradient')
       end block
       block
          original = model%slot_key_proj(2_int32, 3_int32)
@@ -778,6 +803,7 @@ contains
       real(real64) :: slots_before(32, 16), scales_before(3), channels_before(3), salience_before
       real(real64) :: decays_before(3), writes_before(3)
       real(real64), allocatable :: hidden(:), logits(:), dlogits(:)
+      real(real64), allocatable :: gate_before(:, :), scale_gate_before(:, :)
       real(real64) :: loss, norm
 
       config = small_config(2048_int64)
@@ -819,6 +845,10 @@ contains
                  'the multi-scale readout receives a gradient')
       call check(sum(abs(gradient%channel_logit)) > 0.0_real64, &
                  'the channel mixer receives a gradient')
+      call check(sum(abs(gradient%channel_gate_proj)) > 0.0_real64, &
+                 'the input-dependent channel gate receives a gradient')
+      call check(sum(abs(gradient%scale_gate_proj)) > 0.0_real64, &
+                 'the input-dependent scale gate receives a gradient')
       call check(sum(abs(gradient%attention_rms)) > 0.0_real64 .and. &
                  sum(abs(gradient%ffn_rms)) > 0.0_real64, &
                  'both normalization scales receive a gradient')
@@ -837,6 +867,8 @@ contains
       writes_before = model%write_strength_logit
       channels_before = model%channel_logit
       salience_before = model%slot_salience_weight
+      gate_before = model%channel_gate_proj
+      scale_gate_before = model%scale_gate_proj
       call fbc_train_stream(model, optimizer, state, tokens, token_count, chunk, update_config, &
                             workspace, gradient, metrics, status)
       call check(status == FBT_OK, 'needle training completes')
@@ -845,6 +877,10 @@ contains
       call check(any(model%scale_logit /= scales_before), &
                  'the multi-scale readout weights are optimised')
       call check(any(model%channel_logit /= channels_before), 'the channel mixer is optimised')
+      call check(any(model%channel_gate_proj /= gate_before), &
+                 'the input-dependent channel gate is optimised, not just present')
+      call check(any(model%scale_gate_proj /= scale_gate_before), &
+                 'the input-dependent scale gate is optimised, not just present')
       call check(model%slot_salience_weight /= salience_before, 'the salience weight is optimised')
       call check(any(model%decay_logit /= decays_before), 'the memory decay is optimised')
       call check(any(model%write_strength_logit /= writes_before), 'the memory write strength is optimised')
@@ -996,6 +1032,9 @@ contains
                  restored_counters%tokens == counters%tokens, 'counters survive the round trip')
       call check(abs(loaded_config%learning_rate - update_config%learning_rate) == 0.0_real64, &
                  'optimizer hyper-parameters survive the round trip')
+      call check(all(restored%channel_gate_proj == model%channel_gate_proj) .and. &
+                 all(restored%scale_gate_proj == model%scale_gate_proj), &
+                 'the v3 checkpoint restores both input-dependent gates exactly')
       call check(abs(restored%slot_salience_weight - model%slot_salience_weight) == 0.0_real64, &
                  'the salience weight survives the round trip')
       call check(all(restored%decay_logit == model%decay_logit) .and. &
@@ -1055,6 +1094,35 @@ contains
       call fbc_checkpoint_load(legacy, restored, restored_optimizer, loaded_config, &
                                restored_counters, status)
       call check(status == FBT_ERR_LEGACY, 'loading a legacy checkpoint never converts it silently')
+
+      ! A v2 header (the version before the input-dependent gates) must be
+      ! refused with its own status: the payload has no value for the two gate
+      ! projections, and a v3 binary that silently assumed zeros would be
+      ! reporting a different model than the file describes.
+      open(newunit=unit, file=legacy, status='replace', action='write', access='stream', &
+           form='unformatted', iostat=io_status)
+      call check(io_status == 0, 'the v2 fixture can be written')
+      write(unit) FBC_CHECKPOINT_MAGIC
+      write(unit) 2_int32
+      close(unit)
+      call fbc_checkpoint_load(legacy, restored, restored_optimizer, loaded_config, &
+                               restored_counters, status)
+      call check(status == FBT_ERR_VERSION, 'a v2 checkpoint is refused, never converted to v3')
+      open(newunit=unit, file=legacy, status='replace', action='write', access='stream', &
+           form='unformatted', iostat=io_status)
+      write(unit) FBC_CHECKPOINT_MAGIC
+      write(unit) 2_int32
+      write(unit) config%vocabulary_size, config%width, config%heads, config%ffn_width, &
+                  config%local_window, config%memory_scales, config%memory_slots, &
+                  config%logical_horizon, config%rms_epsilon, config%slot_decay, config%slot_temperature
+      write(unit) 0.0_real64
+      write(unit) 0_int32
+      write(unit) 0_int64, 0_int64, 0.0_real64
+      close(unit)
+      call fbc_checkpoint_meta_read(legacy, meta, status)
+      call check(status == FBT_ERR_VERSION, 'the header reader reports the older version instead of guessing')
+      call check(meta%format_version == 2_int32 .and. .not. meta%convertible, &
+                 'the header keeps the real version number and marks the file non-convertible')
 
       call fbc_state_destroy(state)
       call fbc_workspace_destroy(workspace)

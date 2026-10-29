@@ -24,7 +24,7 @@
 !
 !  Checkpoint contract
 !  -------------------
-!  Format `VGFB0001` version 1 stores: architecture version, logical horizon,
+!  Format `VGFB0001` version 3 stores: architecture version, logical horizon,
 !  physical local window, memory scales/slots, the effective (achievable)
 !  horizon and its clamp flag, every learnable array, full optimiser state,
 !  the update counter and the token counter.  Legacy `VGNR0001` checkpoints are
@@ -52,9 +52,12 @@ module fixed_budget_training
    character(len=8), parameter, public :: FBC_CHECKPOINT_MAGIC = 'VGFB0001'
    character(len=8), parameter, public :: FBC_LEGACY_MAGIC = 'VGNR0001'
    !> Version 2 adds the learnable memory dynamics (a decay logit and a write
-   !> logit per scale).  A v1 file has no value for them, and inventing one
-   !> would silently change the model, so v1 is refused rather than converted.
-   integer(int32), parameter, public :: FBC_CHECKPOINT_VERSION = 2_int32
+   !> logit per scale).  Version 3 adds the two input-dependent gate
+   !> projections.  An older file has no value for the arrays a newer version
+   !> added, and inventing one (a zero gate, say) would silently change the
+   !> model, so every older version is refused with FBT_ERR_VERSION instead of
+   !> being converted.
+   integer(int32), parameter, public :: FBC_CHECKPOINT_VERSION = 3_int32
    integer(int32), parameter, public :: FBC_CHECKPOINT_MIN_VERSION = 1_int32
 
    ! Synthetic tasks.  They exist because the contract under test is structural
@@ -358,6 +361,8 @@ contains
       gradient%decay_logit = gradient%decay_logit * scale
       gradient%write_strength_logit = gradient%write_strength_logit * scale
       gradient%channel_logit = gradient%channel_logit * scale
+      gradient%channel_gate_proj = gradient%channel_gate_proj * scale
+      gradient%scale_gate_proj = gradient%scale_gate_proj * scale
       gradient%slot_query_proj = gradient%slot_query_proj * scale
       gradient%slot_key_proj = gradient%slot_key_proj * scale
       gradient%slot_value_proj = gradient%slot_value_proj * scale
@@ -520,6 +525,8 @@ contains
       if (io_status == 0) write(unit, iostat=io_status) model%slot_value_proj
       if (io_status == 0) write(unit, iostat=io_status) model%slot_read_proj
       if (io_status == 0) write(unit, iostat=io_status) model%slot_salience_weight
+      if (io_status == 0) write(unit, iostat=io_status) model%channel_gate_proj
+      if (io_status == 0) write(unit, iostat=io_status) model%scale_gate_proj
    end subroutine write_payload
 
    subroutine read_payload(unit, model, io_status)
@@ -548,6 +555,8 @@ contains
       if (io_status == 0) read(unit, iostat=io_status) model%slot_value_proj
       if (io_status == 0) read(unit, iostat=io_status) model%slot_read_proj
       if (io_status == 0) read(unit, iostat=io_status) model%slot_salience_weight
+      if (io_status == 0) read(unit, iostat=io_status) model%channel_gate_proj
+      if (io_status == 0) read(unit, iostat=io_status) model%scale_gate_proj
    end subroutine read_payload
 
    subroutine write_optimizer(unit, optimizer, io_status)
@@ -588,6 +597,10 @@ contains
                                                         optimizer%energy_slot_read_proj
       if (io_status == 0) write(unit, iostat=io_status) optimizer%slot_salience_weight_velocity, &
                                                         optimizer%slot_salience_weight_energy
+      if (io_status == 0) write(unit, iostat=io_status) optimizer%velocity_channel_gate_proj, &
+                                                        optimizer%energy_channel_gate_proj
+      if (io_status == 0) write(unit, iostat=io_status) optimizer%velocity_scale_gate_proj, &
+                                                        optimizer%energy_scale_gate_proj
    end subroutine write_optimizer
 
    subroutine read_optimizer(unit, optimizer, io_status)
@@ -628,6 +641,10 @@ contains
                                                        optimizer%energy_slot_read_proj
       if (io_status == 0) read(unit, iostat=io_status) optimizer%slot_salience_weight_velocity, &
                                                       optimizer%slot_salience_weight_energy
+      if (io_status == 0) read(unit, iostat=io_status) optimizer%velocity_channel_gate_proj, &
+                                                      optimizer%energy_channel_gate_proj
+      if (io_status == 0) read(unit, iostat=io_status) optimizer%velocity_scale_gate_proj, &
+                                                      optimizer%energy_scale_gate_proj
    end subroutine read_optimizer
 
    !> Loads a checkpoint into a fresh model/optimizer pair.  Returns

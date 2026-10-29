@@ -54,6 +54,8 @@ module fixed_budget_backward
       real(real64), allocatable :: decay_logit(:)
       real(real64), allocatable :: write_strength_logit(:)
       real(real64), allocatable :: channel_logit(:)
+      real(real64), allocatable :: channel_gate_proj(:, :)
+      real(real64), allocatable :: scale_gate_proj(:, :)
       real(real64), allocatable :: slot_query_proj(:, :)
       real(real64), allocatable :: slot_key_proj(:, :)
       real(real64), allocatable :: slot_value_proj(:, :)
@@ -94,6 +96,10 @@ contains
                gradient%decay_logit(size(model%decay_logit)), &
                gradient%write_strength_logit(size(model%write_strength_logit)), &
                gradient%channel_logit(size(model%channel_logit)), &
+               gradient%channel_gate_proj(size(model%channel_gate_proj, 1), &
+                                          size(model%channel_gate_proj, 2)), &
+               gradient%scale_gate_proj(size(model%scale_gate_proj, 1), &
+                                        size(model%scale_gate_proj, 2)), &
                gradient%slot_query_proj(size(model%slot_query_proj, 1), size(model%slot_query_proj, 2)), &
                gradient%slot_key_proj(size(model%slot_key_proj, 1), size(model%slot_key_proj, 2)), &
                gradient%slot_value_proj(size(model%slot_value_proj, 1), size(model%slot_value_proj, 2)), &
@@ -128,6 +134,8 @@ contains
       gradient%decay_logit = 0.0_real64
       gradient%write_strength_logit = 0.0_real64
       gradient%channel_logit = 0.0_real64
+      gradient%channel_gate_proj = 0.0_real64
+      gradient%scale_gate_proj = 0.0_real64
       gradient%slot_query_proj = 0.0_real64
       gradient%slot_key_proj = 0.0_real64
       gradient%slot_value_proj = 0.0_real64
@@ -154,6 +162,8 @@ contains
       if (allocated(gradient%decay_logit)) deallocate(gradient%decay_logit)
       if (allocated(gradient%write_strength_logit)) deallocate(gradient%write_strength_logit)
       if (allocated(gradient%channel_logit)) deallocate(gradient%channel_logit)
+      if (allocated(gradient%channel_gate_proj)) deallocate(gradient%channel_gate_proj)
+      if (allocated(gradient%scale_gate_proj)) deallocate(gradient%scale_gate_proj)
       if (allocated(gradient%slot_query_proj)) deallocate(gradient%slot_query_proj)
       if (allocated(gradient%slot_key_proj)) deallocate(gradient%slot_key_proj)
       if (allocated(gradient%slot_value_proj)) deallocate(gradient%slot_value_proj)
@@ -177,6 +187,7 @@ contains
                 sum(gradient%ffn_output**2) + sum(gradient%distance_bias**2) + &
                 sum(gradient%decay_logit**2) + sum(gradient%write_strength_logit**2) + &
                 sum(gradient%scale_logit**2) + sum(gradient%channel_logit**2) + &
+                sum(gradient%channel_gate_proj**2) + sum(gradient%scale_gate_proj**2) + &
                 sum(gradient%slot_query_proj**2) + sum(gradient%slot_key_proj**2) + &
                 sum(gradient%slot_value_proj**2) + sum(gradient%slot_read_proj**2) + &
                 gradient%slot_salience_weight**2
@@ -219,6 +230,7 @@ contains
       real(real64) :: dslot_read_score(model%config%memory_slots)
       real(real64) :: dsalience(model%config%memory_slots)
       real(real64) :: dscale_alpha(model%config%memory_scales)
+      real(real64) :: dscale_logit(model%config%memory_scales)
       real(real64) :: dslot_key_after(model%config%width)
       real(real64) :: dslot_value_after(model%config%width)
       real(real64) :: key_before(model%config%width)
@@ -228,6 +240,10 @@ contains
       ! Q/K/V and slot projections were computed from the attention one, so it
       ! is rebuilt here rather than read back.
       real(real64) :: attention_input(model%config%width)
+      ! Accumulated dL/d(normalized) contributed by the input-dependent gates.
+      ! Both mixtures are softmax(logit + W . normalized), so the gate has two
+      ! gradients: one towards its own rows (W) and one towards the shared input.
+      real(real64) :: dn_gate(model%config%width)
       ! Scratch for the intra-step retention write (see stage 8).
       real(real64) :: dphi_key(model%head_width), dvalue(model%head_width)
       real(real64) :: dretention(model%head_width, model%head_width)
@@ -258,6 +274,7 @@ contains
             gradient%token_embedding(component, workspace%token) + &
             workspace%hidden(component) * dlogits(workspace%token)
       end do
+      dn_gate = 0.0_real64
       dn = matmul(model%token_embedding, dlogits)
 
       ! ---- 2. residual stream and the gated FFN -----------------------------
@@ -299,6 +316,12 @@ contains
          dchannel(channel) = workspace%channel_alpha(channel) * (dcontext(channel) - moment)
       end do
       gradient%channel_logit = gradient%channel_logit + dchannel
+      ! The gate rows and the shared input both see the same dL/d(logit_eff).
+      do channel = 1_int32, FBC_CHANNEL_COUNT
+         gradient%channel_gate_proj(channel, :) = gradient%channel_gate_proj(channel, :) + &
+                                                  dchannel(channel) * attention_input
+         dn_gate = dn_gate + dchannel(channel) * model%channel_gate_proj(channel, :)
+      end do
 
       ! ---- 6. slot channel: read side ---------------------------------------
       dslot_read = matmul(workspace%channel_alpha(FBC_CHANNEL_SLOTS) * dc, model%slot_read_proj)
@@ -435,7 +458,13 @@ contains
          end do
       end do
       moment = dot_product(workspace%scale_alpha, dscale_alpha)
-      gradient%scale_logit = gradient%scale_logit + workspace%scale_alpha * (dscale_alpha - moment)
+      dscale_logit = workspace%scale_alpha * (dscale_alpha - moment)
+      gradient%scale_logit = gradient%scale_logit + dscale_logit
+      do scale = 1_int32, scales
+         gradient%scale_gate_proj(scale, :) = gradient%scale_gate_proj(scale, :) + &
+                                              dscale_logit(scale) * attention_input
+         dn_gate = dn_gate + dscale_logit(scale) * model%scale_gate_proj(scale, :)
+      end do
 
       ! ---- 9. local attention ------------------------------------------------
       context_scale = 1.0_real64 / sqrt(real(head_width, real64))
@@ -476,6 +505,11 @@ contains
          dn = dn + matmul(dq(:, head), model%query(:, :, head)) + matmul(dk(:, head), model%key(:, :, head)) + &
               matmul(dvv(:, head), model%value(:, :, head))
       end do
+
+      ! The gate reads the same normalised input as Q/K/V, the slot
+      ! projections and the FFN, so its input-side gradient joins theirs before
+      ! the RMSNorm backward splits the sum between the norm and the embedding.
+      dn = dn + dn_gate
 
       ! ---- 11. input RMSNorm and the embedding row --------------------------
       gradient%attention_rms = gradient%attention_rms + dn * workspace%rhat_attention

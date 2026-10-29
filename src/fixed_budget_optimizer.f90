@@ -79,6 +79,10 @@ module fixed_budget_optimizer
       real(real64) :: energy_scale_logit = 0.0_real64
       real(real64), allocatable :: velocity_channel_logit(:)
       real(real64) :: energy_channel_logit = 0.0_real64
+      real(real64), allocatable :: velocity_channel_gate_proj(:, :)
+      real(real64), allocatable :: energy_channel_gate_proj(:)
+      real(real64), allocatable :: velocity_scale_gate_proj(:, :)
+      real(real64), allocatable :: energy_scale_gate_proj(:)
       real(real64), allocatable :: velocity_slot_query_proj(:, :)
       real(real64), allocatable :: energy_slot_query_proj(:)
       real(real64), allocatable :: velocity_slot_key_proj(:, :)
@@ -137,6 +141,10 @@ contains
       allocate(optimizer%velocity_decay_logit(scales), stat=allocation_status)
       allocate(optimizer%velocity_write_strength_logit(scales), stat=allocation_status)
       allocate(optimizer%velocity_channel_logit(nchannels), stat=allocation_status)
+      allocate(optimizer%velocity_channel_gate_proj(nchannels, width), &
+               optimizer%energy_channel_gate_proj(width), stat=allocation_status)
+      allocate(optimizer%velocity_scale_gate_proj(scales, width), &
+               optimizer%energy_scale_gate_proj(width), stat=allocation_status)
       allocate(optimizer%velocity_slot_query_proj(width, width), &
                optimizer%energy_slot_query_proj(width), stat=allocation_status)
       allocate(optimizer%velocity_slot_key_proj(width, width), &
@@ -190,6 +198,10 @@ contains
       optimizer%energy_scale_logit = 0.0_real64
       optimizer%velocity_channel_logit = 0.0_real64
       optimizer%energy_channel_logit = 0.0_real64
+      optimizer%velocity_channel_gate_proj = 0.0_real64
+      optimizer%energy_channel_gate_proj = 0.0_real64
+      optimizer%velocity_scale_gate_proj = 0.0_real64
+      optimizer%energy_scale_gate_proj = 0.0_real64
       optimizer%velocity_slot_query_proj = 0.0_real64
       optimizer%energy_slot_query_proj = 0.0_real64
       optimizer%velocity_slot_key_proj = 0.0_real64
@@ -227,6 +239,10 @@ contains
       if (allocated(optimizer%velocity_decay_logit)) deallocate(optimizer%velocity_decay_logit)
       if (allocated(optimizer%velocity_write_strength_logit)) deallocate(optimizer%velocity_write_strength_logit)
       if (allocated(optimizer%velocity_channel_logit)) deallocate(optimizer%velocity_channel_logit)
+      if (allocated(optimizer%velocity_channel_gate_proj)) deallocate(optimizer%velocity_channel_gate_proj)
+      if (allocated(optimizer%energy_channel_gate_proj)) deallocate(optimizer%energy_channel_gate_proj)
+      if (allocated(optimizer%velocity_scale_gate_proj)) deallocate(optimizer%velocity_scale_gate_proj)
+      if (allocated(optimizer%energy_scale_gate_proj)) deallocate(optimizer%energy_scale_gate_proj)
       if (allocated(optimizer%velocity_slot_query_proj)) deallocate(optimizer%velocity_slot_query_proj)
       if (allocated(optimizer%energy_slot_query_proj)) deallocate(optimizer%energy_slot_query_proj)
       if (allocated(optimizer%velocity_slot_key_proj)) deallocate(optimizer%velocity_slot_key_proj)
@@ -297,6 +313,12 @@ contains
                        optimizer%energy_write_strength_logit, config, parameter_updates)
       call nova_vector(model%channel_logit, gradient%channel_logit, optimizer%velocity_channel_logit, &
                        optimizer%energy_channel_logit, config, parameter_updates)
+      call nova_columns(model%channel_gate_proj, gradient%channel_gate_proj, &
+                        optimizer%velocity_channel_gate_proj, &
+                        optimizer%energy_channel_gate_proj, config, parameter_updates)
+      call nova_columns(model%scale_gate_proj, gradient%scale_gate_proj, &
+                        optimizer%velocity_scale_gate_proj, &
+                        optimizer%energy_scale_gate_proj, config, parameter_updates)
       call nova_columns(model%slot_query_proj, gradient%slot_query_proj, optimizer%velocity_slot_query_proj, &
                         optimizer%energy_slot_query_proj, config, parameter_updates)
       call nova_columns(model%slot_key_proj, gradient%slot_key_proj, optimizer%velocity_slot_key_proj, &

@@ -175,6 +175,15 @@ module fixed_budget_context
       real(real64), allocatable :: distance_bias(:)                  ! (local_window)
       real(real64), allocatable :: scale_logit(:)                    ! (scale)
       real(real64), allocatable :: channel_logit(:)                  ! (3)
+      ! Input-dependent gates for the two soft mixtures.  Each channel/scale
+      ! logit becomes `logit + projection . normalized`, so the model can decide
+      ! *when* to read from local attention, from the recurrent memory or from
+      ! the slots instead of averaging them with one fixed mixture.  Both
+      ! projections start at exactly zero, which makes the initial (and, if the
+      ! optimiser never moves them, the final) behaviour identical to the static
+      ! scalars this replaced -- no silent change to an old checkpoint.
+      real(real64), allocatable :: channel_gate_proj(:, :)           ! (3, width)
+      real(real64), allocatable :: scale_gate_proj(:, :)             ! (scale, width)
       real(real64), allocatable :: slot_query_proj(:, :)             ! (width, width)
       real(real64), allocatable :: slot_key_proj(:, :)               ! (width, width)
       real(real64), allocatable :: slot_value_proj(:, :)             ! (width, width)
@@ -195,6 +204,7 @@ module fixed_budget_context
       real(real64), allocatable :: read_denominator(:, :)      ! (head, scale)
       real(real64), allocatable :: read_scale(:, :, :)         ! (dh, head, scale)
       real(real64), allocatable :: scale_alpha(:)              ! (scale)
+      real(real64), allocatable :: scale_logit_eff(:)           ! (scale) gate applied
       real(real64), allocatable :: local_weight(:, :)          ! (window+1, head), 1 = self
       integer(int32), allocatable :: local_position(:)         ! (window)
       real(real64), allocatable :: local_context(:, :)         ! (dh, head)
@@ -210,6 +220,7 @@ module fixed_budget_context
       real(real64), allocatable :: slot_read(:)                ! (width)
       real(real64), allocatable :: slot_context(:)             ! (width)
       real(real64), allocatable :: channel_alpha(:)            ! (3)
+      real(real64), allocatable :: channel_logit_eff(:)         ! (3) gate applied
       real(real64), allocatable :: channel_context(:, :)       ! (width, 3)
       real(real64), allocatable :: combined(:)                 ! (width)
       real(real64), allocatable :: attention_residual(:)       ! (width)
@@ -306,6 +317,19 @@ contains
          probabilities = 1.0_real64 / real(size(values, kind=int32), real64)
       end if
    end subroutine fbc_softmax
+
+   !> logits = bias + projection . input, one dot product per row.
+   !> Written as an explicit loop over rows so no temporary is created per token
+   !> and the cost is a fixed (rows * width) that does not depend on the horizon.
+   pure subroutine fbc_gate_logits(projection, bias, input_values, logits)
+      real(real64), intent(in) :: projection(:, :), bias(:), input_values(:)
+      real(real64), intent(out) :: logits(:)
+      integer(int32) :: row
+
+      do row = 1_int32, size(bias, kind=int32)
+         logits(row) = bias(row) + dot_product(projection(row, :), input_values)
+      end do
+   end subroutine fbc_gate_logits
 
    !----------------------------------------------------------------------------
    !  Validation and configuration
@@ -503,6 +527,7 @@ contains
               allocated(model%decay_logit) .and. allocated(model%write_strength_logit) .and. &
               allocated(model%write_strength) .and. &
               allocated(model%scale_logit) .and. allocated(model%channel_logit) .and. &
+              allocated(model%channel_gate_proj) .and. allocated(model%scale_gate_proj) .and. &
               allocated(model%slot_query_proj) .and. allocated(model%slot_key_proj) .and. &
               allocated(model%slot_value_proj) .and. allocated(model%slot_read_proj) .and. &
               allocated(model%scale_decay)
@@ -607,6 +632,8 @@ contains
                model%distance_bias(config%local_window + 1_int32), &
                model%scale_logit(config%memory_scales), &
                model%channel_logit(FBC_CHANNEL_COUNT), &
+               model%channel_gate_proj(FBC_CHANNEL_COUNT, config%width), &
+               model%scale_gate_proj(config%memory_scales, config%width), &
                model%slot_query_proj(config%width, config%width), &
                model%slot_key_proj(config%width, config%width), &
                model%slot_value_proj(config%width, config%width), &
@@ -638,6 +665,8 @@ contains
       model%distance_bias = 0.0_real64
       model%scale_logit = 0.0_real64
       model%channel_logit = 0.0_real64
+      model%channel_gate_proj = 0.0_real64
+      model%scale_gate_proj = 0.0_real64
       model%slot_salience_weight = 0.0_real64
       ! Initialise the learnable dynamics so that the very first step behaves
       ! exactly like the fixed ladder this model replaced: lambda_j from the
@@ -673,6 +702,8 @@ contains
       if (allocated(model%distance_bias)) deallocate(model%distance_bias)
       if (allocated(model%scale_logit)) deallocate(model%scale_logit)
       if (allocated(model%channel_logit)) deallocate(model%channel_logit)
+      if (allocated(model%channel_gate_proj)) deallocate(model%channel_gate_proj)
+      if (allocated(model%scale_gate_proj)) deallocate(model%scale_gate_proj)
       if (allocated(model%slot_query_proj)) deallocate(model%slot_query_proj)
       if (allocated(model%slot_key_proj)) deallocate(model%slot_key_proj)
       if (allocated(model%slot_value_proj)) deallocate(model%slot_value_proj)
@@ -793,6 +824,7 @@ contains
                workspace%v(head_width, heads), workspace%phi_q(head_width, heads), &
                workspace%phi_k(head_width, heads), workspace%read_denominator(heads, scales), &
                workspace%read_scale(head_width, heads, scales), workspace%scale_alpha(scales), &
+               workspace%scale_logit_eff(scales), &
                workspace%local_weight(window + 1_int32, heads), workspace%local_position(window), &
                workspace%local_context(head_width, heads), workspace%memory_context(head_width, heads), &
                workspace%slot_query(width), workspace%slot_write_key(width), &
@@ -801,6 +833,7 @@ contains
                workspace%slot_read_score(slots), workspace%slot_read_weight(slots), &
                workspace%slot_read(width), workspace%slot_context(width), &
                workspace%channel_alpha(FBC_CHANNEL_COUNT), &
+               workspace%channel_logit_eff(FBC_CHANNEL_COUNT), &
                workspace%channel_context(width, FBC_CHANNEL_COUNT), &
                workspace%combined(width), workspace%attention_residual(width), &
                workspace%rhat_attention(width), workspace%rhat_ffn(width), &
@@ -827,6 +860,7 @@ contains
       if (allocated(workspace%read_denominator)) deallocate(workspace%read_denominator)
       if (allocated(workspace%read_scale)) deallocate(workspace%read_scale)
       if (allocated(workspace%scale_alpha)) deallocate(workspace%scale_alpha)
+      if (allocated(workspace%scale_logit_eff)) deallocate(workspace%scale_logit_eff)
       if (allocated(workspace%local_weight)) deallocate(workspace%local_weight)
       if (allocated(workspace%local_position)) deallocate(workspace%local_position)
       if (allocated(workspace%local_context)) deallocate(workspace%local_context)
@@ -842,6 +876,7 @@ contains
       if (allocated(workspace%slot_read)) deallocate(workspace%slot_read)
       if (allocated(workspace%slot_context)) deallocate(workspace%slot_context)
       if (allocated(workspace%channel_alpha)) deallocate(workspace%channel_alpha)
+      if (allocated(workspace%channel_logit_eff)) deallocate(workspace%channel_logit_eff)
       if (allocated(workspace%channel_context)) deallocate(workspace%channel_context)
       if (allocated(workspace%combined)) deallocate(workspace%combined)
       if (allocated(workspace%attention_residual)) deallocate(workspace%attention_residual)
@@ -875,6 +910,8 @@ contains
       count = count + 3_int64 * width * ffn + window + 1_int64 + scales + FBC_CHANNEL_COUNT
       ! learnable memory dynamics: one decay logit and one write logit per scale
       count = count + 2_int64 * scales
+      ! input-dependent gates: one learned row per channel and per scale
+      count = count + (int(FBC_CHANNEL_COUNT, int64) + scales) * width
       ! slot projections (query, write key, write value, read output) + salience weight
       count = count + 4_int64 * width * width + 1_int64
    end function fbc_parameter_count
@@ -926,7 +963,8 @@ contains
                                                 3_int64 * width * ffn + width * vocab) + &
                                      2_int64 * (heads * scales * head_width * head_width) + &
                                      4_int64 * width * width * 2_int64 + &
-                                     2_int64 * (2_int64 * width * slots)
+                                     2_int64 * (2_int64 * width * slots) + &
+                                     2_int64 * (int(FBC_CHANNEL_COUNT, int64) + int(config%memory_scales, int64)) * width
       ! The backward pass is the same dense products plus the elementwise chain;
       ! counted as 2x the forward matmul work plus the gate arithmetic.
       plan%backward_flops_per_token = 2_int64 * plan%forward_flops_per_token + &
@@ -1037,7 +1075,13 @@ contains
             workspace%phi_q(component, head) = fbc_softplus(workspace%q(component, head))
          end do
       end do
-      call fbc_softmax(model%scale_logit, workspace%scale_alpha)
+      ! The scale mixture is modulated by the current token: a step whose input
+      ! says "this is a recall prompt" can stretch the fast scales, while a
+      ! continuation step can lean on the slow ones.  Zero gate weights reduce
+      ! this exactly to the static scale_logit vector.
+      call fbc_gate_logits(model%scale_gate_proj, model%scale_logit, workspace%normalized, &
+                           workspace%scale_logit_eff)
+      call fbc_softmax(workspace%scale_logit_eff, workspace%scale_alpha)
       do head = 1_int32, heads
          do scale = 1_int32, scales
             scale_factor = model%scale_decay(scale)
@@ -1110,7 +1154,9 @@ contains
                                    FBC_CHANNEL_RETENTION) = workspace%memory_context(:, head)
       end do
       workspace%channel_context(:, FBC_CHANNEL_SLOTS) = workspace%slot_context
-      call fbc_softmax(model%channel_logit, workspace%channel_alpha)
+      call fbc_gate_logits(model%channel_gate_proj, model%channel_logit, workspace%normalized, &
+                           workspace%channel_logit_eff)
+      call fbc_softmax(workspace%channel_logit_eff, workspace%channel_alpha)
       workspace%combined = 0.0_real64
       do channel = 1_int32, FBC_CHANNEL_COUNT
          workspace%combined = workspace%combined + workspace%channel_alpha(channel) * &
