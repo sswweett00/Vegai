@@ -181,13 +181,67 @@ Yorum (ölçümün söylediği, fazlası değil):
 - `next` ailesinde NLL 9.15: beklenen 6 harflik kaydırma dizisi model için en
   zor görev, çünkü 26^6 olasılık arasından tek doğru diziyi istiyor.
 
-### 7.2 Duman testi (her push, 2 MB)
+### 7.2 İkinci tam geçiş — 600 MB, `lr = 3e-4` (run 40795532458, commit `51e6839`)
+
+Aynı korpus (aynı SHA-256), aynı model şekli, tek fark öğrenme oranı.
+
+| Ölçüm | Değer |
+| --- | --- |
+| Tüketilen | **599 999 999 token = korpusun %100'ü**, 8 oturum |
+| Süre / hız | 11 906 s (3 sa 18 dk), **50 395 token/s** |
+| Eğitim NLL (oturum sırasıyla) | 1.4086, 1.3007, 1.2809, 1.2564, 1.2275, 1.2158, 1.2089, **1.2034** |
+| Öğrenilen erişim | 8 050.5 → **7 940.0 token** |
+| Probe | tam eşleşme **0/500**; sonraki-bayt: fact %3.6, copy %3.2, next %2.7, genel **%3.3** |
+| Teacher-forced NLL | fact 7.23, copy 7.34, next 10.07 |
+| Parametre | 8 001 |
+
+Bu koşunun checkpoint'i ayrı bir değerlendirme koşusunda (run 40816527156)
+artifact'tan geri yüklenip yeniden probe edildi: korpus SHA-256'sı eşleşti ve
+sayılar aynı çıktı. Yani **devam/değerlendirme yolu** da çalışıyor.
+
+### 7.3 İki geçişin karşılaştırması
+
+| | `lr = 3e-3` | `lr = 3e-4` |
+| --- | --- | --- |
+| Tüketilen | %100 (600 MB) | %100 (600 MB) |
+| Eğitim NLL | 1.2178 → **1.4185** (yükseldi) | 1.4086 → **1.2034** (düştü) |
+| Öğrenilen erişim | 3 935.9 → 984.6 | 8 050.5 → **7 940.0** |
+| Hız | 62 722 token/s | 50 395 token/s |
+| Probe (sonraki-bayt) | %3.3–4.2 | %2.7–3.6 |
+| Probe (tam eşleşme) | 0/500 | 0/500 |
+
+Bulgular (ölçümün desteklediği kadar):
+
+1. **`lr = 3e-3` kararsızdı.** Kayıp 586 bin güncelleme boyunca düştüğü yerde
+   yükseldi ve öğrenilen bellek erişimi 984 token'a çöktü. Bu, verinin değil
+   adım büyüklüğünün sonucu: aynı veri, aynı mimari, `lr = 3e-4` ile monoton
+   biçimde iyileşiyor.
+2. **Öğrenilen dinamik gerçekten öğreniliyor.** `decay_logit` yapılandırılan
+   8192'den 7940'a iniyor: model kendi erişimini ayarlıyor, ama ufku
+   *koruyor*. `3e-3`'te aynı parametre kaçıp kısa belleğe çöküyor — yani
+   parametre etkisiz değil, tersine fazla etkili.
+3. **Prompt → yanıt hâlâ çalışmıyor.** 8 001 parametreli bayt modeli yanıt
+   konumunda tek bir baytı tekrarlıyor:
+
+   ```
+   Soru: zırdüş nedir? Cevap:  ->  kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk
+                                    (beklenen: zozraşvö)
+   Soru: hontız nedir? Cevap:  ->  kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk
+                                    (beklenen: ratfısstör)
+   ```
+
+   Tam eşleşme 0/500; sonraki-bayt doğruluğu %3.3, şans düzeyi %0.39. Yani
+   model şansın ~8 katı, ama üretim çöküyor. Sıradaki deney açık: **kapasite**
+   (genişlik 32/64) ve **önbelleğe alınmış çözümleme** (beam/ölçekli örnekleme),
+   ikisi de bu belgenin kapsamı dışında bırakıldı.
+
+### 7.4 Duman testi (her push, 2 MB)
 
 500 satırlık probe ile uçtan uca boru hattı: korpus üretimi + doğrulama, 1
 oturum eğitim, filtre, probe, ask, rapor. Amaç sayı üretmek değil, boru hattının
 her adımının çalıştığını göstermek.
 
-### 7.3 Yeniden üretim
+### 7.5 Yeniden üretim
 
 Her koşu `prompt-response-600mb-evidence` artifact'ini üretir (korpus manifesti,
 oturum raporları, `probe.log`, `ask.log`, `training-summary.json`,

@@ -1,6 +1,6 @@
 {
-  "enabled": true,
-  "note": "Set enabled=true to request a real run on the next push that touches the workflow, the corpus tool or app/prompt_engine.f90. Leave it false otherwise: a real run occupies the runner for hours.",
+  "enabled": false,
+  "note": "Two full 600 MB passes are recorded in docs/PROMPT_RESPONSE_PRETRAINING.md (runs 40772938467 at lr 3e-3 and 40795532458 at lr 3e-4). Set enabled=true to request another pass on the next push that touches the workflow, the corpus tool, app/prompt_engine.f90 or this file; leave it false otherwise, a real pass occupies the runner for hours.",
   "purpose": "One full 600 MB prompt/response training pass in a single job; see docs/FIXED_BUDGET_CONTEXT_ENGINE.md section 10",
   "corpus_bytes": 600000000,
   "facts": 2048,
@@ -11,9 +11,9 @@
   "memory_slots": 32,
   "train_chunk_tokens": 1024,
   "learning_rate": 0.0003,
-  "train_minutes": 10,
+  "train_minutes": 240,
   "session_minutes": 25,
-  "resume_run_id": "40795532458",
-  "resume_start_byte": 599999999,
-  "label": "evaluate-run2-checkpoint"
+  "resume_run_id": "",
+  "resume_start_byte": 0,
+  "label": "lr3e-4-full-600mb"
 }
