@@ -419,22 +419,18 @@ jobs:
                 exit 1
               }
           }
-          # One ask per family, whatever families this probe file actually has:
-          # the bindings layout ships facts only, and `grep` finding nothing must
-          # not fail the step under `pipefail`.
-          asked=0
-          for family in fact copy next; do
-            found=$(grep "^${family}"$'\t' "$RUN_DIR/probe-trained.tsv" | head -n 1 || true)
-            if [ -z "${found:-}" ]; then
-              continue
-            fi
-            IFS=$'\t' read -r kind prompt expected <<< "$found"
-            ask "$kind" "$prompt" "$expected"
-            asked=$(( asked + 1 ))
-            if [ "$asked" -ge 3 ]; then
-              break
-            fi
-          done
+          # Ask up to N rows of one family.  The bindings probe ships facts only,
+          # so a per-family loop would ask a single question; and a family with no
+          # rows must not fail the step under `pipefail`.
+          ask_family() {
+            local family="$1" limit="$2" kind prompt expected
+            while IFS=$'\t' read -r kind prompt expected; do
+              ask "$kind" "$prompt" "$expected"
+            done < <(grep "^${family}"$'\t' "$RUN_DIR/probe-trained.tsv" | head -n "$limit" || true)
+          }
+          ask_family fact 3
+          ask_family copy 1
+          ask_family next 1
           cat "$RUN_DIR/ask.log"
           # A prompt the model never saw is indistinguishable from a prompt it
           # cannot answer, except that the first one answers everything the same
