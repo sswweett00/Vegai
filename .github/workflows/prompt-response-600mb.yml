@@ -227,11 +227,18 @@ jobs:
         if: ${{ hashFiles('.resume-marker') != '' }}
         run: |
           set -euo pipefail
-          restored="${RUNNER_TEMP}/vegai-resume/model.vgfb"
           mkdir -p "${RUNNER_TEMP}/vegai-resume"
-          test -f "$restored" || { echo "::error::no model.vgfb in run ${RESUME_RUN_ID}"; exit 1; }
+          # v4 extracts an artifact into the given path, but the layout has
+          # changed between major versions, so the file is located rather than
+          # assumed: a hard-coded path silently broke one evaluation run.
+          restored=$(find "${RUNNER_TEMP}/vegai-resume" -name model.vgfb -type f | head -n 1)
+          if [ -z "${restored:-}" ]; then
+            echo "::error title=no checkpoint::$(find "${RUNNER_TEMP}/vegai-resume" -maxdepth 3 | head -n 12 | tr '\n' '~')"
+            exit 1
+          fi
           cp "$restored" "$RUN_DIR/model.vgfb"
-          restored_manifest="${RUNNER_TEMP}/vegai-resume/corpus.manifest.json"
+          echo "restored checkpoint: ${restored}"
+          restored_manifest=$(find "${RUNNER_TEMP}/vegai-resume" -name corpus.manifest.json -type f | head -n 1 || true)"
           if [ -f "$restored_manifest" ]; then
             python3 - "$restored_manifest" "$RUN_DIR/corpus.manifest.json" <<'PY'
           import json, sys
