@@ -349,30 +349,42 @@ Sırayla iki hipotez kuruldu ve ikisi de ölçümle sınandı:
    **Bu deponun bu motor için yayımladığı bütün prompt → yanıt sayıları bu
    hatalı yoldan üretildi**, yani o sayılar modeli değil hatayı ölçüyordu.
 
-Düzeltmeden sonra aynı kontrol noktası (run 40899100386):
+`len_trim`'li ara ölçüm (run 40899100386) NLL'yi 14.316 → 5.890'a indirdi ve
+her sorunun farklı cevap üretmesini sağladı, ama bu sayılar **hâlâ** hatalı
+yoldan geldi (§8.6'daki 2 ve 3 numaralı hatalar o zaman henüz bulunmamıştı), bu
+yüzden hiçbiri burada sonuç olarak kullanılmıyor.
 
-| Ölçüm | Bozuk yol | Düzeltilmiş yol |
-| --- | --- | --- |
-| fact NLL | 14.316 | **5.890** |
-| copy NLL | 15.813 | 12.906 |
-| next NLL | 19.249 | 17.067 |
-| Aynı cevap / farklı soru | evet | hayır (her soru farklı) |
+Şablon yerleşimi hakkında "şablonu öğrendi, bağı öğrenmedi" sonucu da o hatalı
+araçla çıkarılmıştı. Aynı kontrol noktası, tam düzeltilmiş araçla yeniden
+ölçüldü — **run 40923834013 (commit `32dccb9`, eğitim yok)**:
+
+| Ölçüm (şablon yerleşimi, 118 847 232 token) | Değer |
+| --- | --- |
+| `fact` tam eşleşme | 5/32 |
+| `fact` sonraki-bayt | **0.851**, NLL 0.748 |
+| `copy` tam eşleşme / sonraki-bayt | 0/200 / 0.173 (NLL 8.936) |
+| `next` tam eşleşme / sonraki-bayt | 0/100 / 0.035 (NLL 11.010) |
+| Genel | tam eşleşme 0.015, sonraki-bayt 0.223 |
+
+Yani model şablon yerleşiminde de bağı **büyük ölçüde** öğrenmiş: yanıt
+baytlarının %85'i doğru, 32 bağın 5'i harfi harfine doğru, kalanlar tek baytlık
+sapmalarla (`lakkokvir` ↔ `laskokvir`, `lesnuknen` ↔ `desnuknen`). Buna karşılık
+bağlamdan kopyalama (`copy`, görülmemiş değerler) %17 ve harf kaydırma kuralı
+(`next`) %3.5 ile başarısız: model **ezberlediği** bağı getirebiliyor,
+**bağlamda verilen** yeni bir diziyi kopyalayamıyor. İkisi ayrı yetenek ve ölçüm
+ikisini ayırıyor.
 
 Regresyon koruması davranışsal: `tools/verify_prompt_response_corpus.py
 --ask-log FILE`, bir ask günlüğünde bütün soruların aynı cevabı verdiğini
-görürse düşer; iş akışı bunu ask adımından sonra çalıştırır (run 40899100386 bu
-kapıya takıldı, çünkü cevaplar boştu).
-
-Düzeltmeden sonra tablo ne söylüyor: model **şablonu** öğrenmiş, **bağı**
-öğrenmemiş. Yanıt baytlarının NLL'si 5.89 ≈ ln 256 = 5.545, yani yanıt
-pozisyonunda dağılım düzgüne yakın. Bunun nedeni ölçülebilir: şablon
-yerleşiminde içerik baytları akışın ~%20'si, geri kalanı sabit metin; ortalama
-kayıp şablonlarla düşüyor ve bağ üzerindeki gradyan seyreltik kalıyor.
+görürse düşer; iş akışı bunu ask adımından sonra çalıştırır ve ne ayrıştırdığını
+da yazar.
 
 ### 8.6 Bağ yerleşimi ve üç çıkarım hatası
 
-Şablon yerleşiminde bağ öğrenilemiyordu, çünkü kaybın çoğu şablonlardan
-geliyordu. `--layout bindings` korpusu yalnızca bağ satırlarından üretir:
+Şablon yerleşiminde bağ öğrenilebiliyordu ama yavaş ve eksik: yanıt baytlarının
+%85'i doğruyken tam eşleşme 5/32'de kalıyordu, çünkü kaybın çoğu şablonlardan
+geliyor ve bağ üzerindeki gradyan seyreltik kalıyor. `--layout bindings` korpusu
+yalnızca bağ satırlarından üretir:
 
 ```
 S: <özne> -> <yanıt>
@@ -442,8 +454,12 @@ adımından sonra çalıştırır ve artık ne ayrıştırdığını da yazar.
   istatistiğini öğrenir.
 - §8.6'daki 32/32, **32 yapay bağın** öğrenildiğini gösterir: `S: <özne> ->`
   istemine karşılık gelen yanıtı üretmek. Bu bir dil yeteneği değil, ölçülebilir
-  bir arama/ezber yeteneğidir; 2048 bağlı şablon korpusunda ve 8 001
-  parametreli modelde aynı şey ölçülemedi (§7).
+  bir arama/ezber yeteneğidir; 2048 bağlı korpusta ve 8 001 parametreli modelde
+  aynı şey ölçülemedi (§7).
+- Ezberlenen bağı getirmek ile **bağlamda verilen** yeni bir diziyi kullanmak
+  ayrı yetenekler ve ikincisi bu bütçede yok: `copy` (görülmemiş değeri kopyala)
+  %17, `next` (harf kaydırma) %3.5 (§8.5). Bu, mimarinin 86 bin parametrede
+  bağlamdan hesaplama yapamadığını gösterir; ölçüm bunu olduğu gibi raporlar.
 - 600 MB'ın **tamamı** bu koşuda tüketilmedi: 51 069 184 bayt (%8.5). Bağ
   yerleşiminde her satır bağımsız olduğu için kalan bayt aynı 32 bağı
   yineliyor; rapordaki oran yine de açıkça yazıyor.
