@@ -144,7 +144,57 @@ python3 tools/build_prompt_response_corpus.py filter-probe corpus.txt \
 python3 tools/report_prompt_response_evidence.py .
 ```
 
-## 7. Sınırlar
+## 7. Ölçülen sonuçlar
+
+Aşağıdaki sayılar workflow'un kendi raporlarından alınmıştır; hiçbiri elle
+hesaplanmamıştır. Her koşunun kimliği (run id, commit, SHA-256) kayıtlıdır.
+
+### 7.1 İlk tam geçiş — 600 MB, `lr = 3e-3` (run 40772938467, commit `3a5b026`)
+
+| Ölçüm | Değer |
+| --- | --- |
+| Korpus | 600 000 000 bayt, 1 028 247 belge, 2048 olgu bağı |
+| Korpus SHA-256 | `d3adca9ba0348605da2f0b4968a0f9e996420c961dedd1162633e687985f6b7d` |
+| Tüketilen | **599 999 999 token = korpusun %100'ü**, 7 oturum |
+| Süre / hız | 9 566 s (2 sa 39 dk), **62 722 token/s** |
+| Eğitim NLL | oturum 1: 1.2178 → oturum 7: **1.4185** (yükseldi) |
+| Öğrenilen erişim | 3 935.9 → **984.6 token** (model unutmayı hızlandırdı) |
+| Parametre | 8 001 |
+| Probe `fact` | tam eşleşme 0/200; sonraki-bayt **%3.3** (2 148 bayt), NLL 4.21 |
+| Probe `copy` | tam eşleşme 0/200; sonraki-bayt **%3.3** (2 171 bayt), NLL 4.15 |
+| Probe `next` | tam eşleşme 0/100; sonraki-bayt **%4.2** (600 bayt), NLL 9.15 |
+| Genel | tam eşleşme **0.000**, sonraki-bayt **0.034** (500 satır) |
+
+Yorum (ölçümün söylediği, fazlası değil):
+
+- Korpusun **tamamı** gerçekten tüketildi; bu bir iddia değil, `end_byte =
+  599 999 999` ve `whole_file` raporundan okunuyor.
+- Kayıp **arttı**. Yani bu koşu "daha iyi bir model" üretmedi: sabit `lr = 3e-3`
+  ile 586 bin güncelleme sonunda model kararsızlaştı (NaN yok, `numeric_ok`
+  doğru; bu bir ıraksama değil, salınım).
+- Öğrenilen bellek erişimi 3 936 token'dan 985 token'a indi: optimizasyon
+  bellekten çok yerel bağlama yaslandı. Bu, yeni dinamiğin **gerçekten
+  öğrenildiğinin** kanıtı; mimarinin ufku koruduğunun değil.
+- Tam eşleşme sıfır, sonraki-bayt doğruluğu %3.3–4.2. Şans düzeyi
+  1/256 = **%0.39**; yani model şansın ~8–10 katı, ama bir yanıtı uçtan uca
+  doğru yazmaktan çok uzak.
+- `next` ailesinde NLL 9.15: beklenen 6 harflik kaydırma dizisi model için en
+  zor görev, çünkü 26^6 olasılık arasından tek doğru diziyi istiyor.
+
+### 7.2 Duman testi (her push, 2 MB)
+
+500 satırlık probe ile uçtan uca boru hattı: korpus üretimi + doğrulama, 1
+oturum eğitim, filtre, probe, ask, rapor. Amaç sayı üretmek değil, boru hattının
+her adımının çalıştığını göstermek.
+
+### 7.3 Yeniden üretim
+
+Her koşu `prompt-response-600mb-evidence` artifact'ini üretir (korpus manifesti,
+oturum raporları, `probe.log`, `ask.log`, `training-summary.json`,
+`evidence.log`). Sayılar ayrıca **annotation** olarak yayınlanır, çünkü bu
+ortamda artifact deposu okunamıyor; sonuç kaybolmasın diye.
+
+## 8. Sınırlar
 
 - Korpus **sentetiktir**; model bu veriyle Türkçe "öğrenmez", bu korpusun
   istatistiğini öğrenir.
