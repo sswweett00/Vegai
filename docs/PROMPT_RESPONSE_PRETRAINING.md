@@ -308,6 +308,67 @@ Borç kalan yan: korpus 600 MB olarak aynı üreticiden geliyor, ama koşu süre
 bütçesiyle sınırlı; tüketilen bayt miktarı raporda açıkça yazıyor ve
 "tamamlandı" denmiyor.
 
+### 8.4 Kalite geçişinin sonucu (run 40860680347, commit `d5ba77a`)
+
+| Ölçüm | Değer |
+| --- | --- |
+| Tüketilen | 118 847 232 token, 10 oturum, 8 428 token/s |
+| Parametre | 86 465 |
+| Eğitim NLL (oturum ortalamaları) | 0.4096 → **0.1557** |
+| Probe (o koşuda) | fact tam 0/32, sonraki-bayt 0.034, nll **14.316** |
+
+Kayıp 0.1557, yani **perplexity 1.17**. Girdisine hiç bakmayan bir model bu
+kaybı tutturamaz; buna karşılık probe'un ölçtüğü yanıt-baytı NLL'si 14.3. İki
+sayı aynı korpusta, aynı ağırlıklarla ölçüldü; aralarındaki fark modelin
+kendisinden çok **ölçüm yolundan** geliyordu.
+
+### 8.5 İki yanlış hipotez ve gerçek hata
+
+Sırayla iki hipotez kuruldu ve ikisi de ölçümle sınandı:
+
+1. **"Soğuk durum" hipotezi.** Eğitim her baytı metin tüketmiş bir durumdan
+   tahmin eder; `probe` ve `ask` ise durumu sıfırlayıp soruyu akışın en başına
+   koyar. Bellek kanalları orada boş, eğitimde doludur ve kanal karışımı
+   girdiden bağımsız bir dışbükey birleşimdir. Bunun için `--warmup-bytes`
+   eklendi: sorudan önce N bayt korpus akıtılır.
+   **Ölçüm hipotezi çürüttü:** 512 baytlık ısınma NLL'yi 14.316 → **13.866**
+   düşürdü, sonraki-bayt doğruluğu 0.023'te kaldı (run 40896847438).
+
+2. **Gerçek hata: soru tamponunun dolgusu.** `respond` ve `score_continuation`
+   soruyu `len(prompt)` ile yürüyordu; oysa `prompt` sabit uzunlukta bir tampona
+   bağlı (ask için 1024, probe satırı için 8192 bayt). Yani model her sorudan
+   sonra **yüzlerce dolgu boşluğu** okuyup devam ediyordu. Belirtiler:
+
+   - üç farklı soru **bayt bayt aynı** cevabı veriyordu (birkaç yüz boşluktan
+     sonra soru pencereden çıkıyor),
+   - üretilen baytlar (0x60, 0xE0 aralığı, `R`) korpusta **hiç geçmiyor**;
+     0.1557 kaybına inmiş bir modelin bunları üretmesi mümkün değil,
+   - eğitim NLL'si 0.1557 olan kontrol noktası probe'da 14.3 veriyordu.
+
+   Düzeltme `len_trim`; eğitim etkilenmedi (blokları dosyadan tam okuyor).
+   **Bu deponun bu motor için yayımladığı bütün prompt → yanıt sayıları bu
+   hatalı yoldan üretildi**, yani o sayılar modeli değil hatayı ölçüyordu.
+
+Düzeltmeden sonra aynı kontrol noktası (run 40899100386):
+
+| Ölçüm | Bozuk yol | Düzeltilmiş yol |
+| --- | --- | --- |
+| fact NLL | 14.316 | **5.890** |
+| copy NLL | 15.813 | 12.906 |
+| next NLL | 19.249 | 17.067 |
+| Aynı cevap / farklı soru | evet | hayır (her soru farklı) |
+
+Regresyon koruması davranışsal: `tools/verify_prompt_response_corpus.py
+--ask-log FILE`, bir ask günlüğünde bütün soruların aynı cevabı verdiğini
+görürse düşer; iş akışı bunu ask adımından sonra çalıştırır (run 40899100386 bu
+kapıya takıldı, çünkü cevaplar boştu).
+
+Düzeltmeden sonra tablo ne söylüyor: model **şablonu** öğrenmiş, **bağı**
+öğrenmemiş. Yanıt baytlarının NLL'si 5.89 ≈ ln 256 = 5.545, yani yanıt
+pozisyonunda dağılım düzgüne yakın. Bunun nedeni ölçülebilir: şablon
+yerleşiminde içerik baytları akışın ~%20'si, geri kalanı sabit metin; ortalama
+kayıp şablonlarla düşüyor ve bağ üzerindeki gradyan seyreltik kalıyor.
+
 ## 9. Sınırlar
 
 - Korpus **sentetiktir**; model bu veriyle Türkçe "öğrenmez", bu korpusun

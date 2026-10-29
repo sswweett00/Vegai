@@ -63,6 +63,12 @@ program prompt_engine
    integer(int64) :: warmup_bytes
    integer(int32), allocatable :: warmup_tokens(:)
    integer(int32) :: warmup_count
+   ! The number of bytes a prompt really has.  A `character(len=*)` dummy cannot
+   ! tell a meaningful trailing space from padding, and every frame in this
+   ! corpus ends with one ("... Cevap: ", "S: subject -> "), so the length has
+   ! to travel beside the string.
+   integer(int32) :: prompt_bytes
+   integer(int32) :: argument_bytes
 
    call read_command(command)
    if (len_trim(command) == 0) call usage_and_stop('missing command')
@@ -94,6 +100,8 @@ program prompt_engine
    warmup_path = ''
    warmup_bytes = 0_int64
    warmup_count = 0_int32
+   prompt_bytes = 0_int32
+   argument_bytes = 0_int32
    reset_every = 0_int64
    learning_rate_given = .false.
 
@@ -171,6 +179,7 @@ contains
          case ('--prompt')
             index = index + 1_int32
             call get_arg(index, prompt_text)
+            prompt_bytes = argument_bytes
          case ('--window')
             index = index + 1_int32
             call get_arg(index, key)
@@ -276,6 +285,7 @@ contains
       value = ''
       if (index > command_argument_count()) call usage_and_stop('missing option value')
       call get_command_argument(index, value, received)
+      argument_bytes = int(received, int32)
    end subroutine get_arg
 
    function parse_int64(text, option) result(value)
@@ -528,7 +538,8 @@ contains
       call load_warmup(trim(warmup_path), trim(corpus_path), warmup_bytes)
 
       random_state = seed * 6364136223846793005_int64 + 1442695040888963407_int64
-      call respond(model, state, workspace, prompt, max_new, temperature, random_state, response, length)
+      call respond(model, state, workspace, prompt, prompt_bytes, max_new, temperature, &
+                   random_state, response, length)
 
       first_field = .true.
       write(output_unit, '(A)') 'PROMPT_RESPONSE_JSON {'
@@ -571,7 +582,7 @@ contains
       integer(int64) :: random_state
       logical :: first_field
       character(len=MAX_RESPONSE) :: scoring
-      integer(int32) :: scoring_bytes, scoring_hits
+      integer(int32) :: scoring_bytes, scoring_hits, prompt_length
       real(real64) :: scoring_nll
 
       if (len_trim(checkpoint) == 0) call usage_and_stop('probe needs --checkpoint')
@@ -600,17 +611,18 @@ contains
          if (len_trim(line) == 0) cycle
          if (line(1:1) == '#') cycle
          if (rows >= MAX_PROBE_ROWS) exit
-         call split_row(line, kind, prompt, expected)
+         call split_row(line, kind, prompt, expected, prompt_length)
          if (len_trim(prompt) == 0 .or. len_trim(expected) == 0) cycle
          rows = rows + 1_int32
-         call respond(model, state, workspace, prompt, max_new, temperature, random_state, response, length)
+         call respond(model, state, workspace, prompt, prompt_length, max_new, temperature, &
+                      random_state, response, length)
          ! Exact match on a greedy continuation is the headline number, but a
          ! tiny model that emits one wrong byte scores zero there while clearly
          ! ranking the right bytes above the rest.  The teacher-forced figures
          ! below say how often the *next byte* was right and how surprised the
          ! model was by the expected continuation, so the probe is informative
          ! even when the exact-match rate is zero.
-         call score_continuation(model, state, workspace, prompt, expected, &
+         call score_continuation(model, state, workspace, prompt, prompt_length, expected, &
                                  scoring, scoring_bytes, scoring_hits, scoring_nll)
          select case (trim(kind))
          case ('fact')
@@ -688,11 +700,13 @@ contains
    end subroutine load_model
 
    !> Feed `prompt` byte by byte, then continue the stream.
-   subroutine respond(model, state, workspace, prompt, max_new, temperature, random_state, response, length)
+   subroutine respond(model, state, workspace, prompt, prompt_length, max_new, temperature, &
+                      random_state, response, length)
       type(fbc_model_t), intent(in) :: model
       type(fbc_state_t), intent(inout) :: state
       type(fbc_workspace_t), intent(inout) :: workspace
       character(len=*), intent(in) :: prompt
+      integer(int32), intent(in) :: prompt_length
       integer(int32), intent(in) :: max_new
       real(real64), intent(in) :: temperature
       integer(int64), intent(inout) :: random_state
@@ -710,10 +724,10 @@ contains
          call fbc_step(model, state, workspace, warmup_tokens(index), hidden, logits, status)
       end do
 
-      ! len_trim, not len: the dummy argument is bound to a fixed-length buffer,
-      ! so len() would stream the padding as real tokens and the model would
-      ! answer a prompt followed by a thousand spaces.
-      do index = 1_int32, len_trim(prompt)
+      ! The caller's byte count, not len(): the dummy is bound to a fixed-length
+      ! buffer, so len() would stream the padding, and len_trim() would silently
+      ! drop the trailing space that every frame in this corpus ends with.
+      do index = 1_int32, min(prompt_length, len(prompt))
          call fbc_step(model, state, workspace, byte_of(prompt(index:index)), hidden, logits, status)
       end do
 
@@ -769,12 +783,13 @@ contains
    !> continuation.  The greedy text repeats what `respond` produced for the
    !> same prompt, which is the exact-match number, and the other two say how
    !> close the model was when it did not match exactly.
-   subroutine score_continuation(model, state, workspace, prompt, expected, greedy, byte_total, &
-                                 byte_hits, nll)
+   subroutine score_continuation(model, state, workspace, prompt, prompt_length, expected, greedy, &
+                                 byte_total, byte_hits, nll)
       type(fbc_model_t), intent(in) :: model
       type(fbc_state_t), intent(inout) :: state
       type(fbc_workspace_t), intent(inout) :: workspace
       character(len=*), intent(in) :: prompt, expected
+      integer(int32), intent(in) :: prompt_length
       character(len=*), intent(out) :: greedy
       integer(int32), intent(out) :: byte_total, byte_hits
       real(real64), intent(out) :: nll
@@ -793,7 +808,7 @@ contains
       do index = 1_int32, warmup_count
          call fbc_step(model, state, workspace, warmup_tokens(index), hidden, logits, status)
       end do
-      do index = 1_int32, len_trim(prompt)
+      do index = 1_int32, min(prompt_length, len(prompt))
          call fbc_step(model, state, workspace, byte_of(prompt(index:index)), hidden, logits, status)
       end do
       do index = 1_int32, len_trim(expected)
@@ -1003,14 +1018,16 @@ contains
    end function json_escape
 
    !> `kind<TAB>prompt<TAB>expected`.  The prompt may not contain a tab.
-   subroutine split_row(line, kind, prompt, expected)
+   subroutine split_row(line, kind, prompt, expected, prompt_length)
       character(len=*), intent(in) :: line
       character(len=*), intent(out) :: kind, prompt, expected
+      integer(int32), intent(out) :: prompt_length
       integer(int32) :: first, second
 
       kind = ''
       prompt = ''
       expected = ''
+      prompt_length = 0_int32
       first = index(line, achar(9))
       if (first <= 1_int32) return
       second = index(line(first + 1_int32:), achar(9))
@@ -1019,6 +1036,8 @@ contains
       if (second >= len_trim(line)) return
       kind = line(1_int32:first - 1_int32)
       prompt = line(first + 1_int32:second - 1_int32)
+      ! The field as written, including a trailing space that belongs to it.
+      prompt_length = second - first - 1_int32
       expected = line(second + 1_int32:len_trim(line))
    end subroutine split_row
 

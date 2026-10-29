@@ -1,7 +1,7 @@
 {
   "enabled": true,
-  "note": "Bindings pass. The template corpus let the model reach a training nll of 0.1557 while learning no binding at all: facts sat inside ~80% predictable prose, so the average loss was dominated by templates and the gradient on the lookup was diluted. This corpus is one line per binding and nothing else -- 'S: <subject> -> <answer>' -- so about half the bytes can only be predicted by looking the binding up. Same shape as the quality pass (86,465 parameters), 32 bindings, 256 tokens per update, state reset every 2048 tokens so the cold-start regime the probes use is inside the training distribution.",
-  "purpose": "Make the binding learnable and measure it end to end; see docs/PROMPT_RESPONSE_PRETRAINING.md section 8.6",
+  "note": "Same bindings checkpoint (run 40899844910, byte 51,069,184) scored again, because the previous fix was incomplete: len_trim(prompt) also cuts the frame's own last byte. Every prompt in this corpus ends with a space ('... Cevap: ' and 'S: subject -> '), so the model was shown a prompt one byte short, answered with the space it expected, and the score counted that as a wrong first answer byte -- next-byte 0.000 with nll 4.165 is that signature. The prompt length now travels beside the string (split_row reports the field length, get_command_argument reports the argument length). No training: train_minutes=1 stops the session loop immediately.",
+  "purpose": "Re-score a checkpoint whose training path was always correct; see docs/PROMPT_RESPONSE_PRETRAINING.md section 8.6",
   "layout": "bindings",
   "corpus_bytes": 600000000,
   "facts": 32,
@@ -12,11 +12,11 @@
   "memory_slots": 64,
   "train_chunk_tokens": 256,
   "learning_rate": 0.0003,
-  "train_minutes": 100,
+  "train_minutes": 1,
   "session_minutes": 25,
   "reset_every": 2048,
   "warmup_bytes": 0,
-  "resume_run_id": "",
-  "resume_start_byte": 0,
-  "label": "bindings-w64-facts32"
+  "resume_run_id": "40899844910",
+  "resume_start_byte": 51069184,
+  "label": "fixed-eval-2-bindings"
 }
