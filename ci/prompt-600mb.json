@@ -11,9 +11,9 @@
   "memory_slots": 32,
   "train_chunk_tokens": 1024,
   "learning_rate": 0.0003,
-  "train_minutes": 240,
+  "train_minutes": 10,
   "session_minutes": 25,
-  "resume_run_id": "",
-  "resume_start_byte": 0,
-  "label": "lr3e-4-full-600mb"
+  "resume_run_id": "40795532458",
+  "resume_start_byte": 599999999,
+  "label": "evaluate-run2-checkpoint"
 }

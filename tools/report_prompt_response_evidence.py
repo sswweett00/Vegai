@@ -177,15 +177,92 @@ def render(evidence: dict) -> list[str]:
     return lines
 
 
+MAX_ANNOTATIONS = 5
+
+
+def annotation_payloads(evidence: dict) -> list[tuple[str, str]]:
+    """Group the evidence into a few annotations.
+
+    GitHub keeps only ten annotations per step, and the prompt -> response lines
+    are the part a reader most needs, so they are packed first-few and the
+    groups are capped instead of emitting one annotation per line (which
+    silently dropped the examples at the end of the list).
+    """
+    corpus = evidence["corpus"]
+    training = evidence["training"]
+    probe = evidence["probe"] or {}
+    groups: list[tuple[str, list[str]]] = []
+
+    corpus_parts = []
+    if corpus.get("bytes"):
+        corpus_parts.append(f"{corpus['bytes']:,} bytes, {corpus.get('documents')} documents, "
+                            f"{corpus.get('facts')} facts")
+    if corpus.get("sha256"):
+        corpus_parts.append(f"sha256 {corpus['sha256']}")
+    if corpus_parts:
+        groups.append(("corpus", corpus_parts))
+
+    training_parts = []
+    if training:
+        training_parts.append(f"{int(training.get('total_tokens', 0)):,} tokens, "
+                              f"{int(training.get('sessions', 0))} sessions, "
+                              f"{float(training.get('tokens_per_second', 0)):,.0f} tok/s, "
+                              f"byte {int(training.get('end_byte', 0)):,} of "
+                              f"{int(training.get('corpus_bytes', 0)):,}")
+        curve = training.get("loss_curve") or []
+        if curve:
+            training_parts.append("loss " + " -> ".join(f"{r['mean_nll']:.4f}" for r in curve))
+        training_parts.append(f"learned reach {training.get('learned_reach_start'):.1f} -> "
+                              f"{training.get('learned_reach_end'):.1f} tokens, "
+                              f"{int(training.get('parameters', 0)):,} parameters")
+    else:
+        training_parts.append("no training report")
+    groups.append(("training", training_parts))
+
+    probe_parts = []
+    if probe:
+        for family in ("fact", "copy", "next"):
+            entry = probe.get(family) or {}
+            probe_parts.append(f"{family} exact {entry.get('correct', 0)}/{entry.get('n', 0)}, "
+                               f"next-byte {entry.get('byte_accuracy', 0.0):.3f}")
+        probe_parts.append(f"overall exact {probe.get('accuracy', 0.0):.3f} / next-byte "
+                           f"{probe.get('byte_accuracy', 0.0):.3f}")
+    else:
+        probe_parts.append("no probe report")
+    groups.append(("probe", probe_parts))
+
+    examples = evidence["examples"]
+    if examples:
+        groups.append(("prompt -> response", [
+            f"{e.get('kind')}: {e.get('prompt')!r} -> {e.get('response')!r} "
+            f"(expected {e.get('expected')!r}, greedy {e.get('greedy')!r})" for e in examples]))
+
+    ask = evidence["ask"]
+    if ask:
+        groups.append(("ask headers", ask))
+
+    payloads: list[tuple[str, str]] = []
+    for title, parts in groups[:MAX_ANNOTATIONS]:
+        text = " | ".join(part for part in parts if part)[:900]
+        payloads.append((title, text))
+    return payloads
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("--json", action="store_true", help="print the collected evidence as JSON")
+    parser.add_argument("--annotations", action="store_true",
+                        help="print at most five grouped annotations instead of one line each")
     arguments = parser.parse_args(argv)
     if not arguments.run_dir.is_dir():
         print(f"no run directory: {arguments.run_dir}", file=sys.stderr)
         return 1
     evidence = collect(arguments.run_dir)
+    if arguments.annotations:
+        for title, text in annotation_payloads(evidence):
+            print(f"ANNOTATION::{title}::{text}")
+        return 0
     if arguments.json:
         print(json.dumps(evidence, indent=1))
         return 0
