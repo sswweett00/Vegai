@@ -223,8 +223,14 @@ def annotation_payloads(evidence: dict) -> list[tuple[str, str]]:
     if probe:
         for family in ("fact", "copy", "next"):
             entry = probe.get(family) or {}
-            probe_parts.append(f"{family} exact {entry.get('correct', 0)}/{entry.get('n', 0)}, "
-                               f"next-byte {entry.get('byte_accuracy', 0.0):.3f}")
+            # The teacher-forced NLL says how far the answer bytes are from the
+            # model, which is the only number that separates "learned the frame"
+            # from "learned the binding" when the exact match is still zero.
+            detail = f"{family} exact {entry.get('correct', 0)}/{entry.get('n', 0)}, " \
+                     f"next-byte {entry.get('byte_accuracy', 0.0):.3f}"
+            if entry.get("mean_nll") is not None:
+                detail += f", nll {entry['mean_nll']:.3f}"
+            probe_parts.append(detail)
         probe_parts.append(f"overall exact {probe.get('accuracy', 0.0):.3f} / next-byte "
                            f"{probe.get('byte_accuracy', 0.0):.3f}")
     else:

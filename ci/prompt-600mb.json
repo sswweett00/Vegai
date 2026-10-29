@@ -1,19 +1,19 @@
 {
   "enabled": true,
-  "note": "Calibration pass for the quality ladder: 20 MB of the corpus, 10.7x the parameters of the recorded 600 MB passes (width 16/ffn 32 -> width 64/ffn 192), a 32-byte physical window that can actually see a whole question frame, and 64 fact bindings instead of 2048. It exists to measure tokens/second and to find out whether this shape learns the binding at all before a long pass is spent on it.",
-  "purpose": "Calibrate throughput and learnability before the full quality pass; see docs/PROMPT_RESPONSE_PRETRAINING.md section 8",
-  "corpus_bytes": 20000000,
-  "facts": 64,
+  "note": "Quality pass: same 600 MB corpus generator as the two recorded passes, but width 64 / ffn 192 (86,449 parameters instead of 8,001), a 48-byte physical window, 32 fact bindings instead of 2048, and 256 tokens per optimiser update so the same wall-clock buys roughly twice as many updates. The calibration pass (20 MB, run 40857056713) measured 7,985 tokens/second at this shape and a loss that fell 0.9222 -> 0.6369 without any exact match, which is what an update-starved run looks like: the adaptive step moves every parameter by about the learning rate per update, so 19k updates only barely left the uniform distribution.",
+  "purpose": "Quality pass with the calibration shape; see docs/PROMPT_RESPONSE_PRETRAINING.md section 8",
+  "corpus_bytes": 600000000,
+  "facts": 32,
   "width": 64,
   "heads": 4,
   "ffn": 192,
-  "local_window": 32,
+  "local_window": 48,
   "memory_slots": 64,
-  "train_chunk_tokens": 512,
+  "train_chunk_tokens": 256,
   "learning_rate": 0.0003,
-  "train_minutes": 20,
-  "session_minutes": 10,
+  "train_minutes": 235,
+  "session_minutes": 25,
   "resume_run_id": "",
   "resume_start_byte": 0,
-  "label": "calib-w64-ffn192-facts64"
+  "label": "quality-w64-facts32-chunk256"
 }
