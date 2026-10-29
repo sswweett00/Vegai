@@ -223,6 +223,9 @@ def annotation_payloads(evidence: dict) -> list[tuple[str, str]]:
     if probe:
         for family in ("fact", "copy", "next"):
             entry = probe.get(family) or {}
+            if int(entry.get("n", 0) or 0) == 0:
+                # A family the probe file never contained is absent, not zero.
+                continue
             # The teacher-forced NLL says how far the answer bytes are from the
             # model, which is the only number that separates "learned the frame"
             # from "learned the binding" when the exact match is still zero.

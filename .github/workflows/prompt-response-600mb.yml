@@ -76,6 +76,10 @@ on:
         description: 'Bytes of corpus streamed into the state before each prompt (0 = cold)'
         required: false
         default: '0'
+      layout:
+        description: 'Corpus layout: templates (facts inside prose) or bindings (compact lines)'
+        required: false
+        default: 'templates'
   # A narrow push trigger makes the workflow reachable from the PR branch
   # without spending a long job on unrelated changes.
   push:
@@ -133,6 +137,7 @@ jobs:
             echo "START_BYTE=0"
             echo "RESET_EVERY=0"
             echo "WARMUP_BYTES=0"
+            echo "LAYOUT=templates"
             echo "RUN_LABEL="
           } > "$GITHUB_ENV"
           if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ -f "$config_file" ]; then
@@ -150,7 +155,7 @@ jobs:
               'session_minutes': 25, 'facts': 2048, 'width': 32, 'heads': 2, 'ffn': 64,
               'local_window': 32, 'memory_slots': 64, 'train_chunk_tokens': 1024,
               'learning_rate': 0.003, 'resume_run_id': '', 'resume_start_byte': 0,
-              'reset_every': 0, 'warmup_bytes': 0,
+              'reset_every': 0, 'warmup_bytes': 0, 'layout': 'templates',
           }
           defaults.update(config)
           print('MODE=dispatch')
@@ -170,6 +175,7 @@ jobs:
           print(f"START_BYTE={defaults['resume_start_byte']}")
           print(f"RESET_EVERY={defaults['reset_every']}")
           print(f"WARMUP_BYTES={defaults['warmup_bytes']}")
+          print(f"LAYOUT={defaults['layout']}")
           PY
           elif [ "${GITHUB_EVENT_NAME}" != "push" ]; then
             {
@@ -192,6 +198,7 @@ jobs:
               echo "START_BYTE=${{ inputs.resume_start_byte }}"
               echo "RESET_EVERY=${{ inputs.reset_every }}"
               echo "WARMUP_BYTES=${{ inputs.warmup_bytes }}"
+              echo "LAYOUT=${{ inputs.layout }}"
             } >> "$GITHUB_ENV"
           fi
           # The restore steps cannot read GITHUB_ENV in their `if`, so the
@@ -243,6 +250,7 @@ jobs:
             "$run_dir/corpus.txt" \
             --bytes "$CORPUS_BYTES" \
             --facts "$FACTS" \
+            --layout "$LAYOUT" \
             --probe-out "$run_dir/probe.tsv" \
             --overwrite | tee "$run_dir/corpus-generate.json"
           python3 tools/build_prompt_response_corpus.py verify "$run_dir/corpus.txt" \
@@ -411,14 +419,21 @@ jobs:
                 exit 1
               }
           }
-          head -n 3 "$RUN_DIR/probe-trained.tsv" | while IFS=$'\t' read -r kind prompt expected; do
+          # One ask per family, whatever families this probe file actually has:
+          # the bindings layout ships facts only, and `grep` finding nothing must
+          # not fail the step under `pipefail`.
+          asked=0
+          for family in fact copy next; do
+            found=$(grep "^${family}"$'\t' "$RUN_DIR/probe-trained.tsv" | head -n 1 || true)
+            if [ -z "${found:-}" ]; then
+              continue
+            fi
+            IFS=$'\t' read -r kind prompt expected <<< "$found"
             ask "$kind" "$prompt" "$expected"
-          done
-          grep '^copy' "$RUN_DIR/probe-trained.tsv" | head -n 1 | while IFS=$'\t' read -r kind prompt expected; do
-            ask "$kind" "$prompt" "$expected"
-          done
-          grep '^next' "$RUN_DIR/probe-trained.tsv" | head -n 1 | while IFS=$'\t' read -r kind prompt expected; do
-            ask "$kind" "$prompt" "$expected"
+            asked=$(( asked + 1 ))
+            if [ "$asked" -ge 3 ]; then
+              break
+            fi
           done
           cat "$RUN_DIR/ask.log"
           # A prompt the model never saw is indistinguishable from a prompt it

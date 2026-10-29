@@ -1,7 +1,8 @@
 {
   "enabled": true,
-  "note": "Re-evaluation of the quality-pass checkpoint with the padding bug fixed: `respond` and `score_continuation` measured the prompt buffer with len() instead of len_trim(), so every prompt was followed by ~1000 padding spaces before the model was asked to continue. That is why all three asks returned the same bytes and why a model with a training loss of 0.156 scored a probe nll of 13.9. No training happens here (train_minutes=1 stops the session loop immediately): the checkpoint of run 40860680347 at byte 118,847,232 is restored and scored again.",
-  "purpose": "Measure the same checkpoint through the fixed inference path; see docs/PROMPT_RESPONSE_PRETRAINING.md section 8.5",
+  "note": "Bindings pass. The template corpus let the model reach a training nll of 0.1557 while learning no binding at all: facts sat inside ~80% predictable prose, so the average loss was dominated by templates and the gradient on the lookup was diluted. This corpus is one line per binding and nothing else -- 'S: <subject> -> <answer>' -- so about half the bytes can only be predicted by looking the binding up. Same shape as the quality pass (86,465 parameters), 32 bindings, 256 tokens per update, state reset every 2048 tokens so the cold-start regime the probes use is inside the training distribution.",
+  "purpose": "Make the binding learnable and measure it end to end; see docs/PROMPT_RESPONSE_PRETRAINING.md section 8.6",
+  "layout": "bindings",
   "corpus_bytes": 600000000,
   "facts": 32,
   "width": 64,
@@ -11,11 +12,11 @@
   "memory_slots": 64,
   "train_chunk_tokens": 256,
   "learning_rate": 0.0003,
-  "train_minutes": 1,
+  "train_minutes": 100,
   "session_minutes": 25,
-  "reset_every": 0,
+  "reset_every": 2048,
   "warmup_bytes": 0,
-  "resume_run_id": "40860680347",
-  "resume_start_byte": 118847232,
-  "label": "fixed-eval-w64-facts32"
+  "resume_run_id": "",
+  "resume_start_byte": 0,
+  "label": "bindings-w64-facts32"
 }

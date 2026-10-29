@@ -46,7 +46,18 @@ import tempfile
 from pathlib import Path
 
 SCHEMA = "vegai-prompt-response-corpus/v1"
+LAYOUT_TEMPLATES = "templates"
+LAYOUT_BINDINGS = "bindings"
+LAYOUTS = (LAYOUT_TEMPLATES, LAYOUT_BINDINGS)
 ALGORITHM = "turkish-patterned-facts/v1"
+# One line per binding and nothing else: "S: <subject> -> <answer>".  The frame
+# is 7 bytes, so the subject is twelve bytes from the answer for a five-byte
+# subject, and roughly half of the stream is content the model can only predict
+# by looking the binding up.  The template layout buries the same bindings
+# inside prose, where a model can reach a low average loss by learning the
+# templates alone -- measured: training nll 0.1557 with no binding learned.
+ALGORITHM_BINDINGS = "turkish-bindings/v1"
+BINDING_FRAME = "S: {subject} -> {answer}"
 DEFAULT_BYTES = 600_000_000
 DEFAULT_SEED = 20261028
 
@@ -127,12 +138,51 @@ def document(rng: random.Random, subjects: list[str], answers: list[str], copies
     return "\n".join(lines) + "\n\n"
 
 
+def binding_sentence(subject: str, answer: str) -> str:
+    return BINDING_FRAME.format(subject=subject, answer=answer)
+
+
+def binding_document(rng: random.Random, subjects: list[str], answers: list[str],
+                     lines_per_document: int = 12) -> str:
+    """A document of independent binding lines, nothing else.
+
+    Every line depends on the lookup, so the only way to lower the loss is to
+    read the subject and recall the answer; no template shortcut exists because
+    subjects and answers and their order are all free.
+    """
+    return "\n".join(binding_sentence(subjects[pick], answers[pick])
+                      for pick in (rng.randrange(len(subjects)) for _ in range(lines_per_document))) + "\n"
+
+
 PROBE_FACTS = 200
 PROBE_COPY = 200
 PROBE_NEXT = 100
 
 
-def write_probe(path: Path, subjects: list[str], answers: list[str], seed: int) -> dict:
+def binding_prompt(subject: str) -> str:
+    return f"S: {subject} -> "
+
+
+def subject_of_corpus_line(line: str) -> str:
+    """The subject a corpus line binds, or "" when the line binds nothing."""
+    if line.startswith("Soru: ") and " nedir? Cevap: " in line:
+        return line[len("Soru: "):].split(" nedir? Cevap: ", 1)[0]
+    if line.startswith("S: ") and " -> " in line:
+        return line[len("S: "):].split(" -> ", 1)[0]
+    return ""
+
+
+def subject_of_prompt(prompt: str) -> str:
+    """The subject a probe prompt asks about, for either layout."""
+    if prompt.startswith("Soru: ") and " nedir? Cevap: " in prompt:
+        return prompt[len("Soru: "):].split(" nedir? Cevap: ", 1)[0]
+    if prompt.startswith("S: ") and prompt.rstrip().endswith("->"):
+        return prompt[len("S: "):].split(" ->", 1)[0].rstrip()
+    return ""
+
+
+def write_probe(path: Path, subjects: list[str], answers: list[str], seed: int,
+                layout: str = LAYOUT_TEMPLATES) -> dict:
     """Emit the prompt/response probe set used by `vegai_prompt_engine probe`.
 
     Three families, each measurable by exact match:
@@ -154,7 +204,17 @@ def write_probe(path: Path, subjects: list[str], answers: list[str], seed: int) 
     rows: list[tuple[str, str, str]] = []
     picks = rng.sample(range(len(subjects)), min(PROBE_FACTS, len(subjects)))
     for pick in picks:
-        rows.append(("fact", f"Soru: {subjects[pick]} nedir? Cevap: ", answers[pick]))
+        if layout == LAYOUT_BINDINGS:
+            rows.append(("fact", binding_prompt(subjects[pick]), answers[pick]))
+        else:
+            rows.append(("fact", f"Soru: {subjects[pick]} nedir? Cevap: ", answers[pick]))
+    if layout == LAYOUT_BINDINGS:
+        # Copy and successor need the template prose to exist in the corpus; the
+        # bindings layout does not contain it, so scoring them would measure a
+        # task the model was never asked to learn.
+        path.write_text("".join(f"{kind}\t{prompt}\t{expected}\n" for kind, prompt, expected in rows),
+                        encoding="utf-8")
+        return {"probe": str(path), "rows": len(rows), "families": {"fact": len(rows)}}
     unseen_copy = build_vocabulary(rng, PROBE_COPY, syllables=3,
                                    forbidden=set(subjects) | set(answers))
     for value in unseen_copy:
@@ -187,8 +247,8 @@ def filter_probe(probe_path: Path, output_path: Path, corpus: Path, trained_byte
                 break
             remaining -= len(chunk)
             line = chunk.decode("utf-8", "replace").rstrip("\n")
-            if line.startswith("Soru: ") and " nedir? Cevap: " in line:
-                subject = line[len("Soru: "):].split(" nedir? Cevap: ", 1)[0]
+            subject = subject_of_corpus_line(line)
+            if subject:
                 seen.add(subject)
     kept: list[str] = []
     dropped = 0
@@ -198,7 +258,7 @@ def filter_probe(probe_path: Path, output_path: Path, corpus: Path, trained_byte
                 continue
             kind, prompt, expected = line.rstrip("\n").split("\t", 2)
             if kind == "fact":
-                subject = prompt[len("Soru: "):].split(" nedir? Cevap: ", 1)[0]
+                subject = subject_of_prompt(prompt)
                 if subject not in seen:
                     dropped += 1
                     continue
@@ -209,9 +269,12 @@ def filter_probe(probe_path: Path, output_path: Path, corpus: Path, trained_byte
 
 
 def generate(path: Path, manifest_path: Path, target_bytes: int, seed: int, *,
-             facts: int = 2048, overwrite: bool = False, probe_path: Path | None = None) -> dict:
+             facts: int = 2048, overwrite: bool = False, probe_path: Path | None = None,
+             layout: str = LAYOUT_TEMPLATES) -> dict:
     if target_bytes <= 0:
         raise CorpusError("target byte count must be positive")
+    if layout not in LAYOUTS:
+        raise CorpusError(f"unknown layout {layout!r}; expected one of {', '.join(LAYOUTS)}")
     if path.exists() and not overwrite:
         raise CorpusError(f"{path} exists; pass --overwrite to replace it")
 
@@ -230,16 +293,28 @@ def generate(path: Path, manifest_path: Path, target_bytes: int, seed: int, *,
     try:
         with handle as stream:
             while written < target_bytes:
-                block = document(rng, subjects, answers, copies, successors)
+                if layout == LAYOUT_BINDINGS:
+                    block = binding_document(rng, subjects, answers)
+                else:
+                    block = document(rng, subjects, answers, copies, successors)
                 payload = block.encode("utf-8")
                 remaining = target_bytes - written
                 if len(payload) > remaining:
-                    # Truncate on a UTF-8 boundary: never emit a partial sequence.
-                    payload = payload[:remaining]
-                    while payload and (payload[-1] & 0xC0) == 0x80:
-                        payload = payload[:-1]
-                    if payload and payload[-1] >= 0xC0:
-                        payload = payload[:-1]
+                    if layout == LAYOUT_BINDINGS:
+                        # Never emit half a binding: this layout's contract is
+                        # that every non-empty line is one complete
+                        # `S: subject -> answer`, so the tail is cut on a line
+                        # boundary and padded instead.
+                        cut = payload.rfind(b"\n", 0, remaining)
+                        payload = payload[:cut + 1] if cut >= 0 else b""
+                    else:
+                        # Truncate on a UTF-8 boundary: never emit a partial
+                        # sequence.
+                        payload = payload[:remaining]
+                        while payload and (payload[-1] & 0xC0) == 0x80:
+                            payload = payload[:-1]
+                        if payload and payload[-1] >= 0xC0:
+                            payload = payload[:-1]
                     remaining = len(payload)
                     if remaining <= 0:
                         break
@@ -262,7 +337,8 @@ def generate(path: Path, manifest_path: Path, target_bytes: int, seed: int, *,
 
     manifest = {
         "schema": SCHEMA,
-        "algorithm": ALGORITHM,
+        "layout": layout,
+        "algorithm": ALGORITHM_BINDINGS if layout == LAYOUT_BINDINGS else ALGORITHM,
         "seed": seed,
         "target_bytes": target_bytes,
         "bytes": written,
@@ -279,7 +355,7 @@ def generate(path: Path, manifest_path: Path, target_bytes: int, seed: int, *,
         },
     }
     if probe_path is not None:
-        manifest["probe"] = write_probe(probe_path, subjects, answers, seed)
+        manifest["probe"] = write_probe(probe_path, subjects, answers, seed, layout)
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     return manifest
 
@@ -298,7 +374,19 @@ def verify(path: Path, manifest_path: Path) -> dict:
     if digest.hexdigest() != manifest["sha256"]:
         raise CorpusError("SHA-256 does not match the manifest")
     text = path.read_text(encoding="utf-8")
-    return {"bytes": size, "documents": text.count("\n\n"), "facts": len(manifest["facts"])}
+    layout = manifest.get("layout", LAYOUT_TEMPLATES)
+    if layout == LAYOUT_BINDINGS:
+        # The point of this layout is that *every* line is a binding, so a
+        # stray template line would silently reintroduce the shortcut the
+        # layout exists to remove.
+        stray = [line for line in text.splitlines() if line and not line.startswith("S: ")]
+        if stray:
+            raise CorpusError(f"{len(stray)} line(s) are not bindings; first: {stray[0][:60]!r}")
+        documents = text.count("\n")
+    else:
+        documents = text.count("\n\n")
+    return {"bytes": size, "documents": documents, "facts": len(manifest["facts"]),
+            "layout": layout}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -313,6 +401,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bytes", type=int, default=DEFAULT_BYTES)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--facts", type=int, default=2048)
+    parser.add_argument("--layout", choices=list(LAYOUTS), default=LAYOUT_TEMPLATES,
+                        help="templates: facts inside Turkish prose; "
+                             "bindings: one 'S: subject -> answer' line per binding")
     parser.add_argument("--overwrite", action="store_true")
     arguments = parser.parse_args(argv)
     manifest_path = arguments.manifest or arguments.corpus.with_suffix(".manifest.json")
@@ -330,7 +421,7 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.action == "generate":
             manifest = generate(arguments.corpus, manifest_path, arguments.bytes, arguments.seed,
                                 facts=arguments.facts, overwrite=arguments.overwrite,
-                                probe_path=arguments.probe_out)
+                                probe_path=arguments.probe_out, layout=arguments.layout)
             summary = verify(arguments.corpus, manifest_path)
             print(json.dumps({"event": "generated", **{k: manifest[k] for k in
                                                         ("bytes", "sha256", "documents", "seed")},

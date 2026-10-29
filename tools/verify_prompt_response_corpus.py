@@ -32,6 +32,7 @@ from build_prompt_response_corpus import (  # noqa: E402
     CorpusError,
     filter_probe,
     generate,
+    subject_of_prompt,
     verify,
 )
 from summarise_prompt_response_run import SummaryError, summarise  # noqa: E402
@@ -305,6 +306,37 @@ def main() -> int:
             check(False, "regenerating without --overwrite is refused")
         except CorpusError:
             pass
+
+        # The bindings layout exists because the template layout let a model
+        # reach a low loss without learning anything contextual.  Its contract:
+        # every line is a binding, the probe asks only about bindings, and the
+        # subject is recoverable from both a corpus line and a probe prompt.
+        bindings = root / "bindings.txt"
+        bindings_probe = root / "bindings.tsv"
+        bindings_manifest = generate(bindings, root / "bindings.json", 200_000, 1234, facts=32,
+                                     overwrite=True, probe_path=bindings_probe,
+                                     layout="bindings")
+        check(bindings_manifest["layout"] == "bindings", "the manifest records the layout")
+        check(bindings_manifest["algorithm"] == "turkish-bindings/v1",
+              "the bindings layout has its own algorithm id")
+        lines = [line for line in bindings.read_text(encoding="utf-8").splitlines() if line]
+        check(all(line.startswith("S: ") and " -> " in line for line in lines),
+              "every line of the bindings corpus is a binding")
+        check(verify(bindings, root / "bindings.json")["layout"] == "bindings",
+              "the verifier reads the layout back")
+        binding_rows = [line.split("\t") for line in
+                        bindings_probe.read_text(encoding="utf-8").splitlines() if line]
+        check(all(row[0] == "fact" for row in binding_rows),
+              "the bindings probe ships facts only, because the other families need prose")
+        subject_line = lines[0][len("S: "):].split(" -> ")[0]
+        check(any(row[1] == f"S: {subject_line} -> " for row in binding_rows),
+              "a binding prompt asks about a subject the corpus binds")
+        check(subject_of_prompt(f"S: {subject_line} -> ") == subject_line,
+              "the subject is recovered from a bindings prompt")
+        filtered = root / "bindings-filtered.tsv"
+        stats_bindings = filter_probe(bindings_probe, filtered, bindings, trained_bytes=50_000)
+        check(stats_bindings["rows"] == len(binding_rows),
+              "filter-probe keeps every binding row the prefix contains")
 
         check_run_summary(root)
         check_ask_responses(root)
