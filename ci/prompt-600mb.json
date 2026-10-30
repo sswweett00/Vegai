@@ -1,7 +1,7 @@
 {
-  "enabled": true,
-  "note": "Induction pass, commit 1478df7 (checkpoint v5). The local channel now also reads the value one position after the position its attention matched, which is the circuit copy/next need; four parameters, zero-initialised. Every setting is identical to run 40927789891 and to run 41033423472 (the router pass, still training when this was requested): 32 bindings, width 64, 4 heads, ffn 192, window 48, chunk 256, lr 3e-4, 225 minutes, 9 sessions, reset_every 4096, fresh model. This run therefore queues behind 41033423472 and reports the cumulative model (gates + router + induction), which is why no single change is credited with any number. Recorded runs: docs/PROMPT_RESPONSE_PRETRAINING.md sections 8-9. Set enabled=false again once this pass has run.",
-  "purpose": "Does the shifted (induction) local read make copy/next learnable, on top of run 40927789891 (fact 32/32, copy 0/200 0.190, next 0/100 0.033)",
+  "enabled": false,
+  "note": "Gate commit for the tied-embedding gradient fix. The 600 MB pass is disabled here on purpose: this push must first prove that the corrected backward pass compiles and that the contract package (whole-matrix finite-difference sweep, plan counters, reset freshness, full ring buffer) is green. The moment tests are green the configuration is flipped back to enabled=true in its own commit, and that pass is the one whose numbers are recorded. Any 225-minute pass requested before this fix trained an output head whose gradient covered only the column of the token being read (docs/PROMPT_RESPONSE_PRETRAINING.md section 8.10), so those runs are cancelled rather than reported.",
+  "purpose": "Compile and contract gate for the corrected tied-embedding gradient; the 600 MB measurement runs in the follow-up commit with enabled=true",
   "layout": "templates",
   "corpus_bytes": 600000000,
   "facts": 32,
@@ -18,5 +18,5 @@
   "warmup_bytes": 0,
   "resume_run_id": "",
   "resume_start_byte": 0,
-  "label": "quality-w64-facts32-router-induction"
+  "label": "gate-tied-gradient-fix"
 }
