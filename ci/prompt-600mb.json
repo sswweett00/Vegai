@@ -1,7 +1,7 @@
 {
-  "enabled": false,
-  "note": "Recorded runs (docs/PROMPT_RESPONSE_PRETRAINING.md sections 8-9): 40857056713 calibration; 40860680347 template quality pass (118,847,232 tokens, loss 0.1557); 40896847438 warm-up control (rejected the cold-state hypothesis); 40899100386 / 40916867071 / 40919515918 the three inference bugs found and fixed; 40899844910 bindings pass (51,069,184 tokens, loss 0.1670); 40921692429 the corrected measurement (fact exact 32/32, next-byte 1.000, nll 0.002); 40923834013 the template checkpoint re-measured (fact 5/32, copy 0.173, next 0.035); 40925939018 the stale default config; 40927789891 the quality pass requested by this file (160,455,168 tokens, loss 0.1376, fact exact 32/32 with next-byte 1.000, copy 0.190, next 0.033). The configuration below is the one run 40927789891 used: 32 bindings, width 64 with the input-dependent channel/scale gate, window 48, chunk 256. Set enabled=true to request another pass on the next push that touches this file, the workflow, the corpus tool, the engine sources or app/prompt_engine.f90; leave it false otherwise, a real pass occupies the runner for hours. A pass requested while enabled is false still fires and trains the *default* smoke shape (2 MB, 256 facts), so a throwaway run after a push is expected and its numbers mean nothing.",
-  "purpose": "Quality pass: can this architecture answer 32 of its own bindings end to end",
+  "enabled": true,
+  "note": "Quality pass for the context-conditioned channel router (commit d093120): the channel mixture now also reads the three channel outputs, not only the current token. The shape and every budget number are identical to run 40927789891 so the two runs are comparable: same 32 bindings, width 64, 4 heads, ffn 192, window 48, chunk 256, lr 3e-4, 225 minutes, 9 sessions, reset_every 4096, fresh model. The checkpoint format went to version 4, so a v3 checkpoint cannot be resumed by design; resume_run_id therefore stays empty. Recorded runs: docs/PROMPT_RESPONSE_PRETRAINING.md sections 8-9. Set enabled=false again once this pass has run: a real pass occupies the runner for hours, and a push that touches this file while enabled is true requests another one.",
+  "purpose": "Does routing the channel mixture on the channel outputs add anything on top of 40927789891",
   "layout": "templates",
   "corpus_bytes": 600000000,
   "facts": 32,
@@ -18,5 +18,5 @@
   "warmup_bytes": 0,
   "resume_run_id": "",
   "resume_start_byte": 0,
-  "label": "quality-w64-facts32-gated"
+  "label": "quality-w64-facts32-router"
 }
