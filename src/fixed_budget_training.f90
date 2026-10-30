@@ -52,12 +52,13 @@ module fixed_budget_training
    character(len=8), parameter, public :: FBC_CHECKPOINT_MAGIC = 'VGFB0001'
    character(len=8), parameter, public :: FBC_LEGACY_MAGIC = 'VGNR0001'
    !> Version 2 adds the learnable memory dynamics (a decay logit and a write
-   !> logit per scale).  Version 3 adds the two input-dependent gate
-   !> projections.  An older file has no value for the arrays a newer version
+   !> logit per scale).  Version 3 adds the two input-dependent gate projections
+   !> (one row per channel, one per scale) and version 4 the context-conditioned
+   !> channel router.  An older file has no value for the arrays a newer version
    !> added, and inventing one (a zero gate, say) would silently change the
    !> model, so every older version is refused with FBT_ERR_VERSION instead of
    !> being converted.
-   integer(int32), parameter, public :: FBC_CHECKPOINT_VERSION = 3_int32
+   integer(int32), parameter, public :: FBC_CHECKPOINT_VERSION = 4_int32
    integer(int32), parameter, public :: FBC_CHECKPOINT_MIN_VERSION = 1_int32
 
    ! Synthetic tasks.  They exist because the contract under test is structural
@@ -362,6 +363,7 @@ contains
       gradient%write_strength_logit = gradient%write_strength_logit * scale
       gradient%channel_logit = gradient%channel_logit * scale
       gradient%channel_gate_proj = gradient%channel_gate_proj * scale
+      gradient%channel_router = gradient%channel_router * scale
       gradient%scale_gate_proj = gradient%scale_gate_proj * scale
       gradient%slot_query_proj = gradient%slot_query_proj * scale
       gradient%slot_key_proj = gradient%slot_key_proj * scale
@@ -526,6 +528,7 @@ contains
       if (io_status == 0) write(unit, iostat=io_status) model%slot_read_proj
       if (io_status == 0) write(unit, iostat=io_status) model%slot_salience_weight
       if (io_status == 0) write(unit, iostat=io_status) model%channel_gate_proj
+      if (io_status == 0) write(unit, iostat=io_status) model%channel_router
       if (io_status == 0) write(unit, iostat=io_status) model%scale_gate_proj
    end subroutine write_payload
 
@@ -556,6 +559,7 @@ contains
       if (io_status == 0) read(unit, iostat=io_status) model%slot_read_proj
       if (io_status == 0) read(unit, iostat=io_status) model%slot_salience_weight
       if (io_status == 0) read(unit, iostat=io_status) model%channel_gate_proj
+      if (io_status == 0) read(unit, iostat=io_status) model%channel_router
       if (io_status == 0) read(unit, iostat=io_status) model%scale_gate_proj
    end subroutine read_payload
 
@@ -599,6 +603,8 @@ contains
                                                         optimizer%slot_salience_weight_energy
       if (io_status == 0) write(unit, iostat=io_status) optimizer%velocity_channel_gate_proj, &
                                                         optimizer%energy_channel_gate_proj
+      if (io_status == 0) write(unit, iostat=io_status) optimizer%velocity_channel_router, &
+                                                        optimizer%energy_channel_router
       if (io_status == 0) write(unit, iostat=io_status) optimizer%velocity_scale_gate_proj, &
                                                         optimizer%energy_scale_gate_proj
    end subroutine write_optimizer
@@ -643,6 +649,8 @@ contains
                                                       optimizer%slot_salience_weight_energy
       if (io_status == 0) read(unit, iostat=io_status) optimizer%velocity_channel_gate_proj, &
                                                       optimizer%energy_channel_gate_proj
+      if (io_status == 0) read(unit, iostat=io_status) optimizer%velocity_channel_router, &
+                                                      optimizer%energy_channel_router
       if (io_status == 0) read(unit, iostat=io_status) optimizer%velocity_scale_gate_proj, &
                                                       optimizer%energy_scale_gate_proj
    end subroutine read_optimizer

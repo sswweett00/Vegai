@@ -523,6 +523,49 @@ yüzden 0.173 → 0.190 farkı bir kazanç olarak değil, **aynı büyüklük
 mertebesinde kaldı** diye okunmalı.) Model, **kendi tablosundaki** bağı getiriyor;
 **bağlamda verilen yeni bir diziyi** kullanamıyor. §9 bunu olduğu gibi yazıyor.
 
+### 8.8 Bağlam koşullu yönlendirici
+
+§8.7'deki geçit lojistiği **yalnızca o anki belirtece** bakıyordu:
+`channel_logit(c) + channel_gate_proj(c,:)·x`. Bu, "bu belirteç yuvalara
+benzeyen bir belirteç" demeyi sağlar; "yerel pencere az önce bir tekrar
+buldu, oradan oku" demeyi sağlamaz, çünkü geçit kanalların ne döndürdüğünü
+görmez. Bu geçişte kanal karışımına **bağlam koşullu** bir terim eklendi:
+
+```
+lojistik_eff(c) = channel_logit(c) + channel_gate_proj(c,:)·x
+                + Σ_{s,k} channel_router(c, (k−1)·3 + s) · context(k, s)
+```
+
+`channel_router` `3 × 3·width` boyutunda ve **sıfırdan** başlar: sıfırda
+davranış §8.7 ile birebir aynıdır (sözleşme testi bunu bit düzeyinde
+doğrular; 17 sonlu fark sondasının ikisi artık yönlendirici sütunlarıdır ve
+sondadan önce yönlendiricinin üç elemanına sıfırdan farklı değer verilir,
+aksi halde kayıp yönlendiriciye göre doğrusal kalır ve testin konusu olan
+bağlam türevi sınanmaz).
+
+**Neden bu, `copy`/`next` için bir umut.** Bu iki aile "bağlamda verilen
+diziyi kullan" diyor. Modelin bunu yapabilmesi için kararın **kanalların
+çıktısına** bağlı olması gerekir: yerel pencere eşleşmeyi bulduğunda
+yönlendirici yerel kanalın ağırlığını artırabilir. `channel_gate_proj` bunu
+yapısal olarak yapamaz, `channel_router` yapabilir.
+
+**Maliyet ve sözleşme.** `9·width` parametre (86 913 → 87 489 at width 64),
+belirteç başına `18·width` ek işlem; ek ayırma yok, belirteç başına `exp` yok,
+sınırlar `width` ve sabit 3 (ufuk yok). Gradyan iki yönlü: yönlendirici
+sütunları `dL/dlojistik · context`, üç bağlam vektörü ise
+`dot(dL/dlojistik, yönlendirici sütunu)` kadar ek gradyan alır. Kontrol
+noktası **sürüm 4**; sürüm 3 (bugün diskte bulunması en olası biçim) ve
+altındaki dosyalar dönüştürülmeden `FBT_ERR_VERSION` ile reddedilir, bu yüzden
+bu geçiş **sıfırdan** eğitilir, önceki koşunun kontrol noktasından devam
+etmez.
+
+**Sonuç (bu bölüm ölçüm geldiğinde doldurulacak; şu an yalnızca mekanizma
+kayıtlı).** Aynı şekil, aynı bütçe: 32 bağ, `width 64`, 4 kafa, `ffn 192`,
+yerel pencere 48, güncelleme boyu 256, `lr 3e-4`, 225 dakika. Ölçüm
+sonuçları geldiğinde §8.7'deki tabloyla **yan yana** yazılacak: `fact`
+(ezber), `copy` (bağlamdan kopyalama), `next` (bağlamdan kural). Bu bir
+ablasyon değildir: geçit + yönlendirici paketi, tek bir koşu.
+
 ## 9. Sınırlar
 
 - Korpus **sentetiktir**; model bu veriyle Türkçe "öğrenmez", bu korpusun

@@ -71,6 +71,31 @@ ufka bağlı hiçbir sınır yok. Eğim, bir softmax'ın girdiye göre afin
 lojistiklerinde iki yolludur ve ikisi de uygulanır: geçit satırları
 `dL/dlojistik · x` alır, paylaşılan girdi ise `Σ dL/dlojistik · W` alır.
 
+**Geçidin ikinci yarısı: bağlam koşullu yönlendirici.** Yalnızca girdiye bakan
+geçit "bu *belirteç* yuvalara benzeyen bir belirteç" diyebilir; "yerel pencere
+az önce bir tekrar buldu, o yüzden oradan oku" diyemez, çünkü kanalların ne
+döndürdüğünü görmez. `channel_router` (`3 × 3·width`) bunu ekler:
+
+```
+lojistik_eff(c) = channel_logit(c)
+                + channel_gate_proj(c, :) · x
+                + Σ_{s,k} channel_router(c, (k−1)·3 + s) · context(k, s)
+```
+
+Burada `context(k, s)`, `s` kanalının (yerel, özyinelemeli, yuva) bu belirteç
+için döndürdüğü vektörün `k`'ıncı bileşenidir; sütun düzeni
+`(bileşen − 1)·3 + kanal`'dır. Satır = çıkış kanalı. Yönlendirici **tam olarak
+sıfırdan** başlar, yani başlangıçta davranış girdiye bağımlı geçitle birebir
+aynıdır (test bunu bit düzeyinde doğrular: sıfır yönlendirici ile etkin
+lojistikler `channel_logit + channel_gate_proj · x`'e eşittir). Maliyet
+`9 × genişlik` parametre ve belirteç başına `2 × 9 × genişlik` işlemdir; ek
+ayırma yok, kendi `exp`'i yok, ufka bağlı hiçbir sınır yok (sınırlar `width` ve
+sabit `3`'tür). Gradyan iki yönlüdür ve ikisi de uygulanır: yönlendirici
+sütunları `dL/dlojistik · context` alır, üç bağlam vektörü ise
+`dot(dL/dlojistik, yönlendirici sütunu)` kadar **ek** gradyan alır ve bu ek,
+kanal geri yayılımının girdisine (yuva okuması, özyinelemeli bellek kafaları,
+yerel dikkat) eklenir.
+
 **Dürüst ufuk raporu.** "Etkin ufuk" bir bozunma erişimidir, kayıpsız depolama
 değildir. Özyinelemeli bellek üstel bir ortalamadır: uzak belirteçler unutulur,
 yuvalar çarpışır ve yanlış hatırlama üretebilir. 1e12 ufuk "1e12 belirteç
@@ -107,8 +132,10 @@ akan durum değil.)
 - her iki RMSNorm ölçeği,
 - çok ölçekli okuma ağırlıkları (`scale_logit`) ve girdiye bağımlı ölçek
   geçidi (`scale_gate_proj`),
-- kanal karışımı (`channel_logit`) ve girdiye bağımlı kanal geçidi
-  (`channel_gate_proj`),
+- kanal karışımı (`channel_logit`), girdiye bağımlı kanal geçidi
+  (`channel_gate_proj`) ve bağlam koşullu kanal yönlendiricisi
+  (`channel_router`) — hem yönlendirici satırları hem de üç bağlam vektörünün
+  yönlendirici üzerinden aldığı ek gradyan,
 - dört yuva projeksiyonu ve yuva önem ağırlığı,
 - mesafe yanlılığı.
 
@@ -117,13 +144,20 @@ onları kullanır: yuva yazması (anahtar, değer, geçit, önem) ve özyineleme
 güncelleme (`φ(k)`, `v`). Önceki belirteçlerin yazmaları dondurulmuştur; bu
 bilinçli ve belgelenmiş bir yaklaşımdır, "tam BPTT" olarak sunulmaz.
 
-Doğrulama: sonlu fark sözleşme testi 15 parametreyi (okuma ağırlığı, kanal
+Doğrulama: sonlu fark sözleşme testi 17 parametreyi (okuma ağırlığı, kanal
 lojistiği, iki yuva yazma projeksiyonu, yuva sorgu projeksiyonu, mesafe
 yanlılığı, FFN kapısı, sorgu, anahtar, değer, bağlı gömme, **öğrenilen bellek
-bozunumu ve yazma gücü**, **girdiye bağımlı kanal ve ölçek geçitleri**)
-merkezi farkla karşılaştırır ve `1e-4` bağıl toleransla geçer. Ayrıca geçidin
-sıfır başlatmada sıfırdan farklı eğim aldığı, eğitimde gerçekten **hareket
-ettiği** ve kontrol noktasından birebir geri yüklendiği ayrı kontrollerdir.
+bozunumu ve yazma gücü**, **girdiye bağımlı kanal ve ölçek geçitleri**,
+**bağlam koşullu yönlendiricinin iki sütunu**) merkezi farkla karşılaştırır ve
+`1e-4` bağıl toleransla geçer. Yönlendirici sıfırdan başladığı için sonda
+*önce* üç elemanına sıfırdan farklı değer verilir (0.30 / −0.20 / 0.25); aksi
+halde kayıp yönlendiriciye göre tam doğrusal olurdu ve yalnızca kanal
+türevleriyle de eşleşirdi — yani testin asıl konusu olan *bağlam* türevini
+sınamazdı. Ayrıca geçidin ve yönlendiricinin sıfır başlatmada sıfırdan farklı
+eğim aldığı, eğitimde gerçekten **hareket ettiği**, sıfır yönlendiricinin
+girdiye bağımlı karışımı birebir yeniden ürettiği, sıfırdan farklı
+yönlendiricinin karışımı **bağlama göre** değiştirdiği ve kontrol noktasından
+birebir geri yüklendiği ayrı kontrollerdir (§7, 12. test).
 
 ### 4.1 Öğrenilen bellek dinamiği
 
@@ -174,22 +208,26 @@ transandantal yoktur.
 
 ## 6. Kontrol noktası
 
-`VGFB0001` sihirli dizesi, **sürüm 3**. İçerik: sözlük/genişlik/kafa/ffn/yerel
+`VGFB0001` sihirli dizesi, **sürüm 4**. İçerik: sözlük/genişlik/kafa/ffn/yerel
 pencere/ölçek/yuva,
 **mantıksal ufuk**, etkin ufuk ve kırpma bayrağı, RMS epsilon, yuva bozunması ve
 sıcaklığı, güncelleme ve belirteç sayaçları, optimize edici hiper-parametreleri,
 tüm parametre yükü ve tüm optimize edici durumu.
 
 Sürüm 2, öğrenilen dinamiği (ölçek başına `decay_logit` ve
-`write_strength_logit`) ve onların optimizer momentumunu ekler. Sürüm 3 ise
+`write_strength_logit`) ve onların optimizer momentumunu ekler. Sürüm 3
 girdiye bağımlı iki geçit projeksiyonunu (`channel_gate_proj`,
-`scale_gate_proj`) ekler; yük 21 diziden 23 diziye çıkar. Sürüm 1 ve 2
+`scale_gate_proj`) ekler (yük 21 → 23 dizi). Sürüm 4 ise bağlam koşullu kanal
+yönlendiricisini ve onun momentumunu ekler (yük 23 → 25 dizi). Sürüm 1, 2 ve 3
 dosyaları okunabilir ama **dönüştürülmez**: `FBT_ERR_VERSION` (−1506) ile
 reddedilir, çünkü o dosyalarda yeni parametrelerin değeri yoktur ve
-uydurulacak bir değer (örneğin sıfır geçit) modeli sessizce değiştirirdi.
-Sürüm 2 reddi ayrı bir testtir: başlık yazılır, hem yükleyicinin hem başlık
-okuyucusunun `FBT_ERR_VERSION` döndürdüğü ve başlığın gerçek sürüm numarasını
-koruduğu doğrulanır. Yükleme sonunda önbellek yeniden kurulur.
+uydurulacak bir değer (örneğin sıfır geçit ya da sıfır yönlendirici) modeli
+sessizce değiştirirdi. Sürüm 2 ve sürüm 3 reddi ayrı testlerdir: başlık
+yazılır, hem yükleyicinin hem başlık okuyucusunun `FBT_ERR_VERSION`
+döndürdüğü ve başlığın gerçek sürüm numarasını koruduğu doğrulanır. Sürüm 3
+özellikle önemlidir: bugün diskte bulunması en olası biçim odur ve sıfır
+yönlendiriciyle tamamlanması modeli sessizce değiştirirdi. Yükleme sonunda
+önbellek yeniden kurulur.
 
 Eski `VGNR0001` (neural_pretrain v5) kontrol noktaları **dönüştürülmez**:
 `FBT_ERR_LEGACY` (−1503) ile reddedilir ve eski ikili dosyayla açılması
@@ -212,7 +250,10 @@ sonluluk ve sınırlı durum; sonlu fark gradyan kontrolü; eğitimde kayıp dü
 her bellek bileşeninin gradyan alması ve değişmesi; 93 belirteç uzaklıktaki
 cevabın sabit boyutlu durum üzerinden sorgu logitlerine ulaşması (ve bellek
 kanalları kapalıyken ulaşamaması); kontrol noktası gidiş-dönüşü ve eski
-biçimin reddi.
+biçimin (sürüm 2 ve sürüm 3) reddi; bağlam koşullu yönlendirici (sıfır
+yönlendirici girdiye bağımlı karışımı birebir yeniden üretir, sıfırdan farklı
+yönlendirici karışımı **bağlama göre** değiştirir, sıfır satırlı kanal
+dokunulmadan kalır).
 
 Kullanım:
 
@@ -288,6 +329,12 @@ görevlerde yardım etmedi" deniyor.
   ölçek, ölçülmüş bir kazancın yokluğuna dayanır, varlığına değil.
 - Benchmark süreleri Debug yapısında ölçülür; mutlak değil göreli kanıt olarak
   okunmalıdır.
+- Yönlendirici **tek adım derinliğinde** çalışır: geri yayılım derinlik-1
+  kesikli olduğu için "yönlendirme → bağlam → yönlendirme" geri beslemesi bir
+  adımdan uzağa taşınmaz. Bu bir eksiklik olarak yazılıyor, gizlenmiyor.
+- Yönlendirmenin **ölçülmüş kalite kazancı** ablasyonsuzdur: aynı şekilde
+  yönlendiricisiz bir koşu yapılmadı, dolayısıyla "yönlendirici şu farkı
+  yarattı" denmez (§8.8, `PROMPT_RESPONSE_PRETRAINING.md`).
 
 ## 10. 600 MB prompt/response ön-eğitimi
 

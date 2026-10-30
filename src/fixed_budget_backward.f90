@@ -55,6 +55,7 @@ module fixed_budget_backward
       real(real64), allocatable :: write_strength_logit(:)
       real(real64), allocatable :: channel_logit(:)
       real(real64), allocatable :: channel_gate_proj(:, :)
+      real(real64), allocatable :: channel_router(:, :)
       real(real64), allocatable :: scale_gate_proj(:, :)
       real(real64), allocatable :: slot_query_proj(:, :)
       real(real64), allocatable :: slot_key_proj(:, :)
@@ -98,6 +99,7 @@ contains
                gradient%channel_logit(size(model%channel_logit)), &
                gradient%channel_gate_proj(size(model%channel_gate_proj, 1), &
                                           size(model%channel_gate_proj, 2)), &
+               gradient%channel_router(size(model%channel_router, 1), size(model%channel_router, 2)), &
                gradient%scale_gate_proj(size(model%scale_gate_proj, 1), &
                                         size(model%scale_gate_proj, 2)), &
                gradient%slot_query_proj(size(model%slot_query_proj, 1), size(model%slot_query_proj, 2)), &
@@ -135,6 +137,7 @@ contains
       gradient%write_strength_logit = 0.0_real64
       gradient%channel_logit = 0.0_real64
       gradient%channel_gate_proj = 0.0_real64
+      gradient%channel_router = 0.0_real64
       gradient%scale_gate_proj = 0.0_real64
       gradient%slot_query_proj = 0.0_real64
       gradient%slot_key_proj = 0.0_real64
@@ -163,6 +166,7 @@ contains
       if (allocated(gradient%write_strength_logit)) deallocate(gradient%write_strength_logit)
       if (allocated(gradient%channel_logit)) deallocate(gradient%channel_logit)
       if (allocated(gradient%channel_gate_proj)) deallocate(gradient%channel_gate_proj)
+      if (allocated(gradient%channel_router)) deallocate(gradient%channel_router)
       if (allocated(gradient%scale_gate_proj)) deallocate(gradient%scale_gate_proj)
       if (allocated(gradient%slot_query_proj)) deallocate(gradient%slot_query_proj)
       if (allocated(gradient%slot_key_proj)) deallocate(gradient%slot_key_proj)
@@ -188,6 +192,7 @@ contains
                 sum(gradient%decay_logit**2) + sum(gradient%write_strength_logit**2) + &
                 sum(gradient%scale_logit**2) + sum(gradient%channel_logit**2) + &
                 sum(gradient%channel_gate_proj**2) + sum(gradient%scale_gate_proj**2) + &
+                sum(gradient%channel_router**2) + &
                 sum(gradient%slot_query_proj**2) + sum(gradient%slot_key_proj**2) + &
                 sum(gradient%slot_value_proj**2) + sum(gradient%slot_read_proj**2) + &
                 gradient%slot_salience_weight**2
@@ -208,6 +213,7 @@ contains
       integer(int32), intent(out) :: status
       integer(int32) :: width, heads, head_width, scales, slots, ffn
       integer(int32) :: head, scale, component, slot, ordinal, channel, position, row
+      integer(int32) :: column_index, channel_source
       real(real64) :: context_scale, slot_scale, moment, weight_sum, slope
       real(real64) :: gate, tanh_value, sigmoid_value, write_slope, denominator, salience_moment
       ! Automatic arrays, sized from the *dummy* model and workspace rather than
@@ -225,6 +231,9 @@ contains
       real(real64) :: dphi(model%head_width), dnum(model%head_width)
       real(real64) :: dlocal_weight(workspace%local_count + 1_int32)
       real(real64) :: dchannel(FBC_CHANNEL_COUNT), dcontext(FBC_CHANNEL_COUNT)
+      ! d(combined)/d(channel_context) arriving through the context router.
+      real(real64) :: dcontext_source(model%config%width, FBC_CHANNEL_COUNT)
+      real(real64) :: dslot_channel(model%config%width)
       real(real64) :: dslot_query(model%config%width), dslot_key(model%config%width)
       real(real64) :: dslot_value(model%config%width), dslot_read(model%config%width)
       real(real64) :: dslot_read_score(model%config%memory_slots)
@@ -322,11 +331,26 @@ contains
                                                   dchannel(channel) * attention_input
          dn_gate = dn_gate + dchannel(channel) * model%channel_gate_proj(channel, :)
       end do
+      ! The router reads the three contexts, so each context vector receives the
+      ! share of the loss that arrives by changing the mixture weights, on top
+      ! of the share it receives as the vector being mixed.
+      dcontext_source = 0.0_real64
+      do channel_source = 1_int32, FBC_CHANNEL_COUNT
+         do component = 1_int32, width
+            column_index = (component - 1_int32) * FBC_CHANNEL_COUNT + channel_source
+            gradient%channel_router(:, column_index) = gradient%channel_router(:, column_index) + &
+               dchannel * workspace%channel_context(component, channel_source)
+            dcontext_source(component, channel_source) = &
+               dot_product(dchannel, model%channel_router(:, column_index))
+         end do
+      end do
 
       ! ---- 6. slot channel: read side ---------------------------------------
-      dslot_read = matmul(workspace%channel_alpha(FBC_CHANNEL_SLOTS) * dc, model%slot_read_proj)
+      dslot_channel = workspace%channel_alpha(FBC_CHANNEL_SLOTS) * dc + &
+                      dcontext_source(:, FBC_CHANNEL_SLOTS)
+      dslot_read = matmul(dslot_channel, model%slot_read_proj)
       gradient%slot_read_proj = gradient%slot_read_proj + &
-         fbc_outer(workspace%channel_alpha(FBC_CHANNEL_SLOTS) * dc, workspace%slot_read)
+         fbc_outer(dslot_channel, workspace%slot_read)
       do slot = 1_int32, slots
          dslot_read_score(slot) = dot_product(dslot_read, state%slot_value(:, slot))
       end do
@@ -390,7 +414,9 @@ contains
       dvv = 0.0_real64
       do head = 1_int32, heads
          dmem = workspace%channel_alpha(FBC_CHANNEL_RETENTION) * &
-                dc((head - 1_int32) * head_width + 1_int32:head * head_width)
+                dc((head - 1_int32) * head_width + 1_int32:head * head_width) + &
+                dcontext_source((head - 1_int32) * head_width + 1_int32:head * head_width, &
+                                FBC_CHANNEL_RETENTION)
          dphi = 0.0_real64
          dphi_key = 0.0_real64
          dvalue = 0.0_real64
@@ -470,7 +496,9 @@ contains
       context_scale = 1.0_real64 / sqrt(real(head_width, real64))
       do head = 1_int32, heads
          dloc = workspace%channel_alpha(FBC_CHANNEL_LOCAL) * &
-                dc((head - 1_int32) * head_width + 1_int32:head * head_width)
+                dc((head - 1_int32) * head_width + 1_int32:head * head_width) + &
+                dcontext_source((head - 1_int32) * head_width + 1_int32:head * head_width, &
+                                FBC_CHANNEL_LOCAL)
          dlocal_weight(1_int32) = dot_product(dloc, workspace%v(:, head))
          weight_sum = workspace%local_weight(1_int32, head) * dlocal_weight(1_int32)
          do ordinal = 1_int32, workspace%local_count

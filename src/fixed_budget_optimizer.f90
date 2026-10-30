@@ -81,6 +81,8 @@ module fixed_budget_optimizer
       real(real64) :: energy_channel_logit = 0.0_real64
       real(real64), allocatable :: velocity_channel_gate_proj(:, :)
       real(real64), allocatable :: energy_channel_gate_proj(:)
+      real(real64), allocatable :: velocity_channel_router(:, :)
+      real(real64), allocatable :: energy_channel_router(:)
       real(real64), allocatable :: velocity_scale_gate_proj(:, :)
       real(real64), allocatable :: energy_scale_gate_proj(:)
       real(real64), allocatable :: velocity_slot_query_proj(:, :)
@@ -143,6 +145,8 @@ contains
       allocate(optimizer%velocity_channel_logit(nchannels), stat=allocation_status)
       allocate(optimizer%velocity_channel_gate_proj(nchannels, width), &
                optimizer%energy_channel_gate_proj(width), stat=allocation_status)
+      allocate(optimizer%velocity_channel_router(nchannels, nchannels * width), &
+               optimizer%energy_channel_router(nchannels * width), stat=allocation_status)
       allocate(optimizer%velocity_scale_gate_proj(scales, width), &
                optimizer%energy_scale_gate_proj(width), stat=allocation_status)
       allocate(optimizer%velocity_slot_query_proj(width, width), &
@@ -200,6 +204,8 @@ contains
       optimizer%energy_channel_logit = 0.0_real64
       optimizer%velocity_channel_gate_proj = 0.0_real64
       optimizer%energy_channel_gate_proj = 0.0_real64
+      optimizer%velocity_channel_router = 0.0_real64
+      optimizer%energy_channel_router = 0.0_real64
       optimizer%velocity_scale_gate_proj = 0.0_real64
       optimizer%energy_scale_gate_proj = 0.0_real64
       optimizer%velocity_slot_query_proj = 0.0_real64
@@ -241,6 +247,8 @@ contains
       if (allocated(optimizer%velocity_channel_logit)) deallocate(optimizer%velocity_channel_logit)
       if (allocated(optimizer%velocity_channel_gate_proj)) deallocate(optimizer%velocity_channel_gate_proj)
       if (allocated(optimizer%energy_channel_gate_proj)) deallocate(optimizer%energy_channel_gate_proj)
+      if (allocated(optimizer%velocity_channel_router)) deallocate(optimizer%velocity_channel_router)
+      if (allocated(optimizer%energy_channel_router)) deallocate(optimizer%energy_channel_router)
       if (allocated(optimizer%velocity_scale_gate_proj)) deallocate(optimizer%velocity_scale_gate_proj)
       if (allocated(optimizer%energy_scale_gate_proj)) deallocate(optimizer%energy_scale_gate_proj)
       if (allocated(optimizer%velocity_slot_query_proj)) deallocate(optimizer%velocity_slot_query_proj)
@@ -316,6 +324,9 @@ contains
       call nova_columns(model%channel_gate_proj, gradient%channel_gate_proj, &
                         optimizer%velocity_channel_gate_proj, &
                         optimizer%energy_channel_gate_proj, config, parameter_updates)
+      call nova_columns(model%channel_router, gradient%channel_router, &
+                        optimizer%velocity_channel_router, optimizer%energy_channel_router, &
+                        config, parameter_updates)
       call nova_columns(model%scale_gate_proj, gradient%scale_gate_proj, &
                         optimizer%velocity_scale_gate_proj, &
                         optimizer%energy_scale_gate_proj, config, parameter_updates)

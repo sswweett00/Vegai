@@ -183,6 +183,15 @@ module fixed_budget_context
       ! optimiser never moves them, the final) behaviour identical to the static
       ! scalars this replaced -- no silent change to an old checkpoint.
       real(real64), allocatable :: channel_gate_proj(:, :)           ! (3, width)
+      ! Second half of the same gate, conditioned on what the three channels
+      ! actually returned rather than on the current token alone:
+      !   logit_eff(c) += sum_{s,k} router(c, (k-1)*3+s) * context(k, s)
+      ! Without it the model can only say "this *token* looks like one that
+      ! needs the slots"; it cannot say "the local window just found a repeat,
+      ! so read from it".  Row = output channel; column
+      ! (component - 1) * FBC_CHANNEL_COUNT + source.  Zero-initialised, so the
+      ! gate starts as exactly the input-only gate above.
+      real(real64), allocatable :: channel_router(:, :)              ! (3, 3*width)
       real(real64), allocatable :: scale_gate_proj(:, :)             ! (scale, width)
       real(real64), allocatable :: slot_query_proj(:, :)             ! (width, width)
       real(real64), allocatable :: slot_key_proj(:, :)               ! (width, width)
@@ -317,6 +326,26 @@ contains
          probabilities = 1.0_real64 / real(size(values, kind=int32), real64)
       end if
    end subroutine fbc_softmax
+
+   !> Adds the context-conditioned part of a gate in place:
+   !>   logits(c) += sum_{s,k} router(c, (k-1)*FBC_CHANNEL_COUNT + s) * contexts(k, s)
+   !> The same helper serves the channel gate and, if a later revision routes the
+   !> memory scales on context too, that gate: the router's row count is the
+   !> number of logits it must produce, and the column count is the flattened
+   !> context.  Zero-initialised router rows therefore add exactly nothing, which
+   !> is what keeps the input-only gate a strict special case.
+   pure subroutine fbc_router_logits(router, contexts, logits)
+      real(real64), intent(in) :: router(:, :), contexts(:, :)
+      real(real64), intent(inout) :: logits(:)
+      integer(int32) :: source, component, column
+
+      do source = 1_int32, size(contexts, 2, kind=int32)
+         do component = 1_int32, size(contexts, 1, kind=int32)
+            column = (component - 1_int32) * size(contexts, 2, kind=int32) + source
+            logits = logits + router(:, column) * contexts(component, source)
+         end do
+      end do
+   end subroutine fbc_router_logits
 
    !> logits = bias + projection . input, one dot product per row.
    !> Written as an explicit loop over rows so no temporary is created per token
@@ -528,6 +557,7 @@ contains
               allocated(model%write_strength) .and. &
               allocated(model%scale_logit) .and. allocated(model%channel_logit) .and. &
               allocated(model%channel_gate_proj) .and. allocated(model%scale_gate_proj) .and. &
+              allocated(model%channel_router) .and. &
               allocated(model%slot_query_proj) .and. allocated(model%slot_key_proj) .and. &
               allocated(model%slot_value_proj) .and. allocated(model%slot_read_proj) .and. &
               allocated(model%scale_decay)
@@ -633,6 +663,7 @@ contains
                model%scale_logit(config%memory_scales), &
                model%channel_logit(FBC_CHANNEL_COUNT), &
                model%channel_gate_proj(FBC_CHANNEL_COUNT, config%width), &
+               model%channel_router(FBC_CHANNEL_COUNT, FBC_CHANNEL_COUNT * config%width), &
                model%scale_gate_proj(config%memory_scales, config%width), &
                model%slot_query_proj(config%width, config%width), &
                model%slot_key_proj(config%width, config%width), &
@@ -666,6 +697,7 @@ contains
       model%scale_logit = 0.0_real64
       model%channel_logit = 0.0_real64
       model%channel_gate_proj = 0.0_real64
+      model%channel_router = 0.0_real64
       model%scale_gate_proj = 0.0_real64
       model%slot_salience_weight = 0.0_real64
       ! Initialise the learnable dynamics so that the very first step behaves
@@ -703,6 +735,7 @@ contains
       if (allocated(model%scale_logit)) deallocate(model%scale_logit)
       if (allocated(model%channel_logit)) deallocate(model%channel_logit)
       if (allocated(model%channel_gate_proj)) deallocate(model%channel_gate_proj)
+      if (allocated(model%channel_router)) deallocate(model%channel_router)
       if (allocated(model%scale_gate_proj)) deallocate(model%scale_gate_proj)
       if (allocated(model%slot_query_proj)) deallocate(model%slot_query_proj)
       if (allocated(model%slot_key_proj)) deallocate(model%slot_key_proj)
@@ -914,6 +947,8 @@ contains
       count = count + (int(FBC_CHANNEL_COUNT, int64) + scales) * width
       ! slot projections (query, write key, write value, read output) + salience weight
       count = count + 4_int64 * width * width + 1_int64
+      ! the context-conditioned router: three outputs over three channel vectors
+      count = count + int(FBC_CHANNEL_COUNT, int64) * int(FBC_CHANNEL_COUNT, int64) * width
    end function fbc_parameter_count
 
    pure integer(int64) function fbc_state_bytes(config) result(bytes)
@@ -964,7 +999,9 @@ contains
                                      2_int64 * (heads * scales * head_width * head_width) + &
                                      4_int64 * width * width * 2_int64 + &
                                      2_int64 * (2_int64 * width * slots) + &
-                                     2_int64 * (int(FBC_CHANNEL_COUNT, int64) + int(config%memory_scales, int64)) * width
+                                     2_int64 * (int(FBC_CHANNEL_COUNT, int64) + int(config%memory_scales, int64)) * width + &
+                                     2_int64 * int(FBC_CHANNEL_COUNT, int64) * &
+                                     int(FBC_CHANNEL_COUNT, int64) * width
       ! The backward pass is the same dense products plus the elementwise chain;
       ! counted as 2x the forward matmul work plus the gate arithmetic.
       plan%backward_flops_per_token = 2_int64 * plan%forward_flops_per_token + &
@@ -1156,6 +1193,11 @@ contains
       workspace%channel_context(:, FBC_CHANNEL_SLOTS) = workspace%slot_context
       call fbc_gate_logits(model%channel_gate_proj, model%channel_logit, workspace%normalized, &
                            workspace%channel_logit_eff)
+      ! ... and the second half of the gate, which reads the three contexts
+      ! instead of the token.  Bounds are the physical width and the fixed
+      ! channel count, so the token cost does not depend on the horizon.
+      call fbc_router_logits(model%channel_router, workspace%channel_context, &
+                             workspace%channel_logit_eff)
       call fbc_softmax(workspace%channel_logit_eff, workspace%channel_alpha)
       workspace%combined = 0.0_real64
       do channel = 1_int32, FBC_CHANNEL_COUNT

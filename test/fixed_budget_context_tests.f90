@@ -19,6 +19,9 @@
 !       query logits through the fixed-size state and provably cannot reach
 !       them through the local ring buffer alone
 !   11. checkpoint round-trip equality and explicit legacy rejection
+!   12. the context router: zero rows reproduce the input-only gate bit for
+!       bit, and a non-zero router mixes the channels differently depending on
+!       what the three channels returned for *that* token
 !
 !  Nothing here is timing based; the invariance checks read structural
 !  counters, so they cannot pass or fail because a runner was busy.
@@ -45,6 +48,7 @@ program fixed_budget_context_tests
    call test_memory_components_train
    call test_remote_influence
    call test_checkpoint_roundtrip
+   call test_context_router_conditions_mixture
 
    write(output_unit, '(A,I0,A,I0,A)') 'fixed-budget context checks: ', checks, ', failures: ', &
       failures, '.'
@@ -482,6 +486,17 @@ contains
 
       config = tiny_config(1024_int64)
       call fbc_model_init(model, config, 5_int64, status)
+      ! The router starts at exactly zero, which makes the one-step loss linear
+      ! in it: a central difference would then agree with any gradient built
+      ! from the right channel derivatives alone, and would not test the term
+      ! that the router contributes to the *context* derivatives.  Give three
+      ! entries a value first so every probe below also exercises that path.
+      model%channel_router(FBC_CHANNEL_RETENTION, 2_int32) = 0.30_real64
+      model%channel_router(FBC_CHANNEL_SLOTS, &
+                           (3_int32 - 1_int32) * FBC_CHANNEL_COUNT + FBC_CHANNEL_RETENTION) = &
+         -0.20_real64
+      model%channel_router(FBC_CHANNEL_LOCAL, &
+                           (5_int32 - 1_int32) * FBC_CHANNEL_COUNT + FBC_CHANNEL_SLOTS) = 0.25_real64
       call fbc_state_init(base, model, status)
       call fbc_workspace_init(workspace, model, status)
       call fbc_gradient_init(gradient, model, status)
@@ -545,6 +560,37 @@ contains
          numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
          call report_gradient(numeric, gradient%scale_gate_proj(1_int32, 3_int32), &
                     'finite difference matches the input-dependent scale gate gradient')
+      end block
+      block
+         ! The context router: logit(c) += sum_{s,k} router(c, (k-1)*3+s) context(k, s).
+         ! Column 2 is component 1 of the *retention* context feeding the
+         ! retention weight, column 19 is component 7 of the *local* context
+         ! feeding the slot weight -- one probe per direction that matters, the
+         ! "read more/less of this channel" pair.
+         original = model%channel_router(FBC_CHANNEL_RETENTION, 2_int32)
+         model%channel_router(FBC_CHANNEL_RETENTION, 2_int32) = original + delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, plus_loss, status)
+         model%channel_router(FBC_CHANNEL_RETENTION, 2_int32) = original - delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
+         model%channel_router(FBC_CHANNEL_RETENTION, 2_int32) = original
+         numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
+         call report_gradient(numeric, gradient%channel_router(FBC_CHANNEL_RETENTION, 2_int32), &
+                    'finite difference matches the context-router gradient (retention context)')
+         call check(abs(gradient%channel_router(FBC_CHANNEL_RETENTION, 2_int32)) > 1.0e-12_real64, &
+                    'the probed router entry really carries a gradient (not 0 against 0)')
+      end block
+      block
+         original = model%channel_router(FBC_CHANNEL_SLOTS, 19_int32)
+         model%channel_router(FBC_CHANNEL_SLOTS, 19_int32) = original + delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, plus_loss, status)
+         model%channel_router(FBC_CHANNEL_SLOTS, 19_int32) = original - delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
+         model%channel_router(FBC_CHANNEL_SLOTS, 19_int32) = original
+         numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
+         call report_gradient(numeric, gradient%channel_router(FBC_CHANNEL_SLOTS, 19_int32), &
+                    'finite difference matches the context-router gradient (local context -> slots)')
+         call check(abs(gradient%channel_router(FBC_CHANNEL_SLOTS, 19_int32)) > 1.0e-12_real64, &
+                    'the second probed router entry carries a gradient too')
       end block
       block
          original = model%slot_key_proj(2_int32, 3_int32)
@@ -804,6 +850,7 @@ contains
       real(real64) :: decays_before(3), writes_before(3)
       real(real64), allocatable :: hidden(:), logits(:), dlogits(:)
       real(real64), allocatable :: gate_before(:, :), scale_gate_before(:, :)
+      real(real64), allocatable :: router_before(:, :)
       real(real64) :: loss, norm
 
       config = small_config(2048_int64)
@@ -847,6 +894,8 @@ contains
                  'the channel mixer receives a gradient')
       call check(sum(abs(gradient%channel_gate_proj)) > 0.0_real64, &
                  'the input-dependent channel gate receives a gradient')
+      call check(sum(abs(gradient%channel_router)) > 0.0_real64, &
+                 'the context router receives a gradient')
       call check(sum(abs(gradient%scale_gate_proj)) > 0.0_real64, &
                  'the input-dependent scale gate receives a gradient')
       call check(sum(abs(gradient%attention_rms)) > 0.0_real64 .and. &
@@ -869,6 +918,7 @@ contains
       salience_before = model%slot_salience_weight
       gate_before = model%channel_gate_proj
       scale_gate_before = model%scale_gate_proj
+      router_before = model%channel_router
       call fbc_train_stream(model, optimizer, state, tokens, token_count, chunk, update_config, &
                             workspace, gradient, metrics, status)
       call check(status == FBT_OK, 'needle training completes')
@@ -881,6 +931,8 @@ contains
                  'the input-dependent channel gate is optimised, not just present')
       call check(any(model%scale_gate_proj /= scale_gate_before), &
                  'the input-dependent scale gate is optimised, not just present')
+      call check(any(model%channel_router /= router_before), &
+                 'the context router is optimised, not just present')
       call check(model%slot_salience_weight /= salience_before, 'the salience weight is optimised')
       call check(any(model%decay_logit /= decays_before), 'the memory decay is optimised')
       call check(any(model%write_strength_logit /= writes_before), 'the memory write strength is optimised')
@@ -1034,7 +1086,9 @@ contains
                  'optimizer hyper-parameters survive the round trip')
       call check(all(restored%channel_gate_proj == model%channel_gate_proj) .and. &
                  all(restored%scale_gate_proj == model%scale_gate_proj), &
-                 'the v3 checkpoint restores both input-dependent gates exactly')
+                 'the v4 checkpoint restores both input-dependent gates exactly')
+      call check(all(restored%channel_router == model%channel_router), &
+                 'the v4 checkpoint restores the context router exactly')
       call check(abs(restored%slot_salience_weight - model%slot_salience_weight) == 0.0_real64, &
                  'the salience weight survives the round trip')
       call check(all(restored%decay_logit == model%decay_logit) .and. &
@@ -1108,6 +1162,33 @@ contains
       call fbc_checkpoint_load(legacy, restored, restored_optimizer, loaded_config, &
                                restored_counters, status)
       call check(status == FBT_ERR_VERSION, 'a v2 checkpoint is refused, never converted to v3')
+      ! Version 3 is the format that had the two input-dependent gates but no
+      ! router, so it is the version a reader is most likely to meet in a real
+      ! directory: it must be refused, not completed with a zero router that
+      ! would silently change the model.
+      open(newunit=unit, file=legacy, status='replace', action='write', access='stream', &
+           form='unformatted', iostat=io_status)
+      call check(io_status == 0, 'the v3 fixture can be written')
+      write(unit) FBC_CHECKPOINT_MAGIC
+      write(unit) 3_int32
+      close(unit)
+      call fbc_checkpoint_load(legacy, restored, restored_optimizer, loaded_config, &
+                               restored_counters, status)
+      call check(status == FBT_ERR_VERSION, 'a v3 checkpoint is refused, never converted to v4')
+      open(newunit=unit, file=legacy, status='replace', action='write', access='stream', &
+           form='unformatted', iostat=io_status)
+      write(unit) FBC_CHECKPOINT_MAGIC
+      write(unit) 3_int32
+      write(unit) config%vocabulary_size, config%width, config%heads, config%ffn_width, &
+                  config%local_window, config%memory_scales, config%memory_slots, &
+                  config%logical_horizon, config%rms_epsilon, config%slot_decay, config%slot_temperature
+      write(unit) 0.0_real64
+      write(unit) 0_int32
+      write(unit) 0_int64, 0_int64, 0.0_real64
+      close(unit)
+      call fbc_checkpoint_meta_read(legacy, meta, status)
+      call check(status == FBT_ERR_VERSION .and. meta%format_version == 3_int32 .and. &
+                 .not. meta%convertible, 'a v3 header is reported as the older version it is')
       open(newunit=unit, file=legacy, status='replace', action='write', access='stream', &
            form='unformatted', iostat=io_status)
       write(unit) FBC_CHECKPOINT_MAGIC
@@ -1131,5 +1212,128 @@ contains
       call fbc_optimizer_destroy(optimizer)
       call fbc_optimizer_destroy(restored_optimizer)
    end subroutine test_checkpoint_roundtrip
+
+   !----------------------------------------------------------------------------
+   !  12. The context router conditions the mixture on what the channels returned
+   !----------------------------------------------------------------------------
+   !> Three properties, in the order they matter:
+   !>   (a) with a zero router the engine is exactly the input-only gate, so the
+   !>       feature is additive and an older model's behaviour is a special case;
+   !>   (b) a non-zero router changes the mixture and the output logits, so the
+   !>       new parameters really are read by the forward pass;
+   !>   (c) the term depends on the three channel vectors of the token being
+   !>       processed, not just on the token: two different contexts from the
+   !>       same frozen state produce different router terms.  That is the whole
+   !>       point -- "the window just found a repeat, read from it" is a
+   !>       statement about context, which a token-only gate cannot make.
+   subroutine test_context_router_conditions_mixture
+      type(fbc_config_t) :: config
+      type(fbc_model_t) :: model
+      type(fbc_state_t) :: state, probe
+      type(fbc_workspace_t) :: workspace
+      integer(int32) :: status, index, channel
+      real(real64) :: hidden(32), logits(32), baseline(32), expected(FBC_CHANNEL_COUNT)
+      real(real64) :: alpha_zero(FBC_CHANNEL_COUNT), alpha_routed(FBC_CHANNEL_COUNT)
+      real(real64), allocatable :: context_a(:, :), context_b(:, :)
+      real(real64) :: term_a(FBC_CHANNEL_COUNT), term_b(FBC_CHANNEL_COUNT)
+
+      config = small_config(1000000000000_int64)
+      call fbc_model_init(model, config, 29_int64, status)
+      call fbc_state_init(state, model, status)
+      call fbc_workspace_init(workspace, model, status)
+      allocate(context_a(config%width, FBC_CHANNEL_COUNT))
+      allocate(context_b(config%width, FBC_CHANNEL_COUNT))
+      call check(all(model%channel_router == 0.0_real64), &
+                 'the context router is initialised to zero, so the gate starts input-only')
+
+      ! Warm the state so all three channels return something measurable.
+      do index = 1_int32, 6
+         call fbc_step(model, state, workspace, 1_int32 + modulo(index * 5_int32, 23_int32), &
+                       hidden, logits, status)
+      end do
+      call check(sum(abs(workspace%channel_context)) > 0.0_real64, &
+                 'the three channel contexts are non-zero, so the router has something to read')
+
+      probe = state
+      call fbc_step(model, probe, workspace, 7_int32, hidden, baseline, status)
+      alpha_zero = workspace%channel_alpha
+      context_a = workspace%channel_context
+      ! (a) The effective logits are exactly channel_logit + gate_proj . x.
+      do channel = 1_int32, FBC_CHANNEL_COUNT
+         expected(channel) = model%channel_logit(channel) + &
+            dot_product(model%channel_gate_proj(channel, :), workspace%normalized)
+      end do
+      call check(maxval(abs(workspace%channel_logit_eff - expected)) < 1.0e-12_real64, &
+                 'with a zero router the effective logits are exactly the input-only gate')
+      call check(all(alpha_zero > 0.0_real64) .and. &
+                 abs(sum(alpha_zero) - 1.0_real64) < 1.0e-12_real64, &
+                 'the zero-router mixture is still a probability vector')
+
+      ! (b) The retention row gets a small weight on *every* context component
+      ! plus two strong entries, so the check cannot pass because a few
+      ! components happened to be equal: any difference between two contexts
+      ! must show up in the term.  The local and slot rows stay exactly zero,
+      ! which is what the "untouched channel" check below relies on.
+      model%channel_router(FBC_CHANNEL_RETENTION, :) = 0.01_real64
+      model%channel_router(FBC_CHANNEL_RETENTION, 2_int32) = 0.35_real64
+      model%channel_router(FBC_CHANNEL_RETENTION, &
+                           (7_int32 - 1_int32) * FBC_CHANNEL_COUNT + FBC_CHANNEL_LOCAL) = -0.30_real64
+      probe = state
+      call fbc_step(model, probe, workspace, 7_int32, hidden, logits, status)
+      alpha_routed = workspace%channel_alpha
+      call check(maxval(abs(alpha_routed - alpha_zero)) > 1.0e-6_real64, &
+                 'a non-zero router changes the channel mixture')
+      call check(maxval(abs(logits - baseline)) > 1.0e-8_real64, &
+                 'and the changed mixture reaches the output logits')
+
+      ! (c) The term is a function of the context, not of the token alone: a
+      ! different token from the same frozen state returns a different set of
+      ! channel vectors, and the router must score them differently.
+      probe = state
+      call fbc_step(model, probe, workspace, 13_int32, hidden, logits, status)
+      context_b = workspace%channel_context
+      call check(maxval(abs(context_a - context_b)) > 0.0_real64, &
+                 'two tokens produce different channel contexts from the same state')
+      term_a = router_term(model, context_a)
+      term_b = router_term(model, context_b)
+      call check(maxval(abs(term_a - term_b)) > 0.0_real64, &
+                 'the router scores two different contexts differently (it is context dependent)')
+      call check(maxval(abs(term_a)) > 0.0_real64, 'the router term is non-zero for a non-zero router')
+      call check(term_a(FBC_CHANNEL_LOCAL) == 0.0_real64 .and. term_a(FBC_CHANNEL_SLOTS) == 0.0_real64, &
+                 'a channel whose router row is zero is left untouched')
+
+      ! (a) again, now that the router has been written: zeroing it must restore
+      ! the input-only behaviour bit for bit, which is what makes this change
+      ! safe for a checkpoint that has not learned it yet.
+      model%channel_router = 0.0_real64
+      probe = state
+      call fbc_step(model, probe, workspace, 7_int32, hidden, logits, status)
+      call check(all(logits == baseline) .and. all(workspace%channel_alpha == alpha_zero), &
+                 'zeroing the router restores the input-only mixture exactly')
+
+      deallocate(context_a, context_b)
+      call fbc_state_destroy(state)
+      call fbc_state_destroy(probe)
+      call fbc_workspace_destroy(workspace)
+      call fbc_model_destroy(model)
+   end subroutine test_context_router_conditions_mixture
+
+   !> The router term, computed from the documented column layout by hand, so the
+   !> test checks the engine's own mapping rather than calling the engine's
+   !> helper (which would agree with itself by construction).
+   pure function router_term(model, contexts) result(term)
+      type(fbc_model_t), intent(in) :: model
+      real(real64), intent(in) :: contexts(:, :)
+      real(real64) :: term(FBC_CHANNEL_COUNT)
+      integer(int32) :: component, source, column
+
+      term = 0.0_real64
+      do source = 1_int32, FBC_CHANNEL_COUNT
+         do component = 1_int32, size(contexts, 1, kind=int32)
+            column = (component - 1_int32) * FBC_CHANNEL_COUNT + source
+            term = term + model%channel_router(:, column) * contexts(component, source)
+         end do
+      end do
+   end function router_term
 
 end program fixed_budget_context_tests
