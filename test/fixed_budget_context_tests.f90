@@ -1399,9 +1399,9 @@ contains
       type(fbc_model_t) :: model
       type(fbc_state_t) :: state
       type(fbc_workspace_t) :: workspace
-      integer(int32) :: status, index, head, step
+      integer(int32) :: status, head, step
       integer(int32), parameter :: pattern(5) = [5_int32, 7_int32, 5_int32, 7_int32, 5_int32]
-      real(real64) :: hidden(32), logits(32)
+      real(real64) :: hidden(8), logits(16)
       real(real64) :: x(8), normalized(8), mean_square, inverse_rms
       real(real64), allocatable :: expected(:), shifted(:), plain(:)
       real(real64) :: matched_weight
@@ -1410,7 +1410,8 @@ contains
       call fbc_model_init(model, config, 71_int64, status)
       call fbc_state_init(state, model, status)
       call fbc_workspace_init(workspace, model, status)
-      allocate(expected(config%head_width), shifted(config%head_width), plain(config%head_width))
+      allocate(expected(config%width / config%heads), shifted(config%width / config%heads), &
+               plain(config%width / config%heads))
 
       call check(all(model%induction_mix == 0.0_real64), &
                  'the induction weights start at zero, so the channel is unchanged at init')
@@ -1467,8 +1468,10 @@ contains
          ! Distances 2 and 4 are the two token-5 occurrences; the byte that
          ! followed each of them is the token 7 at distance 1 and 3.
          matched_weight = workspace%local_weight(3_int32, head) + workspace%local_weight(5_int32, head)
-         call check(matched_weight > 0.999_real64, &
-                    'the two token-5 positions hold almost all of the attention')
+         ! Three positions match maximally: this step's own key and the two
+         ! token-5 entries, so the two shifted weights are two thirds.
+         call check(abs(matched_weight - 2.0_real64 / 3.0_real64) < 1.0e-9_real64, &
+                    'the two token-5 positions carry exactly their share of the attention')
          call check(maxval(abs(shifted - matched_weight * expected)) < 1.0e-9_real64, &
                     'the shifted read is the value that FOLLOWED each matched position')
       end do
