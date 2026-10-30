@@ -173,13 +173,16 @@ onları kullanır: yuva yazması (anahtar, değer, geçit, önem) ve özyineleme
 güncelleme (`φ(k)`, `v`). Önceki belirteçlerin yazmaları dondurulmuştur; bu
 bilinçli ve belgelenmiş bir yaklaşımdır, "tam BPTT" olarak sunulmaz.
 
-Doğrulama: sonlu fark sözleşme testi 18 parametreyi (okuma ağırlığı, kanal
+Doğrulama: sonlu fark sözleşme testi 18 tek parametreyi (okuma ağırlığı, kanal
 lojistiği, iki yuva yazma projeksiyonu, yuva sorgu projeksiyonu, mesafe
 yanlılığı, FFN kapısı, sorgu, anahtar, değer, bağlı gömme, **öğrenilen bellek
 bozunumu ve yazma gücü**, **girdiye bağımlı kanal ve ölçek geçitleri**,
 **bağlam koşullu yönlendiricinin iki sütunu**, **indüksiyon ağırlığı**)
 merkezi farkla karşılaştırır ve
-`1e-4` bağıl toleransla geçer. Yönlendirici sıfırdan başladığı için sonda
+`1e-4` bağıl toleransla geçer. Tek parametreli sondaların yanında bağlı gömme
+matrisinin **tamamı** taranır: `width × sözlük` = 128 elemanın her biri
+merkezi farkla karşılaştırılır (`1e-5` tolerans). Bu tarama, aşağıda §4.2'de
+anlatılan hatayı yakalayan kontroldür. Yönlendirici sıfırdan başladığı için sonda
 *önce* üç elemanına sıfırdan farklı değer verilir (0.30 / −0.20 / 0.25); aksi
 halde kayıp yönlendiriciye göre tam doğrusal olurdu ve yalnızca kanal
 türevleriyle de eşleşirdi — yani testin asıl konusu olan *bağlam* türevini
@@ -220,6 +223,25 @@ döngüsünde transandantal yok**, ufuk hiçbir boyutta kullanılmaz.
 başlangıçta bu değer yapılandırılan ufka eşittir, çünkü `decay_logit` eski
 merdivenden, `write_strength_logit` ise sıfırdan başlar (`g = 1 - lambda`,
 yani eski ileri geçişle **bit düzeyinde aynı**).
+
+### 4.2 Düzeltilen hata: bağlı gömme gradyanı yalnızca tek sütuna yazılıyordu
+
+`logits(j) = h · E(:, j) + b(j)` olduğu için bağlı gömme matrisinin türevi
+`h ⊗ dlogits` **tam dış çarpımıdır**: her `j` sütunu `dlogits(j)` kadar
+gradyan alır. Gönderilen sürüm bu dış çarpımı yalnızca **okunan belirtecin**
+sütununa yazıyordu (`E(:, token) += h · dlogits(token)`, üstüne girdi
+terimi). Sonuç: model yanlış baytı **bastırmayı** öğrenemiyor, yalnızca o anda
+okuduğu baytın vektörünü kaydırabiliyordu. `dlogits(j) = p_j − 1[j = y]`
+olduğundan kayıp, hedef dışındaki sütunlarda tam olarak `p_j` kadardı — yani
+her adımda sözlüğün neredeyse tamamı gradyansız kalıyordu ve çıkış kafası
+"yanlış baytı düşür" sinyalini hiç almıyordu.
+
+Bunun o güne kadarki sözleşme paketiyle yakalanmamış olması öğretici: mevcut sonda okunan
+belirtecin sütununu sınıyordu (`E(3, 9)`, belirteç 9) ve **tam o sütunda**
+eksik terim zaten yazıldığı için hatalı sürüm ile doğru sürüm aynı sayıyı
+veriyordu. Tek sütunluk bir sonda bu hatayı yapısal olarak göremez; bu yüzden
+doğrulama artık matrisin tamamını (128 eleman) tarar ve tek sütunluk sonda da
+korunur (§7, 12. grup).
 
 ## 5. Optimize edici
 
@@ -289,7 +311,17 @@ biçimin (sürüm 2 ve sürüm 3) reddi; bağlam koşullu yönlendirici (sıfır
 yönlendirici girdiye bağımlı karışımı birebir yeniden üretir, sıfırdan farklı
 yönlendirici karışımı **bağlama göre** değiştirir, sıfır satırlı kanal
 dokunulmadan kalır); indüksiyon okuması (`5 7 5 7 5` akışında eşleşen
-konumların **bir sonrasındaki** değeri okur, yerinde okuma sıfır kalır).
+konumların **bir sonrasındaki** değeri okur, yerinde okuma sıfır kalır);
+planın saydığı şeyin gerçekten var olanla eşleşmesi (parametre elemanı,
+durum baytı, ve optimize edicinin bir adımda dokunduğu eleman sayısı —
+parametre sayısına **tam** eşit); sıfırlanmış durumun taze durumla
+**bit-birebir** aynı logitleri vermesi; dolu halka tamponu (her yuvanın kendi
+mesafesindeki belirtecin anahtarını ve değerini tutması, ve kaydırılmış
+okumanın elle hesaplanan toplamla eşleşmesi).
+
+12. gruptaki gradyan kontrolü ayrıca bağlı gömme matrisinin **tamamını**
+tarar (bkz. §4.2): tek sütunluk bir sonda, sondayı okunan belirtecin sütununa
+koyduğu sürece bu sınıftaki hatayı göremez.
 
 Kullanım:
 
@@ -374,6 +406,11 @@ görevlerde yardım etmedi" deniyor.
 - Yönlendirmenin **ölçülmüş kalite kazancı** ablasyonsuzdur: aynı şekilde
   yönlendiricisiz bir koşu yapılmadı, dolayısıyla "yönlendirici şu farkı
   yarattı" denmez (§8.8, `PROMPT_RESPONSE_PRETRAINING.md`).
+- §4.2'deki bağlı gömme hatası **düzeltilmeden önce** üretilen tüm eğitim
+  sayıları (kopyalama 0/200, sonraki-bayt 0/100 dahil) çıkış kafası yalnızca
+  tek sütunla eğitilmiş modellere aittir; bu sayılar düzeltme sonrası
+  koşularla **karşılaştırılamaz** ve "model şu kadar öğrendi" kanıtı olarak
+  kullanılmaz. Düzeltme sonrası ölçüm ayrıca raporlanır.
 
 ## 10. 600 MB prompt/response ön-eğitimi
 

@@ -216,7 +216,7 @@ contains
       type(fbc_gradient_t), intent(inout) :: gradient
       integer(int32), intent(out) :: status
       integer(int32) :: width, heads, head_width, scales, slots, ffn
-      integer(int32) :: head, scale, component, slot, ordinal, channel, position, row
+      integer(int32) :: head, scale, component, slot, ordinal, channel, position, row, column
       integer(int32) :: column_index, channel_source
       real(real64) :: context_scale, slot_scale, moment, weight_sum, slope
       real(real64) :: gate, tanh_value, sigmoid_value, write_slope, denominator, salience_moment
@@ -283,11 +283,19 @@ contains
       ffn = model%config%ffn_width
 
       ! ---- 1. tied logits ----------------------------------------------------
+      ! logits(j) = hidden . E(:, j) + bias(j), so the tied matrix takes the FULL
+      ! outer product hidden (x) dlogits: column j is touched for every j in the
+      ! vocabulary, not only for the column of the token being read.  Writing
+      ! just the current token's column here (which is what an earlier revision
+      ! did) silently drops d(logit_j)/dE(:, j) for every j != token: the model
+      ! can then never learn to suppress a wrong byte, only to move the vector of
+      ! a byte it is currently reading.  The input side below adds the other
+      ! term (d x) to the current token's column, and the two must be summed, not
+      ! confused.
       gradient%output_bias = gradient%output_bias + dlogits
-      do component = 1_int32, width
-         gradient%token_embedding(component, workspace%token) = &
-            gradient%token_embedding(component, workspace%token) + &
-            workspace%hidden(component) * dlogits(workspace%token)
+      do column = 1_int32, size(dlogits, kind=int32)
+         gradient%token_embedding(:, column) = gradient%token_embedding(:, column) + &
+                                              workspace%hidden * dlogits(column)
       end do
       dn_gate = 0.0_real64
       dn = matmul(model%token_embedding, dlogits)

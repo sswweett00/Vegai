@@ -25,6 +25,15 @@
 !   13. the induction (shifted) read: the local channel can read the value that
 !       followed the position its attention matched, i.e. "after this byte came
 !       that byte", which a single in-place read cannot express
+!   14. the plan counts what exists: parameter count against the real arrays,
+!       state-buffer and byte counters against the real allocations, and the
+!       optimiser's update counter against the same number (every parameter
+!       exactly once, none twice, none missed)
+!   15. a reset state is indistinguishable from a freshly initialised one
+!   16. a *full* ring buffer: every slot holds the key/value of the token at its
+!       distance and the shifted read equals the hand-computed sum -- the
+!       finite-difference package warms up three steps with a window of four,
+!       so it never sees the regime training actually runs in
 !
 !  Nothing here is timing based; the invariance checks read structural
 !  counters, so they cannot pass or fail because a runner was busy.
@@ -53,6 +62,9 @@ program fixed_budget_context_tests
    call test_checkpoint_roundtrip
    call test_context_router_conditions_mixture
    call test_induction_read_is_shifted
+   call test_plan_counts_match_reality
+   call test_state_reset_is_fresh
+   call test_full_window_ring
 
    write(output_unit, '(A,I0,A,I0,A)') 'fixed-budget context checks: ', checks, ', failures: ', &
       failures, '.'
@@ -486,7 +498,8 @@ contains
       integer(int32) :: status, index
       integer(int32) :: warm(3)
       real(real64) :: hidden(width), logits(vocabulary), dlogits(vocabulary), loss, delta, original
-      real(real64) :: plus_loss, minus_loss, numeric
+      real(real64) :: plus_loss, minus_loss, numeric, worst_error, error
+      integer(int32) :: component, column
 
       config = tiny_config(1024_int64)
       call fbc_model_init(model, config, 5_int64, status)
@@ -734,6 +747,23 @@ contains
                     'finite difference matches a key projection gradient (intra-step retention write)')
       end block
       block
+         ! A tied-embedding column that is NOT the token being read.  Only the
+         ! output path can reach it, so this is the probe that pins down the
+         ! full outer product: an earlier revision wrote only the current
+         ! token's column and this derivative was silently zero.
+         original = model%token_embedding(3_int32, 12_int32)
+         model%token_embedding(3_int32, 12_int32) = original + delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, plus_loss, status)
+         model%token_embedding(3_int32, 12_int32) = original - delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
+         model%token_embedding(3_int32, 12_int32) = original
+         numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
+         call report_gradient(numeric, gradient%token_embedding(3_int32, 12_int32), &
+                    'finite difference matches an embedding column only the output path can reach')
+         call check(abs(gradient%token_embedding(3_int32, 12_int32)) > 1.0e-14_real64, &
+                    'that output-only column carries a real gradient')
+      end block
+      block
          original = model%token_embedding(3_int32, 9_int32)
          model%token_embedding(3_int32, 9_int32) = original + delta
          call replay_loss(model, base, workspace, 9_int32, 5_int32, plus_loss, status)
@@ -744,6 +774,34 @@ contains
          call report_gradient(numeric, gradient%token_embedding(3_int32, 9_int32), &
                     'finite difference matches the tied-embedding gradient')
       end block
+
+      ! The whole tied embedding against finite differences, element by
+      ! element.  Probing one column is what let the original defect survive
+      ! 138 checks: if the column probed happens to be the token being read, the
+      ! output path contributes to it through logits(token) as well, so the
+      ! truncated version and the correct version agree there and only there.
+      ! Every column has to be probed, because the wrong version differs from
+      ! the right one on all of the others.
+      worst_error = 0.0_real64
+      do column = 1_int32, vocabulary
+         do component = 1_int32, width
+            original = model%token_embedding(component, column)
+            model%token_embedding(component, column) = original + delta
+            call replay_loss(model, base, workspace, 9_int32, 5_int32, plus_loss, status)
+            model%token_embedding(component, column) = original - delta
+            call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
+            model%token_embedding(component, column) = original
+            numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
+            error = abs(numeric - gradient%token_embedding(component, column))
+            error = error / max(1.0_real64, abs(numeric))
+            worst_error = max(worst_error, error)
+         end do
+      end do
+      if (worst_error >= 1.0e-5_real64) then
+         write(output_unit, '(A,ES12.4)') '  worst tied-embedding relative error ', worst_error
+      end if
+      call check(worst_error < 1.0e-5_real64, &
+                 'every tied-embedding entry, all vocabulary columns, matches finite differences')
 
       call check(numeric == numeric .and. abs(numeric) > 0.0_real64, &
                  'the last finite-difference probe actually moves the loss')
@@ -1377,6 +1435,220 @@ contains
       call fbc_workspace_destroy(workspace)
       call fbc_model_destroy(model)
    end subroutine test_context_router_conditions_mixture
+
+   !----------------------------------------------------------------------------
+   !  14. The plan counts what exists, and the optimiser touches it all
+   !----------------------------------------------------------------------------
+   !> Four counters have to agree with the objects they describe, because every
+   !> number this project reports is built from them:
+   !>   * `fbc_parameter_count` versus the sum of the parameter array sizes,
+   !>   * the plan's state element counters versus the allocated state buffers,
+   !>   * `state_bytes_real64` versus eight bytes per element,
+   !>   * the optimiser's `parameter_updates` versus the same parameter count.
+   !> The last one is the interesting one: it is a running count of the elements
+   !> the update rule actually wrote, so a parameter that is updated twice, or
+   !> never, or a model array the optimiser was never given, breaks the equality.
+   subroutine test_plan_counts_match_reality
+      type(fbc_config_t) :: config
+      type(fbc_plan_t) :: plan
+      type(fbc_model_t) :: model
+      type(fbc_state_t) :: state
+      type(fbc_optimizer_t) :: optimizer
+      type(fbc_gradient_t) :: gradient
+      type(fbc_update_config_t) :: update_config
+      integer(int32) :: status
+      integer(int64) :: parameter_updates, state_elements
+
+      config = small_config(4096_int64)
+      call fbc_plan(config, plan)
+      call fbc_model_init(model, config, 101_int64, status)
+      call fbc_state_init(state, model, status)
+      call fbc_optimizer_init(optimizer, config, status)
+      call fbc_gradient_init(gradient, model, status)
+
+      call check(model_parameter_elements(model) == plan%parameter_count, &
+                 'the plan counts exactly the parameter elements the model allocates')
+      call check(plan%parameter_bytes_real64 == 8_int64 * plan%parameter_count, &
+                 'the parameter byte counter is eight bytes per element')
+
+      call check(plan%local_cache_elements == size(state%local_key) + size(state%local_value), &
+                 'the local cache counter equals the ring buffer it describes')
+      call check(plan%retention_state_elements == &
+                 size(state%retention_numerator) + size(state%retention_normalizer), &
+                 'the retention counter equals the recurrent memory it describes')
+      call check(plan%slot_state_elements == &
+                 size(state%slot_key) + size(state%slot_value) + size(state%slot_salience), &
+                 'the slot counter equals the slot state it describes')
+      state_elements = plan%local_cache_elements + plan%retention_state_elements + &
+                       plan%slot_state_elements
+      call check(plan%state_bytes_real64 == 8_int64 * state_elements, &
+                 'the state byte counter equals eight bytes per state element')
+
+      ! A zero gradient: the update rule still walks every parameter, so the
+      ! counter it returns must equal the parameter count exactly.
+      call fbc_gradient_zero(gradient)
+      update_config = fbc_update_config_t()
+      call fbc_optimizer_apply(optimizer, model, gradient, update_config, status, parameter_updates)
+      call check(status == 0, 'the optimiser accepts a zero gradient')
+      call check(parameter_updates == fbc_parameter_count(config), &
+                 'the optimiser writes every parameter exactly once, and no other element')
+      call check(maxval(abs(model%token_embedding)) < 1.0e3_real64 .and. &
+                 maxval(abs(model%output_bias)) < 1.0e3_real64, &
+                 'a zero gradient with no weight decay leaves the weights finite and unmoved')
+
+      call fbc_gradient_destroy(gradient)
+      call fbc_optimizer_destroy(optimizer)
+      call fbc_state_destroy(state)
+      call fbc_model_destroy(model)
+   end subroutine test_plan_counts_match_reality
+
+   !> Every trainable array, summed, as an independent check of the count.
+   pure function model_parameter_elements(model) result(elements)
+      type(fbc_model_t), intent(in) :: model
+      integer(int64) :: elements
+
+      elements = size(model%token_embedding, kind=int64) + size(model%output_bias, kind=int64) + &
+                 size(model%query, kind=int64) + size(model%key, kind=int64) + &
+                 size(model%value, kind=int64) + size(model%attention_output, kind=int64) + &
+                 size(model%attention_rms, kind=int64) + size(model%ffn_rms, kind=int64) + &
+                 size(model%ffn_gate, kind=int64) + size(model%ffn_value, kind=int64) + &
+                 size(model%ffn_output, kind=int64) + size(model%distance_bias, kind=int64) + &
+                 size(model%scale_logit, kind=int64) + size(model%channel_logit, kind=int64) + &
+                 size(model%decay_logit, kind=int64) + size(model%write_strength_logit, kind=int64) + &
+                 size(model%channel_gate_proj, kind=int64) + size(model%scale_gate_proj, kind=int64) + &
+                 size(model%channel_router, kind=int64) + size(model%induction_mix, kind=int64) + &
+                 size(model%slot_query_proj, kind=int64) + size(model%slot_key_proj, kind=int64) + &
+                 size(model%slot_value_proj, kind=int64) + size(model%slot_read_proj, kind=int64) + &
+                 1_int64
+   end function model_parameter_elements
+
+   !----------------------------------------------------------------------------
+   !  15. A reset state is a fresh state
+   !----------------------------------------------------------------------------
+   !> `reset_every` and every prompt restart rely on this: after `fbc_state_reset`
+   !> the model must answer exactly as it would from a state that never carried
+   !> anything.  A single array left uncleared here would leak history into every
+   !> prompt, which is invisible in a loss curve and fatal for the probes.
+   subroutine test_state_reset_is_fresh
+      type(fbc_config_t) :: config
+      type(fbc_model_t) :: model
+      type(fbc_state_t) :: fresh, dirty
+      type(fbc_workspace_t) :: workspace
+      integer(int32) :: status, index
+      real(real64) :: hidden(32), logits(32), reference(32)
+
+      config = small_config(1000000_int64)
+      call fbc_model_init(model, config, 151_int64, status)
+      call fbc_state_init(fresh, model, status)
+      call fbc_state_init(dirty, model, status)
+      call fbc_workspace_init(workspace, model, status)
+
+      call fbc_step(model, fresh, workspace, 7_int32, hidden, reference, status)
+      call check(status == FBC_OK, 'the fresh-state reference step runs')
+      do index = 1_int32, 40
+         call fbc_step(model, dirty, workspace, 1_int32 + modulo(index * 7_int32, 31_int32), &
+                       hidden, logits, status)
+      end do
+      call check(dirty%cache_count == config%local_window .and. dirty%steps == 40_int64, &
+                 'the dirty state really filled up before the reset')
+      call fbc_state_reset(dirty, model, status)
+      call check(status == FBC_OK, 'the state reset succeeds')
+      call fbc_step(model, dirty, workspace, 7_int32, hidden, logits, status)
+      call check(all(logits == reference), &
+                 'after a reset the logits are bit-for-bit those of a fresh state')
+
+      call fbc_state_destroy(fresh)
+      call fbc_state_destroy(dirty)
+      call fbc_workspace_destroy(workspace)
+      call fbc_model_destroy(model)
+   end subroutine test_state_reset_is_fresh
+
+   !----------------------------------------------------------------------------
+   !  16. A full ring buffer
+   !----------------------------------------------------------------------------
+   !> Two properties, both recomputed from the token stream instead of from the
+   !> engine's own indices, so an off-by-one in the ring or in the shifted read
+   !> fails here:
+   !>   (a) every slot holds exactly the key/value of the token at its distance;
+   !>   (b) the shifted read is `sum_d w_{d+1} * value(token at distance d - 1)`,
+   !>       with distance 0 being the current token.
+   subroutine test_full_window_ring
+      type(fbc_config_t) :: config
+      type(fbc_model_t) :: model
+      type(fbc_state_t) :: state
+      type(fbc_workspace_t) :: workspace
+      integer(int32) :: status, step, head, ordinal, position, distance
+      integer(int32), parameter :: length = 11_int32
+      integer(int32) :: stream(length)
+      real(real64) :: hidden(8), logits(16)
+      real(real64), allocatable :: expected_v(:), expected_k(:), expected_read(:)
+
+      config = tiny_config(1024_int64)
+      call fbc_model_init(model, config, 157_int64, status)
+      call fbc_state_init(state, model, status)
+      call fbc_workspace_init(workspace, model, status)
+      allocate(expected_v(config%width / config%heads), expected_k(config%width / config%heads), &
+               expected_read(config%width / config%heads))
+      ! 11 steps with a window of 4 wraps the ring more than twice, and the
+      ! values repeat so a slot that was never overwritten would still look
+      ! plausible if only one distance were checked.
+      stream = [3_int32, 5_int32, 7_int32, 9_int32, 11_int32, 13_int32, 3_int32, 5_int32, &
+                7_int32, 9_int32, 11_int32]
+      do step = 1_int32, length
+         call fbc_step(model, state, workspace, stream(step), hidden, logits, status)
+      end do
+      call check(status == FBC_OK, 'the full-ring stream runs')
+      call check(state%cache_count == config%local_window, 'the ring buffer is full')
+      call check(state%steps == int(length, int64), 'the step counter matches the tokens consumed')
+
+      do head = 1_int32, config%heads
+         ! Distances 1..window-1 were not touched by the final write, so the
+         ! positions the last step used must still hold the token at that
+         ! distance from the last position.
+         do ordinal = 1_int32, config%local_window - 1_int32
+            position = workspace%local_position(ordinal)
+            expected_v = matmul(model%value(:, :, head), normalized_input(model, stream(length - ordinal)))
+            expected_k = matmul(model%key(:, :, head), normalized_input(model, stream(length - ordinal)))
+            call check(maxval(abs(state%local_value(:, head, position) - expected_v)) < 1.0e-12_real64, &
+                       'each ring slot holds the value of the token at its distance')
+            call check(maxval(abs(state%local_key(:, head, position) - expected_k)) < 1.0e-12_real64, &
+                       'and the key of that token')
+         end do
+         ! The slot the final write replaced now holds the current token.
+         position = workspace%local_position(config%local_window)
+         expected_v = matmul(model%value(:, :, head), normalized_input(model, stream(length)))
+         call check(maxval(abs(state%local_value(:, head, position) - expected_v)) < 1.0e-12_real64, &
+                    'the wrapped slot was overwritten by the current token')
+
+         ! (b) the shifted read of that same step, recomputed by hand
+         expected_read = workspace%local_weight(2_int32, head) * &
+                         matmul(model%value(:, :, head), normalized_input(model, stream(length)))
+         do distance = 1_int32, config%local_window - 1_int32
+            expected_read = expected_read + workspace%local_weight(distance + 2_int32, head) * &
+               matmul(model%value(:, :, head), normalized_input(model, stream(length - distance)))
+         end do
+         call check(maxval(abs(workspace%induction_context(:, head) - expected_read)) < 1.0e-12_real64, &
+                    'the shifted read on a full buffer is the successor of every matched position')
+      end do
+
+      deallocate(expected_v, expected_k, expected_read)
+      call fbc_state_destroy(state)
+      call fbc_workspace_destroy(workspace)
+      call fbc_model_destroy(model)
+   end subroutine test_full_window_ring
+
+   !> The model's normalised input for one token, recomputed outside the step.
+   pure function normalized_input(model, token) result(vector)
+      type(fbc_model_t), intent(in) :: model
+      integer(int32), intent(in) :: token
+      real(real64) :: vector(model%config%width)
+      real(real64) :: x(model%config%width), mean_square, inverse_rms
+
+      x = model%token_embedding(:, token)
+      mean_square = dot_product(x, x) / real(model%config%width, real64)
+      inverse_rms = 1.0_real64 / sqrt(mean_square + model%config%rms_epsilon)
+      vector = (x * inverse_rms) * model%attention_rms
+   end function normalized_input
 
    !----------------------------------------------------------------------------
    !  13. The induction (shifted) read
