@@ -342,7 +342,7 @@ contains
       integer(int8), allocatable :: raw(:)
       integer(int64) :: consumed, file_bytes, stopped_at, started, now, elapsed, since_reset
       integer(int64) :: tokens_before, updates_before, session_tokens, session_updates
-      real(real64) :: loss, rate, session_rate, session_loss
+      real(real64) :: loss, rate, session_rate, session_loss, loss_sum_before
       logical :: bounded, first_field
 
       if (len_trim(corpus) == 0) call usage_and_stop('train needs --corpus')
@@ -390,6 +390,7 @@ contains
       since_reset = 0_int64
       tokens_before = metrics%tokens
       updates_before = metrics%updates
+      loss_sum_before = metrics%loss_sum
       metrics%numeric_ok = .true.
       call wall_clock(started)
       do while (consumed + 1_int64 < file_bytes)
@@ -452,7 +453,13 @@ contains
       ! cumulative counters would understate nothing here but would mix runs.
       rate = real(session_tokens, real64) / real(elapsed, real64)
       session_rate = rate
-      session_loss = metrics%loss_sum / real(max(1_int64, metrics%tokens), real64)
+      ! The session's own mean, not the run's.  `loss_sum` is cumulative across
+      ! a resumed chain, so it has to be rebased on the sum the session started
+      ! with; dividing the cumulative sum by the session's token count mixes two
+      ! different intervals and, on a resumed checkpoint, reports a number that
+      ! belongs to no session at all.
+      session_loss = (metrics%loss_sum - loss_sum_before) / &
+                     real(max(1_int64, session_tokens), real64)
       first_field = .true.
       write(output_unit, '(A)') 'CORPUS_TRAIN_JSON {'
       call field_text('corpus', trim(corpus), first_field)
