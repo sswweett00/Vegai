@@ -327,6 +327,15 @@ okumanın elle hesaplanan toplamla eşleşmesi).
 tarar (bkz. §4.2): tek sütunluk bir sonda, sondayı okunan belirtecin sütununa
 koyduğu sürece bu sınıftaki hatayı göremez.
 
+Buna ek olarak, elle seçilmiş sondaların yapısal körlüğünü kapatmak için **tek
+bir yönlü türev** kontrolü vardır: tüm 25 tensörün her elemanı aynı anda
+`±δ` kadar (damalı işaretlerle) kaydırılır, kayıp iki yanda ölçülür ve merkezi
+fark, aynı gezintinin gradyan üzerinde topladığı `Σ s·g` ile karşılaştırılır.
+Geri yayılımın hiç yazmadığı bir tensör analitik toplama hiçbir şey katmaz ama
+sonlu fark onu görür; bu yüzden tek sayı 25 tensörün tamamını kapsar. Bozunum
+ve yazma gücü önbellekleri her kaydırmadan sonra tazelenir (`fbc_refresh_dynamics`),
+çünkü adım lojitleri değil önbelleği okur.
+
 Kullanım:
 
 ```
