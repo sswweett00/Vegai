@@ -187,7 +187,10 @@ sınamazdı. Ayrıca geçidin ve yönlendiricinin sıfır başlatmada sıfırdan
 eğim aldığı, eğitimde gerçekten **hareket ettiği**, sıfır yönlendiricinin
 girdiye bağımlı karışımı birebir yeniden ürettiği, sıfırdan farklı
 yönlendiricinin karışımı **bağlama göre** değiştirdiği ve kontrol noktasından
-birebir geri yüklendiği ayrı kontrollerdir (§7, 12. test).
+birebir geri yüklendiği ayrı kontrollerdir (§7, 12. test). İndüksiyon ağırlığı
+da sıfırken sınanmaz: `induction_mix` sonda öncesi 0.40 / −0.25 yapılır, çünkü
+sıfır ağırlıkta paylaşılan dikkat ağırlıklarına eklenen kaydırılmış terim
+kaybolur ve `key`/`query`/`value`/`distance_bias` sondaları onu sınamazdı.
 
 ### 4.1 Öğrenilen bellek dinamiği
 
