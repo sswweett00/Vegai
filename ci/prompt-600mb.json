@@ -1,7 +1,7 @@
 {
-  "enabled": false,
-  "note": "The router pass (run 41033423472, commit 74f3e9d, label quality-w64-facts32-router) was still training when this file was set back to enabled=false, so this push (which adds the induction read and checkpoint v5) must not start a second 225-minute pass on its own. The induction pass is requested by flipping enabled to true after the router numbers are recorded. Recorded runs: docs/PROMPT_RESPONSE_PRETRAINING.md sections 8-9.",
-  "purpose": "Does routing the channel mixture on the channel outputs add anything on top of 40927789891",
+  "enabled": true,
+  "note": "Induction pass, commit 1478df7 (checkpoint v5). The local channel now also reads the value one position after the position its attention matched, which is the circuit copy/next need; four parameters, zero-initialised. Every setting is identical to run 40927789891 and to run 41033423472 (the router pass, still training when this was requested): 32 bindings, width 64, 4 heads, ffn 192, window 48, chunk 256, lr 3e-4, 225 minutes, 9 sessions, reset_every 4096, fresh model. This run therefore queues behind 41033423472 and reports the cumulative model (gates + router + induction), which is why no single change is credited with any number. Recorded runs: docs/PROMPT_RESPONSE_PRETRAINING.md sections 8-9. Set enabled=false again once this pass has run.",
+  "purpose": "Does the shifted (induction) local read make copy/next learnable, on top of run 40927789891 (fact 32/32, copy 0/200 0.190, next 0/100 0.033)",
   "layout": "templates",
   "corpus_bytes": 600000000,
   "facts": 32,
@@ -18,5 +18,5 @@
   "warmup_bytes": 0,
   "resume_run_id": "",
   "resume_start_byte": 0,
-  "label": "quality-w64-facts32-router"
+  "label": "quality-w64-facts32-router-induction"
 }
