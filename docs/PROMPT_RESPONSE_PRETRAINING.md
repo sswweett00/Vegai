@@ -627,6 +627,10 @@ Oysa ileri hesap `logits(j) = h · E(:, j) + b(j)` olduğu için türev tam dı�
 dL/dE = h ⊗ dlogits,   yani   E(:, j) += h · dlogits(j)   (her j için)
 ```
 
+**Ölçek.** Gönderilen şekilde (genişlik 64, bayt sözlüğü 256) gradyanın
+yazılması gereken eleman sayısı `64 · 256 = 16 384`; yazılan **64**'tü. Yani
+çıkış kafası her adımda gradyanının **%0,39**'unu alıyordu.
+
 **Neden ciddi.** Softmax çapraz entropide `dlogits(j) = p_j − 1[j = y]`.
 Eksik kalan terim, hedef dışındaki her `j` için tam olarak `p_j`'dir — yani
 "yanlış baytın olasılığını düşür" sinyalinin kendisi. Hatalı sürümde model

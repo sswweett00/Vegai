@@ -236,6 +236,10 @@ olduğundan kayıp, hedef dışındaki sütunlarda tam olarak `p_j` kadardı —
 her adımda sözlüğün neredeyse tamamı gradyansız kalıyordu ve çıkış kafası
 "yanlış baytı düşür" sinyalini hiç almıyordu.
 
+Gönderilen şekilde (genişlik 64, bayt sözlüğü 256) yazılması gereken eleman
+sayısı `64 · 256 = 16 384`, yazılan ise 64'tü: çıkış kafası gradyanının
+%0,39'unu alıyordu.
+
 Bunun o güne kadarki sözleşme paketiyle yakalanmamış olması öğretici: mevcut sonda okunan
 belirtecin sütununu sınıyordu (`E(3, 9)`, belirteç 9) ve **tam o sütunda**
 eksik terim zaten yazıldığı için hatalı sürüm ile doğru sürüm aynı sayıyı
