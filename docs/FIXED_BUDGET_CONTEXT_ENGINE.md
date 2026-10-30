@@ -96,6 +96,32 @@ sütunları `dL/dlojistik · context` alır, üç bağlam vektörü ise
 kanal geri yayılımının girdisine (yuva okuması, özyinelemeli bellek kafaları,
 yerel dikkat) eklenir.
 
+**Yerel kanalın ikinci okuması: indüksiyon (kaydırılmış okuma).** Tek bir
+dikkat bloğu, `q_t`'yi yalnızca o anki belirteçten kurar. Bu yüzden "eşleşen
+konumun *değerini* oku" (yerinde okuma) yapabilir, ama "eşleşen konumdan
+**bir sonra** gelen değeri oku" yapamaz. Oysa `Tekrar et: X. Sonuç: X` ya da
+`Say: abc. Sonra: bcd` tipi görevlerin istediği tam olarak budur: `t`
+adımındaki bayt daha önce `j` konumunda geçtiyse, cevap `j+1`'deki bayttır.
+Klasik indüksiyon kafası bunu iki bloğun bileşimiyle yapar; burada aynı iş
+tek taramada yapılır, çünkü halka tamponu `j+1`'in değerini zaten tutar:
+
+```
+read_shifted(h) = Σ_{d=1..count} w_{d+1}(h) · value(d - 1)
+local_context(:, h) = read_place(h) + induction_mix(h) · read_shifted(h)
+```
+
+`w` yerinde okumanın **aynı** softmax ağırlıklarıdır (yeni `exp` yok, yeni
+tampon yok), `value(-1)` bu adımın kendi `v`'sidir, `value(d-1)` ise
+`d-1` uzaklıktaki önbellek girdisidir. `induction_mix` kafa başına **bir
+skalerdir** ve sıfırdan başlar: sıfırda kanal tam olarak yerinde okumadır, yani
+bu da eklemedir, yeniden yorumlama değil. Maliyet: kafa başına bir parametre
+(4 kafada +4), belirteç başına `count × dh × head` çarpım-toplama — sınır
+`local_window`, yani fiziksel sabit; ufuk yok. Gradyan iki yönlüdür ve
+paylaşılan ağırlıklar nedeniyle *aynı* `d(w)` girdilerine eklenir:
+`d(induction_mix) = <dlocal_context, read_shifted>`, `d(w_{d+1}) += <dind, value(d-1)>`,
+`d(v) += w_2 · dind`. Okunan değerler önceki adımların yazdığı donmuş
+önbellektir, dolayısıyla derinlik-1 kesikliliği bozulmaz.
+
 **Dürüst ufuk raporu.** "Etkin ufuk" bir bozunma erişimidir, kayıpsız depolama
 değildir. Özyinelemeli bellek üstel bir ortalamadır: uzak belirteçler unutulur,
 yuvalar çarpışır ve yanlış hatırlama üretebilir. 1e12 ufuk "1e12 belirteç
@@ -136,6 +162,9 @@ akan durum değil.)
   (`channel_gate_proj`) ve bağlam koşullu kanal yönlendiricisi
   (`channel_router`) — hem yönlendirici satırları hem de üç bağlam vektörünün
   yönlendirici üzerinden aldığı ek gradyan,
+- yerel kanalın kaydırılmış (indüksiyon) okuması: kafa başına
+  `induction_mix` **ve** paylaşılan dikkat ağırlıklarının bu okumadan gelen
+  payı (q, k, mesafe yanlılığı ve bu adımın `v`'si),
 - dört yuva projeksiyonu ve yuva önem ağırlığı,
 - mesafe yanlılığı.
 
@@ -144,11 +173,12 @@ onları kullanır: yuva yazması (anahtar, değer, geçit, önem) ve özyineleme
 güncelleme (`φ(k)`, `v`). Önceki belirteçlerin yazmaları dondurulmuştur; bu
 bilinçli ve belgelenmiş bir yaklaşımdır, "tam BPTT" olarak sunulmaz.
 
-Doğrulama: sonlu fark sözleşme testi 17 parametreyi (okuma ağırlığı, kanal
+Doğrulama: sonlu fark sözleşme testi 18 parametreyi (okuma ağırlığı, kanal
 lojistiği, iki yuva yazma projeksiyonu, yuva sorgu projeksiyonu, mesafe
 yanlılığı, FFN kapısı, sorgu, anahtar, değer, bağlı gömme, **öğrenilen bellek
 bozunumu ve yazma gücü**, **girdiye bağımlı kanal ve ölçek geçitleri**,
-**bağlam koşullu yönlendiricinin iki sütunu**) merkezi farkla karşılaştırır ve
+**bağlam koşullu yönlendiricinin iki sütunu**, **indüksiyon ağırlığı**)
+merkezi farkla karşılaştırır ve
 `1e-4` bağıl toleransla geçer. Yönlendirici sıfırdan başladığı için sonda
 *önce* üç elemanına sıfırdan farklı değer verilir (0.30 / −0.20 / 0.25); aksi
 halde kayıp yönlendiriciye göre tam doğrusal olurdu ve yalnızca kanal
@@ -208,7 +238,7 @@ transandantal yoktur.
 
 ## 6. Kontrol noktası
 
-`VGFB0001` sihirli dizesi, **sürüm 4**. İçerik: sözlük/genişlik/kafa/ffn/yerel
+`VGFB0001` sihirli dizesi, **sürüm 5**. İçerik: sözlük/genişlik/kafa/ffn/yerel
 pencere/ölçek/yuva,
 **mantıksal ufuk**, etkin ufuk ve kırpma bayrağı, RMS epsilon, yuva bozunması ve
 sıcaklığı, güncelleme ve belirteç sayaçları, optimize edici hiper-parametreleri,
@@ -217,16 +247,18 @@ tüm parametre yükü ve tüm optimize edici durumu.
 Sürüm 2, öğrenilen dinamiği (ölçek başına `decay_logit` ve
 `write_strength_logit`) ve onların optimizer momentumunu ekler. Sürüm 3
 girdiye bağımlı iki geçit projeksiyonunu (`channel_gate_proj`,
-`scale_gate_proj`) ekler (yük 21 → 23 dizi). Sürüm 4 ise bağlam koşullu kanal
-yönlendiricisini ve onun momentumunu ekler (yük 23 → 25 dizi). Sürüm 1, 2 ve 3
+`scale_gate_proj`) ekler (yük 21 → 23 dizi). Sürüm 4 bağlam koşullu kanal
+yönlendiricisini (yük 23 → 25 dizi), sürüm 5 ise kafa başına indüksiyon
+ağırlığını ve onun momentumunu ekler (yük 25 → 27 dizi). Sürüm 1, 2, 3 ve 4
 dosyaları okunabilir ama **dönüştürülmez**: `FBT_ERR_VERSION` (−1506) ile
 reddedilir, çünkü o dosyalarda yeni parametrelerin değeri yoktur ve
 uydurulacak bir değer (örneğin sıfır geçit ya da sıfır yönlendirici) modeli
-sessizce değiştirirdi. Sürüm 2 ve sürüm 3 reddi ayrı testlerdir: başlık
+sessizce değiştirirdi. Sürüm 2, 3 ve 4 reddi ayrı testlerdir: başlık
 yazılır, hem yükleyicinin hem başlık okuyucusunun `FBT_ERR_VERSION`
-döndürdüğü ve başlığın gerçek sürüm numarasını koruduğu doğrulanır. Sürüm 3
-özellikle önemlidir: bugün diskte bulunması en olası biçim odur ve sıfır
-yönlendiriciyle tamamlanması modeli sessizce değiştirirdi. Yükleme sonunda
+döndürdüğü ve başlığın gerçek sürüm numarasını koruduğu doğrulanır. En yeni
+eski sürüm (4) özellikle önemlidir: diskte bulunması en olası biçim odur ve
+sıfır indüksiyon ağırlığıyla tamamlanması öğrenilmiş bir yeteneği sessizce
+kapatırdı. Yükleme sonunda
 önbellek yeniden kurulur.
 
 Eski `VGNR0001` (neural_pretrain v5) kontrol noktaları **dönüştürülmez**:
@@ -253,7 +285,8 @@ kanalları kapalıyken ulaşamaması); kontrol noktası gidiş-dönüşü ve esk
 biçimin (sürüm 2 ve sürüm 3) reddi; bağlam koşullu yönlendirici (sıfır
 yönlendirici girdiye bağımlı karışımı birebir yeniden üretir, sıfırdan farklı
 yönlendirici karışımı **bağlama göre** değiştirir, sıfır satırlı kanal
-dokunulmadan kalır).
+dokunulmadan kalır); indüksiyon okuması (`5 7 5 7 5` akışında eşleşen
+konumların **bir sonrasındaki** değeri okur, yerinde okuma sıfır kalır).
 
 Kullanım:
 
@@ -332,6 +365,9 @@ görevlerde yardım etmedi" deniyor.
 - Yönlendirici **tek adım derinliğinde** çalışır: geri yayılım derinlik-1
   kesikli olduğu için "yönlendirme → bağlam → yönlendirme" geri beslemesi bir
   adımdan uzağa taşınmaz. Bu bir eksiklik olarak yazılıyor, gizlenmiyor.
+- İndüksiyon okuması eşleşen konumun **bir** sonrasını okur; daha uzun
+  gecikmeli ("iki sonra", "üç sonra") kopyalama bu mekanizmanın dışındadır ve
+  ayrıca ölçülmedi.
 - Yönlendirmenin **ölçülmüş kalite kazancı** ablasyonsuzdur: aynı şekilde
   yönlendiricisiz bir koşu yapılmadı, dolayısıyla "yönlendirici şu farkı
   yarattı" denmez (§8.8, `PROMPT_RESPONSE_PRETRAINING.md`).

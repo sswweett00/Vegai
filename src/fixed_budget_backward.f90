@@ -56,6 +56,7 @@ module fixed_budget_backward
       real(real64), allocatable :: channel_logit(:)
       real(real64), allocatable :: channel_gate_proj(:, :)
       real(real64), allocatable :: channel_router(:, :)
+      real(real64), allocatable :: induction_mix(:)
       real(real64), allocatable :: scale_gate_proj(:, :)
       real(real64), allocatable :: slot_query_proj(:, :)
       real(real64), allocatable :: slot_key_proj(:, :)
@@ -100,6 +101,7 @@ contains
                gradient%channel_gate_proj(size(model%channel_gate_proj, 1), &
                                           size(model%channel_gate_proj, 2)), &
                gradient%channel_router(size(model%channel_router, 1), size(model%channel_router, 2)), &
+               gradient%induction_mix(size(model%induction_mix)), &
                gradient%scale_gate_proj(size(model%scale_gate_proj, 1), &
                                         size(model%scale_gate_proj, 2)), &
                gradient%slot_query_proj(size(model%slot_query_proj, 1), size(model%slot_query_proj, 2)), &
@@ -138,6 +140,7 @@ contains
       gradient%channel_logit = 0.0_real64
       gradient%channel_gate_proj = 0.0_real64
       gradient%channel_router = 0.0_real64
+      gradient%induction_mix = 0.0_real64
       gradient%scale_gate_proj = 0.0_real64
       gradient%slot_query_proj = 0.0_real64
       gradient%slot_key_proj = 0.0_real64
@@ -167,6 +170,7 @@ contains
       if (allocated(gradient%channel_logit)) deallocate(gradient%channel_logit)
       if (allocated(gradient%channel_gate_proj)) deallocate(gradient%channel_gate_proj)
       if (allocated(gradient%channel_router)) deallocate(gradient%channel_router)
+      if (allocated(gradient%induction_mix)) deallocate(gradient%induction_mix)
       if (allocated(gradient%scale_gate_proj)) deallocate(gradient%scale_gate_proj)
       if (allocated(gradient%slot_query_proj)) deallocate(gradient%slot_query_proj)
       if (allocated(gradient%slot_key_proj)) deallocate(gradient%slot_key_proj)
@@ -192,7 +196,7 @@ contains
                 sum(gradient%decay_logit**2) + sum(gradient%write_strength_logit**2) + &
                 sum(gradient%scale_logit**2) + sum(gradient%channel_logit**2) + &
                 sum(gradient%channel_gate_proj**2) + sum(gradient%scale_gate_proj**2) + &
-                sum(gradient%channel_router**2) + &
+                sum(gradient%channel_router**2) + sum(gradient%induction_mix**2) + &
                 sum(gradient%slot_query_proj**2) + sum(gradient%slot_key_proj**2) + &
                 sum(gradient%slot_value_proj**2) + sum(gradient%slot_read_proj**2) + &
                 gradient%slot_salience_weight**2
@@ -234,6 +238,8 @@ contains
       ! d(combined)/d(channel_context) arriving through the context router.
       real(real64) :: dcontext_source(model%config%width, FBC_CHANNEL_COUNT)
       real(real64) :: dslot_channel(model%config%width)
+      real(real64) :: dind(model%head_width)
+      real(real64) :: shifted
       real(real64) :: dslot_query(model%config%width), dslot_key(model%config%width)
       real(real64) :: dslot_value(model%config%width), dslot_read(model%config%width)
       real(real64) :: dslot_read_score(model%config%memory_slots)
@@ -507,6 +513,25 @@ contains
             weight_sum = weight_sum + workspace%local_weight(ordinal + 1_int32, head) * &
                                       dlocal_weight(ordinal + 1_int32)
          end do
+         ! The shifted (induction) read reuses these weights, so its derivative
+         ! adds to the same d(weight) entries before the softmax backward runs.
+         ! Its own weight sees the read it mixes in, and it reads values that the
+         ! previous steps wrote, so no gradient crosses the step boundary.
+         gradient%induction_mix(head) = gradient%induction_mix(head) + &
+                                        dot_product(dloc, workspace%induction_context(:, head))
+         dind = model%induction_mix(head) * dloc
+         do ordinal = 1_int32, workspace%local_count
+            if (ordinal == 1_int32) then
+               shifted = dot_product(dind, workspace%v(:, head))
+               dlocal_weight(2_int32) = dlocal_weight(2_int32) + shifted
+               weight_sum = weight_sum + workspace%local_weight(2_int32, head) * shifted
+            else
+               position = workspace%local_position(ordinal - 1_int32)
+               shifted = dot_product(dind, state%local_value(:, head, position))
+               dlocal_weight(ordinal + 1_int32) = dlocal_weight(ordinal + 1_int32) + shifted
+               weight_sum = weight_sum + workspace%local_weight(ordinal + 1_int32, head) * shifted
+            end if
+         end do
          do ordinal = 1_int32, workspace%local_count + 1_int32
             dlocal_weight(ordinal) = workspace%local_weight(ordinal, head) * (dlocal_weight(ordinal) - weight_sum)
          end do
@@ -521,6 +546,11 @@ contains
          dq(:, head) = dq(:, head) + dlocal_weight(1_int32) * workspace%k(:, head) * context_scale
          dk(:, head) = dk(:, head) + dlocal_weight(1_int32) * workspace%q(:, head) * context_scale
          dvv(:, head) = dvv(:, head) + workspace%local_weight(1_int32, head) * dloc
+         if (workspace%local_count >= 1_int32) then
+            ! The successor of the most recent cached position is this step's own
+            ! value, so the shifted read touches v as well as the frozen cache.
+            dvv(:, head) = dvv(:, head) + workspace%local_weight(2_int32, head) * dind
+         end if
       end do
 
       ! ---- 10. head projections ---------------------------------------------

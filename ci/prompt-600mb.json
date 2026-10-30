@@ -1,6 +1,6 @@
 {
-  "enabled": true,
-  "note": "Quality pass for the context-conditioned channel router (commit d093120): the channel mixture now also reads the three channel outputs, not only the current token. The shape and every budget number are identical to run 40927789891 so the two runs are comparable: same 32 bindings, width 64, 4 heads, ffn 192, window 48, chunk 256, lr 3e-4, 225 minutes, 9 sessions, reset_every 4096, fresh model. The checkpoint format went to version 4, so a v3 checkpoint cannot be resumed by design; resume_run_id therefore stays empty. Recorded runs: docs/PROMPT_RESPONSE_PRETRAINING.md sections 8-9. Set enabled=false again once this pass has run: a real pass occupies the runner for hours, and a push that touches this file while enabled is true requests another one.",
+  "enabled": false,
+  "note": "The router pass (run 41033423472, commit 74f3e9d, label quality-w64-facts32-router) was still training when this file was set back to enabled=false, so this push (which adds the induction read and checkpoint v5) must not start a second 225-minute pass on its own. The induction pass is requested by flipping enabled to true after the router numbers are recorded. Recorded runs: docs/PROMPT_RESPONSE_PRETRAINING.md sections 8-9.",
   "purpose": "Does routing the channel mixture on the channel outputs add anything on top of 40927789891",
   "layout": "templates",
   "corpus_bytes": 600000000,

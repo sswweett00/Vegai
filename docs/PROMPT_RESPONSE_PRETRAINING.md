@@ -566,6 +566,52 @@ sonuçları geldiğinde §8.7'deki tabloyla **yan yana** yazılacak: `fact`
 (ezber), `copy` (bağlamdan kopyalama), `next` (bağlamdan kural). Bu bir
 ablasyon değildir: geçit + yönlendirici paketi, tek bir koşu.
 
+### 8.9 İndüksiyon: eşleşen bayttan **sonra** geleni okumak
+
+§8.8'deki yönlendirici "hangi kanaldan ne kadar okuyacağımı" bağlama bağladı,
+ama kanalların **ne okuyabildiğini** değiştirmedi. Ölçülen iki başarısızlık
+(`copy` 0/200, `next` 0/100) tam olarak şu cümleye dayanıyor: "`t` adımındaki
+bayt daha önce `j` konumunda geçtiyse, cevap `j+1`'deki bayttır." Yerel kanal
+`j`'yi buluyor, ama `j`'deki değeri okuyor (yerinde okuma) — yani **aynı**
+baytı, sonra geleni değil. Tek dikkat bloğu bunu yapısal olarak ifade edemez:
+`q_t` yalnızca o anki belirteçten kurulur, "önceki belirtece bakıp eşleştirme"
+diye ikinci bir karıştırma adımı yoktur. Klasik çözüm iki kafanın bileşimidir;
+burada tek taramada yapılıyor çünkü halka tamponu `j+1`'in değerini zaten
+tutuyor:
+
+```
+read_shifted(h)     = Σ_{d=1..count} w_{d+1}(h) · value(d − 1)
+local_context(:, h) = read_place(h) + induction_mix(h) · read_shifted(h)
+```
+
+- **Yeni `exp` yok**: `w`, yerinde okumanın aynı softmax ağırlıklarıdır.
+- **Yeni tampon yok**: `value(d−1)` önbellekte, `value(−1)` bu adımın `v`'si.
+- **Yeni parametre**: kafa başına bir skaler, `induction_mix`, sıfırdan
+  başlar (yani sıfırda kanal tam olarak yerinde okumadır). 4 kafada +4
+  parametre: 87 489 → **87 493**. Kontrol noktası **sürüm 5**; sürüm 4 ve
+  altı reddedilir, sıfır ağırlıkla tamamlanmaz.
+- **Gradyan iki yönlü**, paylaşılan ağırlık yüzünden aynı `d(w)` girdilerine
+  eklenir: `d(induction_mix) = <dlocal, read_shifted>`,
+  `d(w_{d+1}) += <dind, value(d−1)>`, `d(v) += w_2·dind`. Okunan değerler
+  önceki adımların donmuş önbelleğidir, derinlik-1 kesikliliği bozulmaz.
+
+**Neden bu ikisini hedefliyor.** `copy` (`Tekrar et: X. Sonuç: X`) ve `next`
+(`Say: abcdef. Sonra: bcdefg`) korpusta **eğitiliyor** (§8.7'de yazıldığı gibi
+şablon yerleşiminde her belgede birer tane var), yani 0/200 ve 0/100
+"eğitilmedi" değil "öğrenilemedi" demek. İki görevde de ilk cevap baytından
+sonraki her bayt, bir önceki baytın **önceki geçişinden bir sonraki** bayttır;
+kaydırılmış okuma tam bu sinyali verir.
+
+**Sınır (şimdiden yazılıyor).** İlk cevap baytı bu mekanizmayla gelmez: o
+adımda önceki bayt `:` ya da boşluktur, eşleşecek bir tekrar yoktur; "bu
+değeri kopyala" talimatını tanımak gerekir. Tam eşleşme (`exact match`) bütün
+baytları doğru istediği için `copy` hâlâ 0/200'de kalabilir; bu durumda
+ölçülecek olan **sonraki-bayt** doğruluğudur ve sonuç olduğu gibi yazılır.
+
+**Ölçüm (bu bölüm koşu geldiğinde doldurulacak).** Aynı şekil ve bütçe: 32
+bağ, `width 64`, 4 kafa, `ffn 192`, pencere 48, güncelleme 256, `lr 3e-4`,
+225 dakika, taze model (v5). Karşılaştırma: §8.7 (40927789891) ve §8.8.
+
 ## 9. Sınırlar
 
 - Korpus **sentetiktir**; model bu veriyle Türkçe "öğrenmez", bu korpusun
@@ -596,3 +642,9 @@ ablasyon değildir: geçit + yönlendirici paketi, tek bir koşu.
   sonucudur ve ölçüm bunu olduğu gibi raporlar.
 - `next` görevi (harf kaydırma) bir *kural*dır; örneklenen 100 satır
   ezberlenemez, ancak çok küçük bir model kuralı öğrenemeyebilir.
+- §8.9'daki indüksiyon okuması yalnızca **bir sonraki** baytı getirir; daha
+  uzun gecikmeli kopyalama, çok baytlı yeniden sıralama ve "kopyala ama ters
+  çevir" gibi görevler bu mekanizmanın dışındadır.
+- §8.9'un kazancı, koşu tamamlanmadan **iddia edilmez**; mekanizmanın varlığı
+  sözleşme testleriyle (kaydırma testi, sonlu fark, gidiş-dönüş) kanıtlanır,
+  kalite etkisi ise yalnızca ölçümle.

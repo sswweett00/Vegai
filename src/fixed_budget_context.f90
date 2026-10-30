@@ -192,6 +192,17 @@ module fixed_budget_context
       ! (component - 1) * FBC_CHANNEL_COUNT + source.  Zero-initialised, so the
       ! gate starts as exactly the input-only gate above.
       real(real64), allocatable :: channel_router(:, :)              ! (3, 3*width)
+      ! Per-head weight of the *shifted* local read.  The local channel reads
+      ! the value stored at the positions its attention matched; this second
+      ! read uses the same weights one position later, i.e. "the byte that
+      ! followed the last place this byte occurred".  That is the induction
+      ! circuit a single attention block otherwise cannot express: matching
+      ! needs only the current token, but copying what came *after* the match
+      ! needs the value of the next position, which the ring buffer already
+      ! holds.  Zero-initialised, so the channel is unchanged until training
+      ! gives it a weight; `heads` parameters, one per head, so a head can do
+      ! induction while another keeps reading in place.
+      real(real64), allocatable :: induction_mix(:)                  ! (head)
       real(real64), allocatable :: scale_gate_proj(:, :)             ! (scale, width)
       real(real64), allocatable :: slot_query_proj(:, :)             ! (width, width)
       real(real64), allocatable :: slot_key_proj(:, :)               ! (width, width)
@@ -217,6 +228,7 @@ module fixed_budget_context
       real(real64), allocatable :: local_weight(:, :)          ! (window+1, head), 1 = self
       integer(int32), allocatable :: local_position(:)         ! (window)
       real(real64), allocatable :: local_context(:, :)         ! (dh, head)
+      real(real64), allocatable :: induction_context(:, :)     ! (dh, head) shifted read
       real(real64), allocatable :: memory_context(:, :)        ! (dh, head)
       real(real64), allocatable :: slot_query(:)               ! (width)
       real(real64), allocatable :: slot_write_key(:)           ! (width)
@@ -557,7 +569,7 @@ contains
               allocated(model%write_strength) .and. &
               allocated(model%scale_logit) .and. allocated(model%channel_logit) .and. &
               allocated(model%channel_gate_proj) .and. allocated(model%scale_gate_proj) .and. &
-              allocated(model%channel_router) .and. &
+              allocated(model%channel_router) .and. allocated(model%induction_mix) .and. &
               allocated(model%slot_query_proj) .and. allocated(model%slot_key_proj) .and. &
               allocated(model%slot_value_proj) .and. allocated(model%slot_read_proj) .and. &
               allocated(model%scale_decay)
@@ -664,6 +676,7 @@ contains
                model%channel_logit(FBC_CHANNEL_COUNT), &
                model%channel_gate_proj(FBC_CHANNEL_COUNT, config%width), &
                model%channel_router(FBC_CHANNEL_COUNT, FBC_CHANNEL_COUNT * config%width), &
+               model%induction_mix(config%heads), &
                model%scale_gate_proj(config%memory_scales, config%width), &
                model%slot_query_proj(config%width, config%width), &
                model%slot_key_proj(config%width, config%width), &
@@ -698,6 +711,7 @@ contains
       model%channel_logit = 0.0_real64
       model%channel_gate_proj = 0.0_real64
       model%channel_router = 0.0_real64
+      model%induction_mix = 0.0_real64
       model%scale_gate_proj = 0.0_real64
       model%slot_salience_weight = 0.0_real64
       ! Initialise the learnable dynamics so that the very first step behaves
@@ -736,6 +750,7 @@ contains
       if (allocated(model%channel_logit)) deallocate(model%channel_logit)
       if (allocated(model%channel_gate_proj)) deallocate(model%channel_gate_proj)
       if (allocated(model%channel_router)) deallocate(model%channel_router)
+      if (allocated(model%induction_mix)) deallocate(model%induction_mix)
       if (allocated(model%scale_gate_proj)) deallocate(model%scale_gate_proj)
       if (allocated(model%slot_query_proj)) deallocate(model%slot_query_proj)
       if (allocated(model%slot_key_proj)) deallocate(model%slot_key_proj)
@@ -860,6 +875,7 @@ contains
                workspace%scale_logit_eff(scales), &
                workspace%local_weight(window + 1_int32, heads), workspace%local_position(window), &
                workspace%local_context(head_width, heads), workspace%memory_context(head_width, heads), &
+               workspace%induction_context(head_width, heads), &
                workspace%slot_query(width), workspace%slot_write_key(width), &
                workspace%slot_write_value(width), workspace%slot_write_gate(slots), &
                workspace%slot_key_delta(width, slots), workspace%slot_value_delta(width, slots), &
@@ -897,6 +913,7 @@ contains
       if (allocated(workspace%local_weight)) deallocate(workspace%local_weight)
       if (allocated(workspace%local_position)) deallocate(workspace%local_position)
       if (allocated(workspace%local_context)) deallocate(workspace%local_context)
+      if (allocated(workspace%induction_context)) deallocate(workspace%induction_context)
       if (allocated(workspace%memory_context)) deallocate(workspace%memory_context)
       if (allocated(workspace%slot_query)) deallocate(workspace%slot_query)
       if (allocated(workspace%slot_write_key)) deallocate(workspace%slot_write_key)
@@ -949,6 +966,8 @@ contains
       count = count + 4_int64 * width * width + 1_int64
       ! the context-conditioned router: three outputs over three channel vectors
       count = count + int(FBC_CHANNEL_COUNT, int64) * int(FBC_CHANNEL_COUNT, int64) * width
+      ! one induction weight per head (the shifted local read)
+      count = count + int(config%heads, int64)
    end function fbc_parameter_count
 
    pure integer(int64) function fbc_state_bytes(config) result(bytes)
@@ -993,7 +1012,9 @@ contains
       plan%local_cache_elements = 2_int64 * heads * window * head_width
       plan%retention_state_elements = heads * scales * (head_width * head_width + head_width)
       plan%slot_state_elements = 2_int64 * width * slots + slots
-      ! Q/K/V + output projection + FFN + tied logits, forward.
+      ! Q/K/V + output projection + FFN + tied logits + the two gates, forward,
+      ! plus the shifted (induction) read: one weighted vector add per cached
+      ! position and head.
       plan%forward_flops_per_token = 2_int64 * (3_int64 * heads * head_width * width + width * width + &
                                                 3_int64 * width * ffn + width * vocab) + &
                                      2_int64 * (heads * scales * head_width * head_width) + &
@@ -1001,7 +1022,8 @@ contains
                                      2_int64 * (2_int64 * width * slots) + &
                                      2_int64 * (int(FBC_CHANNEL_COUNT, int64) + int(config%memory_scales, int64)) * width + &
                                      2_int64 * int(FBC_CHANNEL_COUNT, int64) * &
-                                     int(FBC_CHANNEL_COUNT, int64) * width
+                                     int(FBC_CHANNEL_COUNT, int64) * width + &
+                                     2_int64 * heads * window * head_width
       ! The backward pass is the same dense products plus the elementwise chain;
       ! counted as 2x the forward matmul work plus the gate arithmetic.
       plan%backward_flops_per_token = 2_int64 * plan%forward_flops_per_token + &
@@ -1103,6 +1125,26 @@ contains
             workspace%local_context(:, head) = workspace%local_context(:, head) + &
                workspace%local_weight(ordinal + 1_int32, head) * state%local_value(:, head, position)
          end do
+         ! The same attention weights, read one position later: what followed the
+         ! place each matched byte occurred.  The successor of the match at
+         ! distance `ordinal` is the entry at distance `ordinal - 1`, and the
+         ! successor of the most recent cached entry (distance 1) is this step's
+         ! own value.  Nothing new is stored: the ring buffer already holds every
+         ! value this reads, and the cost is one weighted add per cached position
+         ! and head -- a physical-window bound, never the horizon.
+         workspace%induction_context(:, head) = 0.0_real64
+         do ordinal = 1_int32, state%cache_count
+            if (ordinal == 1_int32) then
+               workspace%induction_context(:, head) = workspace%induction_context(:, head) + &
+                  workspace%local_weight(2_int32, head) * workspace%v(:, head)
+            else
+               position = workspace%local_position(ordinal - 1_int32)
+               workspace%induction_context(:, head) = workspace%induction_context(:, head) + &
+                  workspace%local_weight(ordinal + 1_int32, head) * state%local_value(:, head, position)
+            end if
+         end do
+         workspace%local_context(:, head) = workspace%local_context(:, head) + &
+            model%induction_mix(head) * workspace%induction_context(:, head)
       end do
 
       ! ---- 4. multi-scale recurrent memory (write, then read) ----------------

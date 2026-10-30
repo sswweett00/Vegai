@@ -22,6 +22,9 @@
 !   12. the context router: zero rows reproduce the input-only gate bit for
 !       bit, and a non-zero router mixes the channels differently depending on
 !       what the three channels returned for *that* token
+!   13. the induction (shifted) read: the local channel can read the value that
+!       followed the position its attention matched, i.e. "after this byte came
+!       that byte", which a single in-place read cannot express
 !
 !  Nothing here is timing based; the invariance checks read structural
 !  counters, so they cannot pass or fail because a runner was busy.
@@ -49,6 +52,7 @@ program fixed_budget_context_tests
    call test_remote_influence
    call test_checkpoint_roundtrip
    call test_context_router_conditions_mixture
+   call test_induction_read_is_shifted
 
    write(output_unit, '(A,I0,A,I0,A)') 'fixed-budget context checks: ', checks, ', failures: ', &
       failures, '.'
@@ -497,6 +501,12 @@ contains
          -0.20_real64
       model%channel_router(FBC_CHANNEL_LOCAL, &
                            (5_int32 - 1_int32) * FBC_CHANNEL_COUNT + FBC_CHANNEL_SLOTS) = 0.25_real64
+      ! The induction read shares the local attention weights, so it changes the
+      ! weight derivative that the q/k/v and distance-bias probes below check.
+      ! With a zero weight those probes would pass even if the shifted term were
+      ! missing entirely, so the weight is non-zero before any probe runs.
+      model%induction_mix(1_int32) = 0.40_real64
+      model%induction_mix(2_int32) = -0.25_real64
       call fbc_state_init(base, model, status)
       call fbc_workspace_init(workspace, model, status)
       call fbc_gradient_init(gradient, model, status)
@@ -591,6 +601,21 @@ contains
                     'finite difference matches the context-router gradient (local context -> slots)')
          call check(abs(gradient%channel_router(FBC_CHANNEL_SLOTS, 19_int32)) > 1.0e-12_real64, &
                     'the second probed router entry carries a gradient too')
+      end block
+      block
+         ! The induction weight scales the shifted read, so its derivative is the
+         ! overlap between that read and everything the local channel sends on.
+         original = model%induction_mix(1_int32)
+         model%induction_mix(1_int32) = original + delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, plus_loss, status)
+         model%induction_mix(1_int32) = original - delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
+         model%induction_mix(1_int32) = original
+         numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
+         call report_gradient(numeric, gradient%induction_mix(1_int32), &
+                    'finite difference matches the induction (shifted read) weight')
+         call check(abs(gradient%induction_mix(1_int32)) > 1.0e-12_real64, &
+                    'the induction weight carries a gradient, so the probes above are meaningful')
       end block
       block
          original = model%slot_key_proj(2_int32, 3_int32)
@@ -851,6 +876,7 @@ contains
       real(real64), allocatable :: hidden(:), logits(:), dlogits(:)
       real(real64), allocatable :: gate_before(:, :), scale_gate_before(:, :)
       real(real64), allocatable :: router_before(:, :)
+      real(real64), allocatable :: induction_before(:)
       real(real64) :: loss, norm
 
       config = small_config(2048_int64)
@@ -896,6 +922,8 @@ contains
                  'the input-dependent channel gate receives a gradient')
       call check(sum(abs(gradient%channel_router)) > 0.0_real64, &
                  'the context router receives a gradient')
+      call check(sum(abs(gradient%induction_mix)) > 0.0_real64, &
+                 'the induction weights receive a gradient')
       call check(sum(abs(gradient%scale_gate_proj)) > 0.0_real64, &
                  'the input-dependent scale gate receives a gradient')
       call check(sum(abs(gradient%attention_rms)) > 0.0_real64 .and. &
@@ -919,6 +947,7 @@ contains
       gate_before = model%channel_gate_proj
       scale_gate_before = model%scale_gate_proj
       router_before = model%channel_router
+      induction_before = model%induction_mix
       call fbc_train_stream(model, optimizer, state, tokens, token_count, chunk, update_config, &
                             workspace, gradient, metrics, status)
       call check(status == FBT_OK, 'needle training completes')
@@ -933,6 +962,8 @@ contains
                  'the input-dependent scale gate is optimised, not just present')
       call check(any(model%channel_router /= router_before), &
                  'the context router is optimised, not just present')
+      call check(any(model%induction_mix /= induction_before), &
+                 'the induction weights are optimised, not just present')
       call check(model%slot_salience_weight /= salience_before, 'the salience weight is optimised')
       call check(any(model%decay_logit /= decays_before), 'the memory decay is optimised')
       call check(any(model%write_strength_logit /= writes_before), 'the memory write strength is optimised')
@@ -1086,9 +1117,11 @@ contains
                  'optimizer hyper-parameters survive the round trip')
       call check(all(restored%channel_gate_proj == model%channel_gate_proj) .and. &
                  all(restored%scale_gate_proj == model%scale_gate_proj), &
-                 'the v4 checkpoint restores both input-dependent gates exactly')
+                 'the current checkpoint restores both input-dependent gates exactly')
       call check(all(restored%channel_router == model%channel_router), &
-                 'the v4 checkpoint restores the context router exactly')
+                 'the current checkpoint restores the context router exactly')
+      call check(all(restored%induction_mix == model%induction_mix), &
+                 'the v5 checkpoint restores the induction weights exactly')
       call check(abs(restored%slot_salience_weight - model%slot_salience_weight) == 0.0_real64, &
                  'the salience weight survives the round trip')
       call check(all(restored%decay_logit == model%decay_logit) .and. &
@@ -1162,6 +1195,33 @@ contains
       call fbc_checkpoint_load(legacy, restored, restored_optimizer, loaded_config, &
                                restored_counters, status)
       call check(status == FBT_ERR_VERSION, 'a v2 checkpoint is refused, never converted to v3')
+      ! Version 4 is the format just before this one: it has the router but no
+      ! induction weights.  It is the file a reader is most likely to meet, and
+      ! it must be refused rather than completed with zero weights, which would
+      ! silently disable a learned capability.
+      open(newunit=unit, file=legacy, status='replace', action='write', access='stream', &
+           form='unformatted', iostat=io_status)
+      call check(io_status == 0, 'the v4 fixture can be written')
+      write(unit) FBC_CHECKPOINT_MAGIC
+      write(unit) 4_int32
+      close(unit)
+      call fbc_checkpoint_load(legacy, restored, restored_optimizer, loaded_config, &
+                               restored_counters, status)
+      call check(status == FBT_ERR_VERSION, 'a v4 checkpoint is refused, never converted to v5')
+      open(newunit=unit, file=legacy, status='replace', action='write', access='stream', &
+           form='unformatted', iostat=io_status)
+      write(unit) FBC_CHECKPOINT_MAGIC
+      write(unit) 4_int32
+      write(unit) config%vocabulary_size, config%width, config%heads, config%ffn_width, &
+                  config%local_window, config%memory_scales, config%memory_slots, &
+                  config%logical_horizon, config%rms_epsilon, config%slot_decay, config%slot_temperature
+      write(unit) 0.0_real64
+      write(unit) 0_int32
+      write(unit) 0_int64, 0_int64, 0.0_real64
+      close(unit)
+      call fbc_checkpoint_meta_read(legacy, meta, status)
+      call check(status == FBT_ERR_VERSION .and. meta%format_version == 4_int32 .and. &
+                 .not. meta%convertible, 'a v4 header is reported as the older version it is')
       ! Version 3 is the format that had the two input-dependent gates but no
       ! router, so it is the version a reader is most likely to meet in a real
       ! directory: it must be refused, not completed with a zero router that
@@ -1317,6 +1377,107 @@ contains
       call fbc_workspace_destroy(workspace)
       call fbc_model_destroy(model)
    end subroutine test_context_router_conditions_mixture
+
+   !----------------------------------------------------------------------------
+   !  13. The induction (shifted) read
+   !----------------------------------------------------------------------------
+   !> A single in-place read can only reproduce a byte that *equals* the matched
+   !> one: it reads the value stored at the position it attended to.  Induction
+   !> needs the value stored one position *later* -- "after this byte came that
+   !> byte" -- and that is what the shifted read adds.
+   !>
+   !> The stream is `5 7 5 7 5`, so at the last step the token being read is 5,
+   !> its earlier occurrences are the token-5 entries, and the byte that followed
+   !> each of them is 7.  The projections are arranged so the two reads cannot be
+   !> confused: the key sees component 1 (token 5 -> large, token 7 -> 0) and the
+   !> value sees component 2 (token 5 -> 0, token 7 -> large).  The in-place read
+   !> of the matched positions must therefore be (numerically) zero while the
+   !> shifted read is the value of token 7, weighted by exactly the sum of the
+   !> weights of the matched positions.
+   subroutine test_induction_read_is_shifted
+      type(fbc_config_t) :: config
+      type(fbc_model_t) :: model
+      type(fbc_state_t) :: state
+      type(fbc_workspace_t) :: workspace
+      integer(int32) :: status, index, head, step
+      integer(int32), parameter :: pattern(5) = [5_int32, 7_int32, 5_int32, 7_int32, 5_int32]
+      real(real64) :: hidden(32), logits(32)
+      real(real64) :: x(8), normalized(8), mean_square, inverse_rms
+      real(real64), allocatable :: expected(:), shifted(:), plain(:)
+      real(real64) :: matched_weight
+
+      config = tiny_config(1024_int64)
+      call fbc_model_init(model, config, 71_int64, status)
+      call fbc_state_init(state, model, status)
+      call fbc_workspace_init(workspace, model, status)
+      allocate(expected(config%head_width), shifted(config%head_width), plain(config%head_width))
+
+      call check(all(model%induction_mix == 0.0_real64), &
+                 'the induction weights start at zero, so the channel is unchanged at init')
+
+      ! A deliberately readable model: two orthogonal one-hot embeddings, a key
+      ! that sees the first component (times four, so the match is sharp), a
+      ! value that sees the second, and no distance bias.
+      model%token_embedding = 0.0_real64
+      model%token_embedding(1_int32, 5_int32) = 1.0_real64
+      model%token_embedding(2_int32, 7_int32) = 1.0_real64
+      model%output_bias = 0.0_real64
+      model%attention_rms = 1.0_real64
+      model%distance_bias = 0.0_real64
+      model%query = 0.0_real64
+      model%key = 0.0_real64
+      model%value = 0.0_real64
+      do head = 1_int32, config%heads
+         model%query(1_int32, 1_int32, head) = 4.0_real64
+         model%key(1_int32, 1_int32, head) = 4.0_real64
+         model%value(1_int32, 2_int32, head) = 1.0_real64
+      end do
+
+      ! At zero weight the local channel is exactly the in-place read, which only
+      ! ever sees token-5 values here, i.e. nothing at all.
+      do step = 1_int32, size(pattern)
+         call fbc_step(model, state, workspace, pattern(step), hidden, logits, status)
+      end do
+      call check(status == FBC_OK, 'the induction probe stream runs')
+      do head = 1_int32, config%heads
+         call check(maxval(abs(workspace%local_context(:, head))) < 1.0e-12_real64, &
+                    'with a zero weight the local channel is exactly the in-place read')
+      end do
+
+      ! Now switch the shifted read on and replay the same stream.
+      model%induction_mix = 1.0_real64
+      call fbc_state_reset(state, model, status)
+      do step = 1_int32, size(pattern)
+         call fbc_step(model, state, workspace, pattern(step), hidden, logits, status)
+      end do
+
+      ! The value of token 7, computed by hand from the same normalisation.
+      x = 0.0_real64
+      x(2) = 1.0_real64
+      mean_square = dot_product(x, x) / real(config%width, real64)
+      inverse_rms = 1.0_real64 / sqrt(mean_square + config%rms_epsilon)
+      normalized = x * inverse_rms * model%attention_rms
+      do head = 1_int32, config%heads
+         expected = matmul(model%value(:, :, head), normalized)
+         shifted = workspace%induction_context(:, head)
+         plain = workspace%local_context(:, head) - shifted
+         call check(maxval(abs(expected)) > 0.0_real64, 'the hand-computed successor value is not degenerate')
+         call check(maxval(abs(plain)) < 1.0e-12_real64, &
+                    'the in-place read sees only the matched token-5 values (zero here)')
+         ! Distances 2 and 4 are the two token-5 occurrences; the byte that
+         ! followed each of them is the token 7 at distance 1 and 3.
+         matched_weight = workspace%local_weight(3_int32, head) + workspace%local_weight(5_int32, head)
+         call check(matched_weight > 0.999_real64, &
+                    'the two token-5 positions hold almost all of the attention')
+         call check(maxval(abs(shifted - matched_weight * expected)) < 1.0e-9_real64, &
+                    'the shifted read is the value that FOLLOWED each matched position')
+      end do
+
+      deallocate(expected, shifted, plain)
+      call fbc_state_destroy(state)
+      call fbc_workspace_destroy(workspace)
+      call fbc_model_destroy(model)
+   end subroutine test_induction_read_is_shifted
 
    !> The router term, computed from the documented column layout by hand, so the
    !> test checks the engine's own mapping rather than calling the engine's
