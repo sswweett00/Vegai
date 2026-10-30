@@ -499,6 +499,8 @@ contains
       integer(int32) :: warm(3)
       real(real64) :: hidden(width), logits(vocabulary), dlogits(vocabulary), loss, delta, original
       real(real64) :: plus_loss, minus_loss, numeric, worst_error, error
+      real(real64) :: direction_delta, dot, sweep_numeric
+      type(fbc_model_t) :: saved
       integer(int32) :: component, column
 
       config = tiny_config(1024_int64)
@@ -806,6 +808,34 @@ contains
       call check(numeric == numeric .and. abs(numeric) > 0.0_real64, &
                  'the last finite-difference probe actually moves the loss')
 
+      ! One direction over every learnable element at once.  The probes above
+      ! are hand-picked which is exactly how a whole tensor can stay untested:
+      ! the tied-embedding defect hid on the ten thousand columns nobody probed.
+      ! Here a checkerboard direction touches all twenty-five tensors, and the
+      ! analytic side is the same traversal applied to the gradient, so a tensor
+      ! the backward pass never writes makes the two numbers disagree.
+      direction_delta = 1.0e-7_real64
+      saved = model
+      call walk_direction(model, gradient, direction_delta, dot, .true.)
+      ! The decay and write-strength caches are derived from their logits and are
+      ! what the step actually reads, exactly as training refreshes them after
+      ! every update; without this the two logits in the direction would move a
+      ! cache nobody recomputes and the finite difference would see nothing.
+      call fbc_refresh_dynamics(model)
+      call replay_loss(model, base, workspace, 9_int32, 5_int32, plus_loss, status)
+      model = saved
+      call walk_direction(model, gradient, -direction_delta, dot, .true.)
+      call fbc_refresh_dynamics(model)
+      call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
+      model = saved
+      call walk_direction(model, gradient, 0.0_real64, dot, .false.)
+      sweep_numeric = (plus_loss - minus_loss) / (2.0_real64 * direction_delta)
+      if (abs(sweep_numeric - dot) >= 1.0e-6_real64 + 1.0e-4_real64 * abs(dot)) then
+         write(output_unit, '(A,2ES14.6)') '  directional sweep numeric/analytic ', sweep_numeric, dot
+      end if
+      call check(abs(sweep_numeric - dot) < 1.0e-6_real64 + 1.0e-4_real64 * abs(dot), &
+                 'one checkerboard direction over all twenty-five tensors matches finite differences')
+
       call fbc_gradient_destroy(gradient)
       call fbc_state_destroy(base)
       call fbc_state_destroy(probe)
@@ -852,6 +882,342 @@ contains
       end if
       call check(error < 1.0e-4_real64, description)
    end subroutine report_gradient
+
+   !> A single checkerboard direction over every learnable element.
+   !>
+   !> `apply = .true.` displaces `model` by `delta * s` for every element, where
+   !> `s` alternates +1/-1 along one fixed traversal.  `apply = .false.` walks the
+   !> same order and accumulates `sum(s * gradient_element)` into `dot`.  The
+   !> traversal lives in exactly one place, so the two sides cannot drift apart,
+   !> and a tensor the backward pass never writes contributes nothing to `dot`
+   !> while the finite difference still sees it -- one number, all 25 tensors.
+   subroutine walk_direction(model, gradient, delta, dot, apply)
+      type(fbc_model_t), intent(inout) :: model
+      type(fbc_gradient_t), intent(in) :: gradient
+      real(real64), intent(in) :: delta
+      real(real64), intent(out) :: dot
+      logical, intent(in) :: apply
+      integer(int32) :: tensor, i, j, k, counter
+      real(real64) :: sign_value
+
+      dot = 0.0_real64
+      counter = 0_int32
+      do tensor = 1_int32, 25_int32
+         select case (tensor)
+         case (1_int32)
+            do j = 1_int32, size(model%token_embedding, 2, kind=int32)
+               do i = 1_int32, size(model%token_embedding, 1, kind=int32)
+                  counter = counter + 1_int32
+                  sign_value = 1.0_real64
+                  if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+                  if (apply) then
+                     model%token_embedding(i, j) = model%token_embedding(i, j) + delta * sign_value
+                  else
+                     dot = dot + sign_value * gradient%token_embedding(i, j)
+                  end if
+               end do
+            end do
+         case (2_int32)
+            do i = 1_int32, size(model%output_bias, kind=int32)
+               counter = counter + 1_int32
+               sign_value = 1.0_real64
+               if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+               if (apply) then
+                  model%output_bias(i) = model%output_bias(i) + delta * sign_value
+               else
+                  dot = dot + sign_value * gradient%output_bias(i)
+               end if
+            end do
+         case (3_int32)
+            do k = 1_int32, size(model%query, 3, kind=int32)
+               do j = 1_int32, size(model%query, 2, kind=int32)
+                  do i = 1_int32, size(model%query, 1, kind=int32)
+                     counter = counter + 1_int32
+                     sign_value = 1.0_real64
+                     if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+                     if (apply) then
+                        model%query(i, j, k) = model%query(i, j, k) + delta * sign_value
+                     else
+                        dot = dot + sign_value * gradient%query(i, j, k)
+                     end if
+                  end do
+               end do
+            end do
+         case (4_int32)
+            do k = 1_int32, size(model%key, 3, kind=int32)
+               do j = 1_int32, size(model%key, 2, kind=int32)
+                  do i = 1_int32, size(model%key, 1, kind=int32)
+                     counter = counter + 1_int32
+                     sign_value = 1.0_real64
+                     if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+                     if (apply) then
+                        model%key(i, j, k) = model%key(i, j, k) + delta * sign_value
+                     else
+                        dot = dot + sign_value * gradient%key(i, j, k)
+                     end if
+                  end do
+               end do
+            end do
+         case (5_int32)
+            do k = 1_int32, size(model%value, 3, kind=int32)
+               do j = 1_int32, size(model%value, 2, kind=int32)
+                  do i = 1_int32, size(model%value, 1, kind=int32)
+                     counter = counter + 1_int32
+                     sign_value = 1.0_real64
+                     if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+                     if (apply) then
+                        model%value(i, j, k) = model%value(i, j, k) + delta * sign_value
+                     else
+                        dot = dot + sign_value * gradient%value(i, j, k)
+                     end if
+                  end do
+               end do
+            end do
+         case (6_int32)
+            do j = 1_int32, size(model%attention_output, 2, kind=int32)
+               do i = 1_int32, size(model%attention_output, 1, kind=int32)
+                  counter = counter + 1_int32
+                  sign_value = 1.0_real64
+                  if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+                  if (apply) then
+                     model%attention_output(i, j) = model%attention_output(i, j) + delta * sign_value
+                  else
+                     dot = dot + sign_value * gradient%attention_output(i, j)
+                  end if
+               end do
+            end do
+         case (7_int32)
+            do i = 1_int32, size(model%attention_rms, kind=int32)
+               counter = counter + 1_int32
+               sign_value = 1.0_real64
+               if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+               if (apply) then
+                  model%attention_rms(i) = model%attention_rms(i) + delta * sign_value
+               else
+                  dot = dot + sign_value * gradient%attention_rms(i)
+               end if
+            end do
+         case (8_int32)
+            do i = 1_int32, size(model%ffn_rms, kind=int32)
+               counter = counter + 1_int32
+               sign_value = 1.0_real64
+               if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+               if (apply) then
+                  model%ffn_rms(i) = model%ffn_rms(i) + delta * sign_value
+               else
+                  dot = dot + sign_value * gradient%ffn_rms(i)
+               end if
+            end do
+         case (9_int32)
+            do j = 1_int32, size(model%ffn_gate, 2, kind=int32)
+               do i = 1_int32, size(model%ffn_gate, 1, kind=int32)
+                  counter = counter + 1_int32
+                  sign_value = 1.0_real64
+                  if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+                  if (apply) then
+                     model%ffn_gate(i, j) = model%ffn_gate(i, j) + delta * sign_value
+                  else
+                     dot = dot + sign_value * gradient%ffn_gate(i, j)
+                  end if
+               end do
+            end do
+         case (10_int32)
+            do j = 1_int32, size(model%ffn_value, 2, kind=int32)
+               do i = 1_int32, size(model%ffn_value, 1, kind=int32)
+                  counter = counter + 1_int32
+                  sign_value = 1.0_real64
+                  if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+                  if (apply) then
+                     model%ffn_value(i, j) = model%ffn_value(i, j) + delta * sign_value
+                  else
+                     dot = dot + sign_value * gradient%ffn_value(i, j)
+                  end if
+               end do
+            end do
+         case (11_int32)
+            do j = 1_int32, size(model%ffn_output, 2, kind=int32)
+               do i = 1_int32, size(model%ffn_output, 1, kind=int32)
+                  counter = counter + 1_int32
+                  sign_value = 1.0_real64
+                  if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+                  if (apply) then
+                     model%ffn_output(i, j) = model%ffn_output(i, j) + delta * sign_value
+                  else
+                     dot = dot + sign_value * gradient%ffn_output(i, j)
+                  end if
+               end do
+            end do
+         case (12_int32)
+            do i = 1_int32, size(model%distance_bias, kind=int32)
+               counter = counter + 1_int32
+               sign_value = 1.0_real64
+               if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+               if (apply) then
+                  model%distance_bias(i) = model%distance_bias(i) + delta * sign_value
+               else
+                  dot = dot + sign_value * gradient%distance_bias(i)
+               end if
+            end do
+         case (13_int32)
+            do i = 1_int32, size(model%scale_logit, kind=int32)
+               counter = counter + 1_int32
+               sign_value = 1.0_real64
+               if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+               if (apply) then
+                  model%scale_logit(i) = model%scale_logit(i) + delta * sign_value
+               else
+                  dot = dot + sign_value * gradient%scale_logit(i)
+               end if
+            end do
+         case (14_int32)
+            do i = 1_int32, size(model%decay_logit, kind=int32)
+               counter = counter + 1_int32
+               sign_value = 1.0_real64
+               if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+               if (apply) then
+                  model%decay_logit(i) = model%decay_logit(i) + delta * sign_value
+               else
+                  dot = dot + sign_value * gradient%decay_logit(i)
+               end if
+            end do
+         case (15_int32)
+            do i = 1_int32, size(model%write_strength_logit, kind=int32)
+               counter = counter + 1_int32
+               sign_value = 1.0_real64
+               if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+               if (apply) then
+                  model%write_strength_logit(i) = model%write_strength_logit(i) + delta * sign_value
+               else
+                  dot = dot + sign_value * gradient%write_strength_logit(i)
+               end if
+            end do
+         case (16_int32)
+            do i = 1_int32, size(model%channel_logit, kind=int32)
+               counter = counter + 1_int32
+               sign_value = 1.0_real64
+               if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+               if (apply) then
+                  model%channel_logit(i) = model%channel_logit(i) + delta * sign_value
+               else
+                  dot = dot + sign_value * gradient%channel_logit(i)
+               end if
+            end do
+         case (17_int32)
+            do j = 1_int32, size(model%channel_gate_proj, 2, kind=int32)
+               do i = 1_int32, size(model%channel_gate_proj, 1, kind=int32)
+                  counter = counter + 1_int32
+                  sign_value = 1.0_real64
+                  if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+                  if (apply) then
+                     model%channel_gate_proj(i, j) = model%channel_gate_proj(i, j) + delta * sign_value
+                  else
+                     dot = dot + sign_value * gradient%channel_gate_proj(i, j)
+                  end if
+               end do
+            end do
+         case (18_int32)
+            do j = 1_int32, size(model%channel_router, 2, kind=int32)
+               do i = 1_int32, size(model%channel_router, 1, kind=int32)
+                  counter = counter + 1_int32
+                  sign_value = 1.0_real64
+                  if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+                  if (apply) then
+                     model%channel_router(i, j) = model%channel_router(i, j) + delta * sign_value
+                  else
+                     dot = dot + sign_value * gradient%channel_router(i, j)
+                  end if
+               end do
+            end do
+         case (19_int32)
+            do i = 1_int32, size(model%induction_mix, kind=int32)
+               counter = counter + 1_int32
+               sign_value = 1.0_real64
+               if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+               if (apply) then
+                  model%induction_mix(i) = model%induction_mix(i) + delta * sign_value
+               else
+                  dot = dot + sign_value * gradient%induction_mix(i)
+               end if
+            end do
+         case (20_int32)
+            do j = 1_int32, size(model%scale_gate_proj, 2, kind=int32)
+               do i = 1_int32, size(model%scale_gate_proj, 1, kind=int32)
+                  counter = counter + 1_int32
+                  sign_value = 1.0_real64
+                  if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+                  if (apply) then
+                     model%scale_gate_proj(i, j) = model%scale_gate_proj(i, j) + delta * sign_value
+                  else
+                     dot = dot + sign_value * gradient%scale_gate_proj(i, j)
+                  end if
+               end do
+            end do
+         case (21_int32)
+            do j = 1_int32, size(model%slot_query_proj, 2, kind=int32)
+               do i = 1_int32, size(model%slot_query_proj, 1, kind=int32)
+                  counter = counter + 1_int32
+                  sign_value = 1.0_real64
+                  if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+                  if (apply) then
+                     model%slot_query_proj(i, j) = model%slot_query_proj(i, j) + delta * sign_value
+                  else
+                     dot = dot + sign_value * gradient%slot_query_proj(i, j)
+                  end if
+               end do
+            end do
+         case (22_int32)
+            do j = 1_int32, size(model%slot_key_proj, 2, kind=int32)
+               do i = 1_int32, size(model%slot_key_proj, 1, kind=int32)
+                  counter = counter + 1_int32
+                  sign_value = 1.0_real64
+                  if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+                  if (apply) then
+                     model%slot_key_proj(i, j) = model%slot_key_proj(i, j) + delta * sign_value
+                  else
+                     dot = dot + sign_value * gradient%slot_key_proj(i, j)
+                  end if
+               end do
+            end do
+         case (23_int32)
+            do j = 1_int32, size(model%slot_value_proj, 2, kind=int32)
+               do i = 1_int32, size(model%slot_value_proj, 1, kind=int32)
+                  counter = counter + 1_int32
+                  sign_value = 1.0_real64
+                  if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+                  if (apply) then
+                     model%slot_value_proj(i, j) = model%slot_value_proj(i, j) + delta * sign_value
+                  else
+                     dot = dot + sign_value * gradient%slot_value_proj(i, j)
+                  end if
+               end do
+            end do
+         case (24_int32)
+            do j = 1_int32, size(model%slot_read_proj, 2, kind=int32)
+               do i = 1_int32, size(model%slot_read_proj, 1, kind=int32)
+                  counter = counter + 1_int32
+                  sign_value = 1.0_real64
+                  if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+                  if (apply) then
+                     model%slot_read_proj(i, j) = model%slot_read_proj(i, j) + delta * sign_value
+                  else
+                     dot = dot + sign_value * gradient%slot_read_proj(i, j)
+                  end if
+               end do
+            end do
+         case (25_int32)
+            counter = counter + 1_int32
+            sign_value = 1.0_real64
+            if (mod(counter, 2_int32) == 0_int32) sign_value = -1.0_real64
+            if (apply) then
+               model%slot_salience_weight = model%slot_salience_weight + delta * sign_value
+            else
+               dot = dot + sign_value * gradient%slot_salience_weight
+            end if
+         case default
+            dot = 0.0_real64
+         end select
+      end do
+   end subroutine walk_direction
 
    !----------------------------------------------------------------------------
    !  8. Training reduces the loss
