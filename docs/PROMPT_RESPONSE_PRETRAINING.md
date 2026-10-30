@@ -612,6 +612,56 @@ baytları doğru istediği için `copy` hâlâ 0/200'de kalabilir; bu durumda
 bağ, `width 64`, 4 kafa, `ffn 192`, pencere 48, güncelleme 256, `lr 3e-4`,
 225 dakika, taze model (v5). Karşılaştırma: §8.7 (40927789891) ve §8.8.
 
+### 8.10 Denetimde bulunan gradyan hatası: çıkış kafası sözlüğün tamamını görmüyordu
+
+Bu bölüm bir kalite iyileştirmesi değil, bir **hata düzeltmesidir** ve
+§8.7–§8.9'daki tüm sayıları etkiler.
+
+**Hata.** `fbc_step_backward` çıkış aşamasında bağlı (tied) gömme matrisinin
+gradyanı yalnızca **o an okunan belirtecin sütununa** yazılıyordu:
+`E(:, token) += h · dlogits(token)` (artı aynı belirtecin girdi terimi).
+Oysa ileri hesap `logits(j) = h · E(:, j) + b(j)` olduğu için türev tam dış
+çarpımdır ve **her** sütunu alır:
+
+```
+dL/dE = h ⊗ dlogits,   yani   E(:, j) += h · dlogits(j)   (her j için)
+```
+
+**Neden ciddi.** Softmax çapraz entropide `dlogits(j) = p_j − 1[j = y]`.
+Eksik kalan terim, hedef dışındaki her `j` için tam olarak `p_j`'dir — yani
+"yanlış baytın olasılığını düşür" sinyalinin kendisi. Hatalı sürümde model
+yalnızca o anda okuduğu baytın vektörünü ve yanlılığı hareket ettirebiliyordu.
+Eğri yine de düşüyordu (yanlılık ve okunan sütun olasılık kütlesini taşır), bu
+yüzden NLL eğrisine bakarak görülmesi imkânsızdı; ama kopyalama/ardışık-bayt
+gibi "yanlışı bastır, doğruya yükselt" isteyen görevler bu sinyalden mahrumdu.
+
+**Neden testler görmedi.** Mevcut sonlu fark sondası okunan belirtecin
+sütununu sınıyordu (`E(3, 9)`, belirteç 9). Tam o sütunda eksik terim
+`j = token` olduğu için zaten yazılıyordu: hatalı sürüm ve doğru sürüm **tam o
+sütunda aynı sayıyı** veriyordu. Tek sütunluk bir sonda bu sınıftaki hatayı
+yapısal olarak göremez.
+
+**Düzeltme ve koruma.** Aşama 1 artık tam dış çarpımı yazar
+(`do j = 1, sözlük`), girdi terimi ayrı kalır. Sözleşme testi iki katmanlı
+doğruluyor: (a) okunan belirtecin sütunu için mevcut tek parametreli sonda
+korunur; (b) **tüm** `width × sözlük` = 128 eleman, her biri merkezi farkla,
+`1e-5` toleransla karşılaştırılır. Ek maliyet: adım başına `width · sözlük` =
+16 384 axpy (64 × 256); bu, eğrinin düştüğü yerde zaten ödenmesi gereken
+işti — eksik olan gradyanın kendisiydi.
+
+**İkinci, küçük hata.** `train` komutunun `CORPUS_TRAIN_JSON` çıktısındaki
+`session_mean_nll`, oturumun kendi ortalaması değil **kümülatif** ortalamaydı
+(`loss_sum` devam eden zincirde sıfırlanmadığı hâlde oturum belirteç sayısına
+bölünüyordu) — yani hiçbir oturuma ait olmayan bir sayı. Artık oturum
+başındaki `loss_sum` taban çizgisi alınıp fark kullanılıyor; `mean_nll`
+kümülatif kalıyor ve adı da bunu söylüyor.
+
+**Sonuç: karşılaştırılabilirlik.** §8.7, §8.8 ve §8.9'daki koşular (40927789891,
+41031955065, 41033423472, 41040909853) hatalı çıkış gradyanıyla eğitildi. Bu
+sayılar "ölçüldü" olarak kayıtlı kalır, ama artık **mimarinin ne
+yapabildiğinin kanıtı değildir**; düzeltme sonrası koşu ayrı bölümde
+raporlanır ve eski sayılarla doğrudan kıyaslanmaz.
+
 ## 9. Sınırlar
 
 - Korpus **sentetiktir**; model bu veriyle Türkçe "öğrenmez", bu korpusun
