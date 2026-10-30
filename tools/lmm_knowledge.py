@@ -26,13 +26,11 @@ from typing import Any, Iterator, Mapping
 import unicodedata
 
 from lmm_contract import (
-    EVIDENCE_SCHEMA,
     MAX_EVIDENCE_ITEMS,
     MAX_JSON_BYTES,
     MAX_TEXT_BYTES,
     EvidenceBundle,
     EvidenceItem,
-    FileIdentity,
     LMMContractError,
     canonical_json_bytes,
     file_identity,

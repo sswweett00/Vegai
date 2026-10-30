@@ -435,7 +435,8 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     require(binary != checkpoint_candidate and binary != report_candidate, "pretraining binary must not overlap checkpoint/report output")
     require(checkpoint_candidate != report_candidate, "checkpoint and report outputs must differ")
     checkpoint = prepare_output_path(arguments.checkpoint, label="checkpoint", overwrite=arguments.overwrite)
-    report_path = prepare_output_path(arguments.report, label="report", overwrite=arguments.overwrite)
+    # Validation/cleanup side effects only: main() owns the final report path.
+    prepare_output_path(arguments.report, label="report", overwrite=arguments.overwrite)
     require(binary.is_file(), f"pretraining executable does not exist or is not a regular file: {binary}")
     require(os.access(binary, os.X_OK), f"pretraining executable is not executable: {binary}")
 

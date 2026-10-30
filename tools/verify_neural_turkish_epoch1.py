@@ -143,6 +143,41 @@ def main() -> int:
         generation = runner.extract_generation("x\nNEURAL_GENERATION_BEGIN\nmerhaba dünya\nNEURAL_GENERATION_END\n")
         expect(generation == "merhaba dünya", "generation marker extraction is verbatim")
 
+        # The native SGD branch has no decoupled decay term, so the runner must
+        # refuse --optimizer sgd with a non-zero --weight-decay instead of
+        # recording regularisation that never runs.  This exits at argument
+        # parsing time and therefore needs no compiled binary or corpus.
+        rejected = subprocess.run(
+            [sys.executable, str(ROOT / "tools/run_neural_turkish_epoch1.py"),
+             "--neural-bin", "/nonexistent/vegai_neural_pretrain",
+             "--corpus-dir", str(tmp / "unused"), "--run-dir", str(tmp / "unused-run"),
+             "--optimizer", "sgd", "--weight-decay", "0.01"],
+            capture_output=True, text=True, check=False,
+        )
+        expect(rejected.returncode == 2 and "requires --optimizer adamw" in rejected.stderr,
+               "runner rejects weight decay on the SGD optimizer instead of ignoring it")
+
+        # The schedule horizons are token-unit values and are divided by the
+        # accumulation factor, so a budget that collapses below the warmup must
+        # be rejected before any corpus work happens (exit 2 from argparse).
+        collapsed = subprocess.run(
+            [sys.executable, str(ROOT / "tools/run_neural_turkish_epoch1.py"),
+             "--neural-bin", "/nonexistent/vegai_neural_pretrain",
+             "--corpus-dir", str(tmp / "unused"), "--run-dir", str(tmp / "unused-run"),
+             "--gradient-accumulation", "32", "--warmup-updates", "20", "--total-updates", "40"],
+            capture_output=True, text=True, check=False,
+        )
+        expect(collapsed.returncode == 2 and "must exceed --warmup-updates" in collapsed.stderr,
+               "runner rejects a token-unit cosine budget that collapses below the warmup in step units")
+        bad_accumulation = subprocess.run(
+            [sys.executable, str(ROOT / "tools/run_neural_turkish_epoch1.py"),
+             "--neural-bin", "/nonexistent/vegai_neural_pretrain",
+             "--corpus-dir", str(tmp / "unused"), "--run-dir", str(tmp / "unused-run"),
+             "--gradient-accumulation", "0"],
+            capture_output=True, text=True, check=False,
+        )
+        expect(bad_accumulation.returncode == 2, "runner rejects a zero gradient accumulation factor")
+
         binary = os.environ.get("VEGAI_NEURAL_BIN", "")
         if binary:
             run_dir = tmp / "run"

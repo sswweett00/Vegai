@@ -1,0 +1,22 @@
+{
+  "enabled": true,
+  "note": "Corrected-gradient pass, commit 3d7e64f (checkpoint v5). The tied-embedding gradient now covers every vocabulary column (docs/PROMPT_RESPONSE_PRETRAINING.md section 8.10); every earlier 225-minute pass wrote only the column of the token being read and is therefore not a measurement of this architecture. Same shape and budget as 40927789891/41033423472 (32 bindings, width 64, 4 heads, ffn 192, window 48, chunk 256, lr 3e-4, 225 minutes, 9 sessions, reset_every 4096, fresh model, gates + router + induction). The contract package that guards the fix (whole width x vocabulary finite-difference sweep) was green in Fortran verification run 41042246745 before this pass was requested. Recorded runs: docs/PROMPT_RESPONSE_PRETRAINING.md sections 8-9. Set enabled=false again once this pass has run.",
+  "purpose": "Does the corrected tied-embedding gradient make copy/next learnable, on top of run 40927789891 (fact 32/32, copy 0/200 0.190, next 0/100 0.033)",
+  "layout": "templates",
+  "corpus_bytes": 600000000,
+  "facts": 32,
+  "width": 64,
+  "heads": 4,
+  "ffn": 192,
+  "local_window": 48,
+  "memory_slots": 64,
+  "train_chunk_tokens": 256,
+  "learning_rate": 0.0003,
+  "train_minutes": 225,
+  "session_minutes": 25,
+  "reset_every": 4096,
+  "warmup_bytes": 0,
+  "resume_run_id": "",
+  "resume_start_byte": 0,
+  "label": "quality-w64-fixed-tied-gradient"
+}

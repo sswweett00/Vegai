@@ -78,6 +78,14 @@ def require_round_trip(path: Path, records: list[TrainingRecord], *, format: str
 
 
 def main() -> int:
+    if any(argument in {"-h", "--help"} for argument in sys.argv[1:]):
+        print(
+            "usage: verify_training_data_io.py\n\n"
+            "Round-trip and failure-path verification for Vegai training-data I/O.\n"
+            "Parquet/Arrow coverage requires the optional pyarrow dependency;\n"
+            "install it with: python3 -m pip install -r requirements-dataio.txt"
+        )
+        return 0
     try:
         # Confirm this test fails clearly rather than falsely claiming columnar
         # support when a caller omitted the declared optional dependency.
@@ -410,6 +418,15 @@ def main() -> int:
 
             require(infer_format(Path("rows.ndjson")) == "jsonl", "format auto-detection missed ndjson")
             require(infer_format(Path("rows.parquet")) == "parquet", "format auto-detection missed Parquet")
+    except ImportError as error:
+        # A missing optional columnar dependency must be reported as a clear,
+        # actionable contract failure instead of a bare traceback.
+        print(
+            f"training data I/O verification: FAIL: optional columnar dependency is missing ({error}); "
+            "install it with: python3 -m pip install -r requirements-dataio.txt",
+            file=sys.stderr,
+        )
+        return 1
     except (AssertionError, OSError, TrainingDataError, ValueError, json.JSONDecodeError) as error:
         print(f"training data I/O verification: FAIL: {error}", file=sys.stderr)
         return 1

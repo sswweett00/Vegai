@@ -928,7 +928,7 @@ def run_quality_gate(
         require(file_sha256(QUALITY_EVALUATOR) == quality_binding["evaluator_source_sha256"],
                 "quality evaluator source changed while quality gate was running")
         report_summary = quality_report_summary(report_path, quality_binding, binary_sha256, checkpoint_sha256)
-    except (OSError, ValueError, json.JSONDecodeError, ProductionRunError) as error:
+    except (OSError, ValueError, json.JSONDecodeError, ProductionRunError):
         # Child output can contain operator-specific diagnostics.  The durable
         # production result deliberately carries only this bounded category.
         return {

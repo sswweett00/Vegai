@@ -896,16 +896,31 @@ contains
       real(real64), intent(in) :: temperature
       integer(int64), intent(inout) :: state
       integer(int32), intent(out) :: selected
-      real(real64) :: weights(size(successors)), total, draw, running
+      real(real64) :: weights(size(successors)), total, draw, running, maximum_log_count
       integer(int64) :: random_value
       integer :: index
+      logical :: any_support
 
       selected = 0_int32
       weights = 0.0_real64
       total = 0.0_real64
+      ! Count^(1/T) sampling in log space.  Subtracting the largest observed
+      ! log-count leaves the sampled distribution unchanged while bounding
+      ! every weight by 1.0, so a small --temperature can no longer overflow
+      ! the real64 exponent range (which an FPE-trapping build turns into an
+      ! abort instead of a token).
+      maximum_log_count = 0.0_real64
+      any_support = .false.
       do index = 1, size(successors)
          if (successors(index) > 0_int32 .and. counts(index) > 0_int64) then
-            weights(index) = exp(log(real(counts(index), real64)) / temperature)
+            maximum_log_count = max(maximum_log_count, log(real(counts(index), real64)))
+            any_support = .true.
+         end if
+      end do
+      if (.not. any_support) return
+      do index = 1, size(successors)
+         if (successors(index) > 0_int32 .and. counts(index) > 0_int64) then
+            weights(index) = exp((log(real(counts(index), real64)) - maximum_log_count) / temperature)
             total = total + weights(index)
          end if
       end do

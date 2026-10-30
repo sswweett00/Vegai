@@ -1,0 +1,107 @@
+name: Context quality ladder
+
+# Does --memory-scales actually buy held-out quality?
+#
+# This workflow exists to answer one question with numbers instead of
+# intuition: at an *identical* parameter count, token budget, stream and
+# optimiser, does a wider decay ladder (more scales) lower held-out NLL or
+# raise remote recall?  It trains on one synthetic stream and measures a
+# different one, so the reported NLL is held-out, and it repeats the whole run
+# over three seeds because a single seed cannot separate a real effect from
+# initialisation noise.
+#
+# The job is deliberately separate from the main verification job: that one is
+# the correctness gate (Debug, -fcheck=all, -ffpe-trap), this one is a quality
+# benchmark (Release) and it must not slow the gate down.
+#
+# It runs only when the engine or this file changes, and it never gates a merge:
+# its purpose is to produce the measurement, not to fail on a small regression.
+on:
+  push:
+    paths:
+      - 'src/fixed_budget_*.f90'
+      - 'app/context_engine.f90'
+      - 'Makefile'
+      - '.github/workflows/context-quality.yml'
+  pull_request:
+    paths:
+      - 'src/fixed_budget_*.f90'
+      - 'app/context_engine.f90'
+      - 'Makefile'
+      - '.github/workflows/context-quality.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ladder:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install GNU Fortran toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gfortran
+
+      - name: Build the engine (Release)
+        run: make context-engine BUILD_DIR=build-ladder
+
+      # One step, not two: the ladder and its summary run in the same shell and
+      # the same directory, and a row-count assertion makes an empty measurement
+      # loud instead of silent.
+      - name: Run the scale ladder and summarise it
+        run: |
+          set -euo pipefail
+          : > ladder.txt
+          # One physical shape, one budget, one optimiser; only the scale count
+          # and the seed move.  width/heads/ffn/vocab are fixed, so the parameter
+          # difference is only the tiny scale_logit vector.
+          # Two needle distances and the successor task.  256 sits at the edge
+          # of what a single slow scale can carry; 1024 cannot be reached by the
+          # 32-token ring buffer at all, which is where extra decay scales would
+          # have to earn their state bytes.
+          combos="needle:256 needle:1024 markov:256"
+          expected=0
+          for combo in $combos; do
+            task=${combo%%:*}
+            distance=${combo##*:}
+            for scales in 2 4 8; do
+              for seed in 11 12 13; do
+                out="run-${task}-d${distance}-s${scales}-seed${seed}.txt"
+                ./build-ladder/vegai_context_engine quality \
+                  --window 8192 --local-window 32 --memory-slots 64 \
+                  --memory-scales "$scales" --width 32 --heads 2 --ffn 64 --vocab 32 \
+                  --tokens 32768 --eval-tokens 6144 --train-chunk-tokens 64 \
+                  --task "$task" --distance "$distance" --seed "$seed" --eval-seed 991 \
+                  > "$out" 2>&1
+                grep 'CONTEXT_QUALITY_JSON:' "$out" | sed 's/^CONTEXT_QUALITY_JSON: //' >> ladder.txt
+                expected=$((expected + 1))
+              done
+            done
+          done
+          rows=$(wc -l < ladder.txt)
+          echo "::notice title=Ladder rows::${rows} of ${expected}; first=$(head -n 1 ladder.txt | cut -c1-300)"
+          if [ "$rows" -lt "$expected" ]; then
+            echo "::error title=Ladder incomplete::only ${rows} of ${expected} runs produced a row; see the attached per-run output"
+            for stray in run-*.txt; do tail -n 2 "$stray"; done || true
+            exit 1
+          fi
+          python3 tools/summarise_context_ladder.py ladder.txt > ladder.md
+          cat ladder.md >> "$GITHUB_STEP_SUMMARY"
+          summary=$(python3 tools/summarise_context_ladder.py ladder.txt --compact | cut -c1-1800)
+          echo "::notice title=Memory-scale ladder (held-out)::${summary}"
+          recall=$(python3 tools/summarise_context_ladder.py ladder.txt --recall | cut -c1-1800)
+          echo "::notice title=Memory-scale ladder (recall)::${recall}"
+
+      - name: Keep the raw rows
+        uses: actions/upload-artifact@v4
+        with:
+          name: context-quality-ladder
+          path: |
+            ladder.txt
+            run-*.txt
+          if-no-files-found: error

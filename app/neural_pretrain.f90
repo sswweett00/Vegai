@@ -24,6 +24,7 @@ program vegai_neural_pretrain
    logical :: opt_dims_set = .false.
    real(real64) :: opt_lr = 0.0_real64
    real(real64) :: opt_weight_decay = 0.01_real64
+   logical :: opt_weight_decay_set = .false.
    real(real64) :: opt_beta1 = 0.9_real64
    real(real64) :: opt_beta2 = 0.999_real64
    real(real64) :: opt_adam_eps = 1.0e-8_real64
@@ -31,9 +32,13 @@ program vegai_neural_pretrain
    real(real64) :: opt_embedding_limit = 8.0_real64
    real(real64) :: opt_label_smoothing = 0.0_real64
    real(real64) :: opt_min_lr_ratio = 0.1_real64
-   integer(int32) :: opt_optimizer = NPT_OPTIMIZER_ADAMW
+   integer(int32) :: opt_optimizer = NPT_OPTIMIZER_NOVA
    integer(int32) :: opt_schedule = NPT_SCHEDULE_WARMUP_INVSQRT
    integer(int32) :: opt_max_tokens_per_record = 8192_int32
+   ! Mini-batch accumulation for the tied-output update.  1 is the exact
+   ! one-step-per-token path; larger values average that many per-token
+   ! gradients into one optimizer step (see neural_pretraining).
+   integer(int32) :: opt_gradient_accumulation = 1_int32
    integer(int64) :: opt_warmup_updates = 1000_int64
    integer(int64) :: opt_total_updates = 0_int64
 
@@ -111,7 +116,7 @@ contains
          if (.not. starts_with_dashes(key) .or. index + 1 > command_argument_count()) call usage_and_stop()
          call get_command_argument(index + 1, value)
          select case (trim(key))
-         case ('--width', '--heads', '--window', '--ffn', '--max-tokens-per-record')
+         case ('--width', '--heads', '--window', '--ffn', '--max-tokens-per-record', '--gradient-accumulation')
             read(value, *, iostat=parse_status) int32_value
             if (parse_status /= 0) call usage_and_stop()
             select case (trim(key))
@@ -120,6 +125,7 @@ contains
             case ('--window'); opt_window = int32_value; opt_dims_set = .true.
             case ('--ffn'); opt_ffn = int32_value; opt_dims_set = .true.
             case ('--max-tokens-per-record'); opt_max_tokens_per_record = int32_value
+            case ('--gradient-accumulation'); opt_gradient_accumulation = int32_value
             end select
          case ('--seed', '--warmup-updates', '--total-updates')
             read(value, *, iostat=parse_status) int64_value
@@ -135,7 +141,7 @@ contains
             if (parse_status /= 0) call usage_and_stop()
             select case (trim(key))
             case ('--lr'); opt_lr = real_value; opt_lr_set = .true.
-            case ('--weight-decay'); opt_weight_decay = real_value
+            case ('--weight-decay'); opt_weight_decay = real_value; opt_weight_decay_set = .true.
             case ('--beta1'); opt_beta1 = real_value
             case ('--beta2'); opt_beta2 = real_value
             case ('--adam-eps'); opt_adam_eps = real_value
@@ -146,6 +152,7 @@ contains
             end select
          case ('--optimizer')
             select case (trim(value))
+            case ('nova'); opt_optimizer = NPT_OPTIMIZER_NOVA
             case ('adamw'); opt_optimizer = NPT_OPTIMIZER_ADAMW
             case ('sgd'); opt_optimizer = NPT_OPTIMIZER_SGD
             case default; call usage_and_stop()
@@ -166,23 +173,59 @@ contains
 
    subroutine build_train_config(train_config)
       type(neural_train_config_t), intent(out) :: train_config
-      real(real64) :: peak_lr
+      real(real64) :: peak_lr, effective_weight_decay
 
       if (opt_lr_set) then
          peak_lr = opt_lr
-      else if (opt_optimizer == NPT_OPTIMIZER_ADAMW) then
+      else if (opt_optimizer == NPT_OPTIMIZER_NOVA .or. opt_optimizer == NPT_OPTIMIZER_ADAMW) then
+         ! Both normalize the step by a gradient scale, so their step magnitude is
+         ! the learning rate itself; SGD multiplies the raw gradient instead and
+         ! needs the historical, much larger rate.
          peak_lr = 0.003_real64
       else
          peak_lr = 0.025_real64
+      end if
+      ! Decoupled weight decay exists only in the AdamW update.  An explicit
+      ! non-zero --weight-decay with --optimizer sgd would otherwise be
+      ! reported as active regularisation while doing nothing, so it is a
+      ! usage error; the AdamW-only default is simply dropped for SGD.
+      effective_weight_decay = opt_weight_decay
+      if (opt_optimizer == NPT_OPTIMIZER_SGD) then
+         if (opt_weight_decay_set .and. opt_weight_decay /= 0.0_real64) then
+            write(error_unit, '(A)') 'vegai_neural_pretrain: --weight-decay requires '// &
+                                      '--optimizer nova or adamw (the SGD update has no decay term)'
+            call usage_and_stop()
+         end if
+         effective_weight_decay = 0.0_real64
+      end if
+      if (opt_gradient_accumulation < 1_int32 .or. opt_gradient_accumulation > opt_max_tokens_per_record .or. &
+          opt_gradient_accumulation > NPT_MAX_GRADIENT_ACCUMULATION) then
+         write(error_unit, '(A,I0,A,I0,A)') 'vegai_neural_pretrain: --gradient-accumulation must be in [1, ', &
+                                               min(opt_max_tokens_per_record, NPT_MAX_GRADIENT_ACCUMULATION), &
+                                               '] (requested ', opt_gradient_accumulation, ')'
+         call usage_and_stop()
       end if
       train_config = neural_train_config_t(learning_rate=peak_lr, gradient_clip_norm=opt_grad_clip, &
                                            embedding_value_limit=opt_embedding_limit, &
                                            maximum_tokens_per_record=opt_max_tokens_per_record, &
                                            optimizer=opt_optimizer, adam_beta1=opt_beta1, adam_beta2=opt_beta2, &
-                                           adam_epsilon=opt_adam_eps, weight_decay=opt_weight_decay, &
+                                           adam_epsilon=opt_adam_eps, weight_decay=effective_weight_decay, &
                                            label_smoothing=opt_label_smoothing, lr_schedule=opt_schedule, &
                                            warmup_updates=opt_warmup_updates, total_updates=opt_total_updates, &
-                                           minimum_lr_ratio=opt_min_lr_ratio)
+                                           minimum_lr_ratio=opt_min_lr_ratio, &
+                                           gradient_accumulation=opt_gradient_accumulation)
+      if (.not. neural_train_config_is_valid(train_config)) then
+         ! Report the offending combination here instead of surfacing a bare
+         ! library status from deep inside the first training update.  The
+         ! library rejects e.g. lr*weight_decay >= 1 (a decoupled decay factor
+         ! that would zero or invert every embedding), beta >= 1, and a cosine
+         ! schedule without a horizon above the warmup.
+         write(error_unit, '(A)') 'vegai_neural_pretrain: invalid training hyperparameters '// &
+                                   '(need lr > 0, 0 <= beta1,beta2 < 1, adam-eps > 0, '// &
+                                   '0 <= weight-decay, lr*weight-decay < 1, '// &
+                                   '0 <= label-smoothing < 0.5, and cosine total-updates > warmup-updates)'
+         call usage_and_stop()
+      end if
    end subroutine build_train_config
 
    subroutine build_decoder_config(decoder_config, vocabulary_size)
@@ -209,7 +252,9 @@ contains
       integer(int32), intent(in) :: optimizer
       character(len=6) :: name
 
-      if (optimizer == NPT_OPTIMIZER_ADAMW) then
+      if (optimizer == NPT_OPTIMIZER_NOVA) then
+         name = 'nova  '
+      else if (optimizer == NPT_OPTIMIZER_ADAMW) then
          name = 'adamw '
       else
          name = 'sgd   '
@@ -507,6 +552,7 @@ contains
                trim(r64_text(neural_scheduled_learning_rate(train_config, &
                              max(1_int64, train_state%updates_completed))))//','// &
             '"label_smoothing":'//trim(r64_text(train_config%label_smoothing))//','// &
+            '"gradient_accumulation":'//trim(i32_text(train_config%gradient_accumulation))//','// &
             '"eligible_records":'//trim(i64_text(metrics%records))//','// &
             '"prediction_tokens":'//trim(i64_text(metrics%prediction_tokens))//','// &
             '"mean_nll":'//trim(r64_text(metrics%mean_nll))//','// &
@@ -515,6 +561,10 @@ contains
             '"top5_accuracy":'//trim(ratio_text(metrics%top5_correct, metrics%prediction_tokens))//','// &
             '"epoch_wall_seconds":'//trim(r64_text(epoch_seconds))//','// &
             '"prediction_tokens_per_second":'//trim(r64_text(tokens_per_second))//','// &
+            '"phase_seconds":{"decode":'//trim(r64_text(metrics%decode_seconds))//','// &
+            '"project":'//trim(r64_text(metrics%project_seconds))//','// &
+            '"score":'//trim(r64_text(metrics%score_seconds))//','// &
+            '"update":'//trim(r64_text(metrics%update_seconds))//'},'// &
             '"skipped_records":'//trim(i64_text(metrics%skipped_records))//','// &
             '"tokenizer_truncations":'//trim(i64_text(metrics%tokenizer_truncations))//'}'
       end do
@@ -528,6 +578,7 @@ contains
          '"records_completed":'//trim(i64_text(train_state%records_completed))//','// &
          '"source_records_completed":'//trim(i64_text(train_state%source_records_completed))//','// &
          '"tokens_seen":'//trim(i64_text(train_state%tokens_seen))//','// &
+         '"gradient_accumulation":'//trim(i32_text(train_config%gradient_accumulation))//','// &
          '"updates_completed":'//trim(i64_text(train_state%updates_completed))//'}'
       call neural_decoder_destroy(model)
       call bpe_destroy(bpe)
@@ -662,6 +713,7 @@ contains
          '"record_token_buffer_bytes":'//trim(i64_text(plan%record_token_buffer_bytes))//','// &
          '"per_step_working_bytes":'//trim(i64_text(plan%per_step_working_bytes))//','// &
          '"optimizer_state_bytes_real64":'//trim(i64_text(plan%optimizer_state_bytes_real64))//','// &
+         '"gradient_accumulation":'//trim(i32_text(train_config%gradient_accumulation))//','// &
          '"minimum_resident_bytes":'//trim(i64_text(plan%minimum_resident_bytes))//'}'
       call neural_decoder_destroy(model)
       call bpe_destroy(bpe)
@@ -899,11 +951,16 @@ contains
       write(output_unit, '(A)') '  vegai_neural_pretrain train-chunk CORPUS CHECKPOINT TOKENIZER NEW_RECORDS '// &
                                 '[START_RECORD] [--key value ...]'
       write(output_unit, '(A)') '  vegai_neural_pretrain plan CHECKPOINT TOKENIZER'
-      write(output_unit, '(A)') 'Options: --width --heads --window --ffn --seed --lr --optimizer adamw|sgd '// &
+      write(output_unit, '(A)') 'Options: --width --heads --window --ffn --seed --lr --optimizer nova|adamw|sgd '// &
                                 '--schedule constant|invsqrt|cosine --warmup-updates --total-updates --min-lr-ratio'
-      write(output_unit, '(A)') '         --weight-decay --beta1 --beta2 --adam-eps --grad-clip --embedding-limit '// &
-                                '--label-smoothing --max-tokens-per-record'
+      write(output_unit, '(A)') '         --weight-decay (nova/adamw only) --beta1 --beta2 --adam-eps --grad-clip '// &
+                                '--embedding-limit --label-smoothing --max-tokens-per-record '// &
+                                '--gradient-accumulation'
+      write(output_unit, '(A)') '--total-updates and --warmup-updates count optimizer steps; with '// &
+                                '--gradient-accumulation N one step consumes up to N prediction tokens.'
       write(output_unit, '(A)') 'The current trainer updates only tied output embeddings; it is not full BPTT.'
+      write(output_unit, '(A)') 'AdamW applies decoupled decay to the embeddings (never to the output bias) '// &
+                                'as theta <- (1 - lr*weight_decay) * theta.'
    end subroutine print_help
 
 end program vegai_neural_pretrain

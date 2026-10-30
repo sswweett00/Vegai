@@ -89,6 +89,15 @@ module neural_retention_decoder
    public :: neural_decoder_init, neural_decoder_destroy, neural_decoder_is_ready
    public :: neural_decoder_state_init, neural_decoder_state_destroy, neural_decoder_state_reset
    public :: neural_decoder_state_is_ready, neural_decoder_step, neural_decoder_plan
+   public :: neural_decoder_step_hidden, neural_decoder_project_logits
+
+   ! Number of staged tokens the block projection consumes at a time.  It is a
+   ! compile-time constant so the per-lane accumulators live in vector registers
+   ! instead of a runtime-sized stack array: with a dynamic size the fan-out loop
+   ! degrades to load/FMA/store per element, which measured ~8x slower than the
+   ! register form.  Callers allocate the hidden block with this many extra
+   ! zeroed columns, so the last partial group reads defined values.
+   integer(int32), parameter, public :: NRD_LOGIT_BLOCK_LANES = 16_int32
    public :: neural_decoder_config_is_valid
 
 contains
@@ -470,12 +479,17 @@ contains
       state%cache_count = min(state%cache_count + 1_int32, state%local_window)
    end subroutine append_local_cache
 
-   subroutine neural_decoder_step(model, state, token, hidden, logits, status)
+   ! Everything a step does except the tied logits projection: the residual
+   ! stream, attention, retention update and the gated feed-forward.  Splitting
+   ! it out lets the trainer project the logits of a whole accumulated block in
+   ! one pass over the tied embedding (see neural_decoder_project_logits), which
+   ! is the difference between reading the (vocabulary x width) matrix once per
+   ! block instead of once per prediction token.
+   subroutine neural_decoder_step_hidden(model, state, token, hidden, status)
       type(neural_decoder_t), intent(in) :: model
       type(neural_decoder_state_t), intent(inout) :: state
       integer(int32), intent(in) :: token
       real(real32), intent(out) :: hidden(:)
-      real(real32), intent(out) :: logits(:)
       integer(int32), intent(out) :: status
       real(real32) :: normalized(model%config%width), attention_normalized(model%config%width)
       real(real32) :: query(model%head_width, model%config%heads), key(model%head_width, model%config%heads)
@@ -488,16 +502,26 @@ contains
 
       status = NRD_OK
       if (.not. neural_decoder_is_ready(model) .or. .not. neural_decoder_state_is_ready(state, model) .or. &
-          token < 1_int32 .or. token > model%config%vocabulary_size .or. size(hidden) /= model%config%width .or. &
-          size(logits) /= model%config%vocabulary_size) then
+          token < 1_int32 .or. token > model%config%vocabulary_size .or. size(hidden) /= model%config%width) then
          status = NRD_ERR_INVALID_ARGUMENT
          return
       end if
       call rms_normalize(model%token_embedding(:, token), model%attention_rms, model%config%rms_epsilon, normalized, local_status)
       if (local_status /= NRD_OK) then; status = local_status; return; end if
+      ! The three head projections are independent dense products of the same
+      ! input vector, so they run as one parallel section each instead of
+      ! serially.  Nothing about the arithmetic changes -- same expressions, same
+      ! order, disjoint outputs -- so the result is bit-identical at any thread
+      ! count; the condition keeps small models (tests) out of a fork that would
+      ! cost more than the work.
+      !$omp parallel sections if(size(query) + size(key) + size(value) >= 96)
+      !$omp section
       call project_heads(model%query, normalized, query)
+      !$omp section
       call project_heads(model%key, normalized, key)
+      !$omp section
       call project_heads(model%value, normalized, value)
+      !$omp end parallel sections
       call apply_rotary(query, key, state%steps, model%config%rotary_period)
       call local_attention(state, query, key, value, local_context)
       call update_retention_and_context(state, model, query, key, value, global_context, local_status)
@@ -512,15 +536,72 @@ contains
             attention_vector(offset + component) = mixed_context(component, head)
          end do
       end do
+      ! Keep the intrinsic dense products.  Hand-written alternatives were
+      ! measured and are slower, not faster: replacing these four MATMUL calls
+      ! with a vectorized matvec loop, the strided project_heads dot products
+      ! with a contiguous axpy, and TANH with a one-exponential identity moved
+      ! the decoder step from 54.4 to 111.9 microseconds per prediction (CI job
+      ! 122344621975; the same job's held-out evaluate pass fell from 6998 to
+      ! 4600 tokens/s while the untouched merge-base arm moved only 10%, so the
+      ! regression is the code, not the runner).  gfortran lowers MATMUL and
+      ! DOT_PRODUCT on contiguous operands to loops it vectorizes better than
+      ! these hand-written forms.
       residual = model%token_embedding(:, token) + matmul(model%attention_output, attention_vector)
       call rms_normalize(residual, model%ffn_rms, model%config%rms_epsilon, attention_normalized, local_status)
       if (local_status /= NRD_OK) then; status = local_status; return; end if
+      ! 384 sigmoid + 384 tanh per token is the transcendental bill of the
+      ! gate.
+      ! The two branches were also parallelised per row (project_rows, a
+      ! !$omp parallel do of dot_product over the rows of each gated branch and of
+      ! the output projection) on the theory that two sections leave half of a
+      ! four-thread team idle.  Measured in one run against the commit before it,
+      ! the decoder step got 32% slower (79.9 -> 105.8 us per prediction in the
+      ! baseline and per-token arms of run 40662831639, the same model and shape),
+      ! which is beyond the ~14% drift the same code shows between arms of one
+      ! run.  Per-row DOT_PRODUCT calls lose to the single blocked MATMUL above.  Fusing them (tanh(x) = 2*sigmoid(2x) - 1, or a one-exponential
+      ! tanh) does not pay here: see the note above on the same measurement.
+      ! The two gated branches are independent; their product is the widest
+      ! dense work of a step, so they are the natural place to use the second
+      ! thread.  Same MATMUL, same operands, disjoint results.
+      !$omp parallel sections if(model%config%ffn_width >= 256)
+      !$omp section
       gate = matmul(model%ffn_gate, attention_normalized)
+      !$omp section
       value_gate = matmul(model%ffn_value, attention_normalized)
+      !$omp end parallel sections
+      ! Elementwise and independent, and it is the transcendental bill of the
+      ! step (one sigmoid plus one tanh per FFN lane), so it is spread over the
+      ! team as well.  Each lane keeps its own expression, so the values do not
+      ! depend on how many threads run the loop.
+      !$omp parallel do schedule(static) if(model%config%ffn_width >= 256)
       do component = 1_int32, model%config%ffn_width
          ffn_input(component) = stable_sigmoid(gate(component)) * tanh(value_gate(component))
       end do
+      !$omp end parallel do
       hidden = residual + matmul(model%ffn_output, ffn_input)
+      if (.not. all(ieee_is_finite(hidden))) then
+         status = NRD_ERR_NUMERIC
+         return
+      end if
+      call append_local_cache(state, key, value)
+      state%steps = state%steps + 1_int64
+   end subroutine neural_decoder_step_hidden
+
+   subroutine neural_decoder_step(model, state, token, hidden, logits, status)
+      type(neural_decoder_t), intent(in) :: model
+      type(neural_decoder_state_t), intent(inout) :: state
+      integer(int32), intent(in) :: token
+      real(real32), intent(out) :: hidden(:)
+      real(real32), intent(out) :: logits(:)
+      integer(int32), intent(out) :: status
+
+      status = NRD_OK
+      if (size(logits) /= model%config%vocabulary_size) then
+         status = NRD_ERR_INVALID_ARGUMENT
+         return
+      end if
+      call neural_decoder_step_hidden(model, state, token, hidden, status)
+      if (status /= NRD_OK) return
       ! Logits use the vector-matrix matmul form hidden . E, which streams
       ! the tied embedding without materializing a transposed copy (the
       ! earlier matmul(transpose(E), hidden) allocated a full (vocabulary x
@@ -533,13 +614,80 @@ contains
       ! same embedding^T hidden + bias up to reassociation, gated against
       ! the transpose-matmul reference in the test suite.
       logits = matmul(hidden, model%token_embedding) + model%output_bias
-      if (.not. all(ieee_is_finite(hidden)) .or. .not. all(ieee_is_finite(logits))) then
+      if (.not. all(ieee_is_finite(logits))) then
          status = NRD_ERR_NUMERIC
          return
       end if
-      call append_local_cache(state, key, value)
-      state%steps = state%steps + 1_int64
    end subroutine neural_decoder_step
+
+   ! Projects a block of hidden states onto the tied embedding in one pass.
+   !
+   ! hidden_matrix is (count, width) -- one contiguous row per staged token, so
+   ! the lane fan-out below is unit stride -- and logits_matrix is
+   ! (count, vocabulary):
+   ! one row of the output per staged token, so a row is contiguous and can be
+   ! handed straight to stable_softmax.  The outer loop runs over the vocabulary
+   ! (parallel, one token per iteration) and the embedding element
+   ! E(feature, token) is loaded once and fanned out to every column of the
+   ! block, so the (vocabulary x width) matrix is streamed once per block instead
+   ! of once per token.  The fan-out vector is the only dependency: its elements
+   ! are updated once per feature and there are count of them, which is what
+   ! keeps the inner loop at one vector FMA per element instead of a scalar
+   ! chain.  Lanes are consumed NRD_LOGIT_BLOCK_LANES at a time and the vector is
+   ! fixed size, which is what keeps the fan-out in registers.  Writes of one
+   ! token's row step by vocabulary, but each cache line is shared by the
+   ! following tokens of the block, so the output stays resident.
+   subroutine neural_decoder_project_logits(model, hidden_matrix, count, logits_matrix, status)
+      type(neural_decoder_t), intent(in) :: model
+      ! CONTIGUOUS is load bearing: with a bare assumed-shape dummy gfortran
+      ! cannot prove the inner fan-out has unit stride and leaves the loop
+      ! scalar, which measured ~20x slower than the vector form.
+      real(real32), contiguous, intent(in) :: hidden_matrix(:, :)
+      integer(int32), intent(in) :: count
+      real(real32), contiguous, intent(out) :: logits_matrix(:, :)
+      integer(int32), intent(out) :: status
+      integer(int32) :: width, vocabulary_size, token, feature, lane, group, first, available
+      real(real32) :: weight, bias
+      ! Exactly one group of lanes: fixed size, therefore register resident.
+      real(real32) :: accumulator(NRD_LOGIT_BLOCK_LANES)
+
+      status = NRD_OK
+      width = model%config%width
+      vocabulary_size = model%config%vocabulary_size
+      if (.not. neural_decoder_is_ready(model) .or. count < 1_int32 .or. &
+          count > size(hidden_matrix, 1, kind=int32) .or. &
+          count > size(logits_matrix, 1, kind=int32) .or. &
+          size(hidden_matrix, 2, kind=int32) /= width .or. &
+          size(logits_matrix, 2, kind=int32) /= vocabulary_size) then
+         status = NRD_ERR_INVALID_ARGUMENT
+         return
+      end if
+      !$omp parallel do private(token, feature, lane, group, first, available, weight, bias, accumulator) &
+      !$omp schedule(static) if(vocabulary_size >= 512_int32)
+      do token = 1_int32, vocabulary_size
+         bias = model%output_bias(token)
+         do group = 0_int32, (count - 1_int32) / NRD_LOGIT_BLOCK_LANES
+            first = group * NRD_LOGIT_BLOCK_LANES + 1_int32
+            available = min(NRD_LOGIT_BLOCK_LANES, count - first + 1_int32)
+            accumulator = 0.0_real32
+            do feature = 1_int32, width
+               weight = model%token_embedding(feature, token)
+               !$omp simd
+               do lane = 1_int32, NRD_LOGIT_BLOCK_LANES
+                  accumulator(lane) = accumulator(lane) + weight * hidden_matrix(first + lane - 1_int32, feature)
+               end do
+            end do
+            do lane = 1_int32, available
+               logits_matrix(first + lane - 1_int32, token) = accumulator(lane) + bias
+            end do
+         end do
+      end do
+      !$omp end parallel do
+      if (.not. all(ieee_is_finite(logits_matrix(1_int32:count, 1_int32:vocabulary_size)))) then
+         status = NRD_ERR_NUMERIC
+      end if
+   end subroutine neural_decoder_project_logits
+
 
    subroutine neural_decoder_plan(config, plan, status)
       type(neural_decoder_config_t), intent(in) :: config

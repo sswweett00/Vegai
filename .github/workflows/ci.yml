@@ -43,8 +43,10 @@ jobs:
           else
             # Avoid losing the actual compiler error to GitHub's log-size
             # truncation when parallel builds also emit legacy warnings.
-            grep -Ein 'fatal error|error:|warning:|ninja: build stopped' compile-output.txt | tail -n 160 || true
-            detail=$(grep -Ein 'fatal error|error:|ninja: build stopped' compile-output.txt | tail -n 12 | tr '\n' ' ' | cut -c1-1900)
+            # gfortran writes "src/file.f90:line:col:" *before* the message, so
+            # the leading context is what names the file and the source line.
+            grep -Ein -B3 -A1 'fatal error|error:|warning:|ninja: build stopped' compile-output.txt | tail -n 160 || true
+            detail=$(grep -Ein -B3 -A1 'fatal error|error:|ninja: build stopped' compile-output.txt | tail -n 24 | tr '\n' ' ' | cut -c1-1900)
             if [ -z "$detail" ]; then
               detail=$(tail -n 24 compile-output.txt | tr '\n' ' ' | cut -c1-1900)
             fi
@@ -55,13 +57,52 @@ jobs:
       - name: Run native Fortran property and integration tests (including direct attested-pretraining verification)
         run: ctest --test-dir build-ci --output-on-failure
 
+      - name: Measure sparse extreme-capacity invariance (1e3 -> 1e9 parameters)
+        run: |
+          set -euo pipefail
+          ./build-ci/vegai_sparse_layer_tests | tee sparse-layer-tests.txt
+          ./build-ci/vegai_sparse_layer_bench | tee sparse-layer-bench.txt
+          detail=$(grep 'SPARSE_LAYER_BENCH_JSON:' sparse-layer-bench.txt | cut -d' ' -f2- | cut -c1-1900)
+          {
+            echo '## Sparse extreme-capacity layer'
+            echo '```text'
+            cat sparse-layer-tests.txt
+            cat sparse-layer-bench.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Sparse layer capacity invariance::${detail}"
+
+      # The scale ladder lives in .github/workflows/context-quality.yml: it
+      # needs 18 training runs and its own check run, and this job is already
+      # the correctness gate rather than the quality benchmark.
+      - name: Measure fixed-budget context invariance (window 32 -> 1e12)
+        run: |
+          set -euo pipefail
+          ./build-ci/vegai_context_tests | tee context-tests.txt
+          ./build-ci/vegai_context_engine sweep --tokens 256 --train-chunk-tokens 32 \
+            --width 32 --heads 2 --ffn 64 --vocab 32 --local-window 32 \
+            --memory-scales 4 --memory-slots 64 > context-sweep.txt
+          detail=$(grep 'CONTEXT_BENCH_JSON:' context-sweep.txt | sed 's/^CONTEXT_BENCH_JSON: //' \
+            | paste -sd'|' - | cut -c1-1900)
+          {
+            echo '## Fixed-budget context engine'
+            echo '```text'
+            cat context-tests.txt
+            grep -v 'CONTEXT_BENCH_JSON:' context-sweep.txt
+            echo '```'
+            echo '```json'
+            grep 'CONTEXT_BENCH_JSON:' context-sweep.txt | sed 's/^CONTEXT_BENCH_JSON: //'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Fixed-budget context invariance::${detail}"
+
       - name: Surface native test diagnostics on failure
         if: failure()
         run: |
           set -euo pipefail
           log_file=$(find build-ci -name LastTest.log -type f -print -quit)
           if [ -n "$log_file" ]; then
-            detail=$(grep -Ein 'fail|error|assert|checks:' "$log_file" | tail -n 40 | tr '\n' ' ' | cut -c1-1900 || true)
+            detail=$(grep -Ein 'fail|error|assert|checks:|gradient probe|nll before|remote influence' "$log_file" | tail -n 40 | tr '\n' ' ' | cut -c1-1900 || true)
             if [ -z "$detail" ]; then
               detail=$(tail -n 140 "$log_file" | tr '\n' ' ' | cut -c1-1900)
             fi

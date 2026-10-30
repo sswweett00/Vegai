@@ -1,0 +1,166 @@
+name: Neural mini-batch throughput and quality A/B
+
+# The batched tied-output update claims a measured speedup, not an asserted
+# one: this workflow trains a byte-identical synthetic corpus twice (per-token
+# vs accumulated), gates the measured tokens/s ratio, the held-out NLL
+# regression at equal tokens and the NLL-improvement-per-second ratio, and
+# publishes the JSON evidence.
+
+on:
+  workflow_dispatch:
+    inputs:
+      accumulation:
+        description: "optimizer-step accumulation factor reported when no sweep is given"
+        required: false
+        default: "32"
+      sweep:
+        description: "comma separated accumulation factors; the fastest one that does not regress held-out NLL is reported"
+        required: false
+        default: "32,64,128"
+      corpus_bytes:
+        description: "synthetic corpus size per arm"
+        required: false
+        default: "400000"
+      min_speedup:
+        description: "gate for the measured tokens/s ratio against the per-token arm"
+        required: false
+        default: "1.25"
+      min_baseline_speedup:
+        description: "gate for the measured tokens/s ratio against the merge-base binary"
+        required: false
+        default: "2.0"
+      comparison_revision:
+        description: "revision to build the comparison binary from (empty = merge base); set it to isolate one change, e.g. the commit before it"
+        required: false
+        default: ""
+  pull_request:
+    paths:
+      - 'src/neural_pretraining.f90'
+      - 'src/neural_retention_decoder.f90'
+      - 'app/neural_pretrain.f90'
+      - 'tools/benchmark_neural_batch_throughput.py'
+      - 'tools/run_neural_turkish_epoch1.py'
+      - '.github/workflows/neural-batch-throughput.yml'
+
+concurrency:
+  group: neural-batch-throughput-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  throughput:
+    name: Per-token vs accumulated update A/B
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install GNU Fortran toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gfortran cmake ninja-build
+
+      # Same configure path as the main Fortran verification job (proven on this
+      # runner image), releasing with the host CPU target so the absolute rates
+      # are representative; the A/B ratio does not depend on that choice.
+      - name: Build the neural pretraining binary
+        run: |
+          set +e
+          cmake -S . -B build-throughput -G Ninja \
+            -DVEGAI_ENABLE_OPENMP=ON -DVEGAI_CPU_TARGET=native \
+            -DCMAKE_BUILD_TYPE=Release > configure-output.txt 2>&1
+          configure_code=$?
+          if [ "$configure_code" -eq 0 ]; then
+            cmake --build build-throughput --target vegai_neural_pretrain --parallel > build-output.txt 2>&1
+            build_code=$?
+          else
+            build_code=$configure_code
+            cp configure-output.txt build-output.txt
+          fi
+          tee_log=$(cat build-output.txt configure-output.txt 2>/dev/null)
+          if [ "$build_code" -ne 0 ]; then
+            detail=$(printf '%s' "$tee_log" | grep -Ein 'fatal error|error:|ninja: build stopped' | tail -n 16 | tr '\n' ' ' | cut -c1-1900)
+            if [ -z "$detail" ]; then
+              detail=$(tail -n 24 build-output.txt | tr '\n' ' ' | cut -c1-1900)
+            fi
+            echo "::error title=Batch-throughput build diagnostic::$detail"
+            tail -n 60 build-output.txt
+            exit "$build_code"
+          fi
+          ./build-throughput/vegai_neural_pretrain smoke | tail -3
+
+      # The end-to-end claim ("training is N times faster than main") is measured
+      # inside this job, from a binary built out of the merge base, so runner
+      # noise cannot flatter the comparison.
+      - name: Build the comparison binary from the merge base
+        run: |
+          set +e
+          base_ref="${{ inputs.comparison_revision }}"
+          if [ -z "$base_ref" ]; then base_ref=$(git merge-base HEAD origin/main); fi
+          echo "comparison revision: ${base_ref}"
+          git worktree add compare-base "$base_ref" > worktree-output.txt 2>&1
+          code=$?
+          if [ "$code" -eq 0 ]; then
+            cmake -S compare-base -B build-compare -G Ninja \
+              -DVEGAI_ENABLE_OPENMP=ON -DVEGAI_CPU_TARGET=native \
+              -DCMAKE_BUILD_TYPE=Release >> worktree-output.txt 2>&1
+            code=$?
+          fi
+          if [ "$code" -eq 0 ]; then
+            cmake --build build-compare --target vegai_neural_pretrain --parallel >> worktree-output.txt 2>&1
+            code=$?
+          fi
+          if [ "$code" -ne 0 ]; then
+            detail=$(grep -Ein 'fatal error|error:|ninja: build stopped|fatal:' worktree-output.txt | tail -n 12 | tr '\n' ' ' | cut -c1-1700)
+            echo "::warning title=Comparison binary could not be built::${detail}"
+          fi
+          exit 0
+
+      - name: Measure per-token vs mini-batch throughput and quality
+        run: |
+          set +e
+          mkdir -p "${RUNNER_TEMP}/throughput"
+          python3 tools/benchmark_neural_batch_throughput.py \
+            --neural-bin ./build-throughput/vegai_neural_pretrain \
+            --accumulation "${{ inputs.accumulation || '32' }}" \
+            --sweep "${{ inputs.sweep || '32,64,128' }}" \
+            --corpus-bytes "${{ inputs.corpus_bytes || '400000' }}" \
+            --min-speedup "${{ inputs.min_speedup || '1.25' }}" \
+            --baseline-bin ./build-compare/vegai_neural_pretrain \
+            --max-nll-regression 0.05 \
+            --min-baseline-speedup "${{ inputs.min_baseline_speedup || '2.0' }}" \
+            --output "${RUNNER_TEMP}/throughput/benchmark.json" \
+            > "${RUNNER_TEMP}/throughput/benchmark.stdout" 2> "${RUNNER_TEMP}/throughput/benchmark.stderr"
+          code=$?
+          tail -n 40 "${RUNNER_TEMP}/throughput/benchmark.stdout" || true
+          tail -n 40 "${RUNNER_TEMP}/throughput/benchmark.stderr" || true
+          if [ "$code" -ne 0 ]; then
+            # Workflow logs are not always reachable from review tooling, so the
+            # failure reason is republished as an API-readable annotation.
+            detail=$(tail -n 12 "${RUNNER_TEMP}/throughput/benchmark.stderr" | tr '\n' ' ' | cut -c1-1800)
+            if [ -z "$detail" ]; then
+              detail=$(tail -n 12 "${RUNNER_TEMP}/throughput/benchmark.stdout" | tr '\n' ' ' | cut -c1-1800)
+            fi
+            echo "::error title=Neural throughput A/B diagnostic::${detail}"
+          fi
+          exit "$code"
+
+      - name: Summarize the measured comparison
+        if: always()
+        run: |
+          set -euo pipefail
+          report="${RUNNER_TEMP}/throughput/benchmark.json"
+          if [ ! -f "$report" ]; then
+            echo "::warning title=Neural throughput A/B::no report was produced"
+            exit 0
+          fi
+          python3 tools/benchmark_neural_batch_throughput.py --report "$report" --summary || true
+
+      - name: Upload throughput evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: neural-batch-throughput-${{ github.run_id }}
+          path: ${{ runner.temp }}/throughput
+          if-no-files-found: warn

@@ -570,14 +570,15 @@ def copy_private_snapshot(source: Path, identity: FileIdentity, destination: Pat
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     if nofollow:
         flags |= nofollow
+    source_descriptor = None
     try:
         source_descriptor = os.open(source, flags)
         destination_descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     except OSError as error:
-        try:
+        # The source descriptor only exists when its own open succeeded, so the
+        # error path must not assume it was assigned.
+        if source_descriptor is not None:
             os.close(source_descriptor)
-        except (NameError, OSError):
-            pass
         raise PretrainingQualityEvaluationError(f"cannot create private {label} snapshot: {error}") from error
     try:
         before = os.fstat(source_descriptor)

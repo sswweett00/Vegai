@@ -19,7 +19,7 @@ from pathlib import Path
 import sys
 import tempfile
 import time
-from typing import Any, Iterator, Mapping
+from typing import Iterator, Mapping
 
 from lmm_contract import (
     MAX_JSON_BYTES,

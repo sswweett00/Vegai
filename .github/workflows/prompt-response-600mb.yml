@@ -1,0 +1,508 @@
+name: Prompt/response evidence on the 600 MB corpus
+
+# Trains the fixed-budget context engine on a byte-exact 600 MB Turkish
+# prompt/response corpus and scores prompt -> response afterwards.  Everything
+# here is reproducible: the corpus is generated from a seed, its SHA-256 is
+# verified before training starts, and the training sessions are checkpointed
+# so a long run can continue instead of restarting.
+#
+# The job is dispatched manually because it is expensive.  Inputs let a caller
+# shrink the budget for a smoke run, or raise it to the whole corpus.
+
+on:
+  workflow_dispatch:
+    inputs:
+      corpus_bytes:
+        description: 'Corpus size in bytes (default 600000000 = 600 MB)'
+        required: false
+        default: '600000000'
+      train_bytes:
+        description: 'How many corpus bytes to train on (0 = the whole corpus)'
+        required: false
+        default: '0'
+      train_minutes:
+        description: 'Wall-clock budget for training in this dispatch'
+        required: false
+        default: '240'
+      session_minutes:
+        description: 'Length of one checkpointed training session'
+        required: false
+        default: '25'
+      facts:
+        description: 'Number of distinct fact bindings in the corpus'
+        required: false
+        default: '2048'
+      width:
+        description: 'Model width'
+        required: false
+        default: '32'
+      heads:
+        description: 'Attention heads (width must divide evenly)'
+        required: false
+        default: '2'
+      ffn:
+        description: 'Feed-forward width'
+        required: false
+        default: '64'
+      local_window:
+        description: 'Physical ring buffer for the exact causal attention'
+        required: false
+        default: '32'
+      memory_slots:
+        description: 'Fixed number of information slots'
+        required: false
+        default: '64'
+      train_chunk_tokens:
+        description: 'Predictions per optimiser update (also the streaming block size)'
+        required: false
+        default: '512'
+      learning_rate:
+        description: 'Learning rate'
+        required: false
+        default: '0.003'
+      resume_run_id:
+        description: 'Continue the checkpoint uploaded by this earlier run id (artifact from the same workflow)'
+        required: false
+        default: ''
+      resume_start_byte:
+        description: 'Byte offset the resumed checkpoint had reached'
+        required: false
+        default: '0'
+      reset_every:
+        description: 'Reset the recurrent state every N tokens (0 = never)'
+        required: false
+        default: '0'
+      warmup_bytes:
+        description: 'Bytes of corpus streamed into the state before each prompt (0 = cold)'
+        required: false
+        default: '0'
+      layout:
+        description: 'Corpus layout: templates (facts inside prose) or bindings (compact lines)'
+        required: false
+        default: 'templates'
+  # A narrow push trigger makes the workflow reachable from the PR branch
+  # without spending a long job on unrelated changes.
+  push:
+    branches: [arena/b8096ea0-vegai]
+    paths:
+      - '.github/workflows/prompt-response-600mb.yml'
+      # The checked-in request file is itself a reason to run: flipping
+      # `enabled` to true (or adding a resume offset) is how a real pass is
+      # asked for from an environment that cannot dispatch workflows.
+      - 'ci/prompt-600mb.json'
+      - 'tools/build_prompt_response_corpus.py'
+      - 'app/prompt_engine.f90'
+      # An architecture change invalidates every measured number below it, so
+      # the engine sources are a reason to re-measure too.  With `enabled` left
+      # false this costs one short smoke run and no training budget.
+      - 'src/fixed_budget_*.f90'
+      - 'test/fixed_budget_context_tests.f90'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prompt-response-600mb-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prompt-response-600mb:
+    name: 600 MB corpus, streamed training, prompt/response scoring
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      # A dispatch runs the configuration it was given.  A push runs whatever
+      # `ci/prompt-600mb.json` asks for, and falls back to a five-minute smoke
+      # run when that file is absent: an expensive job must never start by
+      # accident, and this environment cannot dispatch workflows, so a checked
+      # in configuration is how a real run is requested.
+      - name: Resolve the run configuration
+        run: |
+          set -euo pipefail
+          config_file="ci/prompt-600mb.json"
+          {
+            echo "MODE=smoke"
+            echo "CORPUS_BYTES=2000000"
+            echo "TRAIN_BYTES=0"
+            echo "TRAIN_MINUTES=3"
+            echo "SESSION_MINUTES=2"
+            echo "FACTS=256"
+            echo "WIDTH=32"
+            echo "HEADS=2"
+            echo "FFN=64"
+            echo "LOCAL_WINDOW=32"
+            echo "SLOTS=64"
+            echo "CHUNK=128"
+            echo "LR=0.003"
+            echo "RESUME_RUN_ID="
+            echo "START_BYTE=0"
+            echo "RESET_EVERY=0"
+            echo "WARMUP_BYTES=0"
+            echo "LAYOUT=templates"
+            echo "RUN_LABEL="
+          } > "$GITHUB_ENV"
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ -f "$config_file" ]; then
+            python3 - "$config_file" >> "$GITHUB_ENV" <<'PY'
+          import json, sys
+          config = json.load(open(sys.argv[1], encoding='utf-8'))
+          if not config.get('enabled', False):
+              # A configuration file that does not ask to run must not spend a
+              # job: `enabled` has no default on purpose.
+              print('MODE=smoke-disabled-config', file=sys.stderr)
+              raise SystemExit(0)
+          print(f"RUN_LABEL={config.get('label', '')}")
+          defaults = {
+              'corpus_bytes': 600_000_000, 'train_bytes': 0, 'train_minutes': 300,
+              'session_minutes': 25, 'facts': 2048, 'width': 32, 'heads': 2, 'ffn': 64,
+              'local_window': 32, 'memory_slots': 64, 'train_chunk_tokens': 1024,
+              'learning_rate': 0.003, 'resume_run_id': '', 'resume_start_byte': 0,
+              'reset_every': 0, 'warmup_bytes': 0, 'layout': 'templates',
+          }
+          defaults.update(config)
+          print('MODE=dispatch')
+          print(f"CORPUS_BYTES={defaults['corpus_bytes']}")
+          print(f"TRAIN_BYTES={defaults['train_bytes']}")
+          print(f"TRAIN_MINUTES={defaults['train_minutes']}")
+          print(f"SESSION_MINUTES={defaults['session_minutes']}")
+          print(f"FACTS={defaults['facts']}")
+          print(f"WIDTH={defaults['width']}")
+          print(f"HEADS={defaults['heads']}")
+          print(f"FFN={defaults['ffn']}")
+          print(f"LOCAL_WINDOW={defaults['local_window']}")
+          print(f"SLOTS={defaults['memory_slots']}")
+          print(f"CHUNK={defaults['train_chunk_tokens']}")
+          print(f"LR={defaults['learning_rate']}")
+          print(f"RESUME_RUN_ID={defaults['resume_run_id']}")
+          print(f"START_BYTE={defaults['resume_start_byte']}")
+          print(f"RESET_EVERY={defaults['reset_every']}")
+          print(f"WARMUP_BYTES={defaults['warmup_bytes']}")
+          print(f"LAYOUT={defaults['layout']}")
+          PY
+          elif [ "${GITHUB_EVENT_NAME}" != "push" ]; then
+            {
+              echo "MODE=dispatch"
+              echo "CORPUS_BYTES=${{ inputs.corpus_bytes }}"
+              echo "TRAIN_BYTES=${{ inputs.train_bytes }}"
+              echo "TRAIN_MINUTES=${{ inputs.train_minutes }}"
+              echo "SESSION_MINUTES=${{ inputs.session_minutes }}"
+              echo "FACTS=${{ inputs.facts }}"
+              echo "WIDTH=${{ inputs.width }}"
+              # A dispatch describes the whole shape: hard-coding heads, ffn,
+              # window or slots here would silently ignore the caller.
+              echo "HEADS=${{ inputs.heads }}"
+              echo "FFN=${{ inputs.ffn }}"
+              echo "LOCAL_WINDOW=${{ inputs.local_window }}"
+              echo "SLOTS=${{ inputs.memory_slots }}"
+              echo "CHUNK=${{ inputs.train_chunk_tokens }}"
+              echo "LR=${{ inputs.learning_rate }}"
+              echo "RESUME_RUN_ID=${{ inputs.resume_run_id }}"
+              echo "START_BYTE=${{ inputs.resume_start_byte }}"
+              echo "RESET_EVERY=${{ inputs.reset_every }}"
+              echo "WARMUP_BYTES=${{ inputs.warmup_bytes }}"
+              echo "LAYOUT=${{ inputs.layout }}"
+            } >> "$GITHUB_ENV"
+          fi
+          # The restore steps cannot read GITHUB_ENV in their `if`, so the
+          # decision is materialised as a file hashFiles() can see.
+          rm -f .resume-marker
+          if grep -q '^RESUME_RUN_ID=.' "$GITHUB_ENV"; then touch .resume-marker; fi
+          cat "$GITHUB_ENV"
+
+      - name: Install GNU Fortran toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gfortran
+
+      - name: Report the toolchain
+        run: |
+          gfortran --version | head -n 1
+          python3 --version
+          nproc
+
+      # Compiler diagnostics are surfaced as annotations too: the job log is a
+      # blob artifact that is not always retrievable, and a build failure has to
+      # name file and line without it.
+      - name: Build the engine, its contract tests and the corpus CLI
+        run: |
+          set -o pipefail
+          if ! make context-engine prompt-engine context-tests BUILD_DIR=build-prompt-600m 2>&1 | tee build.log; then
+            grep -E 'Error:|Fatal Error|undefined reference' build.log | head -n 8 | while IFS= read -r line; do
+              echo "::error title=compile::${line}"
+            done
+            exit 1
+          fi
+
+      - name: Run the engine contract suite (gradients, invariants, checkpoints)
+        run: |
+          make context-tests BUILD_DIR=build-prompt-600m 2>&1 | tee context-tests.log
+
+      # The corpus generator and the ask-log gate are pure Python, so their
+      # contract is checked here too instead of only in the lint workflow.
+      - name: Check the corpus and evidence contracts
+        run: python3 tools/verify_prompt_response_corpus.py
+
+      - name: Generate and verify the corpus
+        run: |
+          set -euo pipefail
+          run_dir="${RUNNER_TEMP}/vegai-prompt-600m"
+          mkdir -p "$run_dir"
+          echo "RUN_DIR=$run_dir" >> "$GITHUB_ENV"
+          python3 tools/build_prompt_response_corpus.py generate \
+            "$run_dir/corpus.txt" \
+            --bytes "$CORPUS_BYTES" \
+            --facts "$FACTS" \
+            --layout "$LAYOUT" \
+            --probe-out "$run_dir/probe.tsv" \
+            --overwrite | tee "$run_dir/corpus-generate.json"
+          python3 tools/build_prompt_response_corpus.py verify "$run_dir/corpus.txt" \
+            | tee "$run_dir/corpus-verify.json"
+          ls -l "$run_dir/corpus.txt"
+
+      # Continuing an earlier dispatch: the checkpoint, its byte offset and the
+      # corpus hash all have to come from that run, otherwise the model would
+      # continue on different bytes than it thinks.
+      - name: Restore the checkpoint of an earlier dispatch
+        if: ${{ hashFiles('.resume-marker') != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: prompt-response-600mb-evidence
+          run-id: ${{ env.RESUME_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ${{ runner.temp }}/vegai-resume
+
+      - name: Adopt the restored checkpoint
+        if: ${{ hashFiles('.resume-marker') != '' }}
+        run: |
+          set -euo pipefail
+          directory="${RUNNER_TEMP}/vegai-resume"
+          mkdir -p "$directory"
+          echo "artifact contents:"
+          find "$directory" -maxdepth 4 | head -n 40
+          checkpoint=$(find "$directory" -type f -name 'model.vgfb' | head -n 1 || true)
+          manifest=$(find "$directory" -type f -name 'corpus.manifest.json' | head -n 1 || true)
+          if [ -z "${checkpoint:-}" ]; then
+            echo "::error title=no checkpoint in the artifact::run ${RESUME_RUN_ID} has no model.vgfb"
+            exit 1
+          fi
+          cp "$checkpoint" "$RUN_DIR/model.vgfb"
+          if [ -n "${manifest:-}" ]; then
+            python3 tools/verify_restored_corpus.py "$manifest" "$RUN_DIR/corpus.manifest.json"
+          else
+            echo "::error title=no corpus manifest::the restored artifact has no corpus.manifest.json"
+            exit 1
+          fi
+          echo "resuming at byte ${START_BYTE}"
+
+      # Every command that can fail here reports its own diagnostics as an
+      # annotation: the job log lives in a blob store that is not always
+      # retrievable, and "exit code 1" alone is not evidence.
+      - name: Train in checkpointed sessions until the budget is spent
+        run: |
+          set -euo pipefail
+          annotate() {
+            # $1 title, $2 file
+            if [ -f "$2" ]; then
+              local tail_text
+              tail_text=$(tail -n 12 "$2" | tr '\n' '~' | cut -c1-900)
+              echo "::error title=$1::${tail_text}"
+            fi
+          }
+          corpus_bytes=$(stat -c %s "$RUN_DIR/corpus.txt")
+          if [ "$TRAIN_BYTES" -gt 0 ] && [ "$TRAIN_BYTES" -lt "$corpus_bytes" ]; then
+            target="$TRAIN_BYTES"
+          else
+            target="$corpus_bytes"
+          fi
+          echo "training target: ${target} of ${corpus_bytes} corpus bytes" | tee "$RUN_DIR/training-sessions.log"
+          deadline=$(( $(date +%s) + TRAIN_MINUTES * 60 ))
+          checkpoint="$RUN_DIR/model.vgfb"
+          offset="${START_BYTE}"
+          session=0
+          # The last byte of a range can never be a target, so a range is
+          # complete once it reaches target - 1.
+          while [ $(( offset + 1 )) -lt "$target" ]; do
+            previous="$offset"
+            now=$(date +%s)
+            remaining=$(( deadline - now ))
+            if [ "$remaining" -le 60 ]; then
+              echo "time budget reached at byte ${offset}" | tee -a "$RUN_DIR/training-sessions.log"
+              break
+            fi
+            session_seconds=$(( SESSION_MINUTES * 60 ))
+            if [ "$session_seconds" -gt "$remaining" ]; then session_seconds="$remaining"; fi
+            session=$(( session + 1 ))
+            session_log="$RUN_DIR/train-session-${session}.log"
+            resume_args=()
+            if [ -f "$checkpoint" ]; then
+              resume_args=(--resume "$checkpoint" --start-byte "$offset")
+            fi
+            if ! ./build-prompt-600m/vegai_prompt_engine train \
+                 --corpus "$RUN_DIR/corpus.txt" \
+                 --checkpoint "$checkpoint" \
+                 --bytes "$target" \
+                 --max-seconds "$session_seconds" \
+                 --train-chunk-tokens "$CHUNK" \
+                 --width "$WIDTH" \
+                 --heads "$HEADS" \
+                 --ffn "$FFN" \
+                 --local-window "$LOCAL_WINDOW" \
+                 --memory-slots "$SLOTS" \
+                 --lr "$LR" \
+                 --reset-every "$RESET_EVERY" \
+                 --progress-every 200 \
+                 ${resume_args[@]+"${resume_args[@]}"} > "$session_log" 2>&1; then
+              cat "$session_log"
+              annotate "train failed in session ${session}" "$session_log"
+              exit 1
+            fi
+            grep '^progress:' "$session_log" | tail -n 2 || true
+            offset=$(grep -o '"end_byte": [0-9]*' "$session_log" | tail -n 1 | grep -o '[0-9]*' || true)
+            if [ -z "${offset:-}" ]; then
+              cat "$session_log"
+              annotate "train printed no end_byte" "$session_log"
+              exit 1
+            fi
+            if [ "$offset" -le "$previous" ]; then
+              echo "no progress in session ${session} (still at byte ${offset}); stopping" \
+                | tee -a "$RUN_DIR/training-sessions.log"
+              break
+            fi
+            echo "session ${session} finished at byte ${offset}" | tee -a "$RUN_DIR/training-sessions.log"
+          done
+          echo "TRAINED_BYTES=${offset}" >> "$GITHUB_ENV"
+          if ! ls "$RUN_DIR"/train-session-*.log > /dev/null 2>&1; then
+            # An evaluation-only run (a restored checkpoint at the end of the
+            # corpus) trains nothing, so there is no session to summarise.
+            echo "no training session in this run; evaluating the restored checkpoint" \
+              | tee "$RUN_DIR/summary.log"
+            exit 0
+          fi
+          if ! python3 tools/summarise_prompt_response_run.py "$RUN_DIR" \
+                 --output "$RUN_DIR/training-summary.json" > "$RUN_DIR/summary.log" 2>&1; then
+            cat "$RUN_DIR/summary.log"
+            echo "::error title=summary failed::$(tail -n 12 "$RUN_DIR/summary.log" | tr '\n' '~' | cut -c1-900)"
+            for session_file in "$RUN_DIR"/train-session-*.log; do
+              echo "::error title=session $(basename "$session_file")::$(tail -c 700 "$session_file" | tr '\n' '~')"
+            done
+            exit 1
+          fi
+
+      - name: Score prompt/response pairs on facts the run actually saw
+        run: |
+          set -euo pipefail
+          python3 tools/build_prompt_response_corpus.py filter-probe "$RUN_DIR/corpus.txt" \
+            --probe "$RUN_DIR/probe.tsv" --out "$RUN_DIR/probe-trained.tsv" \
+            --trained-bytes "${TRAINED_BYTES}" | tee "$RUN_DIR/probe-filter.json"
+          if ! ./build-prompt-600m/vegai_prompt_engine probe \
+               --checkpoint "$RUN_DIR/model.vgfb" \
+               --probe "$RUN_DIR/probe-trained.tsv" \
+               --warmup-bytes "$WARMUP_BYTES" \
+               --warmup-from "$RUN_DIR/corpus.txt" \
+               --max-new 32 > "$RUN_DIR/probe.log" 2>&1; then
+            cat "$RUN_DIR/probe.log"
+            echo "::error title=probe failed::$(tail -n 12 "$RUN_DIR/probe.log" | tr '\n' '~' | cut -c1-900)"
+            exit 1
+          fi
+          cat "$RUN_DIR/probe.log"
+
+      - name: Ask the model a handful of prompts and record the responses
+        run: |
+          set -euo pipefail
+          : > "$RUN_DIR/ask.log"
+          ask() {
+            local kind="$1" prompt="$2" expected="$3"
+            { echo "### ${kind} | expected: ${expected}"; } >> "$RUN_DIR/ask.log"
+            ./build-prompt-600m/vegai_prompt_engine ask \
+              --checkpoint "$RUN_DIR/model.vgfb" --prompt "${prompt}" \
+              --warmup-bytes "$WARMUP_BYTES" --warmup-from "$RUN_DIR/corpus.txt" \
+              --max-new 32 >> "$RUN_DIR/ask.log" 2>&1 || {
+                echo "::error title=ask failed::$(tail -n 6 "$RUN_DIR/ask.log" | tr '\n' '~' | cut -c1-900)"
+                exit 1
+              }
+          }
+          # Ask up to N rows of one family.  The bindings probe ships facts only,
+          # so a per-family loop would ask a single question; and a family with no
+          # rows must not fail the step under `pipefail`.
+          ask_family() {
+            local family="$1" limit="$2" kind prompt expected
+            while IFS=$'\t' read -r kind prompt expected; do
+              ask "$kind" "$prompt" "$expected"
+            done < <(grep "^${family}"$'\t' "$RUN_DIR/probe-trained.tsv" | head -n "$limit" || true)
+          }
+          ask_family fact 3
+          ask_family copy 1
+          ask_family next 1
+          cat "$RUN_DIR/ask.log"
+          # A prompt the model never saw is indistinguishable from a prompt it
+          # cannot answer, except that the first one answers everything the same
+          # way.  Fail the step instead of publishing that as a result.
+          if ! python3 tools/verify_prompt_response_corpus.py --ask-log "$RUN_DIR/ask.log" \
+                 > "$RUN_DIR/ask-check.log" 2>&1; then
+            cat "$RUN_DIR/ask-check.log"
+            echo "::error title=ask log gate::$(tr '\n' '~' < "$RUN_DIR/ask-check.log" | cut -c1-1200)"
+            echo "::error title=ask log tail::$(tail -c 600 "$RUN_DIR/ask.log" | tr '\n' '~')"
+            exit 1
+          fi
+          cat "$RUN_DIR/ask-check.log"
+
+      # The numbers have to survive outside the artifact store, so the whole
+      # evidence block is also emitted as annotations.
+      - name: Summarise the evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          if python3 tools/report_prompt_response_evidence.py "$RUN_DIR" > "$RUN_DIR/evidence.log" 2>&1; then
+            cat "$RUN_DIR/evidence.log"
+            # GitHub keeps only ten annotations per step, so the report groups
+            # its lines instead of emitting one annotation each.
+            if [ -n "${RUN_LABEL:-}" ]; then
+              echo "::notice title=run label::${RUN_LABEL}"
+            fi
+            python3 tools/report_prompt_response_evidence.py "$RUN_DIR" --annotations \
+              | while IFS= read -r encoded; do
+                  title=${encoded#ANNOTATION::}
+                  name=${title%%::*}
+                  text=${title#*::}
+                  echo "::notice title=${name}::${text}"
+                done
+          else
+            cat "$RUN_DIR/evidence.log"
+            echo "::error title=evidence summary failed::$(tail -n 6 "$RUN_DIR/evidence.log" | tr '\n' '~' | cut -c1-900)"
+          fi
+
+      - name: Collect the evidence bundle
+        if: always()
+        run: |
+          set -euo pipefail
+          ls -l "$RUN_DIR" || true
+          du -sh "$RUN_DIR" || true
+
+      - name: Upload the evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prompt-response-600mb-evidence
+          if-no-files-found: warn
+          retention-days: 30
+          path: |
+            ${{ runner.temp }}/vegai-prompt-600m/corpus-generate.json
+            ${{ runner.temp }}/vegai-prompt-600m/corpus-verify.json
+            ${{ runner.temp }}/vegai-prompt-600m/corpus.manifest.json
+            ${{ runner.temp }}/vegai-prompt-600m/probe.tsv
+            ${{ runner.temp }}/vegai-prompt-600m/probe-trained.tsv
+            ${{ runner.temp }}/vegai-prompt-600m/probe-filter.json
+            ${{ runner.temp }}/vegai-prompt-600m/probe.log
+            ${{ runner.temp }}/vegai-prompt-600m/evidence.log
+            ${{ runner.temp }}/vegai-prompt-600m/summary.log
+            ${{ runner.temp }}/vegai-prompt-600m/ask.log
+            ${{ runner.temp }}/vegai-prompt-600m/ask-check.log
+            ${{ runner.temp }}/vegai-prompt-600m/train-session-*.log
+            ${{ runner.temp }}/vegai-prompt-600m/training-sessions.log
+            ${{ runner.temp }}/vegai-prompt-600m/training-summary.json
+            ${{ runner.temp }}/vegai-prompt-600m/model.vgfb
+            context-tests.log
+            build.log

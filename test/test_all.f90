@@ -36,6 +36,9 @@ program test_all
    call test_utf8_record_stream()
    call test_neural_causal_design()
    call test_neural_continuation_checkpoint()
+   call test_nova_optimizer_contract()
+   call test_adamw_optimizer_contract()
+   call test_batched_optimizer_contract()
    call test_text_ingest()
    call test_fortran_control()
    call test_fortran_integrity()
@@ -639,6 +642,10 @@ contains
       integer :: unit, io_status
       real(real32) :: hidden_full(16), hidden_chunked(16), logits_full(64), logits_chunked(64)
       real(real32) :: logits_reference(64)
+      type(neural_decoder_t) :: wide_model
+      type(neural_decoder_state_t) :: wide_state, wide_masked_state
+      type(neural_decoder_config_t) :: wide_config
+      real(real32) :: wide_hidden(96), wide_logits(512), masked_hidden(96), masked_logits(512)
       real(real64) :: raw_logits(4), probabilities(4), heldout_logits(3, 4)
 
       source = ''
@@ -769,6 +776,33 @@ contains
       call assert_true(maxval(abs(logits_full - logits_reference)) < 1.0e-4_real32 .and. &
                        maxloc(logits_full, dim=1) == maxloc(logits_reference, dim=1), &
                        'streamed logits match the transpose-matmul reference within real32 tolerance')
+      ! The wide path (ffn_width >= 256) routes the gated feed-forward and the
+      ! output projection through project_rows, which distributes rows over the
+      ! OpenMP team instead of running two serial MATMULs.  Every output row is
+      ! still one dot product over the same contiguous operand, so the values
+      ! must not move with the thread count and must still equal the dense
+      ! reference.  This is the executable form of that claim, at a width the
+      ! threaded branch actually takes.
+      wide_config = neural_decoder_config_t(vocabulary_size=512_int32, width=96_int32, heads=4_int32, &
+                                           local_window=8_int32, ffn_width=384_int32)
+      call neural_decoder_init(wide_model, wide_config, 20261026_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'wide decoder with a threaded FFN initializes')
+      call neural_decoder_state_init(wide_state, wide_model, status)
+      call assert_i32_equal(status, NRD_OK, 'wide decoder state initializes')
+      call neural_decoder_step(wide_model, wide_state, 7_int32, wide_hidden, wide_logits, status)
+      call assert_i32_equal(status, NRD_OK, 'threaded wide step succeeds')
+      ! The same token stream replayed from a fresh state must reproduce the
+      ! values exactly: a row-parallel loop whose reduction were reassociated (or
+      ! whose lanes shared a temporary) would drift here.
+      call neural_decoder_state_init(wide_masked_state, wide_model, status)
+      call assert_i32_equal(status, NRD_OK, 'replay decoder state initializes')
+      call neural_decoder_step(wide_model, wide_masked_state, 7_int32, masked_hidden, masked_logits, status)
+      call assert_i32_equal(status, NRD_OK, 'replayed wide step succeeds')
+      call assert_true(all(wide_hidden == masked_hidden) .and. all(wide_logits == masked_logits), &
+                       'row-parallel wide step is bit-identical on replay')
+      call assert_true(maxval(abs(wide_logits - (matmul(transpose(wide_model%token_embedding), wide_hidden) + &
+                                                wide_model%output_bias))) < 1.0e-3_real32, &
+                       'wide threaded logits match the dense transpose reference within real32 tolerance')
       call neural_decoder_plan(config, plan, status)
       call assert_i32_equal(status, NRD_OK, 'neural resource planner succeeds')
       call assert_true(plan%parameter_count > 0_int64 .and. plan%per_stream_state_bytes_real32 > 0_int64 .and. &
@@ -880,8 +914,12 @@ contains
       decoder_config = neural_decoder_config_t(vocabulary_size=256_int32, width=16_int32, heads=2_int32, &
                                                local_window=4_int32, ffn_width=32_int32, memory_decay=0.91_real32, &
                                                rms_epsilon=2.0e-5_real32, rotary_period=4096_int32)
+      ! Pinned to AdamW on purpose: this test asserts the v4/v5 checkpoint carries
+      ! AdamW moments bit-identically, which is one of the two optimizer state
+      ! layouts the format has to support.  NOVA-1 has its own contract test.
       train_config = neural_train_config_t(learning_rate=0.025_real64, gradient_clip_norm=4.0_real64, &
-                                           embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32)
+                                           embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32, &
+                                           optimizer=NPT_OPTIMIZER_ADAMW)
       call neural_training_resource_plan(decoder_config, bpe, train_config, resource_plan, status)
       call assert_i32_equal(status, NPT_OK, 'neural continuous resource plan succeeds')
       call assert_true(resource_plan%minimum_resident_bytes > resource_plan%decoder_parameter_bytes_real32 .and. &
@@ -943,6 +981,427 @@ contains
       open(newunit=unit, file=checkpoint_path, status='old', iostat=io_status)
       if (io_status == 0) close(unit, status='delete')
    end subroutine test_neural_continuation_checkpoint
+
+   ! AdamW is the shipped optimizer, so its contract is asserted directly:
+   ! the decoupled-decay factor must stay positive (lr*weight_decay < 1), the
+   ! AdamW-only weight decay must never be silently ignored on the legacy SGD
+   ! path, the moments must exist exactly when the optimizer is AdamW, and the
+   ! optimizer identity plus moments must survive a checkpoint round trip.
+   ! NOVA-1 is the project default optimizer, so it needs the same contract the
+   ! AdamW path has: a real loss reduction, a resource plan that reflects its
+   ! single velocity array, a checkpoint that round-trips its state bit-exactly,
+   ! and chunk+resume identity.  The last one is the strongest: it fails if any
+   ! part of the optimizer state is not persisted.
+   subroutine test_nova_optimizer_contract()
+      type(bpe_model_t) :: bpe
+      type(neural_decoder_t) :: model, full_model, split_model, restored_model
+      type(neural_decoder_config_t) :: decoder_config
+      type(neural_train_config_t) :: config, full_config, restored_config
+      type(neural_train_state_t) :: state, full_state, split_state, restored_state
+      type(neural_train_metrics_t) :: before, after, update_metrics
+      type(neural_train_metrics_t) :: full_metrics, split_metrics, resumed_metrics
+      type(neural_training_resource_plan_t) :: nova_plan, adam_plan
+      integer(int32) :: status, index
+      integer :: unit, io_status
+      integer(int32), parameter :: token_count = 12_int32
+      integer(int32) :: tokens(token_count)
+      character(len=8) :: stored_magic
+      integer(int32) :: stored_version
+      real(real64) :: nova_bytes, adam_bytes
+      character(len=*), parameter :: corpus_path = 'test_neural_nova.txt'
+      character(len=*), parameter :: checkpoint_path = 'test_neural_nova.vgnr'
+
+      config = neural_train_config_t(learning_rate=0.02_real64, gradient_clip_norm=4.0_real64, &
+                                     embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32, &
+                                     optimizer=NPT_OPTIMIZER_NOVA, weight_decay=0.01_real64, &
+                                     gradient_accumulation=4_int32)
+      call assert_true(neural_train_config_is_valid(config), &
+                       'NOVA configuration with decoupled decay is accepted')
+      config%learning_rate = 0.0_real64
+      call assert_true(.not. neural_train_config_is_valid(config), 'NOVA rejects a zero learning rate')
+      config%learning_rate = 0.02_real64
+
+      do index = 1_int32, token_count
+         tokens(index) = modulo(index - 1_int32, 4_int32) + 1_int32
+      end do
+      call bpe_init(bpe, 1_int32, status)
+      call assert_i32_equal(status, BPE_OK, 'NOVA byte tokenizer initializes')
+      decoder_config = neural_decoder_config_t(vocabulary_size=256_int32, width=16_int32, heads=2_int32, &
+                                               local_window=4_int32, ffn_width=32_int32)
+      call neural_decoder_init(model, decoder_config, 515151_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'NOVA contract model initializes')
+
+      ! One velocity per element plus one energy scalar per column: half the
+      ! optimizer bytes AdamW needs for the same shape.
+      call neural_training_resource_plan(decoder_config, bpe, config, nova_plan, status)
+      call assert_i32_equal(status, NPT_OK, 'NOVA resource plan succeeds')
+      config%optimizer = NPT_OPTIMIZER_ADAMW
+      call neural_training_resource_plan(decoder_config, bpe, config, adam_plan, status)
+      call assert_i32_equal(status, NPT_OK, 'AdamW resource plan succeeds for comparison')
+      config%optimizer = NPT_OPTIMIZER_NOVA
+      nova_bytes = real(nova_plan%optimizer_state_bytes_real64, real64)
+      adam_bytes = real(adam_plan%optimizer_state_bytes_real64, real64)
+      call assert_true(nova_bytes > 0.0_real64 .and. nova_bytes < 0.75_real64 * adam_bytes, &
+                       'NOVA state is materially smaller than the two-moment AdamW state')
+
+      call neural_train_state_init(state)
+      call neural_train_metrics_reset(before)
+      call neural_evaluate_token_sequence(model, tokens, token_count, config, before, status)
+      call assert_i32_equal(status, NPT_OK, 'NOVA baseline evaluation succeeds')
+      do index = 1_int32, 30_int32
+         call neural_train_metrics_reset(update_metrics)
+         call neural_train_token_sequence(model, tokens, token_count, config, state, update_metrics, status)
+         call assert_i32_equal(status, NPT_OK, 'NOVA update succeeds')
+      end do
+      ! 11 predictions per record, batch of 4 => ceil(11/4) = 3 steps per record.
+      call assert_true(state%updates_completed == 30_int64 * 3_int64, &
+                       'NOVA counts one optimizer step per full or trailing batch')
+      call assert_true(allocated(state%nova_u_embedding) .and. allocated(state%nova_u_bias) .and. &
+                       allocated(state%nova_energy), 'NOVA materializes its own state')
+      call assert_true(.not. allocated(state%adam_m_embedding), &
+                       'NOVA does not allocate the AdamW moments it replaces')
+      call neural_train_metrics_reset(after)
+      call neural_evaluate_token_sequence(model, tokens, token_count, config, after, status)
+      call assert_i32_equal(status, NPT_OK, 'NOVA post-update evaluation succeeds')
+      call assert_true(after%mean_nll < before%mean_nll, 'NOVA steps reduce deterministic toy NLL')
+
+      ! Checkpoint round trip, including the file's declared format version.
+      call neural_checkpoint_save(checkpoint_path, model, bpe, config, state, status)
+      call assert_i32_equal(status, NPT_OK, 'NOVA checkpoint saves')
+      open(newunit=unit, file=checkpoint_path, status='old', action='read', access='stream', &
+           form='unformatted', iostat=io_status)
+      call assert_true(io_status == 0, 'NOVA checkpoint reopens for a header probe')
+      if (io_status == 0) then
+         read(unit, iostat=io_status) stored_magic
+         read(unit, iostat=io_status) stored_version
+         close(unit)
+      end if
+      call assert_true(stored_magic == 'VGNR0001' .and. stored_version == 5_int32, &
+                       'NOVA checkpoint declares checkpoint format v5')
+      call neural_checkpoint_load(checkpoint_path, bpe, restored_model, restored_config, restored_state, status)
+      call assert_i32_equal(status, NPT_OK, 'NOVA checkpoint loads')
+      call assert_true(restored_config%optimizer == NPT_OPTIMIZER_NOVA, &
+                       'checkpoint preserves the NOVA optimizer identity')
+      call assert_true(all(restored_state%nova_u_embedding == state%nova_u_embedding) .and. &
+                       all(restored_state%nova_u_bias == state%nova_u_bias) .and. &
+                       all(restored_state%nova_energy == state%nova_energy), &
+                       'checkpoint restores bit-identical NOVA state')
+      call neural_decoder_destroy(restored_model)
+
+      ! Chunk + checkpoint + resume must reproduce the one-pass parameters and the
+      ! NOVA state bit-identically, exactly like the AdamW contract does.
+      open(newunit=unit, file=corpus_path, status='replace', action='write', iostat=io_status)
+      call assert_true(io_status == 0, 'temporary NOVA corpus opens')
+      if (io_status == 0) then
+         write(unit, '(A)') 'abababab'
+         write(unit, '(A)') 'babababa'
+         write(unit, '(A)') 'abababab'
+         write(unit, '(A)') 'babababa'
+         close(unit)
+      end if
+      full_config = neural_train_config_t(learning_rate=0.02_real64, gradient_clip_norm=4.0_real64, &
+                                          embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32, &
+                                          optimizer=NPT_OPTIMIZER_NOVA, weight_decay=0.01_real64, &
+                                          gradient_accumulation=3_int32)
+      call neural_decoder_init(full_model, decoder_config, 848484_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'NOVA one-pass model initializes')
+      call neural_decoder_init(split_model, decoder_config, 848484_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'NOVA chunked model initializes')
+      call neural_train_state_init(full_state)
+      call neural_train_state_init(split_state)
+      call neural_train_metrics_reset(full_metrics)
+      call neural_train_utf8_file(full_model, bpe, corpus_path, full_config, full_state, full_metrics, status)
+      call assert_i32_equal(status, NPT_OK, 'NOVA one-pass training succeeds')
+      call neural_train_metrics_reset(split_metrics)
+      call neural_train_utf8_file(split_model, bpe, corpus_path, full_config, split_state, split_metrics, status, &
+                                  maximum_new_source_records=2_int64)
+      call assert_i32_equal(status, NPT_OK, 'first NOVA chunk succeeds')
+      call neural_checkpoint_save(checkpoint_path, split_model, bpe, full_config, split_state, status)
+      call assert_i32_equal(status, NPT_OK, 'NOVA chunk checkpoint saves')
+      call neural_checkpoint_load(checkpoint_path, bpe, restored_model, restored_config, restored_state, status)
+      call assert_i32_equal(status, NPT_OK, 'NOVA chunk checkpoint loads')
+      call neural_train_metrics_reset(resumed_metrics)
+      call neural_train_utf8_file(restored_model, bpe, corpus_path, restored_config, restored_state, resumed_metrics, &
+                                  status, skip_source_records=restored_state%source_records_completed, &
+                                  maximum_new_source_records=2_int64)
+      call assert_i32_equal(status, NPT_OK, 'resumed NOVA chunk succeeds')
+      call assert_true(restored_state%updates_completed == full_state%updates_completed, &
+                       'NOVA resume restores the optimizer-step cursor')
+      call assert_true(all(full_model%token_embedding == restored_model%token_embedding) .and. &
+                       all(full_model%output_bias == restored_model%output_bias), &
+                       'NOVA chunk+resume reproduces the one-pass parameters bit-identically')
+      call assert_true(all(full_state%nova_u_embedding == restored_state%nova_u_embedding) .and. &
+                       all(full_state%nova_u_bias == restored_state%nova_u_bias) .and. &
+                       all(full_state%nova_energy == restored_state%nova_energy), &
+                       'NOVA chunk+resume reproduces the one-pass optimizer state bit-identically')
+
+      open(newunit=unit, file=corpus_path, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+      open(newunit=unit, file=checkpoint_path, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+
+      call neural_decoder_destroy(model)
+      call neural_decoder_destroy(full_model)
+      call neural_decoder_destroy(split_model)
+      call neural_decoder_destroy(restored_model)
+      call bpe_destroy(bpe)
+   end subroutine test_nova_optimizer_contract
+
+   subroutine test_adamw_optimizer_contract()
+      type(bpe_model_t) :: bpe
+      type(neural_decoder_t) :: model, restored_model
+      type(neural_decoder_config_t) :: decoder_config
+      type(neural_train_config_t) :: config, restored_config
+      type(neural_train_state_t) :: state, sgd_state, restored_state
+      type(neural_train_metrics_t) :: before, after, update_metrics
+      integer(int32) :: status, tokens(12), index
+      integer :: unit, io_status
+      character(len=*), parameter :: checkpoint_path = 'test_adamw_contract.vgnr'
+
+      do index = 1_int32, size(tokens, kind=int32)
+         tokens(index) = modulo(index - 1_int32, 4_int32) + 1_int32
+      end do
+      call bpe_init(bpe, 1_int32, status)
+      call assert_i32_equal(status, BPE_OK, 'AdamW contract byte tokenizer initializes')
+      decoder_config = neural_decoder_config_t(vocabulary_size=256_int32, width=16_int32, heads=2_int32, &
+                                               local_window=4_int32, ffn_width=32_int32)
+      call neural_decoder_init(model, decoder_config, 424242_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'AdamW contract model initializes')
+
+      config = neural_train_config_t(learning_rate=0.003_real64, gradient_clip_norm=4.0_real64, &
+                                     embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32, &
+                                     optimizer=NPT_OPTIMIZER_ADAMW, weight_decay=0.01_real64)
+      call assert_true(neural_train_config_is_valid(config), 'default AdamW configuration is accepted')
+      ! Exactly representable binary values keep these boundary cases exact:
+      ! 0.5*2.0 = 1.0 and 0.5*3.0 = 1.5 in real64, so the decision cannot hinge
+      ! on rounding of a computed product.
+      config%learning_rate = 0.5_real64
+      config%weight_decay = 2.0_real64
+      call assert_true(.not. neural_train_config_is_valid(config), &
+                       'lr*weight_decay = 1 is rejected because decoupled decay would annihilate parameters')
+      config%weight_decay = 3.0_real64
+      call assert_true(.not. neural_train_config_is_valid(config), &
+                       'lr*weight_decay > 1 is rejected because decoupled decay would invert parameter signs')
+      config%learning_rate = 0.003_real64
+      config%weight_decay = 0.01_real64
+      config%adam_beta1 = 1.0_real64
+      call assert_true(.not. neural_train_config_is_valid(config), 'beta1 = 1 is rejected (bias correction degenerates)')
+      config%adam_beta1 = 0.9_real64
+      config%adam_beta2 = 1.0_real64
+      call assert_true(.not. neural_train_config_is_valid(config), 'beta2 = 1 is rejected')
+      config%adam_beta2 = 0.999_real64
+      config%adam_epsilon = 0.0_real64
+      call assert_true(.not. neural_train_config_is_valid(config), 'zero Adam epsilon is rejected')
+      config%adam_epsilon = 1.0e-8_real64
+      config%optimizer = NPT_OPTIMIZER_SGD
+      call assert_true(.not. neural_train_config_is_valid(config), &
+                       'SGD with a non-zero weight decay is rejected instead of silently ignoring it')
+      config%weight_decay = 0.0_real64
+      call assert_true(neural_train_config_is_valid(config), 'SGD without weight decay remains a valid legacy mode')
+
+      config = neural_train_config_t(learning_rate=0.050_real64, gradient_clip_norm=4.0_real64, &
+                                     embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32, &
+                                     optimizer=NPT_OPTIMIZER_ADAMW, weight_decay=0.01_real64)
+      call neural_train_state_init(state)
+      call neural_train_metrics_reset(before)
+      call neural_evaluate_token_sequence(model, tokens, size(tokens, kind=int32), config, before, status)
+      call assert_i32_equal(status, NPT_OK, 'AdamW baseline evaluation succeeds')
+      do index = 1_int32, 40_int32
+         call neural_train_metrics_reset(update_metrics)
+         call neural_train_token_sequence(model, tokens, size(tokens, kind=int32), config, state, update_metrics, status)
+         call assert_i32_equal(status, NPT_OK, 'AdamW teacher-forced update succeeds')
+      end do
+      call assert_true(allocated(state%adam_m_embedding) .and. allocated(state%adam_v_embedding) .and. &
+                       allocated(state%adam_m_bias) .and. allocated(state%adam_v_bias), &
+                       'AdamW allocates first/second moments for embeddings and output bias')
+      call assert_true(state%updates_completed == 40_int64 * int(size(tokens, kind=int32) - 1_int32, int64), &
+                       'AdamW counts exactly one update per teacher-forced prediction')
+      call neural_train_metrics_reset(after)
+      call neural_evaluate_token_sequence(model, tokens, size(tokens, kind=int32), config, after, status)
+      call assert_i32_equal(status, NPT_OK, 'AdamW post-update evaluation succeeds')
+      call assert_true(after%mean_nll < before%mean_nll, &
+                       'AdamW with decoupled weight decay still reduces deterministic toy NLL')
+
+      ! Checkpoint round trip must preserve the optimizer identity, its
+      ! hyperparameters and the exact moments, otherwise a resumed AdamW run
+      ! would silently change update semantics.
+      call neural_checkpoint_save(checkpoint_path, model, bpe, config, state, status)
+      call assert_i32_equal(status, NPT_OK, 'AdamW checkpoint saves')
+      call neural_checkpoint_load(checkpoint_path, bpe, restored_model, restored_config, restored_state, status)
+      call assert_i32_equal(status, NPT_OK, 'AdamW checkpoint loads')
+      call assert_true(restored_config%optimizer == NPT_OPTIMIZER_ADAMW .and. &
+                       restored_config%weight_decay == config%weight_decay .and. &
+                       restored_config%adam_beta1 == config%adam_beta1 .and. &
+                       restored_config%adam_beta2 == config%adam_beta2 .and. &
+                       restored_config%adam_epsilon == config%adam_epsilon, &
+                       'checkpoint preserves the AdamW optimizer identity and hyperparameters')
+      ! Fortran does not short-circuit .and., so never compare a possibly
+      ! unallocated array: guard the comparison instead of relying on order.
+      if (allocated(restored_state%adam_m_embedding) .and. allocated(restored_state%adam_v_embedding) .and. &
+          allocated(state%adam_m_embedding) .and. allocated(state%adam_v_embedding)) then
+         call assert_true(all(restored_state%adam_m_embedding == state%adam_m_embedding) .and. &
+                          all(restored_state%adam_v_embedding == state%adam_v_embedding), &
+                          'checkpoint preserves bit-identical AdamW moments')
+      else
+         call assert_true(.false., 'checkpoint preserves bit-identical AdamW moments')
+      end if
+
+      ! The legacy SGD mode stays available and never materializes AdamW state.
+      config%optimizer = NPT_OPTIMIZER_SGD
+      config%weight_decay = 0.0_real64
+      call neural_train_state_init(sgd_state)
+      call neural_train_metrics_reset(update_metrics)
+      call neural_train_token_sequence(model, tokens, size(tokens, kind=int32), config, sgd_state, update_metrics, status)
+      call assert_i32_equal(status, NPT_OK, 'legacy SGD update still succeeds')
+      call assert_true(.not. allocated(sgd_state%adam_m_embedding) .and. sgd_state%updates_completed > 0_int64, &
+                       'legacy SGD path keeps no AdamW moments while still advancing the cursor')
+
+      call neural_decoder_destroy(restored_model)
+      call neural_decoder_destroy(model)
+      call bpe_destroy(bpe)
+      open(newunit=unit, file=checkpoint_path, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+   end subroutine test_adamw_optimizer_contract
+
+   ! Mini-batch accumulation is the throughput mode of the tied-output
+   ! trainer: N per-token gradients are evaluated at the pre-step parameters,
+   ! averaged, and applied as one optimizer step.  These assertions pin the
+   ! contract that makes it safe: the accumulation factor is validated, one
+   ! step consumes a whole batch instead of one token, the batch is flushed at
+   ! every record boundary so 2+checkpoint+2 stays bit-identical to one pass,
+   ! and the factor survives the checkpoint round trip.
+   subroutine test_batched_optimizer_contract()
+      type(bpe_model_t) :: bpe
+      type(neural_decoder_t) :: model, full_model, split_model, restored_model
+      type(neural_decoder_config_t) :: decoder_config
+      type(neural_train_config_t) :: config, full_config, restored_config
+      type(neural_train_state_t) :: state, full_state, split_state, restored_state
+      type(neural_train_metrics_t) :: before, after, update_metrics
+      type(neural_train_metrics_t) :: full_metrics, split_metrics, resumed_metrics
+      integer(int32) :: status, tokens(12), index
+      integer :: unit, io_status
+      character(len=*), parameter :: corpus_path = 'test_neural_batch.txt'
+      character(len=*), parameter :: checkpoint_path = 'test_neural_batch.vgnr'
+
+      ! Validation: an accumulation factor of zero or one larger than a record
+      ! can never be honoured, so it must be rejected instead of silently
+      ! clamped (a clamp would change the effective learning rate).
+      config = neural_train_config_t(learning_rate=0.003_real64, gradient_clip_norm=4.0_real64, &
+                                     embedding_value_limit=4.0_real64, maximum_tokens_per_record=32_int32)
+      config%gradient_accumulation = 0_int32
+      call assert_true(.not. neural_train_config_is_valid(config), 'zero gradient accumulation is rejected')
+      config%gradient_accumulation = 33_int32
+      call assert_true(.not. neural_train_config_is_valid(config), &
+                       'gradient accumulation larger than a record is rejected')
+      config%gradient_accumulation = 32_int32
+      call assert_true(neural_train_config_is_valid(config), 'gradient accumulation equal to a record is accepted')
+      config%maximum_tokens_per_record = 4096_int32
+      config%gradient_accumulation = NPT_MAX_GRADIENT_ACCUMULATION + 1_int32
+      call assert_true(.not. neural_train_config_is_valid(config), &
+                       'gradient accumulation above the staging cap is rejected instead of allocating without bound')
+      config%maximum_tokens_per_record = 32_int32
+      config%gradient_accumulation = 1_int32
+      call assert_true(neural_train_config_is_valid(config), 'per-token accumulation remains valid')
+
+      do index = 1_int32, size(tokens, kind=int32)
+         tokens(index) = modulo(index - 1_int32, 4_int32) + 1_int32
+      end do
+      call bpe_init(bpe, 1_int32, status)
+      call assert_i32_equal(status, BPE_OK, 'batched byte tokenizer initializes')
+      decoder_config = neural_decoder_config_t(vocabulary_size=256_int32, width=16_int32, heads=2_int32, &
+                                               local_window=4_int32, ffn_width=32_int32)
+      call neural_decoder_init(model, decoder_config, 717171_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'batched contract model initializes')
+
+      config = neural_train_config_t(learning_rate=0.01_real64, gradient_clip_norm=4.0_real64, &
+                                     embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32, &
+                                     optimizer=NPT_OPTIMIZER_ADAMW, weight_decay=0.01_real64, &
+                                     gradient_accumulation=4_int32)
+      call neural_train_state_init(state)
+      call neural_train_metrics_reset(before)
+      call neural_evaluate_token_sequence(model, tokens, size(tokens, kind=int32), config, before, status)
+      call assert_i32_equal(status, NPT_OK, 'batched baseline evaluation succeeds')
+      do index = 1_int32, 30_int32
+         call neural_train_metrics_reset(update_metrics)
+         call neural_train_token_sequence(model, tokens, size(tokens, kind=int32), config, state, update_metrics, status)
+         call assert_i32_equal(status, NPT_OK, 'batched teacher-forced update succeeds')
+      end do
+      ! 11 prediction tokens per record with a batch of 4 => ceil(11/4) = 3
+      ! optimizer steps per record, i.e. the counter measures steps, not the
+      ! tokens that were accumulated into them.
+      call assert_true(state%updates_completed == 30_int64 * 3_int64, &
+                       'batched accumulation counts one optimizer step per full or trailing batch')
+      call assert_true(allocated(state%adam_m_embedding) .and. allocated(state%adam_v_embedding), &
+                       'batched AdamW path materializes the moments')
+      call neural_train_metrics_reset(after)
+      call neural_evaluate_token_sequence(model, tokens, size(tokens, kind=int32), config, after, status)
+      call assert_i32_equal(status, NPT_OK, 'batched post-update evaluation succeeds')
+      call assert_true(after%mean_nll < before%mean_nll, &
+                       'averaged mini-batch steps still reduce deterministic toy NLL')
+
+      ! Accumulation across a record boundary must never happen: every
+      ! checkpoint is written between records, so a batch that spanned two
+      ! records would make chunk+resume differ from the one-pass stream.
+      open(newunit=unit, file=corpus_path, status='replace', action='write', iostat=io_status)
+      call assert_true(io_status == 0, 'temporary batched neural corpus opens')
+      if (io_status == 0) then
+         write(unit, '(A)') 'abababab'
+         write(unit, '(A)') 'babababa'
+         write(unit, '(A)') 'abababab'
+         write(unit, '(A)') 'babababa'
+         close(unit)
+      end if
+      full_config = neural_train_config_t(learning_rate=0.02_real64, gradient_clip_norm=4.0_real64, &
+                                          embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32, &
+                                          optimizer=NPT_OPTIMIZER_ADAMW, weight_decay=0.01_real64, &
+                                          gradient_accumulation=3_int32)
+      call neural_decoder_init(full_model, decoder_config, 828282_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'batched one-pass model initializes')
+      call neural_decoder_init(split_model, decoder_config, 828282_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'batched chunked model initializes')
+      call neural_train_state_init(full_state)
+      call neural_train_state_init(split_state)
+      call neural_train_metrics_reset(full_metrics)
+      call neural_train_utf8_file(full_model, bpe, corpus_path, full_config, full_state, full_metrics, status)
+      call assert_i32_equal(status, NPT_OK, 'batched one-pass training succeeds')
+      call neural_train_metrics_reset(split_metrics)
+      call neural_train_utf8_file(split_model, bpe, corpus_path, full_config, split_state, split_metrics, status, &
+                                  maximum_new_source_records=2_int64)
+      call assert_i32_equal(status, NPT_OK, 'first batched chunk succeeds')
+      call neural_checkpoint_save(checkpoint_path, split_model, bpe, full_config, split_state, status)
+      call assert_i32_equal(status, NPT_OK, 'batched chunk checkpoint saves')
+      call neural_checkpoint_load(checkpoint_path, bpe, restored_model, restored_config, restored_state, status)
+      call assert_i32_equal(status, NPT_OK, 'batched chunk checkpoint loads')
+      call assert_true(restored_config%gradient_accumulation == 3_int32, &
+                       'checkpoint preserves the gradient accumulation factor')
+      call neural_train_metrics_reset(resumed_metrics)
+      call neural_train_utf8_file(restored_model, bpe, corpus_path, restored_config, restored_state, resumed_metrics, &
+                                  status, skip_source_records=restored_state%source_records_completed, &
+                                  maximum_new_source_records=2_int64)
+      call assert_i32_equal(status, NPT_OK, 'resumed batched chunk succeeds')
+      call assert_true(restored_state%updates_completed == full_state%updates_completed, &
+                       'batched resume restores the optimizer-step cursor')
+      call assert_true(all(full_model%token_embedding == restored_model%token_embedding) .and. &
+                       all(full_model%output_bias == restored_model%output_bias), &
+                       'batched chunk+resume reproduces the one-pass parameters bit-identically')
+      if (allocated(full_state%adam_m_embedding) .and. allocated(restored_state%adam_m_embedding)) then
+         call assert_true(all(full_state%adam_m_embedding == restored_state%adam_m_embedding) .and. &
+                          all(full_state%adam_v_embedding == restored_state%adam_v_embedding), &
+                          'batched chunk+resume reproduces the one-pass AdamW moments bit-identically')
+      else
+         call assert_true(.false., 'batched chunk+resume reproduces the one-pass AdamW moments bit-identically')
+      end if
+
+      call neural_decoder_destroy(model)
+      call neural_decoder_destroy(full_model)
+      call neural_decoder_destroy(split_model)
+      call neural_decoder_destroy(restored_model)
+      call bpe_destroy(bpe)
+      open(newunit=unit, file=corpus_path, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+      open(newunit=unit, file=checkpoint_path, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+   end subroutine test_batched_optimizer_contract
 
    subroutine test_text_ingest()
       type(vocabulary_t) :: vocab
