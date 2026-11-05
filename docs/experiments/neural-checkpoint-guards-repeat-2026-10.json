@@ -1,0 +1,169 @@
+{
+  "binary_sha256": "5fad87117305d687286230e52cc5d42e1860011f6bcde7e205bf0d33cd387894",
+  "configuration": {
+    "adam_eps": 1e-08,
+    "beta1": 0.9,
+    "beta2": 0.999,
+    "candidate_lr": 0.003,
+    "embedding_limit": 8.0,
+    "ffn": 64,
+    "grad_clip": 4.0,
+    "gradient_accumulation": 16,
+    "heads": 4,
+    "heldout_every": 9,
+    "label_smoothing": 0.0,
+    "max_tokens_per_record": 8192,
+    "min_lr_ratio": 0.1,
+    "min_pair_frequency": 2,
+    "optimizer": "nova",
+    "reference_lr": 0.003,
+    "requested_corpus_bytes": 200000,
+    "require_checkpoint_identity": true,
+    "schedule": "constant",
+    "threads": 1,
+    "total_updates": 0,
+    "vocab": 320,
+    "warmup_updates": 0,
+    "weight_decay": 0.01,
+    "width": 32,
+    "window": 8
+  },
+  "limitations": [
+    "Synthetic record-disjoint microbenchmark, not a real-world language or safety evaluation.",
+    "Equal tokens and updates do not prove equal energy, peak memory or cost on other hardware.",
+    "A learning rate better on these seeds need not generalize to other datasets or schedules.",
+    "The native trainer updates tied output embeddings only, not full backpropagation through the core."
+  ],
+  "reference_binary_sha256": "b813947435e1ab6aa87805875859fd08df971180b759b215b99293cd3d36f5f7",
+  "runs": [
+    {
+      "candidate_minus_reference_nll": 0.0,
+      "candidate_nll": 3.663403125745882,
+      "candidate_over_reference_time": 0.9641295596075515,
+      "candidate_train_seconds": 1.3090898219998053,
+      "checkpoint_byte_identical": true,
+      "checkpoint_sha256": "dc75a0c9a1e953d720ac39d22f3658492233dc8413240eedb1f189320629e2af",
+      "corpus_sha256": "6e9778fd659059665d0a63072e5113f13ea3d3198db1296c9fbc664adfd9b29e",
+      "heldout_prediction_tokens": 10072,
+      "heldout_sha256": "2e70c202c08a831095dba8183e06fdfb6140d335bb35db481fab73223dbdb7fa",
+      "initial_heldout_nll": 5.878298483989242,
+      "optimizer_updates": 5015,
+      "order": [
+        "reference",
+        "candidate"
+      ],
+      "phase_seconds": {
+        "decode": {
+          "candidate_seconds": 0.5976400072759134,
+          "reference_seconds": 0.6249090988367243
+        },
+        "project": {
+          "candidate_seconds": 0.09458944098150823,
+          "reference_seconds": 0.09582122800020443
+        },
+        "score": {
+          "candidate_seconds": 0.2191652929159318,
+          "reference_seconds": 0.22773597497871378
+        },
+        "update": {
+          "candidate_seconds": 0.3636988599973847,
+          "reference_seconds": 0.3743914999995468
+        }
+      },
+      "reference_nll": 3.663403125745882,
+      "reference_train_seconds": 1.3577945090000867,
+      "seed": 21,
+      "tokenizer_sha256": "464bca4f2e228c684c1bb4e6a259dafb03cd7b65514ea555d646c7431fee82cd",
+      "train_prediction_tokens": 78633,
+      "train_sha256": "5b246fa3d5ddc1edca0511a4e43aa4846609b151b56ac1cd1b7b69a935ba8173"
+    },
+    {
+      "candidate_minus_reference_nll": 0.0,
+      "candidate_nll": 3.648300514612964,
+      "candidate_over_reference_time": 0.9927447843590775,
+      "candidate_train_seconds": 1.3908528049996676,
+      "checkpoint_byte_identical": true,
+      "checkpoint_sha256": "5c25c63ad54157d0fca32b76225fbd7cac9357feb7bece28e52346dd5e1fb311",
+      "corpus_sha256": "098b1cd7b6f4080fa94adece1ae4641554de43116420ed6abc662f0e309929de",
+      "heldout_prediction_tokens": 10303,
+      "heldout_sha256": "35c04944dbc528b187780a2fc2670527f22a1dd9d5da9d81b6e7f0403b6d2654",
+      "initial_heldout_nll": 5.883680149895415,
+      "optimizer_updates": 5196,
+      "order": [
+        "candidate",
+        "reference"
+      ],
+      "phase_seconds": {
+        "decode": {
+          "candidate_seconds": 0.6373954132413928,
+          "reference_seconds": 0.6467790940387204
+        },
+        "project": {
+          "candidate_seconds": 0.09937117302615661,
+          "reference_seconds": 0.09813597607171687
+        },
+        "score": {
+          "candidate_seconds": 0.23011747900636692,
+          "reference_seconds": 0.23533948192016396
+        },
+        "update": {
+          "candidate_seconds": 0.38831036392366514,
+          "reference_seconds": 0.3859884190496814
+        }
+      },
+      "reference_nll": 3.648300514612964,
+      "reference_train_seconds": 1.4010174889990594,
+      "seed": 42,
+      "tokenizer_sha256": "7854ba447066a048fe8dd43c3ed1ffc7383634a083394c4128ab898a156f7613",
+      "train_prediction_tokens": 81578,
+      "train_sha256": "fa54c9de2e00d5e2571b0da19003b0b3e7e1ec208ce3cbd2ad968b84cb43f1d6"
+    },
+    {
+      "candidate_minus_reference_nll": 0.0,
+      "candidate_nll": 3.625583937829356,
+      "candidate_over_reference_time": 0.9065812684289191,
+      "candidate_train_seconds": 1.3781706879999547,
+      "checkpoint_byte_identical": true,
+      "checkpoint_sha256": "195eac80ec40a17c5d8d838d60c6614eb1bc6d6f9ec78554f32cb1de1cfc2850",
+      "corpus_sha256": "e5f9f3c6fb5a4a32c16abbfd248d5e8f07e18ea2ebe91cfe2ccb0c8d4de98349",
+      "heldout_prediction_tokens": 10456,
+      "heldout_sha256": "81e4bbb42ddb0ecf65cd3e0fd20d4bfb1ab9ae54ebd5accda381c20690d1dc86",
+      "initial_heldout_nll": 5.853315224027907,
+      "optimizer_updates": 5213,
+      "order": [
+        "reference",
+        "candidate"
+      ],
+      "phase_seconds": {
+        "decode": {
+          "candidate_seconds": 0.629466182037504,
+          "reference_seconds": 0.7014172549606883
+        },
+        "project": {
+          "candidate_seconds": 0.09781915501662297,
+          "reference_seconds": 0.10723983500247414
+        },
+        "score": {
+          "candidate_seconds": 0.229444328979298,
+          "reference_seconds": 0.2532668510120857
+        },
+        "update": {
+          "candidate_seconds": 0.3870311960199615,
+          "reference_seconds": 0.41965681801775645
+        }
+      },
+      "reference_nll": 3.625583937829356,
+      "reference_train_seconds": 1.5201843850009027,
+      "seed": 73,
+      "tokenizer_sha256": "e0c2f976bb7cde1d08cf667493274c1e0bb7363b12342438a064255df98b2b46",
+      "train_prediction_tokens": 81815,
+      "train_sha256": "57b2f8593a2e5e7453c37eff952fc8d4e762d39473feb811597ad0c277a8f745"
+    }
+  ],
+  "schema": "vegai-neural-equal-budget-quality/v1",
+  "summary": {
+    "candidate_better_seeds": 0,
+    "median_candidate_minus_reference_nll": 0.0,
+    "median_candidate_over_reference_time": 0.9641295596075515
+  }
+}

@@ -1,0 +1,9 @@
+{"schema":"vegai-exact-record-overlap/v1",
+"train_records":1000,
+"heldout_records":80,
+"heldout_unique_records":80,
+"overlapping_train_records":0,
+"overlapping_heldout_unique_records":0,
+"first_train_line":0,
+"first_heldout_line":0,
+"overlap":false}

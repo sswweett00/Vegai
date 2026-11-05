@@ -11,9 +11,8 @@
 !  from an OS-specific command.
 !==============================================================================
 module fortran_control
-   use, intrinsic :: iso_fortran_env, only: int32, int64, real64, output_unit, error_unit, &
+   use, intrinsic :: iso_fortran_env, only: int32, int64, real64, output_unit, error_unit, file_storage_size, &
                                           compiler_version, compiler_options
-   use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
    use hdc_pretraining, only: PT_OK, PT_CONTEXT_LEGACY_POSITIONAL, PT_CONTEXT_POSITIONAL, &
                               PT_CONTEXT_HYBRID, PT_CONTEXT_HIERARCHICAL, PT_CONTEXT_COHERENT, &
                               PT_CONTEXT_DEBIASED, PT_CONTEXT_RESONANT, hdc_pretrain_model_t, &
@@ -22,7 +21,11 @@ module fortran_control
                               pretrain_build_vocabulary, pretrain_train_file, &
                               pretrain_checkpoint_save, pretrain_checkpoint_load, &
                               pretrain_model_destroy, pretrain_model_is_ready
-   use fortran_integrity, only: FI_OK, sha256_file
+   use fortran_integrity, only: FI_OK, sha256_file, sha256_platform_supported
+   use portable_cli, only: CLI_OK, cli_get_argument, cli_parse_integer32, cli_parse_integer64, cli_parse_real64, &
+                           cli_valid_utf8, cli_real64_is_finite
+   use corpus_preflight, only: CP_OK, corpus_preflight_limits_t, corpus_preflight_stats_t, &
+                               corpus_preflight_scan, corpus_preflight_strict_ok
    use fortran_quality_gate, only: QG_OK, QG_ERR_IO, quality_case_t, quality_policy_t, &
                                    quality_report_t, quality_case_file_load, quality_gate_evaluate, &
                                    quality_policy_is_valid
@@ -90,7 +93,7 @@ contains
       plan = fortran_resource_plan_t()
       status = FC_ERR_INVALID_ARGUMENT
       if (max_vocabulary <= 0_int64) return
-      if (.not. ieee_is_finite(reserve_fraction)) return
+      if (.not. cli_real64_is_finite(reserve_fraction)) return
       if (reserve_fraction < 0.0_real64 .or. reserve_fraction > 4.0_real64) return
       ! Keep each documented multiplication inside signed int64 with ample
       ! headroom. A larger request cannot be allocated by the bounded model in
@@ -121,7 +124,9 @@ contains
       resident_before_reserve = plan%model_payload_bytes + plan%resonant_snapshot_bytes + &
                                  plan%vocabulary_allowance_bytes + plan%context_staging_bytes + &
                                  plan%line_update_scratch_bytes + plan%lookup_cache_workspace_bytes
-      plan%reserve_bytes = int(real(resident_before_reserve, real64) * reserve_fraction, int64)
+      ! Compute the ceiling of the represented fraction, including when a
+      ! rounded floating multiply would appear to be an exact whole byte.
+      plan%reserve_bytes = reserve_bytes_ceiling(resident_before_reserve, reserve_fraction)
       plan%required_available_bytes = resident_before_reserve + plan%reserve_bytes
       plan%estimated_checkpoint_bytes = FC_CHECKPOINT_FIXED_BYTES + &
                                         max_vocabulary * FC_CHECKPOINT_BYTES_PER_SLOT
@@ -133,9 +138,59 @@ contains
       status = FC_OK
    end subroutine fortran_resource_plan_estimate
 
+   pure integer(int64) function reserve_bytes_ceiling(resident, reserve) result(bytes)
+      integer(int64), intent(in) :: resident
+      real(real64), intent(in) :: reserve
+      integer(int64), parameter :: base = 1073741824_int64 ! 2**30
+      integer(int64) :: mantissa, n0, n1, m0, m1, p0, p1, p2, mask, whole
+      integer :: shift_bits
+      logical :: has_remainder
+
+      bytes = 0_int64
+      if (reserve == 0.0_real64) return
+      ! For binary64 the exact represented fraction is mantissa / 2**shift.
+      ! Split the at-most-93-bit integer product into three base-2**30 limbs;
+      ! each intermediate is bounded by the planner's vocabulary cap. No
+      ! nonstandard 128-bit integer kind or training-loop work is required.
+      if (radix(reserve) == 2 .and. digits(reserve) == 53) then
+         mantissa = int(scale(fraction(reserve), digits(reserve)), int64)
+         shift_bits = digits(reserve) - exponent(reserve)
+         if (shift_bits >= 94) then
+            bytes = 1_int64
+            return
+         end if
+         n0 = modulo(resident, base)
+         n1 = resident / base
+         m0 = modulo(mantissa, base)
+         m1 = mantissa / base
+         p0 = n0 * m0
+         p1 = n0 * m1 + n1 * m0 + p0 / base
+         p2 = n1 * m1 + p1 / base
+         p0 = modulo(p0, base)
+         p1 = modulo(p1, base)
+         if (shift_bits < 60) then
+            whole = shiftl(p2, 60 - shift_bits) + shiftr(p1, shift_bits - 30)
+            mask = shiftl(1_int64, shift_bits - 30) - 1_int64
+            has_remainder = iand(p1, mask) /= 0_int64 .or. p0 /= 0_int64
+         else
+            whole = shiftr(p2, shift_bits - 60)
+            mask = shiftl(1_int64, shift_bits - 60) - 1_int64
+            has_remainder = iand(p2, mask) /= 0_int64 .or. p1 /= 0_int64 .or. p0 /= 0_int64
+         end if
+         bytes = whole
+         if (has_remainder) bytes = bytes + 1_int64
+      else
+         ! Avoid making assumptions about arithmetic accuracy or conversion
+         ! on an untested real format. The validated fraction is at most four,
+         ! so this integer-only fallback cannot underreserve; it may be coarse.
+         bytes = 4_int64 * resident
+      end if
+   end function reserve_bytes_ceiling
+
    subroutine fortran_control_main(exit_status)
       integer(int32), intent(out) :: exit_status
       integer :: argument_count
+      integer(int32) :: argument_status
       character(len=512) :: command
 
       exit_status = FC_OK
@@ -145,12 +200,19 @@ contains
          exit_status = FC_ERR_INVALID_ARGUMENT
          return
       end if
-      call get_command_argument(1, command)
+      call cli_get_argument(1, command, argument_status)
+      if (argument_status /= CLI_OK) then
+         write(error_unit, '(A)') 'vegai_control: command is empty, too long, or unreadable'
+         exit_status = FC_ERR_INVALID_ARGUMENT
+         return
+      end if
       select case (trim(command))
       case ('profile')
          call profile_command(argument_count, exit_status)
       case ('resource-plan')
          call resource_plan_command(argument_count, exit_status)
+      case ('corpus-manifest')
+         call corpus_manifest_command(argument_count, exit_status)
       case ('smoke')
          call smoke_command(argument_count, exit_status)
       case ('quality-gate')
@@ -158,6 +220,11 @@ contains
       case ('attest')
          call attest_command(argument_count, exit_status)
       case ('help', '--help', '-h')
+         if (argument_count /= 1) then
+            write(error_unit, '(A)') 'vegai_control: help takes no additional arguments'
+            exit_status = FC_ERR_INVALID_ARGUMENT
+            return
+         end if
          call print_usage(output_unit)
       case default
          write(error_unit, '(A,A)') 'vegai_control: unknown command: ', trim(command)
@@ -177,28 +244,22 @@ contains
       status = FC_OK
       index = 2
       do while (index <= argument_count)
-         call get_command_argument(index, option)
+         call control_argument(index, option, status)
+         if (status /= FC_OK) return
          select case (trim(option))
          case ('--format')
-            if (index == argument_count) then
-               status = FC_ERR_INVALID_ARGUMENT
-               return
-            end if
-            call get_command_argument(index + 1, value)
-            format = trim(value)
-            index = index + 2
+            call option_value(argument_count, index, value, status)
+            format = value
          case ('--output')
-            if (index == argument_count) then
-               status = FC_ERR_INVALID_ARGUMENT
-               return
-            end if
-            call get_command_argument(index + 1, output_path)
-            index = index + 2
+            call option_value(argument_count, index, output_path, status, path=.true.)
          case default
             write(error_unit, '(A,A)') 'vegai_control profile: unsupported option: ', trim(option)
             status = FC_ERR_INVALID_ARGUMENT
-            return
          end select
+         if (status /= FC_OK) then
+            write(error_unit, '(A,A)') 'vegai_control profile: invalid value for ', trim(option)
+            return
+         end if
       end do
       if (trim(format) /= 'text' .and. trim(format) /= 'json') then
          write(error_unit, '(A)') 'vegai_control profile: --format must be text or json'
@@ -230,7 +291,8 @@ contains
          write(error_unit, '(A)') 'vegai_control resource-plan: CORPUS is required'
          return
       end if
-      call get_command_argument(2, corpus_path)
+      call control_argument(2, corpus_path, status, path=.true.)
+      if (status /= FC_OK) return
       checkpoint_path = ''
       output_path = ''
       format = 'text'
@@ -245,15 +307,15 @@ contains
       require_ready = .false.
       index = 3
       do while (index <= argument_count)
-         call get_command_argument(index, option)
+         call control_argument(index, option, status)
+         if (status /= FC_OK) return
          select case (trim(option))
          case ('--checkpoint')
-            call option_value(argument_count, index, checkpoint_path, status)
+            call option_value(argument_count, index, checkpoint_path, status, path=.true.)
          case ('--max-vocab')
             call option_value(argument_count, index, value, status)
             if (status == FC_OK) then
-               read(value, *, iostat=io_status) maximum_vocabulary
-               if (io_status /= 0) status = FC_ERR_INVALID_ARGUMENT
+               call control_integer64(value, maximum_vocabulary, status)
             end if
          case ('--context-mode')
             call option_value(argument_count, index, value, status)
@@ -280,33 +342,32 @@ contains
          case ('--reserve-fraction')
             call option_value(argument_count, index, value, status)
             if (status == FC_OK) then
-               read(value, *, iostat=io_status) reserve_fraction
-               if (io_status /= 0) status = FC_ERR_INVALID_ARGUMENT
+               call control_real64(value, reserve_fraction, status)
             end if
          case ('--omp-threads')
             call option_value(argument_count, index, value, status)
             if (status == FC_OK) then
-               read(value, *, iostat=io_status) requested_threads
-               if (io_status /= 0 .or. requested_threads <= 0_int32) status = FC_ERR_INVALID_ARGUMENT
+               call control_integer32(value, requested_threads, status)
+               if (status == FC_OK .and. requested_threads <= 0_int32) status = FC_ERR_INVALID_ARGUMENT
             end if
          case ('--available-memory-bytes')
             call option_value(argument_count, index, value, status)
             if (status == FC_OK) then
-               read(value, *, iostat=io_status) available_memory
-               if (io_status /= 0 .or. available_memory < 0_int64) status = FC_ERR_INVALID_ARGUMENT
+               call control_integer64(value, available_memory, status)
+               if (status == FC_OK .and. available_memory < 0_int64) status = FC_ERR_INVALID_ARGUMENT
             end if
             memory_supplied = status == FC_OK
          case ('--available-storage-bytes')
             call option_value(argument_count, index, value, status)
             if (status == FC_OK) then
-               read(value, *, iostat=io_status) available_storage
-               if (io_status /= 0 .or. available_storage < 0_int64) status = FC_ERR_INVALID_ARGUMENT
+               call control_integer64(value, available_storage, status)
+               if (status == FC_OK .and. available_storage < 0_int64) status = FC_ERR_INVALID_ARGUMENT
             end if
             storage_supplied = status == FC_OK
          case ('--format')
             call option_value(argument_count, index, format, status)
          case ('--output')
-            call option_value(argument_count, index, output_path, status)
+            call option_value(argument_count, index, output_path, status, path=.true.)
          case ('--require-ready')
             require_ready = .true.
             index = index + 1
@@ -324,8 +385,10 @@ contains
          status = FC_ERR_INVALID_ARGUMENT
          return
       end if
+      exists = .false.
+      corpus_bytes = -1_int64
       inquire(file=trim(corpus_path), exist=exists, size=corpus_bytes, iostat=io_status)
-      if (.not. exists .or. io_status /= 0) then
+      if (.not. exists .or. io_status /= 0 .or. corpus_bytes < 0_int64) then
          write(error_unit, '(A,A)') 'vegai_control resource-plan: cannot inspect corpus: ', trim(corpus_path)
          status = FC_ERR_IO
          return
@@ -340,10 +403,12 @@ contains
       plan%available_storage_known = storage_supplied
       plan%available_memory_bytes = available_memory
       plan%available_storage_bytes = available_storage
-      plan%ready = .true.
+      ! Unknown availability is not evidence that a host is ready. The plan
+      ! remains usable as an estimate, but `ready` is true only when both
+      ! operator-supplied resource observations pass their respective bounds.
+      plan%ready = memory_supplied .and. storage_supplied
       if (memory_supplied .and. available_memory < plan%required_available_bytes) plan%ready = .false.
       if (storage_supplied .and. available_storage < plan%estimated_checkpoint_bytes) plan%ready = .false.
-      if (require_ready .and. (.not. memory_supplied .or. .not. storage_supplied)) plan%ready = .false.
 
       call emit_resource_plan(output_unit, trim(format), trim(corpus_path), corpus_bytes, trim(checkpoint_path), &
                               require_ready, plan)
@@ -360,6 +425,161 @@ contains
       end if
    end subroutine resource_plan_command
 
+   subroutine corpus_manifest_command(argument_count, status)
+      integer, intent(in) :: argument_count
+      integer(int32), intent(out) :: status
+      type(corpus_preflight_stats_t) :: stats
+      type(corpus_preflight_limits_t) :: limits
+      character(len=512) :: corpus_path, output_path, source, license, retrieved, preprocessing, option, expected, value
+      integer(int32) :: scan_status
+      integer :: index, position, code, unit, io_status
+      logical :: strict, native_ok
+
+      status = FC_ERR_INVALID_ARGUMENT
+      if (argument_count < 2) then
+         write(error_unit, '(A)') 'vegai_control corpus-manifest: CORPUS is required'
+         return
+      end if
+      call control_argument(2, corpus_path, status, path=.true.)
+      if (status /= FC_OK) return
+      output_path = '-'
+      source = ''
+      license = ''
+      retrieved = ''
+      preprocessing = ''
+      expected = ''
+      limits = corpus_preflight_limits_t()
+      strict = .false.
+      index = 3
+      do while (index <= argument_count)
+         call control_argument(index, option, status)
+         if (status /= FC_OK) return
+         select case (trim(option))
+         case ('--output')
+            call option_value(argument_count, index, output_path, status, path=.true.)
+         case ('--source')
+            call option_value(argument_count, index, source, status, path=.true.)
+         case ('--license')
+            call option_value(argument_count, index, license, status, path=.true.)
+         case ('--retrieved-at')
+            call option_value(argument_count, index, retrieved, status, path=.true.)
+         case ('--preprocessing')
+            call option_value(argument_count, index, preprocessing, status, path=.true.)
+         case ('--max-line-bytes')
+            call option_value(argument_count, index, value, status)
+            if (status == FC_OK) call control_integer64(value, limits%max_line_bytes, status)
+            if (status == FC_OK .and. limits%max_line_bytes <= 0_int64) status = FC_ERR_INVALID_ARGUMENT
+         case ('--token-length')
+            call option_value(argument_count, index, value, status)
+            if (status == FC_OK) call control_integer64(value, limits%token_length_bytes, status)
+            if (status == FC_OK .and. limits%token_length_bytes <= 0_int64) status = FC_ERR_INVALID_ARGUMENT
+         case ('--max-tokens-per-line')
+            call option_value(argument_count, index, value, status)
+            if (status == FC_OK) call control_integer64(value, limits%max_tokens_per_line, status)
+            if (status == FC_OK .and. limits%max_tokens_per_line <= 0_int64) status = FC_ERR_INVALID_ARGUMENT
+         case ('--expect-sha256')
+            call option_value(argument_count, index, expected, status)
+            if (status == FC_OK) then
+               if (len_trim(expected) /= 64) then
+                  status = FC_ERR_INVALID_ARGUMENT
+               else
+                  do position = 1, 64
+                     code = iachar(expected(position:position))
+                     if (code >= iachar('A') .and. code <= iachar('F')) then
+                        expected(position:position) = achar(code + iachar('a') - iachar('A'))
+                        code = iachar(expected(position:position))
+                     end if
+                     if (.not. ((code >= iachar('0') .and. code <= iachar('9')) .or. &
+                                (code >= iachar('a') .and. code <= iachar('f')))) then
+                        status = FC_ERR_INVALID_ARGUMENT
+                     end if
+                  end do
+               end if
+            end if
+         case ('--strict-contract')
+            strict = .true.
+            index = index + 1
+         case default
+            status = FC_ERR_INVALID_ARGUMENT
+         end select
+         if (status /= FC_OK) then
+            write(error_unit, '(A,A)') 'vegai_control corpus-manifest: invalid option or value: ', trim(option)
+            return
+         end if
+      end do
+      call corpus_preflight_scan(trim(corpus_path), stats, scan_status, limits, native_ok)
+      if (scan_status /= CP_OK) then
+         write(error_unit, '(A,I0)') 'vegai_control corpus-manifest: scan failed, status=', scan_status
+         status = FC_ERR_IO
+         return
+      end if
+      if (len_trim(expected) > 0 .and. expected /= stats%sha256) then
+         write(error_unit, '(A)') 'vegai_control corpus-manifest: SHA-256 mismatch'
+         status = FC_ERR_ATTESTATION
+         return
+      end if
+      if (strict .and. (.not. corpus_preflight_strict_ok(stats) .or. .not. native_ok)) then
+         write(error_unit, '(A)') 'vegai_control corpus-manifest: configured or native strict HDC contract rejected the corpus'
+         status = FC_ERR_INVALID_ARGUMENT
+         return
+      end if
+      if (trim(output_path) == '-') then
+         call emit_corpus_manifest(output_unit, corpus_path, source, license, retrieved, preprocessing, &
+                                   limits, stats, strict, native_ok)
+      else
+         ! Exclusive create protects inputs, existing reports, and aliases that
+         ! already exist; no temporary copy or overwrite is performed.
+         open(newunit=unit, file=trim(output_path), status='new', action='write', form='formatted', iostat=io_status)
+         if (io_status /= 0) then
+            write(error_unit, '(A,A)') 'vegai_control corpus-manifest: cannot create output: ', trim(output_path)
+            status = FC_ERR_IO
+            return
+         end if
+         call emit_corpus_manifest(unit, corpus_path, source, license, retrieved, preprocessing, &
+                                   limits, stats, strict, native_ok)
+         close(unit, iostat=io_status)
+         if (io_status /= 0) then
+            status = FC_ERR_IO
+            return
+         end if
+      end if
+      status = FC_OK
+   end subroutine corpus_manifest_command
+
+   subroutine emit_corpus_manifest(unit, path, source, license, retrieved, preprocessing, limits, stats, strict, native_ok)
+      integer, intent(in) :: unit
+      character(len=*), intent(in) :: path, source, license, retrieved, preprocessing
+      type(corpus_preflight_limits_t), intent(in) :: limits
+      type(corpus_preflight_stats_t), intent(in) :: stats
+      logical, intent(in) :: strict, native_ok
+
+      write(unit, '(A)') '{'
+      write(unit, '(A)') '  "schema": "vegai-corpus-manifest/v1",'
+      write(unit, '(A)') '  "input": {"path": ' // json_quote(path) // ', "sha256": ' // &
+                          json_quote(stats%sha256) // ', "bytes": ' // integer_text(stats%bytes) // &
+                          ', "physical_lf_records": ' // integer_text(stats%records) // '},'
+      write(unit, '(A)') '  "declared_provenance": {"source": ' // json_quote(source) // ', "license": ' // &
+                          json_quote(license) // ', "retrieved_at": ' // json_quote(retrieved) // &
+                          ', "preprocessing": ' // json_quote(preprocessing) // '},'
+      write(unit, '(A)') '  "vegai_ascii_ingest_contract": {"max_line_bytes": ' // &
+                          integer_text(limits%max_line_bytes) // ', "token_length_bytes": ' // &
+                          integer_text(limits%token_length_bytes) // ', "max_tokens_per_line": ' // &
+                          integer_text(limits%max_tokens_per_line) // &
+                          ', "token_bytes": "A-Z a-z 0-9 underscore apostrophe; ASCII lowercase"},'
+      write(unit, '(A)') '  "preflight": {"overlong_records": ' // integer_text(stats%overlong_records) // &
+                          ', "records_with_tokenizer_truncation": ' // &
+                          integer_text(stats%records_with_tokenizer_truncation) // &
+                          ', "accepted_tokens": ' // integer_text(stats%accepted_tokens) // &
+                          ', "dropped_tokens": ' // integer_text(stats%dropped_tokens) // &
+                          ', "maximum_record_bytes": ' // integer_text(stats%maximum_record_bytes) // &
+                          ', "non_ascii_bytes": ' // integer_text(stats%non_ascii_bytes) // &
+                          ', "crlf_records": ' // integer_text(stats%crlf_records) // '},'
+      write(unit, '(A)') '  "strict_contract_requested": ' // logical_text(strict) // ','
+      write(unit, '(A)') '  "strict_configured_contract_ok": ' // logical_text(corpus_preflight_strict_ok(stats)) // ','
+      write(unit, '(A)') '  "strict_hdc_contract_ok": ' // logical_text(native_ok)
+      write(unit, '(A)') '}'
+   end subroutine emit_corpus_manifest
+
    subroutine smoke_command(argument_count, status)
       integer, intent(in) :: argument_count
       integer(int32), intent(out) :: status
@@ -368,14 +588,30 @@ contains
       type(hdc_pretrain_config_t) :: config
       type(pretrain_metrics_t) :: vocabulary_metrics, training_metrics
       type(pretrain_execution_report_t) :: execution
+      integer :: io_status
+      logical :: exists
 
       status = FC_ERR_INVALID_ARGUMENT
       if (argument_count /= 3) then
          write(error_unit, '(A)') 'vegai_control smoke: expected CORPUS CHECKPOINT'
          return
       end if
-      call get_command_argument(2, corpus_path)
-      call get_command_argument(3, checkpoint_path)
+      call control_argument(2, corpus_path, status, path=.true.)
+      if (status /= FC_OK) return
+      call control_argument(3, checkpoint_path, status, path=.true.)
+      if (status /= FC_OK) return
+      ! Do not replace a corpus or an existing checkpoint. A new smoke run
+      ! requires its own destination; this also blocks hard-link aliases.
+      inquire(file=trim(checkpoint_path), exist=exists, iostat=io_status)
+      if (io_status /= 0) then
+         status = FC_ERR_IO
+         return
+      end if
+      if (exists .or. trim(checkpoint_path) == trim(corpus_path)) then
+         write(error_unit, '(A)') 'vegai_control smoke: checkpoint destination already exists or aliases corpus'
+         status = FC_ERR_INVALID_ARGUMENT
+         return
+      end if
       config = hdc_pretrain_config_t()
       config%max_vocabulary = 64_int32
       config%min_frequency = 2_int64
@@ -398,7 +634,7 @@ contains
          call pretrain_model_destroy(model)
          return
       end if
-      call pretrain_checkpoint_save(model, trim(checkpoint_path), status)
+      call pretrain_checkpoint_save(model, trim(checkpoint_path), status, replace_existing=.false.)
       if (status /= PT_OK) then
          write(error_unit, '(A,I0)') 'vegai_control smoke: checkpoint save failed, status=', status
          status = FC_ERR_TRAINING
@@ -441,7 +677,7 @@ contains
       type(quality_report_t) :: report
       character(len=512) :: checkpoint_path, cases_path, output_path, format, option, value
       integer(int32) :: gate_status
-      integer :: index, io_status
+      integer :: index
       logical :: have_minimum_cases, have_minimum_accuracy, have_minimum_wilson
       logical :: have_minimum_mean, have_minimum_case, have_maximum_incorrect
 
@@ -450,8 +686,10 @@ contains
          write(error_unit, '(A)') 'vegai_control quality-gate: expected CHECKPOINT CASES'
          return
       end if
-      call get_command_argument(2, checkpoint_path)
-      call get_command_argument(3, cases_path)
+      call control_argument(2, checkpoint_path, status, path=.true.)
+      if (status /= FC_OK) return
+      call control_argument(3, cases_path, status, path=.true.)
+      if (status /= FC_OK) return
       output_path = ''
       format = 'text'
       policy = quality_policy_t()
@@ -464,54 +702,49 @@ contains
       status = FC_OK
       index = 4
       do while (index <= argument_count)
-         call get_command_argument(index, option)
+         call control_argument(index, option, status)
+         if (status /= FC_OK) return
          select case (trim(option))
          case ('--minimum-cases')
             call option_value(argument_count, index, value, status)
             if (status == FC_OK) then
-               read(value, *, iostat=io_status) policy%minimum_cases
-               if (io_status /= 0) status = FC_ERR_INVALID_ARGUMENT
+               call control_integer32(value, policy%minimum_cases, status)
             end if
             have_minimum_cases = status == FC_OK
          case ('--minimum-top1-accuracy')
             call option_value(argument_count, index, value, status)
             if (status == FC_OK) then
-               read(value, *, iostat=io_status) policy%minimum_top1_accuracy
-               if (io_status /= 0) status = FC_ERR_INVALID_ARGUMENT
+               call control_real64(value, policy%minimum_top1_accuracy, status)
             end if
             have_minimum_accuracy = status == FC_OK
          case ('--minimum-top1-wilson-lower-bound-95')
             call option_value(argument_count, index, value, status)
             if (status == FC_OK) then
-               read(value, *, iostat=io_status) policy%minimum_top1_wilson_lower_bound_95
-               if (io_status /= 0) status = FC_ERR_INVALID_ARGUMENT
+               call control_real64(value, policy%minimum_top1_wilson_lower_bound_95, status)
             end if
             have_minimum_wilson = status == FC_OK
          case ('--minimum-mean-similarity')
             call option_value(argument_count, index, value, status)
             if (status == FC_OK) then
-               read(value, *, iostat=io_status) policy%minimum_mean_similarity
-               if (io_status /= 0) status = FC_ERR_INVALID_ARGUMENT
+               call control_real64(value, policy%minimum_mean_similarity, status)
             end if
             have_minimum_mean = status == FC_OK
          case ('--minimum-case-similarity')
             call option_value(argument_count, index, value, status)
             if (status == FC_OK) then
-               read(value, *, iostat=io_status) policy%minimum_case_similarity
-               if (io_status /= 0) status = FC_ERR_INVALID_ARGUMENT
+               call control_real64(value, policy%minimum_case_similarity, status)
             end if
             have_minimum_case = status == FC_OK
          case ('--maximum-incorrect-cases')
             call option_value(argument_count, index, value, status)
             if (status == FC_OK) then
-               read(value, *, iostat=io_status) policy%maximum_incorrect_cases
-               if (io_status /= 0) status = FC_ERR_INVALID_ARGUMENT
+               call control_integer32(value, policy%maximum_incorrect_cases, status)
             end if
             have_maximum_incorrect = status == FC_OK
          case ('--format')
             call option_value(argument_count, index, format, status)
          case ('--output')
-            call option_value(argument_count, index, output_path, status)
+            call option_value(argument_count, index, output_path, status, path=.true.)
          case default
             write(error_unit, '(A,A)') 'vegai_control quality-gate: unsupported option: ', trim(option)
             status = FC_ERR_INVALID_ARGUMENT
@@ -593,22 +826,25 @@ contains
          write(error_unit, '(A)') 'vegai_control attest: expected CORPUS CHECKPOINT'
          return
       end if
-      call get_command_argument(2, corpus_path)
-      call get_command_argument(3, checkpoint_path)
+      call control_argument(2, corpus_path, status, path=.true.)
+      if (status /= FC_OK) return
+      call control_argument(3, checkpoint_path, status, path=.true.)
+      if (status /= FC_OK) return
       quality_report_path = ''
       output_path = ''
       format = 'text'
       status = FC_OK
       index = 4
       do while (index <= argument_count)
-         call get_command_argument(index, option)
+         call control_argument(index, option, status)
+         if (status /= FC_OK) return
          select case (trim(option))
          case ('--quality-report')
-            call option_value(argument_count, index, quality_report_path, status)
+            call option_value(argument_count, index, quality_report_path, status, path=.true.)
          case ('--format')
             call option_value(argument_count, index, format, status)
          case ('--output')
-            call option_value(argument_count, index, output_path, status)
+            call option_value(argument_count, index, output_path, status, path=.true.)
          case default
             write(error_unit, '(A,A)') 'vegai_control attest: unsupported option: ', trim(option)
             status = FC_ERR_INVALID_ARGUMENT
@@ -675,18 +911,54 @@ contains
       status = FC_OK
    end subroutine attest_command
 
-   subroutine option_value(argument_count, index, value, status)
+   subroutine control_argument(index, value, status, path)
+      integer, intent(in) :: index
+      character(len=*), intent(out) :: value
+      integer(int32), intent(out) :: status
+      logical, intent(in), optional :: path
+      integer(int32) :: argument_status
+
+      call cli_get_argument(index, value, argument_status, path)
+      status = FC_ERR_INVALID_ARGUMENT
+      if (argument_status == CLI_OK) status = FC_OK
+   end subroutine control_argument
+
+   subroutine control_integer64(value, parsed, status)
+      character(len=*), intent(in) :: value
+      integer(int64), intent(out) :: parsed
+      integer(int32), intent(out) :: status
+      call cli_parse_integer64(value, parsed, status)
+      if (status /= CLI_OK) status = FC_ERR_INVALID_ARGUMENT
+   end subroutine control_integer64
+
+   subroutine control_integer32(value, parsed, status)
+      character(len=*), intent(in) :: value
+      integer(int32), intent(out) :: parsed
+      integer(int32), intent(out) :: status
+      call cli_parse_integer32(value, parsed, status)
+      if (status /= CLI_OK) status = FC_ERR_INVALID_ARGUMENT
+   end subroutine control_integer32
+
+   subroutine control_real64(value, parsed, status)
+      character(len=*), intent(in) :: value
+      real(real64), intent(out) :: parsed
+      integer(int32), intent(out) :: status
+      call cli_parse_real64(value, parsed, status)
+      if (status /= CLI_OK) status = FC_ERR_INVALID_ARGUMENT
+   end subroutine control_real64
+
+   subroutine option_value(argument_count, index, value, status, path)
       integer, intent(in) :: argument_count
       integer, intent(inout) :: index
       character(len=*), intent(out) :: value
       integer(int32), intent(out) :: status
+      logical, intent(in), optional :: path
 
       value = ''
       status = FC_ERR_INVALID_ARGUMENT
       if (index >= argument_count) return
-      call get_command_argument(index + 1, value)
+      call control_argument(index + 1, value, status, path)
       index = index + 2
-      status = FC_OK
    end subroutine option_value
 
    subroutine emit_profile(unit, format)
@@ -701,9 +973,13 @@ contains
       if (trim(format) == 'json') then
          write(unit, '(A)') '{'
          write(unit, '(A)') '  "schema": "vegai-fortran-native-profile/v1",'
-         write(unit, '(A)') '  "language": "Fortran 2023",'
+         write(unit, '(A)') '  "language": "Fortran",'
          write(unit, '(A)') '  "compiler_version": ' // json_quote(compiler_version()) // ','
          write(unit, '(A)') '  "compiler_options": ' // json_quote(compiler_options()) // ','
+         write(unit, '(A)') '  "real64_radix": ' // integer32_text(int(radix(0.0_real64), int32)) // ','
+         write(unit, '(A)') '  "real64_digits": ' // integer32_text(int(digits(0.0_real64), int32)) // ','
+         write(unit, '(A)') '  "file_storage_unit_bits": ' // integer32_text(int(file_storage_size, int32)) // ','
+         write(unit, '(A)') '  "sha256_octet_supported": ' // logical_text(sha256_platform_supported()) // ','
          write(unit, '(A)') '  "omp_num_threads_environment": ' // json_quote(trim(omp_threads)) // ','
          write(unit, '(A)') '  "execution_backend": "portable-cpu",'
          write(unit, '(A)') '  "gpu_compute_used": false,'
@@ -713,9 +989,12 @@ contains
          write(unit, '(A)') '}'
       else
          write(unit, '(A)') 'Vegai native Fortran profile'
-         write(unit, '(A,A)') 'Language: ', 'Fortran 2023'
+         write(unit, '(A,A)') 'Language: ', 'Fortran (minimum standard 2018)'
          write(unit, '(A,A)') 'Compiler: ', trim(compiler_version())
          write(unit, '(A,A)') 'Compiler options: ', trim(compiler_options())
+         write(unit, '(A,I0,A,I0)') 'real64 radix/digits: ', radix(0.0_real64), '/', digits(0.0_real64)
+         write(unit, '(A,I0)') 'File storage unit bits: ', file_storage_size
+         write(unit, '(A,L1)') 'SHA-256 octet representation supported: ', sha256_platform_supported()
          write(unit, '(A,A)') 'OMP_NUM_THREADS: ', trim(omp_threads)
          write(unit, '(A)') 'Execution backend: portable CPU'
          write(unit, '(A)') 'GPU/NPU compute: not claimed by this native profile'
@@ -729,15 +1008,16 @@ contains
       integer(int32), intent(out) :: status
       integer :: unit, io_status
 
-      open(newunit=unit, file=trim(path), status='replace', action='write', form='formatted', iostat=io_status)
+      open(newunit=unit, file=trim(path), status='new', action='write', form='formatted', iostat=io_status)
       if (io_status /= 0) then
          write(error_unit, '(A,A)') 'vegai_control profile: cannot write output: ', trim(path)
          status = FC_ERR_IO
          return
       end if
       call emit_profile(unit, format)
-      close(unit)
+      close(unit, iostat=io_status)
       status = FC_OK
+      if (io_status /= 0) status = FC_ERR_IO
    end subroutine emit_profile_file
 
    subroutine emit_resource_plan(unit, format, corpus_path, corpus_bytes, checkpoint_path, require_ready, plan)
@@ -756,7 +1036,7 @@ contains
       if (trim(format) == 'json') then
          write(unit, '(A)') '{'
          write(unit, '(A)') '  "schema": "vegai-fortran-resource-plan/v1",'
-         write(unit, '(A)') '  "language": "Fortran 2023",'
+         write(unit, '(A)') '  "language": "Fortran",'
          write(unit, '(A)') '  "corpus_path": ' // json_quote(corpus_path) // ','
          write(unit, '(A)') '  "corpus_bytes": ' // integer_text(corpus_bytes) // ','
          write(unit, '(A)') '  "checkpoint_path": ' // checkpoint_rendered // ','
@@ -816,15 +1096,16 @@ contains
       integer(int32), intent(out) :: status
       integer :: unit, io_status
 
-      open(newunit=unit, file=trim(path), status='replace', action='write', form='formatted', iostat=io_status)
+      open(newunit=unit, file=trim(path), status='new', action='write', form='formatted', iostat=io_status)
       if (io_status /= 0) then
          write(error_unit, '(A,A)') 'vegai_control resource-plan: cannot write output: ', trim(path)
          status = FC_ERR_IO
          return
       end if
       call emit_resource_plan(unit, format, corpus_path, corpus_bytes, checkpoint_path, require_ready, plan)
-      close(unit)
+      close(unit, iostat=io_status)
       status = FC_OK
+      if (io_status /= 0) status = FC_ERR_IO
    end subroutine emit_resource_plan_file
 
    subroutine emit_quality_report(unit, format, checkpoint_path, cases_path, policy, report)
@@ -862,7 +1143,7 @@ contains
                               real_text(report%minimum_observed_similarity) // ','
          write(unit, '(A)') '    "passed": ' // logical_text(report%passed)
          write(unit, '(A)') '  },'
-         write(unit, '(A)') '  "scope": "held-out top-1 HDC semantic-neighbour gate; not a general LMM quality claim"'
+         write(unit, '(A)') '  "scope": "operator-supplied top-1 HDC gate; held-out status and general quality unverified"'
          write(unit, '(A)') '}'
       else
          write(unit, '(A)') 'Vegai native Fortran quality gate'
@@ -878,7 +1159,7 @@ contains
          write(unit, '(A,ES14.6E3)') 'Mean similarity: ', report%mean_similarity
          write(unit, '(A,ES14.6E3)') 'Minimum observed similarity: ', report%minimum_observed_similarity
          write(unit, '(A,L1)') 'Passed: ', report%passed
-         write(unit, '(A)') 'Scope: held-out top-1 HDC semantic-neighbour gate; not a general LMM quality claim'
+         write(unit, '(A)') 'Scope: operator-supplied top-1 HDC gate; held-out status and general quality unverified'
       end if
    end subroutine emit_quality_report
 
@@ -889,15 +1170,16 @@ contains
       integer(int32), intent(out) :: status
       integer :: unit, io_status
 
-      open(newunit=unit, file=trim(path), status='replace', action='write', form='formatted', iostat=io_status)
+      open(newunit=unit, file=trim(path), status='new', action='write', form='formatted', iostat=io_status)
       if (io_status /= 0) then
          write(error_unit, '(A,A)') 'vegai_control quality-gate: cannot write output: ', trim(path)
          status = FC_ERR_IO
          return
       end if
       call emit_quality_report(unit, format, checkpoint_path, cases_path, policy, report)
-      close(unit)
+      close(unit, iostat=io_status)
       status = FC_OK
+      if (io_status /= 0) status = FC_ERR_IO
    end subroutine emit_quality_report_file
 
    subroutine emit_attestation_report(unit, format, corpus_path, corpus_digest, corpus_bytes, checkpoint_path, &
@@ -954,7 +1236,7 @@ contains
       integer(int32), intent(out) :: status
       integer :: unit, io_status
 
-      open(newunit=unit, file=trim(path), status='replace', action='write', form='formatted', iostat=io_status)
+      open(newunit=unit, file=trim(path), status='new', action='write', form='formatted', iostat=io_status)
       if (io_status /= 0) then
          write(error_unit, '(A,A)') 'vegai_control attest: cannot write output: ', trim(path)
          status = FC_ERR_IO
@@ -963,8 +1245,9 @@ contains
       call emit_attestation_report(unit, format, corpus_path, corpus_digest, corpus_bytes, checkpoint_path, &
                                    checkpoint_digest, checkpoint_bytes, quality_report_path, quality_report_digest, &
                                    quality_report_bytes)
-      close(unit)
+      close(unit, iostat=io_status)
       status = FC_OK
+      if (io_status /= 0) status = FC_ERR_IO
    end subroutine emit_attestation_report_file
 
    function integer_text(value) result(rendered)
@@ -1022,7 +1305,14 @@ contains
       character(len=:), allocatable :: rendered
       integer :: index
       character(len=1) :: character
+      character(len=4) :: escape
 
+      ! JSON strings must be UTF-8. CLI values are validated before use;
+      ! compiler/environment text outside our control may instead be null.
+      if (.not. cli_valid_utf8(value(:len_trim(value)))) then
+         rendered = 'null'
+         return
+      end if
       rendered = achar(34)
       do index = 1, len_trim(value)
          character = value(index:index)
@@ -1039,7 +1329,8 @@ contains
             rendered = rendered // achar(92) // 't'
          case default
             if (iachar(character) < 32) then
-               rendered = rendered // '?'
+               write(escape, '(Z4.4)') iachar(character)
+               rendered = rendered // achar(92) // 'u' // escape
             else
                rendered = rendered // character
             end if
@@ -1058,6 +1349,9 @@ contains
       write(unit, '(A)') '      [--reserve-fraction R] [--omp-threads N]; resonant reserves an epoch semantic snapshot'
       write(unit, '(A)') '      [--available-memory-bytes N] [--available-storage-bytes N]'
       write(unit, '(A)') '      [--require-ready] [--format text|json] [--output PATH]'
+      write(unit, '(A)') '  vegai_control corpus-manifest CORPUS [--strict-contract] [--expect-sha256 HEX]'
+      write(unit, '(A)') '      [--max-line-bytes N] [--token-length N] [--max-tokens-per-line N]'
+      write(unit, '(A)') '      [--source TEXT] [--license TEXT] [--retrieved-at TEXT] [--preprocessing TEXT] [--output PATH|-]'
       write(unit, '(A)') '  vegai_control smoke CORPUS CHECKPOINT'
       write(unit, '(A)') '  vegai_control quality-gate CHECKPOINT CASES --minimum-cases N'
       write(unit, '(A)') '      --minimum-top1-accuracy R --minimum-top1-wilson-lower-bound-95 R'

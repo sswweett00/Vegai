@@ -9,11 +9,6 @@ on:
       - 'examples/corpus/toy_hdc_corpus.txt'
       - 'CMakeLists.txt'
       - 'CMakePresets.json'
-      - 'tools/hardware_compatibility.py'
-      - 'tools/verify_hardware_compatibility.py'
-      - 'tools/training_resource_plan.py'
-      - 'tools/verify_training_resource_plan.py'
-      - 'tools/verify_portable_runtime.py'
       - '.github/workflows/portable-platforms.yml'
   pull_request:
     paths:
@@ -23,19 +18,16 @@ on:
       - 'examples/corpus/toy_hdc_corpus.txt'
       - 'CMakeLists.txt'
       - 'CMakePresets.json'
-      - 'tools/hardware_compatibility.py'
-      - 'tools/verify_hardware_compatibility.py'
-      - 'tools/training_resource_plan.py'
-      - 'tools/verify_training_resource_plan.py'
-      - 'tools/verify_portable_runtime.py'
       - '.github/workflows/portable-platforms.yml'
 
 permissions:
   contents: read
 
-# This workflow deliberately builds the serial portable preset.  It proves that
-# the project has no mandatory OpenMP, vendor GPU/NPU, POSIX-shell, or host-ISA
-# runtime dependency. Linux CI separately exercises the OpenMP/full test suite.
+# This workflow targets the serial portable preset without a mandatory OpenMP,
+# vendor GPU/NPU or host-ISA runtime dependency. A definition is not evidence of
+# a passing runner; inspect each actual OS/architecture result independently.
+# Native profile and same-host runtime checks require no Python. Native
+# Fortran does not discover OS/CPU inventory; supply those details separately.
 jobs:
   linux-portable:
     name: Linux portable (${{ matrix.architecture }})
@@ -49,7 +41,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install portable Fortran toolchain
         run: |
@@ -60,6 +52,8 @@ jobs:
         run: |
           cmake --preset portable-serial -DVEGAI_BUILD_TESTS=OFF
           cmake --build --preset portable-serial --parallel
+          # The byte-exact fixture is required by the native contracts below.
+          cmake --build --preset portable-serial --parallel --target vegai_prompt_resume_fixture
 
       - name: Run native Fortran control/profile/resource/checkpoint/attestation contract
         run: |
@@ -72,15 +66,18 @@ jobs:
           ./build/portable-serial/vegai_control attest examples/corpus/toy_hdc_corpus.txt \
             build/portable-serial/fortran-control-smoke.vgai --format json
 
-      - name: Run same-host portable engine/train/inspect contract
+      - name: Validate same-host portable engine/train/inspect contract
         run: |
-          python3 tools/hardware_compatibility.py --format json --require-recognized-os \
-            --output "${RUNNER_TEMP}/hardware-profile.json" > /dev/null
-          python3 tools/verify_hardware_compatibility.py
-          python3 tools/verify_portable_runtime.py \
-            --engine-bin ./build/portable-serial/hds_engine \
-            --pretrain-bin ./build/portable-serial/vegai_pretrain \
-            --output "${RUNNER_TEMP}/portable-runtime.json"
+          cmake -DENGINE="$PWD/build/portable-serial/hds_engine" \
+            -DPRETRAIN="$PWD/build/portable-serial/vegai_pretrain" \
+            -DCORPUS="$PWD/examples/corpus/toy_hdc_corpus.txt" -DWORK_ROOT="$RUNNER_TEMP" \
+            -P test/native_portable_runtime.cmake
+          cmake -DCONTROL="$PWD/build/portable-serial/vegai_control" \
+            -DCORPUS="$PWD/examples/corpus/toy_hdc_corpus.txt" -DWORK_ROOT="$RUNNER_TEMP" \
+            -P test/native_control_regression.cmake
+          cmake -DEXTRACT="$PWD/build/portable-serial/vegai_ud_text_extract" \
+            -DFIXTURE="$PWD/build/portable-serial/vegai_prompt_resume_fixture" -DWORK_ROOT="$RUNNER_TEMP" \
+            -P test/native_ud_text_extract.cmake
 
   macos-arm64-portable:
     name: macOS ARM64 portable
@@ -88,7 +85,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install GNU Fortran and Ninja
         shell: bash
@@ -108,6 +105,8 @@ jobs:
         run: |
           cmake --preset portable-serial -DVEGAI_BUILD_TESTS=OFF -DCMAKE_Fortran_COMPILER="$FC"
           cmake --build --preset portable-serial --parallel
+          # The byte-exact fixture is required by the native contracts below.
+          cmake --build --preset portable-serial --parallel --target vegai_prompt_resume_fixture
 
       - name: Run native Fortran control/profile/resource/checkpoint/attestation contract
         shell: bash
@@ -121,16 +120,19 @@ jobs:
           ./build/portable-serial/vegai_control attest examples/corpus/toy_hdc_corpus.txt \
             build/portable-serial/fortran-control-smoke.vgai --format json
 
-      - name: Run same-host portable engine/train/inspect contract
+      - name: Validate same-host portable engine/train/inspect contract
         shell: bash
         run: |
-          python3 tools/hardware_compatibility.py --format json --require-recognized-os \
-            --output "${RUNNER_TEMP}/hardware-profile.json" > /dev/null
-          python3 tools/verify_hardware_compatibility.py
-          python3 tools/verify_portable_runtime.py \
-            --engine-bin ./build/portable-serial/hds_engine \
-            --pretrain-bin ./build/portable-serial/vegai_pretrain \
-            --output "${RUNNER_TEMP}/portable-runtime.json"
+          cmake -DENGINE="$PWD/build/portable-serial/hds_engine" \
+            -DPRETRAIN="$PWD/build/portable-serial/vegai_pretrain" \
+            -DCORPUS="$PWD/examples/corpus/toy_hdc_corpus.txt" -DWORK_ROOT="$RUNNER_TEMP" \
+            -P test/native_portable_runtime.cmake
+          cmake -DCONTROL="$PWD/build/portable-serial/vegai_control" \
+            -DCORPUS="$PWD/examples/corpus/toy_hdc_corpus.txt" -DWORK_ROOT="$RUNNER_TEMP" \
+            -P test/native_control_regression.cmake
+          cmake -DEXTRACT="$PWD/build/portable-serial/vegai_ud_text_extract" \
+            -DFIXTURE="$PWD/build/portable-serial/vegai_prompt_resume_fixture" -DWORK_ROOT="$RUNNER_TEMP" \
+            -P test/native_ud_text_extract.cmake
 
   windows-x86_64-portable:
     name: Windows x86_64 portable
@@ -138,10 +140,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install MinGW-w64 GNU Fortran toolchain
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
         with:
           msystem: UCRT64
           update: true
@@ -149,7 +151,6 @@ jobs:
             mingw-w64-ucrt-x86_64-gcc-fortran
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
-            mingw-w64-ucrt-x86_64-python
 
       - name: Configure and build serial portable preset
         shell: msys2 {0}
@@ -157,6 +158,8 @@ jobs:
           set -euo pipefail
           cmake --preset portable-serial -DVEGAI_BUILD_TESTS=OFF
           cmake --build --preset portable-serial --parallel
+          # The byte-exact fixture is required by the native contracts below.
+          cmake --build --preset portable-serial --parallel --target vegai_prompt_resume_fixture
 
       - name: Run native Fortran control/profile/resource/checkpoint/attestation contract
         shell: msys2 {0}
@@ -171,14 +174,35 @@ jobs:
           ./build/portable-serial/vegai_control.exe attest examples/corpus/toy_hdc_corpus.txt \
             build/portable-serial/fortran-control-smoke.vgai --format json
 
-      - name: Run same-host portable engine/train/inspect contract
+      - name: Validate same-host portable engine/train/inspect contract
         shell: msys2 {0}
         run: |
           set -euo pipefail
-          python tools/hardware_compatibility.py --format json --require-recognized-os \
-            --output "${RUNNER_TEMP}/hardware-profile.json" > /dev/null
-          python tools/verify_hardware_compatibility.py
-          python tools/verify_portable_runtime.py \
-            --engine-bin ./build/portable-serial/hds_engine.exe \
-            --pretrain-bin ./build/portable-serial/vegai_pretrain.exe \
-            --output "${RUNNER_TEMP}/portable-runtime.json"
+          root="$(cygpath -m "$PWD")"
+          work="$(cygpath -m "$RUNNER_TEMP")"
+          run_contract() {
+            local name="$1" output status detail
+            shift
+            if output=$("$@" 2>&1); then
+              printf '%s\n' "$output"
+            else
+              status=$?
+              printf '%s\n' "$output" >&2
+              detail=$(printf '%s' "$output" | tail -c 4000)
+              detail=${detail//'%'/'%25'}
+              detail=${detail//$'\r'/'%0D'}
+              detail=${detail//$'\n'/'%0A'}
+              printf '::error title=Portable %s::%s\n' "$name" "$detail"
+              return "$status"
+            fi
+          }
+          run_contract runtime cmake -DENGINE="$root/build/portable-serial/hds_engine.exe" \
+            -DPRETRAIN="$root/build/portable-serial/vegai_pretrain.exe" \
+            -DCORPUS="$root/examples/corpus/toy_hdc_corpus.txt" -DWORK_ROOT="$work" \
+            -P test/native_portable_runtime.cmake
+          run_contract control cmake -DCONTROL="$root/build/portable-serial/vegai_control.exe" \
+            -DCORPUS="$root/examples/corpus/toy_hdc_corpus.txt" -DWORK_ROOT="$work" \
+            -P test/native_control_regression.cmake
+          run_contract ud-extract cmake -DEXTRACT="$root/build/portable-serial/vegai_ud_text_extract.exe" \
+            -DFIXTURE="$root/build/portable-serial/vegai_prompt_resume_fixture.exe" -DWORK_ROOT="$work" \
+            -P test/native_ud_text_extract.cmake

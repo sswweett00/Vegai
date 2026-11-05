@@ -1,0 +1,9 @@
+{"schema":"vegai-cold-record-eval/v1",
+"training_rule":6,
+"prefix_bytes":32,
+"records":160,
+"scored_records":160,
+"predictions":11412,
+"prefix_predictions":5058,
+"mean_nll": 2.4797829468359529E+000,
+"prefix_mean_nll": 2.5798618542245308E+000}

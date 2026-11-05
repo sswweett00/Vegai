@@ -246,7 +246,7 @@ planlayın.
 
 ## Gerçek pretraining run
 
-Önce portable Fortran 2023 binary'yi derleyin, sonra paketin üretim gate'lerini
+Önce portable Fortran 2018+ binary'yi derleyin, sonra paketin üretim gate'lerini
 ve gerçek continuous controller'ı çalıştırın:
 
 ```bash

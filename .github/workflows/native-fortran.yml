@@ -1,0 +1,111 @@
+name: Native Fortran portability
+
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'app/**'
+      - 'test/**'
+      - 'examples/corpus/**'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'Makefile'
+      - '.github/workflows/native-fortran.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'app/**'
+      - 'test/**'
+      - 'examples/corpus/**'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'Makefile'
+      - '.github/workflows/native-fortran.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Project build/test steps do not invoke Python. Toolchain installers and
+# hosted runners may themselves contain other languages. A passing runner does
+# not establish support for untested processors, compilers, drivers or ABIs.
+jobs:
+  native:
+    name: GNU Fortran 2018 / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    env:
+      OMP_NUM_THREADS: '2'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: fortran-lang/setup-fortran@1f630c95fa9e0c941248f52e4674260139020365 # v1
+        with:
+          compiler: gcc
+          version: '14'
+      - uses: lukka/get-cmake@a89e43e22a96abafcd7a62db652a65ecd33052c9 # v4.4.4
+        with:
+          cmakeVersion: '3.31.6'
+          ninjaVersion: '1.12.1'
+      - name: Configure portable serial baseline
+        run: cmake -S . -B build-native-ci -G Ninja -DCMAKE_BUILD_TYPE=Release -DVEGAI_FORTRAN_STANDARD=2018 -DVEGAI_ENABLE_OPENMP=OFF -DVEGAI_BUILD_TESTS=ON -DVEGAI_ENABLE_LEGACY_PYTHON_TESTS=OFF
+      - name: Build all native executables and tests
+        run: cmake --build build-native-ci --parallel 2
+      - name: Run native contracts
+        run: ctest --test-dir build-native-ci --output-on-failure --parallel 2
+      - name: Surface native contract failures
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed_file=build-native-ci/Testing/Temporary/LastTestsFailed.log
+          log_file=build-native-ci/Testing/Temporary/LastTest.log
+          if [ ! -s "$failed_file" ] || [ ! -f "$log_file" ]; then
+            echo '::error title=CTest diagnostic::Failure occurred before CTest produced a failure log.'
+            exit 0
+          fi
+          while IFS=: read -r number name; do
+            name=${name%$'\r'}
+            [ -n "$name" ] || continue
+            detail=$(awk -v test_name="$name" '
+              index($0, "Testing: " test_name) { active=1 }
+              active { print }
+              active && /^<end of output>/ { exit }
+            ' "$log_file" | tail -c 4000)
+            detail=${detail//'%'/'%25'}
+            detail=${detail//$'\r'/'%0D'}
+            detail=${detail//$'\n'/'%0A'}
+            printf '::error title=CTest %s::%s\n' "$name" "$detail"
+          done < "$failed_file"
+
+  native-openmp-debug:
+    name: GNU Fortran 2018 / Linux OpenMP and checked arithmetic
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      OMP_NUM_THREADS: '2'
+      OMP_DYNAMIC: 'FALSE'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: fortran-lang/setup-fortran@1f630c95fa9e0c941248f52e4674260139020365 # v1
+        with:
+          compiler: gcc
+          version: '14'
+      - uses: lukka/get-cmake@a89e43e22a96abafcd7a62db652a65ecd33052c9 # v4.4.4
+        with:
+          cmakeVersion: '3.31.6'
+          ninjaVersion: '1.12.1'
+      - name: Configure required OpenMP and checked arithmetic
+        run: >-
+          cmake -S . -B build-native-openmp -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug -DVEGAI_FORTRAN_STANDARD=2018
+          -DVEGAI_ENABLE_OPENMP=ON -DVEGAI_REQUIRE_OPENMP=ON
+          -DVEGAI_BUILD_TESTS=ON -DVEGAI_ENABLE_LEGACY_PYTHON_TESTS=OFF
+          -DCMAKE_Fortran_FLAGS='-fcheck=all -finit-real=snan -fbacktrace -ffpe-trap=invalid,zero,overflow -ftrapv'
+      - name: Build native executables and tests
+        run: cmake --build build-native-openmp --parallel 2
+      - name: Run native contracts including actual two-thread probe
+        run: ctest --test-dir build-native-openmp --output-on-failure --parallel 2

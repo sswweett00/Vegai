@@ -1,0 +1,34 @@
+UTC_initial_metadata=2026-11-05T16:13:15Z
+UTC_final_prompt_binary=2026-11-05T16:18:28Z
+BASE_GIT=8d205ab6d053a2e42c47507286ea38f2dc9ac7bb
+Linux 6.1.158+ x86_64 GNU/Linux
+model name	: Intel(R) Xeon(R) Processor @ 2.60GHz
+logical_cpus=2
+GNU Fortran (GCC) 12.2.0
+cmake version 3.28.0
+Fortran Release flags:
+CMAKE_Fortran_FLAGS_RELEASE:STRING=-O3 -DNDEBUG -O3
+VEGAI_CPU_TARGET:STRING=portable
+VEGAI_ENABLE_OPENMP:BOOL=OFF
+Source and executable SHA256:
+c9c85d461d1d2451c8eb5a3c74af1975355d8c92054e7a22b7d129a15bded11e  app/prompt_engine.f90
+f5947a286fb437cb44f441910ad24776db462ba5f62fa1a0f32f90e627c58b40  app/natural_eval.f90
+223c49878eee07a352579ed3cc5930af059d96a4966930985e39e964f16f020b  src/utf8_generation.f90
+1d074b6499db05bd8fe5c88fcde06714ba860583c9e1586399c19af237d1b431  src/fixed_budget_context.f90
+1f84563d63935f19def4f5b9a6d8e61245660b52566ef228ae8d98b92ecd798c  src/fixed_budget_backward.f90
+bbe5b2e22da9f2cf352aa390d14c38d627d22d1155c8a230e32df18f02f326d9  src/fixed_budget_optimizer.f90
+392723258f09fbe7a5d4bda1d6d114612bdb7ca27f22908aa1d687b8f9d41e46  src/fixed_budget_training.f90
+b78d21abc5f4ab0ba5869fba1fbcff60eeb8323c8345bdd9d4d9aac931ae6673  src/fixed_budget_natural_eval.f90
+90f5df67384b4804952e73314fb918f2f148c623fbe7805023064c9dbdb1cf03  tools/benchmark_natural_quality.f90
+8606e963d4c65e016c3e364130dcd611ef36a719ce2e3ff638e21faa40969a2f  /tmp/vegai-natural-build/vegai_natural_quality_ab
+e6100565fade3f5276fb982d68fd3bcc67c27ca3b54c90f1368356fbad1e0834  /tmp/vegai-natural-build/vegai_prompt_engine
+1615c843cf44881c1406ea298e5378c6e71930abba4925d20490320bcc441b4d  /tmp/vegai-natural-build/vegai_natural_eval
+Bootstrap provenance (not an official validated toolchain): GCC releases/gcc-12.2.0 source from codeload.github.com/gcc-mirror/gcc; generated gengtype lexer normalized from pexip/os-gcc-pex-future commit d633ab74018b3f510f1a60c376f43909ba82fec9 and matching c834606877/padavan-arm commit 809e2823e1b1a2663d03196d38056a525281ef97. GMP/MPFR/MPC headers acquired separately and not independently audited; system shared libraries used. Quadmath headers taken from GCC source and system quadmath used. OpenMP library built separately from same GCC release.
+0d943c5a94f0132c6bf85967cf691ce7b3fb74d11ac53a4467f1b965ba1b112e  normalized gengtype-lex.cc
+7f033be66a7f8188bc08703f4656362db8ef6177f32591115475728d6ffd2ece  bootstrap gmp.h
+917b62ce536a1695042ada02157fda9d035cd44065222a16940ba4fd9872caae  bootstrap mpfr.h
+bca641f4c59f5303d3212650cc00fec0ee2659a220067535dee9029761e83849  bootstrap mpc.h
+f8840b7e93b2dd9814ebcbf6aa0c2e3b19733f712a4dfe7377389d86382bb730  bootstrap gfortran driver
+098ca641f79641562ada313fb8dd34ebcf0b5550e77f45c49df4ca86d1d6cc2a  bootstrap f951
+5c2645050feba739dc65f15ba6ad7d6edd11e1e8fd9212fd40b21c24d98f7551  bootstrap libgfortran.so.5.0.0
+6bd5d3ff340ec3c21ab52e5c4d53f17c91db95b83b2d37b6adba259e280193af  bootstrap libgomp.so.1.0.0

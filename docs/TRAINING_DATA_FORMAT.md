@@ -1,6 +1,6 @@
 # Vegai eğitim verisi formatı ve streaming I/O sözleşmesi
 
-Bu belge, Vegai'nin mevcut Fortran 2023 HDC/VSA eğitim mimarisi için eklenen
+Bu belge, Vegai'nin mevcut Fortran 2018+ HDC/VSA eğitim mimarisi için eklenen
 çok-formatlı veri sınırını tanımlar. Amaç JSONL/JSON/TXT/Parquet/Arrow'dan
 gelen **yapısal kayıtları** doğrulamak, kalite telemetrisi üretmek ve ancak
 bilinçli bir son adımda native HDC eğitiminin tüketebileceği strict corpus'a
@@ -319,7 +319,13 @@ Repository bu sayıları ölçmeden evrensel throughput vaadi vermez.
 ## 9. Varsayımlar ve sınırlar
 
 - JSON input top-level **array** olmalıdır; `{"records": [...]}` wrapper'ı
-  streaming sözleşmesinin parçası değildir.
+  streaming sözleşmesinin parçası değildir. Array elemanları parça parça
+  okunur ve kayıt boyutu sınırı her elemanın UTF-8 kaynak byte'larına uygulanır;
+  elemanlar arasındaki whitespace bu sınıra dahil edilmez. Büyük kayıtlar tek
+  bir kez ayrıştırılır. Geçersiz Unicode ve aşırı iç içe JSON reddedilir.
+- `TrainingRecord` içindeki metadata koleksiyonları Python'da değiştirilebilir;
+  yazar bunları yayınlamadan veya Arrow/Parquet batch'ine almadan önce yeniden
+  doğrular ve kopyalar. Sonradan yapılan değişiklikler sıradaki batch'i bozmaz.
 - Text record içinde CR/LF yoktur. Multi-paragraph source önce explicit
   sentence/record segmentation ile line-level record'lara ayrılmalıdır.
 - Arrow/Parquet writer schema'sı stricttir. Başka bir producer'ın nested/map

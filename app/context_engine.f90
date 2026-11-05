@@ -30,6 +30,9 @@
 program context_engine
    use, intrinsic :: iso_fortran_env, only: int32, int64, real64, output_unit, error_unit
    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+   use, intrinsic :: ieee_exceptions, only: ieee_status_type, ieee_get_status, ieee_set_status, &
+      ieee_support_halting, ieee_set_halting_mode, ieee_set_flag, ieee_get_flag, &
+      ieee_overflow, ieee_underflow, ieee_invalid
    use fixed_budget_context
    use fixed_budget_backward
    use fixed_budget_optimizer
@@ -44,7 +47,7 @@ program context_engine
    integer(int64) :: seed, token_budget, eval_budget, eval_seed
    integer(int32) :: task, distance, chunk_tokens, status
    character(len=512) :: checkpoint_path
-   logical :: have_checkpoint
+   logical :: have_checkpoint, allow_partial_chunk
 
    call read_command(command)
    if (len_trim(command) == 0) call usage_and_stop('missing command')
@@ -72,6 +75,7 @@ program context_engine
    chunk_tokens = 256_int32
    checkpoint_path = ''
    have_checkpoint = .false.
+   allow_partial_chunk = .false.
 
    call parse_options(config, update_config, seed, token_budget, eval_budget, eval_seed, task, &
                       distance, chunk_tokens, checkpoint_path, have_checkpoint)
@@ -102,11 +106,136 @@ program context_engine
 
 contains
 
+   ! Seeds are signed int64 values, not arbitrary list-directed records: a
+   ! slash, repetition count or comma must never silently preserve/alter one.
+   subroutine parse_integer64(raw, parsed, parse_status)
+      character(len=*), intent(in) :: raw
+      integer(int64), intent(out) :: parsed
+      integer(int32), intent(out) :: parse_status
+      character(len=len(raw)) :: token
+      integer :: position, last
+
+      parsed = 0_int64
+      parse_status = 1_int32
+      token = adjustl(raw)
+      last = len_trim(token)
+      if (last == 0) return
+      position = 1
+      if (token(position:position) == '+' .or. token(position:position) == '-') position = position + 1
+      if (position > last) return
+      do while (position <= last)
+         if (token(position:position) < '0' .or. token(position:position) > '9') return
+         position = position + 1
+      end do
+      read(token, *, iostat=parse_status) parsed
+      if (parse_status /= 0_int32) parsed = 0_int64
+   end subroutine parse_integer64
+
+   ! Parse one decimal option without letting a library conversion of 1e309
+   ! trap before IOSTAT can report an error. Parsing is CLI-only, not per token.
+   ! The caller's IEEE modes and flags are restored even when conversion fails.
+   subroutine parse_real_option(raw, parsed, parse_status)
+      character(len=*), intent(in) :: raw
+      real(real64), intent(out) :: parsed
+      integer(int32), intent(out) :: parse_status
+      type(ieee_status_type) :: saved_status
+      character(len=len(raw)) :: token
+      character(len=1) :: digit
+      integer :: position, last, digit_count
+      integer(int64) :: bits
+      logical :: nonzero_mantissa, overflowed, invalid
+
+      parsed = 0.0_real64
+      parse_status = 1_int32
+      token = adjustl(raw)
+      last = len_trim(token)
+      if (last == 0) return
+      position = 1
+      if (token(position:position) == '+' .or. token(position:position) == '-') position = position + 1
+      digit_count = 0
+      nonzero_mantissa = .false.
+      do while (position <= last)
+         digit = token(position:position)
+         if (digit < '0' .or. digit > '9') exit
+         digit_count = digit_count + 1
+         nonzero_mantissa = nonzero_mantissa .or. digit /= '0'
+         position = position + 1
+      end do
+      if (position <= last) then
+         if (token(position:position) == '.') then
+            position = position + 1
+            do while (position <= last)
+               digit = token(position:position)
+               if (digit < '0' .or. digit > '9') exit
+               digit_count = digit_count + 1
+               nonzero_mantissa = nonzero_mantissa .or. digit /= '0'
+               position = position + 1
+            end do
+         end if
+      end if
+      if (digit_count == 0) return
+      if (position <= last) then
+         digit = token(position:position)
+         if (digit == 'e' .or. digit == 'E' .or. digit == 'd' .or. digit == 'D') then
+            position = position + 1
+            if (position <= last) then
+               if (token(position:position) == '+' .or. token(position:position) == '-') position = position + 1
+            end if
+            digit_count = 0
+            do while (position <= last)
+               digit = token(position:position)
+               if (digit < '0' .or. digit > '9') exit
+               digit_count = digit_count + 1
+               position = position + 1
+            end do
+            if (digit_count == 0) return
+         end if
+      end if
+      ! No list-directed separators, repeat counts, slash, or trailing tokens.
+      if (position <= last) return
+
+      call ieee_get_status(saved_status)
+      if (ieee_support_halting(ieee_overflow)) call ieee_set_halting_mode(ieee_overflow, .false.)
+      if (ieee_support_halting(ieee_underflow)) call ieee_set_halting_mode(ieee_underflow, .false.)
+      if (ieee_support_halting(ieee_invalid)) call ieee_set_halting_mode(ieee_invalid, .false.)
+      call ieee_set_flag(ieee_overflow, .false.)
+      call ieee_set_flag(ieee_invalid, .false.)
+      read(token, *, iostat=parse_status) parsed
+      call ieee_get_flag(ieee_overflow, overflowed)
+      call ieee_get_flag(ieee_invalid, invalid)
+      call ieee_set_status(saved_status)
+      if (parse_status /= 0_int32 .or. overflowed .or. invalid) then
+         parse_status = 1_int32
+         return
+      end if
+      if (storage_size(parsed) == 64 .and. radix(parsed) == 2 .and. digits(parsed) == 53 .and. &
+          maxexponent(parsed) == 1024 .and. minexponent(parsed) == -1021) then
+         bits = transfer(parsed, 0_int64)
+         if (iand(bits, int(z'7FF0000000000000', int64)) == int(z'7FF0000000000000', int64)) then
+            parse_status = 1_int32
+            return
+         end if
+      else
+         if (.not. ieee_is_finite(parsed)) then
+            parse_status = 1_int32
+            return
+         end if
+      end if
+      ! A nonzero decimal rounded entirely to zero must not silently disable an
+      ! option such as weight decay. Representable subnormals remain valid.
+      if (parsed == 0.0_real64 .and. nonzero_mantissa) parse_status = 1_int32
+   end subroutine parse_real_option
+
+
    subroutine read_command(name)
       character(len=*), intent(out) :: name
+      integer :: argument_status
 
       name = ''
-      if (command_argument_count() >= 1) call get_command_argument(1, name)
+      if (command_argument_count() >= 1) then
+         call get_command_argument(1, name, status=argument_status)
+         if (argument_status /= 0) call usage_and_stop('command is too long')
+      end if
    end subroutine read_command
 
    subroutine print_usage_and_stop()
@@ -116,6 +245,7 @@ contains
       write(output_unit, '(A)') '  --memory-scales N       fixed decay scales, 1..16 (default 4)'
       write(output_unit, '(A)') '  --memory-slots N        fixed information slots, 1..1024 (default 64)'
       write(output_unit, '(A)') '  --train-chunk-tokens N  predictions per update, 1..8192 (default 256)'
+      write(output_unit, '(A)') '  --allow-partial-chunk true|false  opt in to an extra short update (default false)'
       write(output_unit, '(A)') '  --width N --heads N --ffn N --vocab N'
       write(output_unit, '(A)') '  --seed N --lr X --tokens N --task markov|needle --distance N'
       write(output_unit, '(A)') '  --eval-tokens N --eval-seed N   held-out stream for `quality`'
@@ -165,15 +295,26 @@ contains
       logical, intent(inout) :: have_checkpoint
       integer(int32), intent(out) :: parse_status
       character(len=256) :: key, value
+      integer :: argument_status, argument_length
 
       parse_status = 0_int32
-      call get_command_argument(index, key)
+      call get_command_argument(index, key, status=argument_status)
+      if (argument_status /= 0) then
+         write(error_unit, '(A)') 'option name is too long'
+         parse_status = 1_int32
+         return
+      end if
       if (index + 1_int32 > command_argument_count()) then
          write(error_unit, '(A,A)') 'option without a value: ', trim(key)
          parse_status = 1_int32
          return
       end if
-      call get_command_argument(index + 1_int32, value)
+      call get_command_argument(index + 1_int32, value, length=argument_length, status=argument_status)
+      if (argument_status /= 0) then
+         write(error_unit, '(A,A)') 'option value is too long: ', trim(key)
+         parse_status = 1_int32
+         return
+      end if
       select case (trim(key))
       case ('--window')
          call fbc_parse_horizon(value, config%logical_horizon, parse_status)
@@ -185,6 +326,15 @@ contains
          call fbc_parse_count(value, 1_int32, FBC_MAX_MEMORY_SLOTS, config%memory_slots, parse_status)
       case ('--train-chunk-tokens')
          call fbc_parse_count(value, 1_int32, FBC_MAX_CHUNK_TOKENS, chunk_tokens, parse_status)
+      case ('--allow-partial-chunk')
+         select case (trim(value))
+         case ('true')
+            allow_partial_chunk = .true.
+         case ('false')
+            allow_partial_chunk = .false.
+         case default
+            parse_status = 1_int32
+         end select
       case ('--width')
          call fbc_parse_count(value, 2_int32, 1024_int32, config%width, parse_status)
       case ('--heads')
@@ -200,19 +350,29 @@ contains
       case ('--eval-tokens')
          call fbc_parse_horizon(value, eval_budget, parse_status)
       case ('--seed')
-         read(value, *, iostat=parse_status) seed
+         call parse_integer64(value, seed, parse_status)
       case ('--eval-seed')
-         read(value, *, iostat=parse_status) eval_seed
+         call parse_integer64(value, eval_seed, parse_status)
       case ('--lr')
-         read(value, *, iostat=parse_status) update_config%learning_rate
-         if (parse_status == 0 .and. (update_config%learning_rate <= 0.0_real64 .or. &
-                                      update_config%learning_rate >= 1.0_real64)) parse_status = 1_int32
+         call parse_real_option(value, update_config%learning_rate, parse_status)
+         if (parse_status == 0) then
+            if (.not. fbc_real64_is_finite(update_config%learning_rate)) parse_status = 1_int32
+         end if
+         if (parse_status == 0) then
+            if (update_config%learning_rate <= 0.0_real64 .or. &
+                update_config%learning_rate >= 1.0_real64) parse_status = 1_int32
+         end if
       case ('--task')
          call fbc_parse_task(value, task, parse_status)
       case ('--checkpoint')
-         checkpoint_path = trim(value)
-         have_checkpoint = len_trim(checkpoint_path) > 0
-         if (.not. have_checkpoint) parse_status = 1_int32
+         ! A trailing blank would be removed by the native file APIs and could
+         ! replace a different path than the caller supplied.
+         have_checkpoint = argument_length > 0 .and. len_trim(value) == argument_length
+         if (have_checkpoint) then
+            checkpoint_path = value
+         else
+            parse_status = 1_int32
+         end if
       case default
          write(error_unit, '(A,A)') 'unknown option: ', trim(key)
          parse_status = 1_int32
@@ -221,6 +381,15 @@ contains
          write(error_unit, '(A,A,A,A)') 'invalid value for ', trim(key), ': ', trim(value)
       end if
    end subroutine parse_pair
+
+   subroutine check_training_chunk_budget(token_count, chunk_tokens)
+      integer(int32), intent(in) :: token_count, chunk_tokens
+
+      if (.not. allow_partial_chunk .and. modulo(token_count, chunk_tokens) /= 0_int32) then
+         call usage_and_stop('training tokens must be a multiple of --train-chunk-tokens; '// &
+                             'or opt in to an extra update with --allow-partial-chunk true')
+      end if
+   end subroutine check_training_chunk_budget
 
    !----------------------------------------------------------------------------
    !  plan / inspect
@@ -323,6 +492,7 @@ contains
 
       if (.not. fbc_config_is_valid(config)) call usage_and_stop('configuration is not valid')
       token_count = int(min(token_budget, 20000000_int64), int32)
+      call check_training_chunk_budget(token_count, chunk_tokens)
       allocate(tokens(token_count + 1_int32), answer_mask(token_count))
       call fbc_generate_tokens(task, token_count, config%vocabulary_size, distance, seed, tokens(1_int32:token_count), &
                                answer_mask, status)
@@ -341,7 +511,7 @@ contains
 
       call wall_clock(started)
       call fbc_train_stream(model, optimizer, state, tokens, token_count, chunk_tokens, update_config, &
-                            workspace, gradient, metrics, status)
+                            workspace, gradient, metrics, status, allow_partial_chunk=allow_partial_chunk)
       call wall_clock(elapsed)
       elapsed = elapsed - started
       if (status /= FBT_OK) then
@@ -459,6 +629,7 @@ contains
       if (.not. fbc_config_is_valid(config)) call usage_and_stop('configuration is not valid')
       call fbc_plan(config, plan)
       token_count = int(min(max(token_budget, 64_int64), 1000000_int64), int32)
+      call check_training_chunk_budget(token_count, chunk_tokens)
       allocate(tokens(token_count + 1_int32), answer_mask(token_count))
       call fbc_generate_tokens(task, token_count, config%vocabulary_size, distance, seed, &
                                tokens(1_int32:token_count), answer_mask, status)
@@ -499,8 +670,12 @@ contains
       call fbc_state_reset(state, model, status)
       call system_clock(start_clock, rate)
       call fbc_train_stream(model, optimizer, state, tokens, token_count, chunk_tokens, update_config, &
-                            workspace, gradient, metrics, status)
+                            workspace, gradient, metrics, status, allow_partial_chunk=allow_partial_chunk)
       call system_clock(end_clock, rate)
+      if (status /= FBT_OK) then
+         write(error_unit, '(A,I0)') 'training failed, status ', status
+         stop 1_int32
+      end if
       training_seconds = real(end_clock - start_clock, real64) / real(rate, real64)
       training_tokens = max(1_int64, metrics%tokens)
 
@@ -577,6 +752,7 @@ contains
       if (.not. fbc_config_is_valid(config)) call usage_and_stop('configuration is not valid')
       call fbc_plan(config, plan)
       train_tokens = int(min(token_budget, 20000000_int64), int32)
+      call check_training_chunk_budget(train_tokens, chunk_tokens)
       held_out_tokens = int(min(eval_budget, 20000000_int64), int32)
       call fbc_model_init(model, config, seed, status)
       if (status /= FBC_OK) call usage_and_stop('model initialisation failed')
@@ -597,7 +773,7 @@ contains
       tokens(train_tokens + 1_int32) = 1_int32
       call wall_clock(started)
       call fbc_train_stream(model, optimizer, state, tokens, train_tokens, chunk_tokens, update_config, &
-                            workspace, gradient, metrics, status)
+                            workspace, gradient, metrics, status, allow_partial_chunk=allow_partial_chunk)
       call wall_clock(elapsed)
       elapsed = elapsed - started
       if (status /= FBT_OK) then

@@ -11,6 +11,8 @@ on:
       - 'app/pretrain.f90'
       - 'src/**'
       - 'tools/continuous_pretrain.py'
+      - 'tools/run_9mib_pretraining.py'
+      - 'tools/bounded_process.py'
       - 'tools/continuous_quality_gate.py'
       - 'tools/pretraining_quality_evaluation.py'
       - 'tools/run_900mb_continuous_pretraining.py'
@@ -44,7 +46,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes gfortran
 
-      - name: Compile portable Fortran 2023 pretraining binary
+      - name: Compile portable Fortran 2018 pretraining binary
         run: make pretrain BUILD_DIR=build-900mb
 
       - name: Allocate ignored runtime directory

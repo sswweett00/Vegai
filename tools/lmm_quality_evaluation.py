@@ -45,6 +45,8 @@ from lmm_contract import (
     require,
     require_unchanged,
     sha256_bytes,
+    strict_json_value,
+    validate_gateway_runtime_sources,
     validate_identifier,
     validate_sha256,
     validate_unicode_text,
@@ -201,9 +203,6 @@ def iter_cases(path: Path, maximum_cases: int) -> Iterator[QualityCase]:
                 has_lf = raw.endswith(b"\n")
                 payload_bytes = len(raw) - 1 if has_lf else len(raw)
                 overlong = payload_bytes > MAX_CASE_LINE_BYTES or (not has_lf and len(raw) == limit)
-                if overlong and not has_lf:
-                    while raw and not raw.endswith(b"\n"):
-                        raw = handle.readline(limit)
                 require(not overlong, f"quality case line {number} exceeds {MAX_CASE_LINE_BYTES} bytes")
                 require(has_lf, f"quality case line {number} must terminate with LF")
                 expanded_bytes += len(raw)
@@ -212,11 +211,7 @@ def iter_cases(path: Path, maximum_cases: int) -> Iterator[QualityCase]:
                 raw = raw[:-1]
                 require(not raw.endswith(b"\r"), f"quality case line {number} uses CRLF; strict LF is required")
                 require(bool(raw.strip()), f"quality case line {number} is blank")
-                try:
-                    decoded = raw.decode("utf-8")
-                    parsed = json.loads(decoded)
-                except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                    raise LMMQualityEvaluationError(f"quality case line {number} is invalid JSON: {error}") from error
+                parsed = strict_json_value(raw, f"quality case line {number}")
                 case = parse_case(parsed, number)
                 require(case.case_id not in identifiers, "quality case IDs must be unique")
                 identifiers.add(case.case_id)
@@ -269,6 +264,7 @@ def stable_runtime_identity(report: Mapping[str, Any]) -> tuple[str, str]:
     require(isinstance(identities, Mapping), "quality gateway report has no identities object")
     stable_fields = (
         "gateway_tool",
+        "runtime_sources",
         "model_manifest",
         "tokenizer",
         "asset_registry",
@@ -278,6 +274,7 @@ def stable_runtime_identity(report: Mapping[str, Any]) -> tuple[str, str]:
     )
     missing = [field for field in stable_fields if field not in identities]
     require(not missing, "quality gateway report identities is missing fields: " + ", ".join(missing))
+    validate_gateway_runtime_sources(identities["runtime_sources"], "quality gateway runtime_sources")
     model_manifest = identities["model_manifest"]
     require(isinstance(model_manifest, Mapping), "quality gateway report model manifest identity is invalid")
     model_manifest_sha256 = validate_sha256(model_manifest.get("sha256"), "quality gateway model manifest sha256")
@@ -307,9 +304,9 @@ def run_gateway_case(
             f"stderr-bytes={completed.stderr_bytes}, exit={completed.returncode}"
         )
     try:
-        payload = json.loads(completed.stdout.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise LMMQualityEvaluationError(f"quality gateway did not emit UTF-8 --print-json output: {error}") from error
+        payload = strict_json_value(completed.stdout, "quality gateway --print-json output")
+    except LMMContractError as error:
+        raise LMMQualityEvaluationError("quality gateway did not emit strict UTF-8 JSON") from error
     require(isinstance(payload, Mapping), "quality gateway output must be an object")
     exact_fields(payload, {"response", "report"}, "quality gateway output")
     response = validate_unicode_text(payload["response"], "quality gateway response", maximum_bytes=MAX_TEXT_BYTES)

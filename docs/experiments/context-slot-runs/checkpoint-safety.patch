@@ -1,0 +1,161 @@
+--- a/src/fixed_budget_training.f90
++++ b/src/fixed_budget_training.f90
+@@ -905,6 +905,9 @@
+       type(fbc_metrics_t), intent(out) :: counters
+       integer(int32), intent(out) :: status
+       integer(int32) :: unit, io_status, version, clamped_flag, allocation_status
++      integer :: real_storage_units
++      integer(int64) :: file_units, path_units, payload_position, parameter_count, energy_count, stored_reals
++      integer(int64) :: payload_units, header_units
+       character(len=8) :: magic
+       type(fbc_config_t) :: config
+       real(real64) :: effective_horizon
+@@ -923,6 +926,20 @@
+          status = FBT_ERR_ARGUMENT
+          return
+       end if
++      ! Reject unknown-length and empty sources before OPEN, which avoids
++      ! blocking on a zero-sized FIFO on processors that report its size as 0.
++      ! Standard Fortran cannot identify every special file or eliminate a
++      ! concurrent path-replacement race.
++      path_units = -1_int64
++      inquire(file=trim(path), size=path_units, iostat=io_status)
++      if (io_status /= 0 .or. path_units < 0_int64) then
++         status = FBT_ERR_IO
++         return
++      end if
++      if (path_units == 0_int64) then
++         status = FBT_ERR_FORMAT
++         return
++      end if
+       open(newunit=unit, file=trim(path), status='old', action='read', access='stream', &
+            form='unformatted', iostat=io_status)
+       if (io_status /= 0) then
+@@ -978,7 +995,7 @@
+          status = FBT_ERR_FORMAT
+          return
+       end if
+-      if (.not. fbc_update_config_is_valid(update_config) .or. &
++      if (.not. fbc_config_is_valid(config) .or. .not. fbc_update_config_is_valid(update_config) .or. &
+           counters%updates < 0_int64 .or. counters%tokens < 0_int64 .or. &
+           (clamped_flag /= 0_int32 .and. clamped_flag /= 1_int32)) then
+          close(unit)
+@@ -995,6 +1012,56 @@
+          status = FBT_ERR_FORMAT
+          return
+       end if
++      ! V5-V7 store each parameter, a same-shaped momentum, and reduced
++      ! per-column/per-vector optimizer energies. Reject a truncated file
++      ! before allocating according to an untrusted header. IOLENGTH and SIZE
++      ! use file-storage units, not an assumed number of bytes. This length
++      ! check is not a payload hash or a memory guarantee for sparse files.
++      inquire(iolength=real_storage_units) 0.0_real64
++      file_units = -1_int64
++      payload_position = 0_int64
++      inquire(unit=unit, size=file_units, pos=payload_position, iostat=io_status)
++      if (io_status /= 0 .or. file_units < 0_int64 .or. payload_position < 1_int64 .or. real_storage_units <= 0) then
++         close(unit)
++         status = FBT_ERR_IO
++         return
++      end if
++      parameter_count = fbc_parameter_count(config)
++      if (parameter_count < 0_int64) then
++         close(unit)
++         status = FBT_ERR_FORMAT
++         return
++      end if
++      ! Energy shapes: embedding(vocab), Q/K/V(width,heads), output(width),
++      ! FFN gates(2*width), FFN output(ffn), channel gate(width), router
++      ! (3*width), scale gate(width), four slot projections(4*width), plus ten
++      ! scalar energies. The parameter count already includes scalar momentum.
++      energy_count = int(config%vocabulary_size, int64) + &
++                     3_int64 * int(config%width, int64) * int(config%heads, int64) + &
++                     12_int64 * int(config%width, int64) + int(config%ffn_width, int64) + 10_int64
++      if (parameter_count > (huge(0_int64) - energy_count) / 2_int64) then
++         close(unit)
++         status = FBT_ERR_FORMAT
++         return
++      end if
++      stored_reals = 2_int64 * parameter_count + energy_count
++      if (stored_reals > huge(0_int64) / int(real_storage_units, int64)) then
++         close(unit)
++         status = FBT_ERR_FORMAT
++         return
++      end if
++      payload_units = stored_reals * int(real_storage_units, int64)
++      header_units = payload_position - 1_int64
++      if (header_units > huge(0_int64) - payload_units) then
++         close(unit)
++         status = FBT_ERR_FORMAT
++         return
++      end if
++      if (file_units < header_units + payload_units) then
++         close(unit)
++         status = FBT_ERR_FORMAT
++         return
++      end if
+       call fbc_model_init(model, config, 1_int64, allocation_status)
+       if (allocation_status /= FBC_OK) then
+          close(unit)
+@@ -1007,6 +1074,8 @@
+       call fbc_optimizer_init(optimizer, config, allocation_status)
+       if (allocation_status /= 0_int32) then
+          close(unit)
++         call fbc_model_destroy(model)
++         call fbc_optimizer_destroy(optimizer)
+          status = FBT_ERR_IO
+          return
+       end if
+@@ -1030,7 +1099,9 @@
+       type(fbc_checkpoint_meta_t), intent(out) :: meta
+       integer(int32), intent(out) :: status
+       integer(int32) :: unit, io_status, version, clamped_flag
++      integer(int64) :: path_units
+       character(len=8) :: magic
++      type(fbc_config_t) :: header_config
+       real(real64) :: rms_epsilon, slot_decay, slot_temperature, loss_sum
+ 
+       meta = fbc_checkpoint_meta_t()
+@@ -1038,6 +1109,18 @@
+       version = 0_int32
+       clamped_flag = 0_int32
+       io_status = 0
++      ! Inspect also avoids opening a source whose reported length is unknown
++      ! or zero. On Linux this rejects a FIFO without waiting for a writer.
++      path_units = -1_int64
++      inquire(file=trim(path), size=path_units, iostat=io_status)
++      if (io_status /= 0 .or. path_units < 0_int64) then
++         status = FBT_ERR_IO
++         return
++      end if
++      if (path_units == 0_int64) then
++         status = FBT_ERR_FORMAT
++         return
++      end if
+       open(newunit=unit, file=trim(path), status='old', action='read', access='stream', &
+            form='unformatted', iostat=io_status)
+       if (io_status /= 0) then
+@@ -1086,6 +1169,23 @@
+          status = FBT_ERR_VERSION
+          return
+       end if
++      ! Header-only inspection cannot validate the payload, but it must not
++      ! call a structurally or numerically invalid configuration convertible.
++      header_config%vocabulary_size = meta%vocabulary_size
++      header_config%width = meta%width
++      header_config%heads = meta%heads
++      header_config%ffn_width = meta%ffn_width
++      header_config%local_window = meta%local_window
++      header_config%memory_scales = meta%memory_scales
++      header_config%memory_slots = meta%memory_slots
++      header_config%logical_horizon = meta%logical_horizon
++      header_config%rms_epsilon = rms_epsilon
++      header_config%slot_decay = slot_decay
++      header_config%slot_temperature = slot_temperature
++      if (.not. fbc_config_is_valid(header_config)) then
++         status = FBT_ERR_FORMAT
++         return
++      end if
+       if (meta%updates < 0_int64 .or. meta%tokens < 0_int64 .or. &
+           (clamped_flag /= 0_int32 .and. clamped_flag /= 1_int32)) then
+          meta%convertible = .false.

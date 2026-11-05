@@ -2,7 +2,7 @@
 
 Vegai'nin doğrulaması üç birbirini tamamlayan seviyededir:
 
-1. **native Fortran 2023 testleri** (`test/test_all.f90`): derlenen gerçek
+1. **native Fortran 2018+ testleri** (`test/test_all.f90`): derlenen gerçek
    API'nin contract/property testleri;
 2. **bağımsız Python referans modeli** (`tools/verify_reference.py`): bit
    cebiri, standart SplitMix64 oracle'ı ve demo senaryosunun farklı bir dilde
@@ -12,13 +12,121 @@ Vegai'nin doğrulaması üç birbirini tamamlayan seviyededir:
 
 Bu katmanlar aynı bug sınıfını farklı şekillerde yakalamaya yöneliktir. Python
 modeli Fortran derleyicisinin yerine geçmez; native testler de referans modelin
-yerine geçmez.
+yerine geçmez. Varsayılan native build/test ve aşağıdaki yerel native kanıtlar
+Python gerektirmez; Python referansı ve henüz taşınmamış araçlar ayrı/legacy'dir.
+
+## Yerel native doğrulama — 2026-11-05
+
+Linux x86-64 üzerinde kaynaklardan hazırlanmış GNU Fortran 12.2, CMake 3.28,
+FPM 0.12 ve portable CPU profiliyle, doğal dil profilinin eklenmesinden **önceki**
+çalışmalarda:
+
+- CMake Release serial **38/38**, OpenMP Release **39/39**, OpenMP checked
+  Debug **39/39** CTest geçti. Debug'da bounds/runtime denetimleri, signaling
+  NaN başlangıcı, integer overflow ve invalid/zero/overflow FPE trap açıktı.
+- Context suite **513 kontrol / 0 hata**; FPM serial ve OpenMP suite'leri geçti,
+  OpenMP probe gerçekten iki thread gördü. FPM ana property suite **1737/0**.
+- Python'un `PATH` üzerinde bulunmadığı ortamda genişletilmiş Make
+  `native-contract-check`, FPM serial/OpenMP ve Linux `portable-serial`
+  workflow adımları geçti. Bu,
+  kurulu araçların arz zincirini veya sistem genelinde Python yokluğunu kanıtlamaz.
+- Native UD çıkarıcı beş BOUN/PUD dosyasının beklenen SHA-256 değerlerini
+  üretti; test verileri repoya eklenmedi. Örnek ve sınırlar
+  [deney kaydında](experiments/context-slot-quality-2026-11.md).
+
+Bunlar tek host ve bu bootstrap toolchain için kanıttır; macOS, Windows, başka
+mimari/compiler, GPU/NPU ve üretim yükünde başarı veya certification iddiası
+değildir. Legacy Python testleri ve harici provider/format entegrasyonları bu
+native matrisin parçası değildir.
+
+## Platformlar arası sözleşme düzeltmeleri — 2026-11-05
+
+GitHub Actions'ta Linux ve macOS işleri geçerken Windows işleri başarısız oldu.
+Kök nedenler testleri zayıflatarak değil, sözleşmeleri platformdan bağımsız hale
+getirerek giderildi:
+
+- **Bayt-tam fixture'lar:** CMake'ın `file(WRITE)` komutu metni ana işletim
+  sisteminin satır sonu kipinde yazar; Windows'ta her LF, CRLF olur. Bu yüzden
+  LF/CR baytına duyarlı testler artık derlenen Fortran yardımcı programıyla
+  (`vegai_prompt_resume_fixture bytes`, hex ve `xx*N` yineleme token'ları)
+  dosyaları bayt-tam üretir (`test/native_exact_text.cmake`). Python gerekmez.
+- **Çıkış kodları:** Fortran `ERROR STOP` kodu işlemciye bağlıdır. POSIX onu 8
+  bite indirgerken Windows işaretsiz değeri negatif sayı olarak raporlar. Negatif
+  sıfır olmayan sayısal durum, kontrollü reddetme sayılır; sinyal/başlatma
+  hatası sayılmaz. CLI'nın kendi 2/1 dönüş kodları değişmedi.
+- **JSON derinlik sınırı:** CPython 3.12+ çok daha derin JSON'u özyineleme
+  hatası vermeden işleyebilir. Bu nedenle `tools/lmm_contract.py` ve
+  `tools/training_data_io.py` artık açık, özyinelemesiz derinlik/düğüm
+  sınırları uygular. Bu, sürümden bağımsız fail-closed davranıştır.
+- **Make zaman damgası:** macOS'un GNU Make 3.81 sürümü saniye çözünürlüğünde
+  karşılaştırır; artımlı derleme testi bu nedenle en az bir saniye bekler.
+- **Depo satır sonları:** `.gitattributes` metin dosyalarını her platformda LF
+  olarak checkout eder; ikili fixture ve arşiv yamaları normalize edilmez.
+- **Eksik modül onarımı:** Eksik `.mod` veya eksik modül dizini artık damga
+  zamanına güvenmez. Modül durumu `-include` edilen makefile dosyalarında
+  tutulur; hasar görüldüğünde ilgili kütüphanenin nesneleri silinir ve GNU Make
+  dosyaları yeniden stat ederek yeniden başlar. Böylece saniye çözünürlüklü
+  dosya sistemi/make (macOS make 3.81, HFS+, NTFS) onarımı "güncel" sayamaz.
+  Nesne sayısı sözleşmesi değişmedi; yalnızca hasarlı derleme yolu tam yeniden
+  derleme yapar.
+- **Windows `fsync`:** `FlushFileBuffers` yazılabilir tanıtıcı ister; Windows'ta
+  dosya artık `O_RDWR` ile açılır ve salt-okunur dosya işletim sisteminin kendi
+  geri yazımına bırakılır. POSIX davranışı (`O_RDONLY` + `fsync`) aynıdır.
+- **Uzun fixture'lar:** İşletim sistemi tek komut satırı argümanını sınırlar.
+  `native_write_text` uzun metinleri 16000 hex karakterlik parçalar hâlinde
+  yazar (`bytes` + `bytes-append`); içerik yine bayt-tamdır ve satır sonları
+  platformdan bağımsızdır.
+- **JSON derinliği (denetleyici):** `tools/continuous_pretrain.py` artık
+  ayrıştırmadan önce ham metinde 64 seviyeyi aşan JSON'u reddeder. Python 3.14'ün
+  JSON tarayıcısı 3.11/3.12'den çok daha derin belgeleri kabul ettiği için
+  özyineleme hatası tek başına sözleşme sayılmaz.
+- **Rezerve aygıt adları:** Windows'ta `nul`, `con`, `aux`, `com1` gibi adlar
+  aygıta yönlenir. NUL baytı fixture'ları artık `nul-bytes.txt`,
+  `nul-corpus.bin`, `nul-record`, `nul-output.txt` gibi adlar kullanır; içerik
+  ve doğrulanan baytlar aynıdır.
+- **Taşınabilir işler:** `vegai_prompt_resume_fixture` artık `VEGAI_BUILD_TESTS`
+  kapalıyken de üretilir ve taşınabilir CI işleri onu açıkça derleyip
+  `-DFIXTURE` ile bayt-tam sözleşmelere verir.
+- **İkili tanıtıcılar:** Windows CRT metin kipinde `os.read` ilk `0x1A`
+  baytında durur ve `os.write` LF'yi CRLF'e çevirir. Bu yüzden içerik taşıyan
+  tüm tanıtıcılar (`pretraining_quality_evaluation`, `continuous_pretrain`,
+  `attested_pretrain`) artık `O_BINARY` ile açılır. Aksi hâlde gerçek bir
+  yürütülebilir dosyanın özeti yalnızca ilk birkaç KB'ı kapsıyor ve özel
+  checkpoint kopyaları bozuluyordu; Windows'ta kalite kanıtı bu yüzden
+  reddediliyordu.
+- **Ölçüm kalibrasyonu:** `benchmark_neural_batch_throughput.py` içindeki
+  "merge-base'e göre 2x" kapısı, ana makine hızına bağlı bir banttı. Aynı kod
+  merge-base kolu ~2.1-2.5k token/s çalışan makinelerde **3.2-3.6x**, ~3.6-8.1k
+  token/s çalışan GitHub koşucularında **1.74-1.79x** ölçüyor; bant üst sınırı
+  4500 yerine 3000 token/s'ye çekildi ve gerekçesi koda yazıldı. Daha hızlı
+  sınıflarda oran yine yayımlanır, ancak kapı yerine "notice" olarak raporlanır;
+  aynı ikiliye karşı per-token hızlanma (1.25x), NLL ve NLL-regresyon kapıları
+  ana makineden bağımsız olarak yürürlükte kalır.
+- **Hata teşhisi:** Başarısız adımlar artık 4000 karakterden kısa çıktılarda da
+  hata ayrıntısını yayımlar (`printf '%s' "$output" | tail -c 4000`); bash'in
+  `"${var: -4000}"` biçimi kısa metinde boş dize döndürüyordu.
+
+Aynı tarihli **güncel doğal dil değişikliklerinden sonra** yeni bootstrap GNU
+Fortran 12.2 ve CMake 3.28 ile tüm native CTest sonuçları: serial Release
+**41/41**, iki-thread OpenMP Release **42/42**, checked OpenMP Debug
+**42/42**. Context suite **535/0**; FPM 0.12 serial ve iki-thread OpenMP,
+Python `PATH`'te olmadan paralel `make -j2 native-contract-check` ve güncel
+prompt sözleşmeleri geçti. Yeni profilin elle verilen LR ile aynı checkpoint'i,
+resume'da LR korunumu, gerçek geçersiz UTF-8 byte'ı, FIFO reddi ve sıfır
+ilerleme sıklığı checked build'de test edildi. İlk `make -j2` denemesi eksik
+Fortran modül bağımlılığı nedeniyle, ilk checked profil denemesi de sıfır
+progress sıklığında `MOD` nedeniyle başarısızdı; ikisi düzeltildi ve tekrar
+tam testler geçti. Önceki yük altı sparse latency testi sakin ortamda serial,
+OpenMP ve Debug tam suite içinde geçti. Test edilen host/derleyici sınırları
+ve sonuçlar [doğal dil deneyinde](experiments/turkish-natural-quality-2026-11.md).
 
 ## Çalıştırma matrisi
 
 | Komut | Kapsam | Beklenen sonuç |
 |---|---|---|
-| `make check` | bağımsız reference/property/demo + stdlib control-plane contract'leri | tüm çağrılar `PASS` |
+| `make check` | Python/CMake gerektirmeyen native property, corpus preflight, control ve fixed-budget context sözleşmeleri | tüm çağrılar `PASS` |
+| `make native-contract-check` | ayrıca prompt/resume, Türkçe profil, doğal dil NLL, overlap, UD çıkarıcı ve benchmark CLI sözleşmeleri; CMake test yürütücüsü gerekir | tüm çağrılar `PASS` |
+| `make legacy-python-check` | henüz taşınmamış bağımsız Python reference ve control-plane sözleşmeleri | tüm çağrılar `PASS` (isteğe bağlı adapter'lar ayrıca belirtilir) |
 | `make data-check` | optional PyArrow kurulumu; streaming JSONL/JSON/TXT/Parquet/Arrow round-trip, corruption, production adapter ve curriculum compiler'ın optional Parquet/Arrow replay'i | `training data I/O verification: PASS` + `capability curriculum verification: PASS (... Parquet/Arrow=checked)` |
 | `make capability-check` | stdlib-only policy-driven curriculum build/replay, strict text-only projection, held-out/source coverage, split/annotation conflict, no-output failure, controller-ledger ve tamper rejection | `capability curriculum verification: PASS` |
 | `make lmm-check` | optional Rust Unicode/BPE tokenizer; long context, session ledger, knowledge evidence, image/audio/video asset registry, real worker protocol, held-out citation/abstention quality release gate, measured domain-expert routing/panel, typed verified read-only tool plan, immutable shadow/canary governor + single-host authoritative registry ve capability gate | `lmm runtime verification: PASS` + `lmm portfolio verification: PASS` + `LMM tool orchestrator verification: PASS` + `LMM release governor verification: PASS` + `LMM release registry verification: PASS` |
@@ -333,7 +441,7 @@ latency benchmarkı ölçün.
 Bir sonuç raporlanırken en az şu bilgiler saklanmalıdır:
 
 - compiler ve version (`gfortran --version`);
-- Fortran 2023 conformance flag'i (`-std=f2023` veya compiler eşdeğeri);
+- seçilen Fortran conformance flag'i (varsayılan `-std=f2018`; isteğe bağlı `-std=f2023` veya compiler eşdeğeri);
 - `FFLAGS`, `OMP_NUM_THREADS`, CPU/OS;
 - symbol ID/seed seti;
 - bundle tie seedleri;
@@ -355,7 +463,7 @@ Bir değişiklik merge edilmeden önce:
 - [ ] `cmake` + `ctest` checked build
 - [ ] yeni public API için normal ve hata yolu testi
 - [ ] kaynakta signed-overflow'a dayanan yeni integer aritmetiği yok
-- [ ] Fortran derlemesi `-std=f2023` (veya compiler eşdeğeri) ile geçti
+- [ ] Varsayılan Fortran derlemesi `-std=f2018` (veya compiler eşdeğeri) ile geçti; 2023 iddiası varsa ayrı test edildi
 - [ ] exact ve approximate cleanup sözleşmeleri karıştırılmadı
 - [ ] Resonator sonucunda heuristic network residual ile certified final residual ayrıldı
 - [ ] pretraining corpus manifesti, lisans/PII/retention değerlendirmesi ve digest'i kaydedildi

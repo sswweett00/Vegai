@@ -33,6 +33,11 @@ GENERATION_REPORT_SCHEMA = "vegai-lmm-generation-report/v1"
 STRUCTURED_RESPONSE_SCHEMA = "vegai-lmm-structured-response-contract/v1"
 
 MAX_JSON_BYTES = 16 * 1024 * 1024
+# Recursive decode/serialization depth is bounded explicitly: interpreter
+# versions differ in when nested JSON raises RecursionError, so the contract
+# cannot rely on the runtime's stack. Operators may still use the much deeper
+# schema/value bounds below for legitimate documents.
+MAX_JSON_DEPTH = 64
 MAX_TEXT_BYTES = 1 * 1024 * 1024
 MAX_MESSAGE_PARTS = 64
 MAX_MESSAGES = 16_384
@@ -217,6 +222,22 @@ class FileIdentity:
         }
 
 
+GATEWAY_RUNTIME_SOURCE_NAMES = frozenset({"lmm_contract", "lmm_process", "bounded_process"})
+
+
+def validate_gateway_runtime_sources(value: object, field: str) -> None:
+    """Require complete, well-formed provenance for project-owned gateway helpers."""
+    require(isinstance(value, Mapping), f"{field} must be an object")
+    require_exact_fields(value, set(GATEWAY_RUNTIME_SOURCE_NAMES), field)
+    for name in sorted(GATEWAY_RUNTIME_SOURCE_NAMES):
+        identity = value[name]
+        require(isinstance(identity, Mapping), f"{field}.{name} must be a file identity")
+        require_exact_fields(identity, {"path", "sha256", "bytes"}, f"{field}.{name}")
+        validate_unicode_text(identity["path"], f"{field}.{name}.path", maximum_bytes=16 * 1024)
+        validate_sha256(identity["sha256"], f"{field}.{name}.sha256")
+        parse_positive_int(identity["bytes"], f"{field}.{name}.bytes", MAX_JSON_BYTES)
+
+
 def file_identity(path: Path, label: str, *, maximum_bytes: int | None = None) -> FileIdentity:
     resolved = path.resolve()
     require(resolved.is_file(), f"{label} is not a regular file: {resolved}")
@@ -243,11 +264,12 @@ def require_unchanged(path: Path, before: FileIdentity, label: str) -> FileIdent
 def read_json_object(path: Path, label: str, *, maximum_bytes: int = MAX_JSON_BYTES) -> dict[str, Any]:
     identity = file_identity(path, label, maximum_bytes=maximum_bytes)
     try:
-        payload = path.resolve().read_bytes()
-        decoded = payload.decode("utf-8")
-        value = json.loads(decoded)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise LMMContractError(f"cannot parse {label} {path}: {error}") from error
+        with path.resolve().open("rb") as handle:
+            payload = handle.read(maximum_bytes + 1)
+    except OSError as error:
+        raise LMMContractError(f"cannot read {label} {path}: {error}") from error
+    require(len(payload) <= maximum_bytes, f"{label} exceeds {maximum_bytes} bytes")
+    value = strict_json_value(payload, f"{label} {path}")
     require(isinstance(value, Mapping), f"{label} must contain one top-level JSON object")
     require_unchanged(path, identity, label)
     return dict(value)
@@ -607,13 +629,13 @@ class AssetRegistry:
         resolved = path.resolve()
         identity = file_identity(resolved, "asset registry", maximum_bytes=MAX_JSON_BYTES)
         assets: dict[str, AssetRecord] = {}
+        consumed = 0
         try:
             with resolved.open("rb") as handle:
                 for number, raw in _iter_bounded_jsonl_lines(handle, MAX_JSON_BYTES):
-                    try:
-                        mapping = json.loads(raw.decode("utf-8"))
-                    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                        raise LMMContractError(f"asset registry line {number} is invalid JSON: {error}") from error
+                    consumed += len(raw) + 1  # The strict iterator removed LF.
+                    require(consumed <= MAX_JSON_BYTES, f"asset registry exceeds {MAX_JSON_BYTES} bytes")
+                    mapping = strict_json_value(raw, f"asset registry line {number}")
                     asset = AssetRecord.from_mapping(mapping, f"asset registry line {number}")
                     require(asset.asset_id not in assets, f"asset registry repeats id {asset.asset_id!r}")
                     require(len(assets) < MAX_ASSETS, f"asset registry exceeds {MAX_ASSETS} entries")
@@ -953,21 +975,46 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, ob
     result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
-            raise LMMContractError(f"JSON object repeats key {key!r}")
+            raise LMMContractError(f"JSON object contains duplicate key {key!r}")
         result[key] = value
     return result
 
 
+def _require_bounded_json_depth(value: object, label: str) -> None:
+    """Reject over-nested parsed JSON with an explicit stack, not the C stack."""
+    pending: list[tuple[object, int]] = [(value, 1)]
+    while pending:
+        current, depth = pending.pop()
+        if depth > MAX_JSON_DEPTH:
+            raise LMMContractError(
+                f"{label} is not strict UTF-8 JSON: nesting depth exceeds {MAX_JSON_DEPTH}"
+            )
+        if isinstance(current, Mapping):
+            pending.extend((child, depth + 1) for child in current.values())
+        elif isinstance(current, list):
+            pending.extend((child, depth + 1) for child in current)
+
+
 def strict_json_value(raw: bytes, label: str) -> object:
+    """Parse one unambiguous, finite, depth-bounded UTF-8 JSON value."""
     def reject_constant(value: str) -> object:
         raise ValueError(f"unsupported JSON constant {value!r}")
 
+    def finite_float(value: str) -> float:
+        result = float(value)
+        if not math.isfinite(result):
+            raise ValueError("JSON number is outside the finite floating-point range")
+        return result
+
     try:
-        return json.loads(
-            raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_json_keys, parse_constant=reject_constant
+        value = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=reject_constant, parse_float=finite_float,
         )
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as error:
+    except (LMMContractError, UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as error:
         raise LMMContractError(f"{label} is not strict UTF-8 JSON: {error}") from error
+    _require_bounded_json_depth(value, label)
+    return value
 
 
 def validate_bounded_structured_json_tree(value: object, field: str) -> None:
@@ -1167,9 +1214,6 @@ def _iter_bounded_jsonl_lines(handle: Any, maximum_bytes: int) -> Iterable[tuple
         has_lf = raw.endswith(b"\n")
         payload_bytes = len(raw) - 1 if has_lf else len(raw)
         overlong = payload_bytes > maximum_bytes or (not has_lf and len(raw) == limit)
-        if overlong and not has_lf:
-            while raw and not raw.endswith(b"\n"):
-                raw = handle.readline(limit)
         require(not overlong, f"JSONL line {number} exceeds {maximum_bytes} bytes")
         require(has_lf, f"JSONL line {number} must terminate with LF")
         payload = raw[:-1]

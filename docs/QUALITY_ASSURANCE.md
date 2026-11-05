@@ -30,7 +30,7 @@ anlamına gelmez.
 
 | Alan | Mevcut doğrulanabilir güç | Kalite riski / sınır | Uygulanan veya gerekli kontrol |
 |---|---|---|---|
-| Bit cebiri | Fortran 2023 fixed-size HDC, SplitMix64 oracle, XOR/unbinding, canonical distance→similarity, exact-rate Floyd/complement mask | Model kapasitesi HDC cardinality ve vocabulary ile sınırlı; PRNG kriptografik değildir | Native property tests, bağımsız Python oracle, cardinality/determinism edges |
+| Bit cebiri | Fortran 2018+ fixed-size HDC, SplitMix64 oracle, XOR/unbinding, canonical distance→similarity, exact-rate Floyd/complement mask | Model kapasitesi HDC cardinality ve vocabulary ile sınırlı; PRNG kriptografik değildir | Native property tests, bağımsız Python oracle, cardinality/determinism edges |
 | Symbolic memory / Resonator | Lexicographic exact cleanup ve multi-factor certificate; retained-XOR residual optimization | Heuristic resonator aşaması tek başına certificate değildir | Lowest-slot tie regression, rebind oracle, exact verification, ambiguity telemetry |
 | Pretraining | İki-pass streaming vocabulary ve deterministic source-ordered Hebbian update | Transformer loss/perplexity yok; semantic quality corpus'a bağımlı | Strict ingest, checkpoint/resume, controlled mode diagnostics ve operator-owned held-out semantic-neighbour checkpoint gate |
 | Data quality | JSONL/JSON/TXT/Parquet/Arrow schema boundary, exact dedupe, split audit | Exact dedupe semantic duplicate, PII/license veya contamination çözmez | `training_dataset.py`, provenance ve upstream governed pipeline |

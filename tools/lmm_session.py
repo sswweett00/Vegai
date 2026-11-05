@@ -31,6 +31,8 @@ from lmm_contract import (
     file_identity,
     require,
     require_unchanged,
+    read_json_object,
+    strict_json_value,
     validate_identifier,
     validate_sha256,
     write_json_atomic,
@@ -81,6 +83,7 @@ def iter_events(path: Path) -> Iterator[tuple[ConversationMessage, str]]:
     require(source.is_file(), f"session ledger is not a regular file: {source}")
     identity = file_identity(source, "session ledger", maximum_bytes=MAX_JSON_BYTES)
     expected_previous = GENESIS
+    consumed = 0
     try:
         with source.open("rb") as handle:
             number = 0
@@ -90,21 +93,17 @@ def iter_events(path: Path) -> Iterator[tuple[ConversationMessage, str]]:
                 if not raw:
                     break
                 number += 1
+                consumed += len(raw)
+                require(consumed <= MAX_JSON_BYTES, f"session ledger exceeds {MAX_JSON_BYTES} bytes")
                 has_lf = raw.endswith(b"\n")
                 payload_bytes = len(raw) - 1 if has_lf else len(raw)
                 overlong = payload_bytes > MAX_EVENT_LINE_BYTES or (not has_lf and len(raw) == limit)
-                if overlong and not has_lf:
-                    while raw and not raw.endswith(b"\n"):
-                        raw = handle.readline(limit)
                 require(not overlong, f"session event {number} exceeds {MAX_EVENT_LINE_BYTES} bytes")
                 require(has_lf, f"session event {number} must terminate with LF")
                 raw = raw[:-1]
                 require(not raw.endswith(b"\r"), f"session event {number} uses CRLF; strict LF is required")
                 require(bool(raw.strip()), f"session event {number} is blank")
-                try:
-                    parsed = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                    raise LMMContractError(f"session event {number} is invalid JSON: {error}") from error
+                parsed = strict_json_value(raw, f"session event {number}")
                 message, digest = parse_event(parsed, number, expected_previous)
                 expected_previous = digest
                 yield message, digest
@@ -139,22 +138,26 @@ def fsync_directory(directory: Path) -> None:
 
 
 def write_ledger_atomic(path: Path, messages: list[ConversationMessage]) -> str:
+    require(len(messages) <= MAX_MESSAGES, f"session ledger would exceed {MAX_MESSAGES} messages")
     path.parent.mkdir(parents=True, exist_ok=True)
-    rendered: list[bytes] = []
     previous = GENESIS
-    for sequence, message in enumerate(messages, start=1):
-        payload = event_payload(sequence, previous, message)
-        digest = event_digest(payload)
-        event = dict(payload)
-        event["event_sha256"] = digest
-        rendered.append(canonical_json_bytes(event) + b"\n")
-        previous = digest
+    total_bytes = 0
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     temporary = Path(temporary_name)
     try:
         with os.fdopen(descriptor, "wb") as handle:
-            for line in rendered:
-                handle.write(line)
+            for sequence, message in enumerate(messages, start=1):
+                payload = event_payload(sequence, previous, message)
+                digest = event_digest(payload)
+                event = dict(payload)
+                event["event_sha256"] = digest
+                line = canonical_json_bytes(event)
+                require(len(line) <= MAX_EVENT_LINE_BYTES,
+                        f"session event {sequence} exceeds {MAX_EVENT_LINE_BYTES} bytes")
+                total_bytes += len(line) + 1  # Strict ledger lines include LF.
+                require(total_bytes <= MAX_JSON_BYTES, f"session ledger would exceed {MAX_JSON_BYTES} bytes")
+                handle.write(line + b"\n")
+                previous = digest
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
@@ -193,14 +196,7 @@ class LedgerLock:
 
 
 def read_message(path: Path) -> ConversationMessage:
-    identity = file_identity(path, "message JSON", maximum_bytes=MAX_JSON_BYTES)
-    try:
-        value = json.loads(path.resolve().read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise LMMContractError(f"cannot parse message JSON {path}: {error}") from error
-    require(file_identity(path, "message JSON", maximum_bytes=MAX_JSON_BYTES) == identity,
-            "message JSON changed while it was being read")
-    return ConversationMessage.from_mapping(value, "message JSON")
+    return ConversationMessage.from_mapping(read_json_object(path, "message JSON"), "message JSON")
 
 
 def append_event(arguments: argparse.Namespace) -> dict[str, object]:

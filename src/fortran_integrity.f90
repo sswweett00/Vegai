@@ -8,7 +8,7 @@
 !  signed int32 overflow while retaining standard Fortran bit intrinsics.
 !==============================================================================
 module fortran_integrity
-   use, intrinsic :: iso_fortran_env, only: int8, int32, int64
+   use, intrinsic :: iso_fortran_env, only: int8, int32, int64, file_storage_size
    implicit none
    private
 
@@ -16,6 +16,7 @@ module fortran_integrity
    integer(int32), parameter, public :: FI_ERR_INVALID_ARGUMENT = -960_int32
    integer(int32), parameter, public :: FI_ERR_IO = -961_int32
    integer(int32), parameter, public :: FI_ERR_SIZE = -962_int32
+   integer(int32), parameter, public :: FI_ERR_PLATFORM = -963_int32
    integer(int64), parameter :: MASK32 = int(z'00000000FFFFFFFF', int64)
    integer(int64), parameter :: INITIAL_HASH(8) = [ &
       int(z'6A09E667', int64), int(z'BB67AE85', int64), int(z'3C6EF372', int64), int(z'A54FF53A', int64), &
@@ -46,9 +47,20 @@ module fortran_integrity
       logical :: finalized = .false.
    end type sha256_state_t
 
-   public :: sha256_init, sha256_update_bytes, sha256_final_hex, sha256_file
+   public :: sha256_init, sha256_update_bytes, sha256_final_hex, sha256_file, sha256_platform_supported
 
 contains
+
+   pure logical function sha256_platform_supported() result(supported)
+      ! Stream bytes and signed-byte conversion below rely on octet file units
+      ! and two's-complement sign extension. Reject other representations
+      ! instead of returning a plausible but incorrect fingerprint.
+      supported = file_storage_size == 8 .and. storage_size(0_int8) == 8 .and. &
+                  bit_size(0_int8) == 8 .and. bit_size(0_int64) == 64
+      if (.not. supported) return
+      supported = iand(int(-1_int8, int64), 255_int64) == 255_int64 .and. &
+                  iand(int(int(z'80', int8), int64), 255_int64) == 128_int64
+   end function sha256_platform_supported
 
    subroutine sha256_init(state)
       type(sha256_state_t), intent(out) :: state
@@ -60,27 +72,35 @@ contains
       type(sha256_state_t), intent(inout) :: state
       integer(int8), intent(in) :: bytes(:)
       integer(int32), intent(out) :: status
-      integer :: input_index, take_count, available
-      integer(int64) :: input_count
+      integer :: take_count, available
+      integer(int64) :: input_index, input_count
 
+      status = FI_ERR_PLATFORM
+      if (.not. sha256_platform_supported()) return
       status = FI_OK
-      if (state%finalized) then
+      if (.not. sha256_state_is_valid(state)) then
          status = FI_ERR_INVALID_ARGUMENT
          return
       end if
-      input_count = int(size(bytes), int64)
-      if (input_count > huge(0_int64) - state%total_bytes) then
+      input_count = size(bytes, kind=int64)
+      if (state%total_bytes > huge(0_int64) / 8_int64) then
          status = FI_ERR_SIZE
          return
       end if
-      input_index = 1
-      do while (input_index <= size(bytes))
+      if (input_count > huge(0_int64) / 8_int64 - state%total_bytes) then
+         status = FI_ERR_SIZE
+         return
+      end if
+      ! Use 64-bit subscripts and termination arithmetic. A final input chunk
+      ! ending at huge(default integer) must not overflow index + take_count.
+      input_index = 1_int64
+      do while (input_index <= input_count)
          available = 64 - int(state%buffer_length)
-         take_count = min(available, size(bytes) - input_index + 1)
+         take_count = int(min(int(available, int64), input_count - input_index + 1_int64))
          state%buffer(int(state%buffer_length) + 1:int(state%buffer_length) + take_count) = &
-            bytes(input_index:input_index + take_count - 1)
+            bytes(input_index:input_index + int(take_count, int64) - 1_int64)
          state%buffer_length = state%buffer_length + int(take_count, int32)
-         input_index = input_index + take_count
+         input_index = input_index + int(take_count, int64)
          if (state%buffer_length == 64_int32) then
             call sha256_compress_block(state%hash_words, state%buffer)
             state%buffer_length = 0_int32
@@ -97,8 +117,10 @@ contains
       integer :: buffer_length, index, output_position
 
       digest_hex = ''
+      status = FI_ERR_PLATFORM
+      if (.not. sha256_platform_supported()) return
       status = FI_OK
-      if (state%finalized) then
+      if (.not. sha256_state_is_valid(state)) then
          status = FI_ERR_INVALID_ARGUMENT
          return
       end if
@@ -129,6 +151,16 @@ contains
       end do
    end subroutine sha256_final_hex
 
+   pure logical function sha256_state_is_valid(state) result(valid)
+      type(sha256_state_t), intent(in) :: state
+      valid = .false.
+      if (state%finalized .or. state%buffer_length < 0_int32 .or. state%buffer_length >= 64_int32) return
+      if (state%total_bytes < 0_int64) return
+      if (modulo(state%total_bytes, 64_int64) /= int(state%buffer_length, int64)) return
+      if (any(state%hash_words < 0_int64) .or. any(state%hash_words > MASK32)) return
+      valid = .true.
+   end function sha256_state_is_valid
+
    subroutine sha256_file(path, digest_hex, byte_count, status)
       character(len=*), intent(in) :: path
       character(len=64), intent(out) :: digest_hex
@@ -136,14 +168,18 @@ contains
       integer(int32), intent(out) :: status
       type(sha256_state_t) :: state
       integer(int8) :: chunk(65536)
-      integer :: unit, io_status, read_count
-      integer(int64) :: remaining, file_size
+      integer :: unit, io_status, close_status, read_count
+      integer(int64) :: remaining, file_size, opened_size, ending_size
       logical :: exists
 
       digest_hex = ''
       byte_count = 0_int64
+      status = FI_ERR_PLATFORM
+      if (.not. sha256_platform_supported()) return
       status = FI_ERR_INVALID_ARGUMENT
       if (len_trim(path) == 0) return
+      exists = .false.
+      file_size = -1_int64
       inquire(file=trim(path), exist=exists, size=file_size, iostat=io_status)
       if (io_status /= 0 .or. .not. exists) then
          status = FI_ERR_IO
@@ -155,6 +191,13 @@ contains
       end if
       open(newunit=unit, file=trim(path), status='old', action='read', access='stream', form='unformatted', iostat=io_status)
       if (io_status /= 0) then
+         status = FI_ERR_IO
+         return
+      end if
+      opened_size = -1_int64
+      inquire(unit=unit, size=opened_size, iostat=io_status)
+      if (io_status /= 0 .or. opened_size /= file_size) then
+         close(unit)
          status = FI_ERR_IO
          return
       end if
@@ -175,7 +218,13 @@ contains
          end if
          remaining = remaining - int(read_count, int64)
       end do
-      close(unit)
+      ending_size = -1_int64
+      inquire(unit=unit, size=ending_size, iostat=io_status)
+      close(unit, iostat=close_status)
+      if (io_status /= 0 .or. close_status /= 0 .or. ending_size /= file_size) then
+         status = FI_ERR_IO
+         return
+      end if
       call sha256_final_hex(state, digest_hex, status)
       if (status == FI_OK) byte_count = file_size
    end subroutine sha256_file

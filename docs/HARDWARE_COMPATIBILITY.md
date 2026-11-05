@@ -1,7 +1,7 @@
 # Donanım ve işletim sistemi uyumluluğu
 
 Vegai'nin çalıştırma sözleşmesi, vendor'a özgü GPU kernel'i değil **portable
-Fortran 2023 CPU backend**'idir. Bu tercih Intel Core Ultra 5 125H gibi mobil
+Fortran 2018+ CPU backend**'idir. Bu tercih Intel Core Ultra 5 125H gibi mobil
 x86-64 sistemlerde, daha eski uyumlu x86-64 CPU'larda ve uygun Fortran compiler
 ile ARM64 gibi başka mimarilerde aynı kaynak kodunun derlenebilmesini hedefler.
 
@@ -23,9 +23,9 @@ Vegai bunu ölçülebilir katmanlara ayırır:
 
 | Katman | Sözleşme | Kanıt / davranış |
 |---|---|---|
-| Portable CPU kaynak yolu | Standard Fortran 2023 + host-ISA bayrağı olmayan CMake profili | Aynı hedef OS/CPU üzerinde yeniden derlenir; zorunlu GPU/NPU runtime'ı yoktur. |
+| Portable CPU kaynak yolu | Fortran 2018 varsayılan, 2023 opt-in + host-ISA bayrağı olmayan CMake profili | Aynı hedef OS/CPU üzerinde yeniden derlenir; zorunlu GPU/NPU runtime'ı yoktur. |
 | Serial fallback | OpenMP bulunmadan da aynı CPU semantiği | `portable-serial` preset'i `VEGAI_ENABLE_OPENMP=OFF` ile derler. |
-| OpenMP CPU yolu | Runtime bulunursa immutable context aşamasını paralelleştirir | Sıralı commit korunur; throughput hosta özeldir. |
+| OpenMP CPU yolu | Runtime bulunursa immutable context aşamasını paralelleştirir | Sıralı commit korunur; throughput hosta özeldir. `VEGAI_REQUIRE_OPENMP=ON` configure sırasında gerçek desteği zorunlu kılar. |
 | Optional accelerator | OpenVINO provider yalnız açıkça seçilirse kullanılır | Driver/device/bit-exact contract yoksa CPU fallback veya explicit failure; adapter listesi hızlandırma iddiası değildir. |
 | Checkpoint taşınması | ABI-local stream-unformatted dosya | OS/CPU/compiler geçişinde checkpoint'i taşınabilir saymaz; hedefte yeniden train veya aynı ABI gerekir. |
 
@@ -33,15 +33,19 @@ Vegai bunu ölçülebilir katmanlara ayırır:
 host-only `native`. `.github/workflows/portable-platforms.yml`, source/launcher
 sözleşmesini Linux x86-64, macOS ARM64 ve Windows x86-64 üzerinde serial
 portable profile ile çalıştıracak şekilde tanımlanmıştır. ARM64 source/runtime
-sözleşmesi macOS ARM64 worker üzerinde ölçülür; Linux ARM64 ise aynı portable
-preset'i hedefte çalıştırılması gereken bir build adayıdır. Bu workflow her
-platformda gerçek `hds_engine` çalıştırır, küçük bir corpus ile `vegai_pretrain
-train` çağrısı yapar ve oluşan checkpoint'i **aynı binary** ile inspect eder.
-Bu, compiler/OS/launcher/path uyumluluğu kanıtıdır; platformlar arası checkpoint
-interchange veya bir CPU'nun diğerinden hızlı olduğu iddiası değildir.
+sözleşmesi macOS ARM64 worker için hedeflenir; Linux ARM64 ise aynı portable
+preset'i hedefte çalıştırılması gereken bir build adayıdır. Workflow gerçek
+`hds_engine`, küçük bir `vegai_pretrain train` koşusu ve checkpoint'in **aynı
+binary** ile inspect edilmesini içerir. Proje adımları Python çağırmaz; CMake
+sınama altyapısı native executable'ların çıktısını, checkpoint boyutunu ve
+SHA-256'larını kontrol eder. Native profil OS/CPU inventory doğrulaması yapmaz;
+eski Python envanter raporu ve testleri yalnız ayrıca çalıştırılan legacy
+araçlardır. Ancak workflow tanımı başarı kanıtı değildir; her platformun
+çalıştırma sonucu ayrıca kontrol edilmelidir. Bir geçiş platformlar arası
+checkpoint interchange veya hız karşılaştırması da kanıtlamaz.
 
 Bilinmeyen veya CI'da henüz ölçülmemiş BSD, RISC-V, POWER, s390x ya da özel
-embedded hedeflerde kaynak portable-build *adayı*dır; hedefte Fortran 2023
+embedded hedeflerde kaynak portable-build *adayı*dır; hedefte Fortran 2018
 compiler + CMake ile configure/build/smoke sonucu alınmadan desteklenmiş olarak
 sunulmaz. `hardware_compatibility.py` architecture family, pointer width ve byte
 order'ı raporlar; `unknown` bir envanter sonucu derleme başarısızlığı değildir,
@@ -49,7 +53,7 @@ ama doğrulanmış-platform rozeti de değildir.
 
 ## 2. Native Fortran profile ve resource preflight
 
-`vegai_control` standart Fortran 2023 control-plane executable'ıdır. Python,
+`vegai_control` Fortran 2018+ control-plane executable'ıdır. Python,
 `/proc`, PowerShell, `sysctl`, WMIC veya başka OS shell inventory komutu çağırmaz.
 Bu nedenle portable olan compiler/environment gerçeklerini raporlar; RAM ve
 free-storage değerleri gerekiyorsa operatorün denetlenmiş input'u olarak kabul
@@ -109,6 +113,15 @@ Bu profil yalnız compiler'ın hedef mimarisi için güvenli baseline instructio
 setini kullanır. Aynı x86-64 ABI ailesindeki farklı CPU'lar için uygun seçimdir;
 ARM64 hedefi için binary'nin ARM64 host/toolchain üzerinde yeniden derlenmesi
 gerekir.
+
+**Eşzamanlı çağrı sınırı:** Serial GNU build'de compiler bazı büyük yerel
+dizileri statik depolamaya taşıyabilir; kütüphane yordamlarının aynı süreçte
+birden çok dış thread'den eşzamanlı veya reentrant çağrılması genel olarak
+sınanmış ya da güvenli kabul edilmez. OpenMP testinde iki thread'lik takımın
+çalışması da tüm API'lerin thread-safe olduğunu kanıtlamaz. Paylaşılan model,
+akış ve workspace erişimini uygulama eşgüdümlemeli; ihtiyaç duyulan eşzamanlı
+çağrılar, thread-stack boyutu ve seçilen compiler/OS üzerinde ayrıca test
+edilmelidir. Güvenli izolasyon isteniyorsa ayrı süreçler kullanın.
 
 ### `native` — yalnız build host için opt-in profil
 
@@ -239,12 +252,10 @@ Windows'ta GNU Make yerine CMake önerilir. GNU Fortran (örneğin MSYS2 UCRT64
 verin. En geniş runtime fallback için OpenMP'siz portable preset'i seçin:
 
 ```powershell
-cmake --preset portable-serial
+cmake --preset portable-serial -DVEGAI_BUILD_TESTS=ON
 cmake --build --preset portable-serial --parallel
 .\build\portable-serial\vegai_pretrain.exe help
-python tools\verify_portable_runtime.py `
-  --engine-bin .\build\portable-serial\hds_engine.exe `
-  --pretrain-bin .\build\portable-serial\vegai_pretrain.exe
+ctest --test-dir build/portable-serial -R '^vegai_portable_runtime_smoke$' --output-on-failure
 ```
 
 MSYS2 shell içindeyseniz aynı yollar slash biçiminde kullanılabilir. Windows
@@ -252,22 +263,24 @@ runner smoke check'i checkpoint'i aynı `.exe` ile train+inspect eder; `.vgai`
 dosyasını macOS/Linux binary'sine kopyalayıp okumayı test veya sözleşme olarak
 sunmaz.
 
-Compiler'ın Fortran 2023 conformance seçeneği desteklenmiyorsa CMake bunu
-uyarı olarak gösterir; platforma uygun current compiler veya explicit compiler
-flag kullanılmalıdır.
+GNU compiler'ın seçilen Fortran standardı bayrağı desteklenmiyorsa CMake
+configure aşamasında açık hata verir; varsayılan 2018, 2023 ise opt-in'dir.
+Diğer compiler'larda ilgili conformance bayrağı ve hedef OS'teki sonuç ayrıca
+doğrulanmalıdır.
 
 ### Aynı-host portable runtime gate
 
-CMake ile üretilen binary için platformdan bağımsız launch/train/inspect gate:
+CMake ile üretilen binary için Python gerektirmeyen launch/train/inspect gate:
 
 ```bash
-python3 tools/verify_portable_runtime.py \
-  --engine-bin ./build/portable-serial/hds_engine \
-  --pretrain-bin ./build/portable-serial/vegai_pretrain
+cmake --preset portable-serial -DVEGAI_BUILD_TESTS=ON
+cmake --build --preset portable-serial --parallel
+ctest --test-dir build/portable-serial -R '^vegai_portable_runtime_smoke$' --output-on-failure
 ```
 
-Windows'ta executable suffix'i `.exe` olur. Bu gate command-line path, temporary
-checkpoint creation ve aynı binary ile inspect akışını doğrular; benchmark
+CTest derleme sistemi target yolunu ve Windows `.exe` suffix'ini çözer. Gate
+command-line path, geçici checkpoint creation ve aynı binary ile inspect akışını
+doğrular ve SHA-256 değerlerini raporlar; benchmark
 zamanı kaydetmez ve compiler/OS değişince checkpoint'in taşınacağını iddia
 etmez.
 

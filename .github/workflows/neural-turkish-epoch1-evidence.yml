@@ -16,6 +16,7 @@ on:
       - '.github/workflows/neural-turkish-epoch1-evidence.yml'
       - 'tools/build_turkish_wiki_corpus.py'
       - 'tools/run_neural_turkish_epoch1.py'
+      - 'tools/bounded_process.py'
   workflow_dispatch:
     inputs:
       mode:
@@ -90,8 +91,9 @@ jobs:
           # measured probe rate (~3200 token/s).  100 MB ~= 26.2M tokens
           # (3.82 B/token) => ~68 min at measured rate, ~136 min at plan
           # rate, inside the 350 min job even with the whole-dump corpus
-          # build.  Training runs in 10 checkpointed chunks so a timeout
-          # loses at most one chunk; cosine horizon = token estimate.
+          # build. Training uses 10 chunks; checkpoint writes are in-place,
+          # so interruption during a save can also damage the previous file.
+          # Cosine horizon = token estimate.
           echo "VEGAI_MODE=${{ inputs.mode || 'full' }}" >> "$GITHUB_ENV"
           echo "VEGAI_INPUT_BUDGET=${{ inputs.train_byte_budget || '100000000' }}" >> "$GITHUB_ENV"
           echo "VEGAI_SCHEDULE=${{ inputs.schedule || 'cosine' }}" >> "$GITHUB_ENV"

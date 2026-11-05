@@ -738,7 +738,9 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 server = HTTPServer(('127.0.0.1', 0), Handler)
-port_file.write_text(str(server.server_port), encoding='ascii')
+port_temp = port_file.with_name(port_file.name + '.tmp')
+port_temp.write_text(str(server.server_port), encoding='ascii')
+port_temp.replace(port_file)
 server.handle_request()
 """,
                 encoding="utf-8",
@@ -804,7 +806,10 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 server = HTTPServer(('127.0.0.1', 0), Handler)
-Path(sys.argv[1]).write_text(str(server.server_port), encoding='ascii')
+port_file = Path(sys.argv[1])
+port_temp = port_file.with_name(port_file.name + '.tmp')
+port_temp.write_text(str(server.server_port), encoding='ascii')
+port_temp.replace(port_file)
 server.serve_forever()
 """,
                     encoding="utf-8", newline="\n",
@@ -832,7 +837,10 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 server = HTTPServer(('127.0.0.1', 0), Handler)
-Path(sys.argv[1]).write_text(str(server.server_port), encoding='ascii')
+port_file = Path(sys.argv[1])
+port_temp = port_file.with_name(port_file.name + '.tmp')
+port_temp.write_text(str(server.server_port), encoding='ascii')
+port_temp.replace(port_file)
 server.handle_request()
 """,
                         encoding="utf-8", newline="\n",

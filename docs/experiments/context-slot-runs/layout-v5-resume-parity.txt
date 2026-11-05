@@ -1,0 +1,10 @@
+schema=vegai-v5-resume-parity/v1
+corpus=train-200 sha256=0889ecce1aabec92284cb4cb3994aaa1e862609487a2adc526fa02f71622ac74 predictions=1024 chunk=32 updates=32
+fixture=prompt_resume_fixture custom optimizer learning_rate=0.002 and legacy V5
+old_binary_sha256=141d62cc07b6f9164fad40bee6b57e7a6c1512a09e1de2aa7c8a0e8b3866ed53 new_binary_sha256=89c7f0508be19670e82c039443112a298a8a0739ffbba8a64ff1e091079535bb
+compiler=GNU_Fortran_12.2.0 flags=-O3,-std=f2018
+V5 resume seed 21: byte-identical sha256 f5a501e8bdd1ef6fe432e905f28e410cdb12d9c87497203b00449fd3bf518548
+V5 resume seed 42: byte-identical sha256 0d3698fd2b1998ae42cbe8e192f3148463a6daa0a421a337c6114d5df1f4688f
+V5 resume seed 73: byte-identical sha256 01b9348a14664813bfb152ab74dcff323ba79706cc6f8b237084e5365528b4d3
+V5 resume seed 101: byte-identical sha256 19de511a8507efd1f958bb83f4c1f5707dc3ec8330083e1cacb8e0d655eeab66
+V5 resume seed 137: byte-identical sha256 d05d74e3a3a699466cf9a456e3aa7021c9a06554e0f17cc21f356d476a2c88f1

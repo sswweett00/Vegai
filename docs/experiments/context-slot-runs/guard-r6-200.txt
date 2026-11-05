@@ -1,0 +1,13 @@
+schema=vegai-guarded-cli-timing/v1
+contract=external wall time includes process, corpus reads, train, checkpoint write; same host only
+host=Linux x86_64 6.1.158+
+train=/tmp/vegai-quality-data/train-200.txt sha256=0889ecce1aabec92284cb4cb3994aaa1e862609487a2adc526fa02f71622ac74 predictions=16896 chunk=512 lr=0.006 rule=6
+old=/tmp/vegai-before-release/vegai_prompt_engine sha256=141d62cc07b6f9164fad40bee6b57e7a6c1512a09e1de2aa7c8a0e8b3866ed53
+new=/tmp/vegai-repo-release/vegai_prompt_engine sha256=0e86239551dfb495bebfc614b401ed4cbcec2ac3ed70ea7f56c63938da5f0795
+seed,order,old_seconds,new_seconds,new_over_old,old_sha256,new_sha256,bit_identical
+21,old-new,4.025155127,3.910735645,0.971573895,7bdfb79ba5c6cb4b7521b10ab20d7da1e824ccc92f364d6bd4376769f096fc40,7bdfb79ba5c6cb4b7521b10ab20d7da1e824ccc92f364d6bd4376769f096fc40,true
+42,new-old,3.835259391,3.685539158,0.960962162,d74c624b8c8e0ecef2a80988c1ba5af62030b6957868660c8a316a5f33abe30d,d74c624b8c8e0ecef2a80988c1ba5af62030b6957868660c8a316a5f33abe30d,true
+73,old-new,4.090455933,4.029423084,0.985079206,25cd79dbae437245f502bbd4bb030e962e921a3ac82efeff83aa1067c7756a74,25cd79dbae437245f502bbd4bb030e962e921a3ac82efeff83aa1067c7756a74,true
+101,new-old,4.117228794,4.106667056,0.997434746,a1e8b46625fcba81be69de0e69a22d6548b827fba0bb2e93dde7cbc5ffc91781,a1e8b46625fcba81be69de0e69a22d6548b827fba0bb2e93dde7cbc5ffc91781,true
+137,old-new,3.962239377,3.999649318,1.009441616,899d0499b166bfed8da1d8f2eec3e2b75e470abc72420a24c09407d126fce3bf,899d0499b166bfed8da1d8f2eec3e2b75e470abc72420a24c09407d126fce3bf,true
+median_new_over_old=0.985079206

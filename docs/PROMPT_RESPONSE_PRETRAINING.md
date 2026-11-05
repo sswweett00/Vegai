@@ -46,14 +46,14 @@ python3 tools/build_prompt_response_corpus.py verify corpora/prompt_600mb.txt
 
 ## 2. Tokenizasyon: bayt = token
 
-Motorun sözlük varsayılanı 256'dır, korpus ise UTF-8 metindir. Bu yüzden
-**token kimliği = bayt değeri**: tokenizer yok, sözlük dosyası yok, eğitim ile
-değerlendirme arasında sözlük kayması **olamaz**. Manifestte yazan bayt sayısı,
-modelin gördüğü token sayısıdır.
+Motorun sözlüğü 256'dır. Baytlar 1–255 aynı sayılı token'a eşlenir; V6/V7 NUL
+baytını 256'ya eşler, V5 ise NUL'u reddeder. Tokenizer ve ayrı sözlük dosyası
+yoktur. N baytlık tam geçişte ilk bayt bağlamdır ve N−1 hedef tahmini vardır;
+manifestteki bayt sayısı güncelleme/tahmin sayısı değildir.
 
-Türkçe harfler UTF-8'de iki bayttır; `app/prompt_engine.f90` bunu
-`transfer`/`iand` ile ham bayt olarak ele alır (`byte_of`, `byte_character`),
-`iachar`/`achar`'ın 7 bit varsayımına güvenmez.
+Türkçe harflerin çoğu UTF-8'de iki bayttır; motor bunları ham bayt dizisi olarak
+işler. Varsayılan ham üretim her zaman geçerli UTF-8 değildir; yalnız serbest
+üretimi sınırlayan isteğe bağlı `--text-output utf8` aşağıda açıklanmıştır.
 
 ## 3. Eğitim: dosyadan akış
 
@@ -75,14 +75,50 @@ Koşuyu durduran her sınır açıktır ve raporlanır:
 | --- | --- |
 | `--bytes N` | Eğitimin **bitiş** baytı (0 = dosya sonu) |
 | `--start-byte N` | Bu oturumun başlayacağı bayt (zincirleme için) |
-| `--max-updates N` | Güncelleme sayısı sınırı |
+| `--max-updates N` | Checkpoint dahil kümülatif güncelleme sınırı (0 = sınırsız); oturum başına ek bütçe değildir |
 | `--max-seconds S` | Duvar saati sınırı (oturum uzunluğu) |
 | `--resume FILE` | Kontrol noktasından devam (model + optimizer + sayaçlar) |
 | `--progress-every N` | İlerleme satırı sıklığı |
+| `--reset-every N` | En az N tahminden sonra, **chunk sınırında** state sıfırla; 0 kapalıdır |
+| `--training-profile turkish-short` | Yeni, V6, varsayılan şekil/chunk 512 ve reset'siz koşuda **deneysel** kısa Türkçe eğitim LR'si; `--max-updates 1..163` zorunlu |
+
+`turkish-short` yalnız `0.012` öğrenme oranını seçer; eğitimde ek geçiş,
+güncelleme veya checkpoint kopyası yapmaz. `--lr` ile birleştirilemez ve
+checkpoint'ten devam ederken verilmez; seçilen oran checkpoint'te saklanır.
+`CORPUS_TRAIN_JSON.learning_rate` gerçek oranı tam duyarlıkla,
+`training_profile_applied` ise yalnız o oturumda profilin seçilip seçilmediğini
+bildirir. Eski varsayılanlar değişmedi. Profil, küçük BOUN/Kenet deneyleriyle
+sınırlı bir seçenektir; başka veri, daha uzun eğitim veya diyalog becerisi
+hakkında genelleme değildir. Ölçüm ve olumsuz sonuçlar:
+[deney kaydı](experiments/turkish-natural-quality-2026-11.md).
+
+```sh
+./build/vegai_prompt_engine train --corpus train.txt --checkpoint model.vgfb \
+  --max-updates 163 --training-profile turkish-short
+# Ayrı held-out dosyasında, hiçbir güncelleme yapmadan:
+./build/vegai_natural_eval model.vgfb heldout.txt 32
+```
+
+CLI argümanları geçerli UTF-8 olmalıdır; `ask` prompt'u en fazla 8192 bayttır.
+Dosya yolları sonunda boşluk kabul edilmez: Fortran yol çağrıları bu boşluğu kırptığı için yanlış bir dosyayı
+okuma veya üzerine yazma riski reddedilir. Yazımda farklı symlink/hardlink
+adlarının aynı dosyaya işaret etmediği ayrıca garanti edilmez. Reset ayarı ve
+anlık recurrent state checkpoint'te saklanmaz: devam eden koşuda istenen
+`--reset-every` değerini tekrar belirtmek gerekir; resume daima soğuk state ile
+başlar.
 
 Her oturum `CORPUS_TRAIN_JSON { ... }` bloğu basar; blok **geçerli JSON**'dur
 (bu, bir hata sınıfını ortadan kaldırdı: Fortran `L1` ile `T`/`F`, `F0.x` ile
-`.000` yazıyor ve virgülleri koymuyordu).
+`.000` yazıyor ve virgülleri koymuyordu). `session_seconds_precise` yüksek
+çözünürlüklü duvar saatinde eğitim döngüsünü, byte okuma ve corpus kapanışı
+ile birlikte; model başlatma ve checkpoint yazımı hariç ölçer.
+`session_tokens_per_second_precise`, bu oturumun hedef bayt tahmini sayısının
+bu süreye bölümüdür. Bu modelde **1 token = 1 byte hedefi**; BPE/kelime tokenı
+ile karşılaştırılmamalıdır. Saat kullanılamaz, sarar veya çözünürlük yetersizse
+iki alan da `null` olur. Eski tam-saniye `seconds` ve `tokens_per_second`
+alanları geriye uyumluluk için korunmuştur; kısa koşularda yaklaşık değerlerdir.
+Ölçüm yalnız oturum başında/sonunda birer saat okumaktır, eğitim iç döngüsüne
+ek ölçüm eklemez.
 
 ## 4. Kanıt iş akışı
 
@@ -117,12 +153,54 @@ tetiklenmemelidir.
 
 Her probe satırı iki kez puanlanır:
 
-1. **greedy yanıt** (açgözlü çözümleme) → `exact` eşleşmesi; yanıt `'.'` veya
-   satır sonunda kesilir, etiketle birebir karşılaştırılır;
+1. **serbest yanıt** → `exact` eşleşmesi; varsayılan sıfır sıcaklıkta greedy,
+   pozitif `--temperature` ile örneklemelidir. `'.'`, satır sonu, NUL veya bir
+   kontrol baytında kesilir ve etiketle boşluklar dahil birebir karşılaştırılır;
 2. **teacher-forced** geçiş → beklenen yanıtın baytları tek tek beslenir ve
-   - kaç beklenen baytı model **ilk sırada** sıraladı (`correct_bytes`,
-     `byte_accuracy`),
+   - kaç beklenen baytı model **ilk sırada** sıraladı (`correct_bytes`), toplam
+     kaç bayt puanlandı (`total_bytes`) ve bunların oranı (`byte_accuracy`),
    - beklenen yanıtın ortalama negatif log-olabilirliği (`mean_nll`).
+
+`greedy` örnek alanı her pozisyonda *gerçek önceki hedefler* verilerek bulunan
+argmax'lardır; serbest koşan yanıtla aynı olmak zorunda değildir. TSV tam üç
+alanlı `fact|copy|next<TAB>prompt<TAB>expected` biçiminde, UTF-8 ve boş olmayan
+alanlarla yazılmalıdır. Satır uzunluğu 4096 bayttan az, yanıt en fazla 256 bayt
+olmalıdır; işlenen bozuk/uzun satır hata verir. Boş ve `#` yorum satırları
+atlandıktan sonra ilk 4096 veri satırı puanlanır; işlenmemiş başka veri satırı
+varsa `PROBE_JSON.truncated` true olur. Ham satır sonundaki
+ve alanlardaki anlamlı boşluklar korunur; eski raporlarda bu garanti yoktur.
+
+Bayt modeli geçersiz veya yarım UTF-8 üretebilir. `ask` ve `PROBE_EXAMPLES`
+JSON'u geçerli tutmak için böyle bir `response`/`greedy` alanını `null` yapar;
+`response_bytes_hex`/`greedy_bytes_hex` özgün baytları kayıpsız verir. `ask`
+`response_valid_utf8` alanını da ekler. Geçerli UTF-8 aynı metin olarak, kontrol
+karakterleri uygun JSON escape'iyle yazılır. Probe `mean_nll`, küçük farkların
+kaybolmaması için 17 anlamlı basamaklı bilimsel JSON gösterimiyle yazılır; çok
+büyük veya çok küçük sıfırdan farklı diğer gerçek sayılar da bilimsel gösterim
+kullanabilir. Temsil edilemeyen probe NLL toplamı sessiz taşma yerine hata verir. Bu nedenle eski tüketiciler
+`null` yanıtı, üs gösterimini ve yeni alanları açıkça desteklemelidir.
+
+`ask` ve `probe` için `--text-output utf8` seçeneği, serbest üretimde geçerli
+UTF-8'e devam edemeyen baytları maskeler; greedy en yüksek geçerli baytı seçer,
+sampling kalan dağılımı yeniden normalize eder. Yarım karaktere yer kalmamışsa
+çok baytlı karakter başlatılmaz. C0 kontrol baytları ve DEL maskelenir; `.` ve
+LF yalnız karakter sınırında eski durdurma işaretleridir. `--max-new` karakter
+değil **byte** sınırı olmaya devam eder; küçük bir bütçe uzun Unicode
+karakterlerini seçilemez kılabilir. Ortaya çıkan metin boş veya anlamsız olabilir;
+geçerli kodlama, dil anlama ya da doğru yanıt garantisi değildir. Mod
+JSON'daki `text_output` alanında raporlanır. Eski serbest üretim davranışı için
+varsayılan veya açık `--text-output bytes` kullanılabilir. `probe` içindeki
+teacher-forced NLL ve `greedy` byte'ları **maskelenmez**, bu nedenle iki modun
+NLL'leri karşılaştırılabilir; serbest `response` ve exact-match değişebilir.
+`PROBE_JSON` ayrıca tüm işlenen satırlar için `valid_utf8_responses`,
+`invalid_utf8_responses` ve `empty_responses` sayılarını verir. Boş yanıt
+geçerli UTF-8 sayılır ve ayrıca raporlanır; bu sayılar yanıtın anlamını ölçmez.
+Bu özellik eğitime yeni tarama, güncelleme veya checkpoint kopyası eklemez.
+
+```sh
+./build/vegai_prompt_engine ask --checkpoint model.vgfb --prompt 'Merhaba, ' \
+  --max-new 48 --text-output utf8
+```
 
 İkinci ölçüm, tam eşleşme sıfır olduğunda bile modelin ne kadar yaklaştığını
 gösterir; 256 sınıflı bir bayt modelinde şans düzeyi `1/256 = 0.0039`'dur ve
@@ -130,9 +208,17 @@ karşılaştırma bu tabana göre yapılmalıdır.
 
 ## 6. Yeniden üretim
 
+Varsayılan yeni model V6'dır. Ek yuva çeşitliliği için yeni eğitimde
+`--training-rule 7` seçilebilir; bu, V6 dosyasını güncellemez ve resume sırasında
+kural değişimine izin verilmez. V7 deneyi bazı held-out NLL sonuçlarını
+iyileştirmiş ancak ilk zamanlamada medyan eğitim süresi artmıştır; hız veya
+genel görev kalitesi garantisi değildir. Ayrıntı ve ham sonuçlar:
+[yuva deneyi](experiments/context-slot-quality-2026-11.md).
+
 ```bash
-make prompt-engine context-tests          # derleme + sözleşme testleri
-python3 tools/verify_prompt_response_corpus.py
+make prompt-engine context-tests          # Fortran derleme + çekirdek testleri
+make prompt-contract-check                # CMake ile Python'suz CLI sözleşmeleri
+python3 tools/verify_prompt_response_corpus.py  # yalnızca legacy Python araçları
 python3 tools/build_prompt_response_corpus.py generate corpus.txt --bytes 2000000 \
   --facts 256 --probe-out probe.tsv --overwrite
 ./build/vegai_prompt_engine train --corpus corpus.txt --checkpoint model.vgfb \
@@ -167,8 +253,12 @@ hesaplanmamıştır. Her koşunun kimliği (run id, commit, SHA-256) kayıtlıd�
 
 Yorum (ölçümün söylediği, fazlası değil):
 
-- Korpusun **tamamı** gerçekten tüketildi; bu bir iddia değil, `end_byte =
-  599 999 999` ve `whole_file` raporundan okunuyor.
+- `end_byte = 599 999 999`, 600 milyon byte için son prediction konumuna
+  ulaşıldığını gösterir. Eski raporlama `whole_file` alanını yalnız `end_byte`
+  byte sayısına eriştiğinde doğru saydığından bu koşuda yanlışlıkla `false`
+  üretebiliyordu; son sürüm `N−1` sınırını kullanır. Uç noktaya ulaşmak tek
+  başına yedi oturumun aralıksız olduğunu kanıtlamaz; oturum sınırlarını da
+  doğrulamak gerekir.
 - Kayıp **arttı**. Yani bu koşu "daha iyi bir model" üretmedi: sabit `lr = 3e-3`
   ile 586 bin güncelleme sonunda model kararsızlaştı (NaN yok, `numeric_ok`
   doğru; bu bir ıraksama değil, salınım).

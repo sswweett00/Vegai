@@ -618,7 +618,8 @@ contains
       write(output_unit, '(A)') '    [--reference-context-kernel] [--lookup-cache|--no-lookup-cache]'
       write(output_unit, '(A)') '  vegai_pretrain continue SHARD CHECKPOINT [--epochs N] [--strict] [--query TOKEN]'
       write(output_unit, '(A)') '    [--reference-context-kernel] [--lookup-cache|--no-lookup-cache]'
-      write(output_unit, '(A)') '  vegai_pretrain inspect CHECKPOINT [--query TOKEN | --query-file PATH] [--active-vocabulary-file PATH]'
+      write(output_unit, '(A)') '  vegai_pretrain inspect CHECKPOINT [--query TOKEN | --query-file PATH] ' // &
+                               '[--active-vocabulary-file PATH]'
       write(output_unit, '(A)') 'Train options:'
       write(output_unit, '(A)') '  --max-vocab N --min-frequency N --window N --position-shift N --context-mode MODE --epochs N'
       write(output_unit, '(A)') '  MODE: legacy, positional, hybrid, hierarchical, coherent, debiased, or resonant'
@@ -629,14 +630,19 @@ contains
       write(output_unit, '(A)') '  resonant is CPU/OpenMP-only: frozen semantic neighbours per epoch; epoch one equals hybrid'
       write(output_unit, '(A)') '  continue first extends vocabulary from one immutable shard, then trains it'
       write(output_unit, '(A)') '  --initial-plasticity N --minimum-plasticity N --decay-events N --strict --query TOKEN'
-      write(output_unit, '(A)') '  --parallel-context-build (default) builds immutable per-record contexts with OpenMP when worthwhile'
+      write(output_unit, '(A)') '  --parallel-context-build (default) builds immutable per-record contexts ' // &
+                               'with OpenMP when worthwhile'
       write(output_unit, '(A)') '  --parallel-min-contexts N launches OpenMP only at N record updates (default 32; execution-only)'
       write(output_unit, '(A)') '  --serial-context-build disables that execution-only parallel stage for diagnosis'
       write(output_unit, '(A)') '  --reference-context-kernel is an exact benchmark/regression implementation switch'
-      write(output_unit, '(A)') '  --lookup-cache (default) or --no-lookup-cache controls an exact-token execution-only vocabulary cache'
-      write(output_unit, '(A)') '  --context-provider cpu|openvino --openvino-worker PATH --openvino-python CMD --openvino-device DEVICE'
-      write(output_unit, '(A)') '  --openvino-work-dir DIR --openvino-min-contexts N --openvino-timeout-ms N [--openvino-fallback-cpu|--openvino-required]'
-      write(output_unit, '(A)') '  --openvino-require-accelerator rejects OpenVINO CPU fallback; immutable contexts only, commits stay ordered on CPU'
+      write(output_unit, '(A)') '  --lookup-cache (default) or --no-lookup-cache controls an exact-token ' // &
+                               'execution-only vocabulary cache'
+      write(output_unit, '(A)') '  --context-provider cpu|openvino --openvino-worker PATH --openvino-python CMD ' // &
+                               '--openvino-device DEVICE'
+      write(output_unit, '(A)') '  --openvino-work-dir DIR --openvino-min-contexts N --openvino-timeout-ms N ' // &
+                               '[--openvino-fallback-cpu|--openvino-required]'
+      write(output_unit, '(A)') '  --openvino-require-accelerator rejects OpenVINO CPU fallback; ' // &
+                               'immutable contexts only, commits stay ordered on CPU'
       write(output_unit, '(A)') 'This is streaming distributional HDC learning, not Transformer/LLM pretraining.'
    end subroutine print_usage
 

@@ -42,6 +42,8 @@ from lmm_contract import (
     require,
     require_unchanged,
     sha256_bytes,
+    strict_json_value,
+    validate_gateway_runtime_sources,
     validate_identifier,
     validate_sha256,
     validate_unicode_text,
@@ -74,6 +76,7 @@ MAX_GATEWAY_STDERR_BYTES = 1 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 180.0
 _RUNTIME_IDENTITY_FIELDS = (
     "gateway_tool",
+    "runtime_sources",
     "model_manifest",
     "tokenizer",
     "asset_registry",
@@ -250,9 +253,12 @@ def resolve_declared_path(value: object, base: Path, field: str) -> Path:
 def load_json_mapping(path: Path, label: str, *, maximum_bytes: int = MAX_JSON_BYTES) -> tuple[dict[str, Any], FileIdentity]:
     identity = file_identity(path, label, maximum_bytes=maximum_bytes)
     try:
-        value = json.loads(path.resolve().read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise LMMPortfolioError(f"cannot parse {label} {path}: {error}") from error
+        with path.resolve().open("rb") as handle:
+            raw = handle.read(maximum_bytes + 1)
+    except OSError as error:
+        raise LMMPortfolioError(f"cannot read {label} {path}: {error}") from error
+    require(len(raw) <= maximum_bytes, f"{label} exceeds {maximum_bytes} bytes")
+    value = strict_json_value(raw, f"{label} {path}")
     require(isinstance(value, Mapping), f"{label} must contain one JSON object")
     require_unchanged(path, identity, label)
     return dict(value), identity
@@ -844,6 +850,7 @@ def gateway_runtime_identity(identities: Mapping[str, Any]) -> str:
     missing = [field for field in _RUNTIME_IDENTITY_FIELDS if field not in identities]
     require(not missing,
             "selected gateway report identities is missing runtime fields: " + ", ".join(missing))
+    validate_gateway_runtime_sources(identities["runtime_sources"], "selected gateway runtime_sources")
     stable = {field: identities[field] for field in _RUNTIME_IDENTITY_FIELDS}
     return sha256_bytes(canonical_json_bytes(stable))
 
@@ -859,9 +866,9 @@ def parse_gateway_result(
     require(len(stdout) <= MAX_GATEWAY_STDOUT_BYTES,
             f"selected gateway stdout exceeds {MAX_GATEWAY_STDOUT_BYTES} bytes")
     try:
-        payload = json.loads(stdout.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise LMMPortfolioError(f"selected gateway did not emit UTF-8 --print-json output: {error}") from error
+        payload = strict_json_value(stdout, "selected gateway --print-json output")
+    except LMMContractError as error:
+        raise LMMPortfolioError("selected gateway did not emit strict UTF-8 JSON") from error
     require(isinstance(payload, Mapping) and set(payload) == {"response", "report"},
             "selected gateway output must contain exactly response and report")
     response = validate_unicode_text(payload["response"], "selected gateway response", maximum_bytes=MAX_TEXT_BYTES)

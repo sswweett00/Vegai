@@ -21,21 +21,17 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import platform
 import re
-import signal
-import subprocess
 import sys
 import tempfile
-import threading
-import time
 from typing import Any, Mapping, Sequence
 
+from bounded_process import ProcessExecutionError, run_process
 from synthetic_pretraining_fixture import FixtureError, sha256_file, verify_fixture
 from training_resource_plan import ResourcePlanError, build_plan
 
@@ -132,26 +128,6 @@ def file_identity(path: Path) -> dict[str, Any]:
     }
 
 
-def _terminate_process_group(process: subprocess.Popen[bytes], *, force: bool) -> None:
-    if process.poll() is not None:
-        return
-    try:
-        if os.name == "posix":
-            os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
-        elif force:
-            process.kill()
-        else:
-            process.terminate()
-    except OSError:
-        try:
-            if force:
-                process.kill()
-            else:
-                process.terminate()
-        except OSError:
-            pass
-
-
 def run_bounded_child(
     command: Sequence[str],
     *,
@@ -161,134 +137,23 @@ def run_bounded_child(
     stderr_limit_bytes: int,
     label: str,
 ) -> BoundedProcessResult:
-    """Run a no-shell child with bounded pipes and a child-invocation timer.
-
-    The stopwatch starts immediately before ``Popen`` and stops immediately
-    after its process exits. Reader shutdown and output parsing happen later,
-    so those controller-only operations cannot inflate the reported train time.
-    """
-
-    require(timeout_seconds > 0.0 and math.isfinite(timeout_seconds), f"{label} timeout must be finite and positive")
-    require(stdout_limit_bytes > 0 and stderr_limit_bytes > 0, f"{label} output caps must be positive")
-    require(command and all(isinstance(item, str) and item for item in command), f"{label} command is invalid")
-    started_ns = time.perf_counter_ns()
+    """Run a no-shell child; training time ends at direct-child exit."""
     try:
-        process: subprocess.Popen[bytes] = subprocess.Popen(
-            list(command),
-            cwd=ROOT,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=dict(environment),
-            start_new_session=(os.name == "posix"),
+        result = run_process(
+            command, cwd=ROOT, environment=environment,
+            timeout_seconds=timeout_seconds, stdout_limit_bytes=stdout_limit_bytes,
+            stderr_limit_bytes=stderr_limit_bytes, label=label,
         )
-    except (OSError, ValueError) as error:
-        raise PretrainingRunError(f"cannot launch {label}: {error}") from error
-    require(process.stdout is not None and process.stderr is not None, f"{label} pipes are unavailable")
-
-    stdout_chunks: list[bytes] = []
-    stdout_bytes = 0
-    stderr_bytes = 0
-    stdout_digest = hashlib.sha256()
-    stderr_digest = hashlib.sha256()
-    stdout_overflow = threading.Event()
-    stderr_overflow = threading.Event()
-    reader_errors: list[BaseException] = []
-    counter_lock = threading.Lock()
-
-    def drain_stdout() -> None:
-        nonlocal stdout_bytes
-        try:
-            while True:
-                chunk = process.stdout.read(64 * 1024)
-                if not chunk:
-                    return
-                with counter_lock:
-                    next_size = stdout_bytes + len(chunk)
-                    if next_size <= stdout_limit_bytes:
-                        stdout_chunks.append(chunk)
-                        stdout_bytes = next_size
-                        stdout_digest.update(chunk)
-                    else:
-                        stdout_overflow.set()
-                        _terminate_process_group(process, force=False)
-        except (OSError, ValueError) as error:
-            reader_errors.append(error)
-
-    def drain_stderr() -> None:
-        nonlocal stderr_bytes
-        try:
-            while True:
-                chunk = process.stderr.read(64 * 1024)
-                if not chunk:
-                    return
-                with counter_lock:
-                    stderr_bytes += len(chunk)
-                    stderr_digest.update(chunk)
-                    if stderr_bytes > stderr_limit_bytes:
-                        stderr_overflow.set()
-                        _terminate_process_group(process, force=False)
-        except (OSError, ValueError) as error:
-            reader_errors.append(error)
-
-    stdout_reader = threading.Thread(target=drain_stdout, name=f"{label}-stdout", daemon=True)
-    stderr_reader = threading.Thread(target=drain_stderr, name=f"{label}-stderr", daemon=True)
-    stdout_reader.start()
-    stderr_reader.start()
-    deadline = time.monotonic() + timeout_seconds
-    timed_out = False
-    while process.poll() is None:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0.0:
-            timed_out = True
-            _terminate_process_group(process, force=False)
-            break
-        try:
-            process.wait(timeout=min(0.1, remaining))
-        except subprocess.TimeoutExpired:
-            continue
-    if process.poll() is None:
-        try:
-            process.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            _terminate_process_group(process, force=True)
-            try:
-                process.wait(timeout=5.0)
-            except subprocess.TimeoutExpired as error:
-                raise PretrainingRunError(f"{label} did not terminate after timeout/cap enforcement") from error
-    stopped_ns = time.perf_counter_ns()
-
-    # The process has exited. Drain threads should finish quickly; a leaked
-    # descendant pipe is rejected rather than allowing a controller hang.
-    for reader, stream in ((stdout_reader, process.stdout), (stderr_reader, process.stderr)):
-        reader.join(timeout=5.0)
-        if reader.is_alive():
-            try:
-                stream.close()
-            except OSError:
-                pass
-            reader.join(timeout=1.0)
-    if stdout_reader.is_alive() or stderr_reader.is_alive():
-        _terminate_process_group(process, force=True)
-        raise PretrainingRunError(f"{label} left an output pipe open after process exit")
-    if reader_errors:
-        raise PretrainingRunError(f"cannot drain {label} output") from reader_errors[0]
-    if timed_out:
-        raise PretrainingRunError(f"{label} exceeded its {timeout_seconds:g}-second timeout")
-    if stdout_overflow.is_set():
-        raise PretrainingRunError(f"{label} stdout exceeded its {stdout_limit_bytes}-byte cap")
-    if stderr_overflow.is_set():
-        raise PretrainingRunError(f"{label} stderr exceeded its {stderr_limit_bytes}-byte cap")
-    if process.returncode is None:
-        raise PretrainingRunError(f"{label} did not report an exit status")
+    except ProcessExecutionError as error:
+        raise PretrainingRunError(str(error)) from error
     return BoundedProcessResult(
-        returncode=process.returncode,
-        stdout=b"".join(stdout_chunks),
-        stdout_sha256=stdout_digest.hexdigest(),
-        stdout_bytes=stdout_bytes,
-        stderr_sha256=stderr_digest.hexdigest(),
-        stderr_bytes=stderr_bytes,
-        child_wall_seconds=(stopped_ns - started_ns) / 1_000_000_000,
+        returncode=result.returncode,
+        stdout=result.stdout,
+        stdout_sha256=result.stdout_sha256,
+        stdout_bytes=result.stdout_bytes,
+        stderr_sha256=result.stderr_sha256,
+        stderr_bytes=result.stderr_bytes,
+        child_wall_seconds=result.child_wall_seconds,
     )
 
 
@@ -349,7 +214,7 @@ def preflight_plan(arguments: argparse.Namespace, corpus: Path, checkpoint: Path
     return {"status": "ready", "plan": plan}
 
 
-def prepare_output_path(path: Path, *, label: str, overwrite: bool) -> Path:
+def prepare_output_path(path: Path, *, label: str, overwrite: bool, remove_existing: bool = True) -> Path:
     # Check the operator spelling before resolve(): Path.resolve() follows a
     # final symlink and would otherwise conceal a symlinked output target.
     require(not path.is_symlink(), f"refusing symlinked {label} output: {path}")
@@ -357,10 +222,11 @@ def prepare_output_path(path: Path, *, label: str, overwrite: bool) -> Path:
     if resolved.exists():
         require(not resolved.is_dir(), f"{label} output is a directory: {resolved}")
         require(overwrite, f"{label} output already exists (pass --overwrite to replace it): {resolved}")
-        try:
-            resolved.unlink()
-        except OSError as error:
-            raise PretrainingRunError(f"cannot remove prior {label} output {resolved}: {error}") from error
+        if remove_existing:
+            try:
+                resolved.unlink()
+            except OSError as error:
+                raise PretrainingRunError(f"cannot remove prior {label} output {resolved}: {error}") from error
     resolved.parent.mkdir(parents=True, exist_ok=True)
     return resolved
 
@@ -434,9 +300,12 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     require(manifest != checkpoint_candidate and manifest != report_candidate, "manifest must not overlap checkpoint/report output")
     require(binary != checkpoint_candidate and binary != report_candidate, "pretraining binary must not overlap checkpoint/report output")
     require(checkpoint_candidate != report_candidate, "checkpoint and report outputs must differ")
-    checkpoint = prepare_output_path(arguments.checkpoint, label="checkpoint", overwrite=arguments.overwrite)
-    # Validation/cleanup side effects only: main() owns the final report path.
-    prepare_output_path(arguments.report, label="report", overwrite=arguments.overwrite)
+    # Validate both destinations before touching either prior artifact. Input,
+    # fixture and resource preflight below must also finish before --overwrite
+    # is allowed to remove the old checkpoint or report.
+    checkpoint = prepare_output_path(arguments.checkpoint, label="checkpoint", overwrite=arguments.overwrite,
+                                     remove_existing=False)
+    prepare_output_path(arguments.report, label="report", overwrite=arguments.overwrite, remove_existing=False)
     require(binary.is_file(), f"pretraining executable does not exist or is not a regular file: {binary}")
     require(os.access(binary, os.X_OK), f"pretraining executable is not executable: {binary}")
 
@@ -455,6 +324,10 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
     manifest_before = file_identity(manifest)
     binary_identity = file_identity(binary)
     resource_preflight = preflight_plan(arguments, corpus, checkpoint)
+    checkpoint = prepare_output_path(arguments.checkpoint, label="checkpoint", overwrite=arguments.overwrite)
+    # main() owns final report publication; clear only after all preflight has
+    # passed, so an invalid input cannot erase a previous report.
+    prepare_output_path(arguments.report, label="report", overwrite=arguments.overwrite)
 
     environment = os.environ.copy()
     environment["OMP_NUM_THREADS"] = str(arguments.omp_threads)
@@ -603,9 +476,15 @@ def main() -> int:
         # A failure report is best effort. Do not hide the originating failure
         # if its destination is unavailable or intentionally refused.
         try:
-            if not report_path.exists():
+            # A rejected collision or a broken symlink must not turn the
+            # best-effort failure report into a write to an input/target path.
+            protected = {
+                path.resolve() for path in
+                (arguments.pretrain_bin, arguments.corpus, arguments.manifest, arguments.checkpoint)
+            }
+            if not arguments.report.is_symlink() and report_path not in protected and not report_path.exists():
                 atomic_json_write(report_path, failure_report)
-        except OSError:
+        except (OSError, RuntimeError):
             pass
         print(f"9 MiB pretraining run: FAIL: {error}", file=sys.stderr)
         return 2

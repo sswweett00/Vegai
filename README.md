@@ -3,7 +3,7 @@
 [![Fortran verification](https://github.com/sswweett00/Vegai/actions/workflows/ci.yml/badge.svg)](https://github.com/sswweett00/Vegai/actions/workflows/ci.yml)
 
 Vegai, **16.384 boyutlu ikili/bipolar hiper-vektörler** üzerinde çalışan,
-**Fortran 2023** hedefli, küçük ve denetlenebilir bir **Vector Symbolic
+**Fortran 2018** tabanlı (2023 seçeneği destekleyen), küçük ve denetlenebilir bir **Vector Symbolic
 Architecture (VSA) / Hyperdimensional Computing (HDC)** çekirdeğidir. Yoğun
 kayan nokta matrisleri yerine `256 × int64` paketli vektörler, XOR bağlama,
 çoğunluk süperpozisyonu, döngüsel permütasyon ve Hamming/`popcnt` rezonansı
@@ -38,16 +38,31 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
   [COSMOS_TURKISH_9GB_CAUSAL_EXPERIMENT.md](docs/COSMOS_TURKISH_9GB_CAUSAL_EXPERIMENT.md)'dedir; tamamlanan
   gerçek 9 GB run'ın zayıf ama dürüst output/metric kaydı
   [COSMOS_TURKISH_9GB_RESULTS.md](docs/COSMOS_TURKISH_9GB_RESULTS.md)'dedir;
+- ayrı bir Fortran fixed-budget byte modeli (`vegai_prompt_engine`): V6
+  varsayılan, V7'de çoklu yuvalar için isteğe bağlı kimliklendirme vardır.
+  Küçük held-out deneylerde NLL çoğunlukla iyileşse de ilk V7 zamanlamaları
+  daha yavaştı; evrensel üstünlük veya hız garantisi değildir
+  ([deney](docs/experiments/context-slot-quality-2026-11.md),
+  [motor sözleşmesi](docs/FIXED_BUDGET_CONTEXT_ENGINE.md)). `ask`/`probe`
+  için isteğe bağlı `--text-output utf8` geçersiz veya yarım UTF-8 üretimini
+  engeller; eski ham-bayt çıktısı varsayılan olarak korunur. Deneysel
+  `--training-profile turkish-short` kısa, varsayılan şekilli V6 eğitiminde
+  test edilmiş bir LR seçer; genel varsayılanlar değişmez. Soğuk satır ve
+  kısa-bağlam NLL ölçümü için Python'suz `vegai_natural_eval` kullanılabilir
+  ([ölçüm sözleşmesi](docs/NATURAL_LANGUAGE_EVALUATION.md),
+  [deney](docs/experiments/turkish-natural-quality-2026-11.md)). Bunlar anlam
+  veya diyalog kalitesi garantisi değildir;
 - HDC/n-gram yolundan ayrı, lossless byte-BPE, bounded local attention +
   decayed positive-feature retention, repetition-aware calibrated decoding ve
   açıkça **tied-output-head-only** teacher-forced adapter eğitimi/checkpoint
   içeren native `vegai_neural_lm` / `vegai_neural_pretrain` yolu; causal,
   chunk-equivalent, finite-state, codec, decoder ve checkpoint invariant'leri
-  executable testlerle kapsanır. Eğitim sistemi v2 bu yola AdamW + LR
-  schedule + label smoothing + top-1/top-5/perplexity metrikleri, momentleri
-  bit-birebir taşıyan checkpoint v3, exact-rescan ile merge-identik hızlı
-  in-memory BPE eğitici ve no-update `evaluate`/`init-checkpoint` yüzeyleri
-  ekler. Bu henüz full-BPTT, Turkish quality veya accelerator throughput
+  executable testlerle kapsanır. Native CLI/API varsayılanı NOVA, epoch
+  runner varsayılanı AdamW'dir; SGD de seçilebilir. LR schedule, label smoothing,
+  top-1/top-5/perplexity metrikleri, optimizer durumunu taşıyan checkpoint v5
+  (v2–v4 yükleme), exact-rescan ile merge-identik hızlı in-memory BPE eğitici ve
+  no-update `evaluate`/`init-checkpoint` yüzeyleri vardır. Bu henüz full-BPTT,
+  Turkish quality veya accelerator throughput
   iddiası değildir; matematiksel/resource sınırlar
   [NEURAL_CAUSAL_SYSTEM.md](docs/NEURAL_CAUSAL_SYSTEM.md)'dedir; gerçek
   Türkçe Wikipedia üzerinde kalite-filtreli, hash-bağlı 1 epoch kanıt hattı
@@ -187,8 +202,10 @@ Bu depo bir tasarım taslağı değil; aşağıdakileri içerir:
 ### GNU Fortran + Make
 
 ```bash
-# Fortran 2023 modu destekleyen GNU Fortran ve OpenMP çalışma zamanı gerekir
+# Varsayılan: Fortran 2018 modu destekleyen GNU Fortran ve OpenMP
 make test
+# Daha yeni GNU compiler'da isteğe bağlı 2023 profili:
+# make FORTRAN_STANDARD=f2023 test
 make run
 make pretrain
 make causal-lm
@@ -210,6 +227,8 @@ make chat
 ./build/vegai_neural_pretrain tokenizer-train examples/corpus/mini_turkish_causal_utf8.txt /tmp/mini.bpe 264
 ./build/vegai_neural_pretrain train examples/corpus/mini_turkish_causal_utf8.txt /tmp/mini.vgnr /tmp/mini.bpe 1
 ./build/vegai_neural_pretrain generate /tmp/mini.vgnr /tmp/mini.bpe "Türkiye" 16 7
+# İsteğe bağlı, eşit token/adım bütçesinde sentetik LR karşılaştırması:
+python3 tools/benchmark_neural_quality_budget.py --neural-bin ./build/vegai_neural_pretrain
 
 # Varsayılan native control-plane doğrulaması: Python interpreter çağırmaz.
 # Fortran property testleri + profile + gerçek train/checkpoint/load smoke.
@@ -221,6 +240,13 @@ make fortran-check
   --require-ready --format json
 # Native streaming SHA-256 identities and same-host checkpoint-reader validation.
 ./build/vegai_control attest examples/corpus/toy_hdc_corpus.txt /safe/runtime/toy.vgai --format json
+# İsteğe bağlı tam-satır split sızıntısı denetimi (0: temiz, 1: çakışma, 2: hata).
+# Bu ayrı bir I/O taramasıdır; eğitim döngüsüne otomatik maliyet eklemez.
+make corpus-overlap
+./build/vegai_corpus_overlap TRAIN.txt HELDOUT.txt
+# UD # text kayıtlarının isteğe bağlı Python'suz hazırlığı (çıktı yeni olmalı).
+make ud-text-extract
+./build/vegai_ud_text_extract INPUT.conllu OUTPUT.txt 200
 # Strict TSV: query_token<TAB>expected_self_excluded_neighbour; all policy
 # thresholds are mandatory and a failure exits non-zero after reporting.
 ./build/vegai_control quality-gate /safe/runtime/toy.vgai CASES.tsv \
@@ -265,8 +291,13 @@ make release-registry-check
 # Sınır denetimli hata ayıklama derlemesi
 make debug
 
-# Bağımsız cebirsel/reference doğrulama
+# Python kullanmayan native özellik testleri (GNU Make + Fortran yeterli)
 make check
+# Prompt, doğal metin değerlendirmesi, overlap, UD çıkarıcı ve benchmark CLI sözleşmeleri de dahil;
+# CMake test yürütücüsü gerekir, Python gerekmez
+make native-contract-check
+# Henüz taşınmamış bağımsız Python reference/control-plane testleri (isteğe bağlı)
+make legacy-python-check
 ```
 
 Varsayılan Make derlemesi artık host-ISA bağımsız portable `-O3` profilidir;
@@ -309,11 +340,9 @@ OpenMP veya herhangi bir GPU/NPU runtime'ını gerektirmeyen en geniş CPU
 fallback'idir; platformlar arası checkpoint binary interchange vaadi değildir:
 
 ```bash
-cmake --preset portable-serial
+cmake --preset portable-serial -DVEGAI_BUILD_TESTS=ON
 cmake --build --preset portable-serial --parallel
-python3 tools/verify_portable_runtime.py \
-  --engine-bin ./build/portable-serial/hds_engine \
-  --pretrain-bin ./build/portable-serial/vegai_pretrain
+ctest --test-dir build/portable-serial -R '^vegai_portable_runtime_smoke$' --output-on-failure
 ```
 
 Kaynak/launcher contract'i için Linux x86-64, macOS ARM64 ve Windows x86-64
@@ -324,6 +353,11 @@ anlamına gelmez; doğrulanmış kapsam ve hedefte çalıştırma adımları
 [HARDWARE_COMPATIBILITY.md](docs/HARDWARE_COMPATIBILITY.md)'dedir.
 
 ### CMake / CTest
+
+`VEGAI_ENABLE_OPENMP=ON` uygun runtime bulunamazsa uyarıyla seri çalışmaya
+geçer. Paralel derlemenin zorunlu olduğu ortamlarda ayrıca
+`-DVEGAI_REQUIRE_OPENMP=ON` kullanın; OpenMP yoksa configure başarısız olur.
+Bu kontrol belirli bir thread sayısını veya hızlanmayı garanti etmez.
 
 ```bash
 cmake -S . -B build -DVEGAI_CPU_TARGET=portable -DVEGAI_ENABLE_OPENMP=ON -DVEGAI_BUILD_TESTS=ON
@@ -439,29 +473,63 @@ python3 tools/production_pretrain.py --pretrain-bin ./build/vegai_pretrain \
 make quality-check
 ```
 
-GNU CMake hedefi `-std=f2023` bayrağını uygulama, test ve kütüphane hedeflerine
-aktarır. Başka bir compiler kullanıyorsanız eşdeğer Fortran 2023 conformance
-bayrağını doğrulayın.
+**Neural eğitim geçiş notu:** Düzeltilmiş NOVA mini-batch yolu artık gradyanları
+başlatılmış `1/B` ile ortalar. Önceki binary ile `gradient_accumulation > 1`
+kullanılarak eğitilmiş NOVA checkpoint'leri ve kalite ölçümleri güvenilir kabul
+edilmemeli; yeni binary ile yeniden eğitilip held-out veride sınanmalıdır.
+Checkpoint'i okumak önceki eğitimi onarmaz. Doğrudan Fortran API'nin varsayılan
+NOVA LR'si 0,025'ten CLI ile aynı 0,003'e düşürüldü. Resume/chunk yalnız açıkça
+verilen alanları değiştirir, diğer kayıtlı ayarlar korunur; `--seed` yalnız ilk
+başlatmada etkilidir. Güncelleme almış checkpoint'te optimizer değiştirmek
+reddedilir. Eski SGD API LR'si isteniyorsa 0,025 ve `weight_decay=0` açıkça
+verilmelidir. Bu değer her korpus için optimum değildir. Epoch runner mevcut
+çıktıları ezmez; her koşuda yeni bir `--run-dir` gerekir. `--threads` ve
+`--omp-wait-policy` ile CPU kullanımı seçilebilir. Native checkpoint yazımı
+henüz crash-atomic değildir; kritik koşularda ayrı yedek tutun. Örnek ve ölçüm
+sınırları için [operasyon denetimine](docs/OPERATIONS_AUDIT_2026-10.md) bakın.
+
+GNU CMake hedefinin varsayılanı `-std=f2018`'dir; bayrak desteklenmiyorsa
+configure aşamasında durur. Daha yeni derleyiciyle Fortran 2023 profili açıkça
+seçilebilir:
+
+```bash
+cmake -S . -B build-f2023 -DVEGAI_FORTRAN_STANDARD=2023 -DVEGAI_ENABLE_OPENMP=OFF
+cmake --build build-f2023 --parallel
+ctest --test-dir build-f2023 --output-on-failure
+```
+
+2018 profili Linux/GNU 12 ile sınanmıştır; 2023 ve her compiler/OS kombinasyonu
+için garanti değildir. Make, compiler veya bayrak değişikliklerinde ilgili hedefleri yeniden
+oluşturur; compiler aynı yolda yerinde değiştirilmişse `make clean` uygulayın.
+Başka bir compiler kullanıyorsanız ilgili conformance bayrağını doğrulayın.
 
 Sınır ve çalışma zamanı kontrolleri için:
 
 ```bash
 cmake -S . -B build-debug -DVEGAI_BUILD_TESTS=ON \
   -DCMAKE_BUILD_TYPE=Debug \
-  -DCMAKE_Fortran_FLAGS='-fcheck=all -fbacktrace -ffpe-trap=invalid,zero,overflow'
+  -DCMAKE_Fortran_FLAGS='-fcheck=all -finit-real=snan -fbacktrace -ffpe-trap=invalid,zero,overflow'
 cmake --build build-debug --parallel
 ctest --test-dir build-debug --output-on-failure
 ```
 
 ### Fortran Package Manager
 
+`test_all` eski fixture'ları sabit adlarla yazar; doğrudan çalıştırmak yerine
+her test için ayrı geçici çalışma dizini sağlayan runner kullanılmalıdır:
+
 ```bash
-fpm test --flag '-std=f2023 -fopenmp' --link-flag '-fopenmp'
-fpm run --flag '-O3 -std=f2023 -fopenmp' --link-flag '-fopenmp'
+fpm test --runner 'cmake -P test/fpm_scratch_runner.cmake' --flag '-std=f2018'
+# OpenMP ile ayrıca: --flag '-std=f2018 -fopenmp' --link-flag '-fopenmp'
 ```
 
-OpenMP isteğe bağlıdır: direktifleri desteklemeyen veya `-fopenmp` verilmeyen
-bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
+Runner CMake gerektirir, Python gerektirmez. FPM 0.12.0 ve GNU Fortran 12 ile
+Linux'ta sıralı ve iki iş parçacıklı OpenMP testleri çalıştırıldı; bunlar diğer
+işletim sistemlerinin doğrulandığı anlamına gelmez. Runner kullanılmadan eski
+sabit adlı fixture testi, kullanıcı dosyalarını değiştirmeden hata verir.
+OpenMP isteğe bağlıdır: `-fopenmp` olmadan cleanup taraması sıralıdır.
+Platforma özgü fpm/runner desteğini hedefte sınayın; CMake/CTest ve GNU Make
+native doğrulama için de kullanılabilir.
 
 ## Mimari özeti
 
@@ -495,6 +563,8 @@ bir derleyicide cleanup taraması doğru fakat sıralı olarak çalışır.
 | Çalıştırılabilir doğrulama | `app/main.f90` | %25 exact gürültü, analoji, causal chain ve 3-faktör Resonator demo |
 | Native testler | `test/test_all.f90` | cebirsel invariantlar, hata yolları, native resource-plan sınırları, serial/OpenMP pretraining eşitliği ve uçtan uca test |
 | Native Fortran control plane | `src/fortran_control.f90`, `src/fortran_integrity.f90`, `src/fortran_quality_gate.f90`, `app/control.f90` | compiler/runtime profile, explicit RAM/SSD preflight, stream SHA-256 checkpoint identity, actual vocab/train/stream-checkpoint/load smoke and fail-closed aggregate semantic-neighbour quality gate; Python veya shell inventory çağırmaz |
+| İsteğe bağlı split çakışma kontrolü | `app/corpus_overlap.f90` | tam UTF-8 satır karşılaştırması; sınırlı held-out indeks, hash çakışmasında byte doğrulaması, fail-closed sınırlar; semantik sızıntı kanıtı değildir ([sözleşme](docs/CORPUS_OVERLAP.md)) |
+| UD metni hazırlama | `app/ud_text_extract.f90` | Sınırlı `# text = ` çıkarımı, yeni çıktı ve geçerli UTF-8 kontrolleri; genel CoNLL-U doğrulayıcısı değil ([sözleşme](docs/UD_TEXT_EXTRACTION.md)) |
 | Aşırı kapasiteli seyrek uzman katmanı | `src/sparse_expert_layer.f90`, `app/sparse_layer_bench.f90`, `test/sparse_layer_tests.f90` | donmuş LSH yönlendirmesi + hash'ten üretilen sanal uzmanlar + açık adreslemeli sayfa deposu: `W_total` 1e9'a çıkarken aktif parametre, aktif FLOP ve adım süresi `O(k)` kalır; `system_clock` benchmark'ı kapasite değişmezliğini eşitlik olarak sınar (bkz. `docs/SPARSE_EXTREME_CAPACITY_LAYER.md`); eğitim hattına bağlı değildir |
 | Donanım/OS profili (legacy adapter) | `tools/hardware_compatibility.py` | privacy-conscious CPU/RAM/GPU/NPU inventory; native portable baseline bunu çağırmaz |
 | Bağımsız HDC oracle | `tools/verify_reference.py` | standart SplitMix64 ve demo sözleşmelerinin Python modeli |
@@ -527,7 +597,9 @@ crash-safe exactly-once continual pretraining için
 [docs/CONTINUOUS_PRETRAINING.md](docs/CONTINUOUS_PRETRAINING.md), data-driven grounded
 chat/retrieval sözleşmesi için [docs/DIALOGUE_RETRIEVAL.md](docs/DIALOGUE_RETRIEVAL.md),
 tüm system quality audit'i ve held-out release gate için
-[docs/QUALITY_ASSURANCE.md](docs/QUALITY_ASSURANCE.md), production data foundry,
+[docs/QUALITY_ASSURANCE.md](docs/QUALITY_ASSURANCE.md), işlem hataları, build/JSON
+performansı, doğrulama kapsamı ve açık sınırlar için
+[docs/OPERATIONS_AUDIT_2026-10.md](docs/OPERATIONS_AUDIT_2026-10.md), production data foundry,
 record-level leakage gate ve immutable run provenance için
 [docs/PRODUCTION_PRETRAINING.md](docs/PRODUCTION_PRETRAINING.md), gerçek LMM/LLM
 hedefine ilişkin kapsam/gap analizi için

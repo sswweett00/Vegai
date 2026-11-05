@@ -80,14 +80,33 @@ def summarise(run_dir: Path) -> dict:
     total_tokens = sum(record["session_tokens"] for record in records)
     total_seconds = sum(record["seconds"] for record in records)
     corpus_bytes = records[-1]["corpus_bytes"]
+    if type(corpus_bytes) is not int or corpus_bytes < 0:
+        raise SummaryError("corpus_bytes must be a non-negative integer")
+    for record in records:
+        start, end = record["start_byte"], record["end_byte"]
+        if (type(record["corpus_bytes"]) is not int or record["corpus_bytes"] != corpus_bytes
+                or type(start) is not int or type(end) is not int
+                or not 0 <= start <= end <= corpus_bytes):
+            raise SummaryError("session offsets or corpus sizes are inconsistent")
     end_byte = max(record["end_byte"] for record in records)
+    # end_byte is the next overlapping input offset; N bytes provide N-1
+    # prediction pairs. The largest offset alone does not prove there were no
+    # gaps in a resumed chain, so report the contiguous prefix from zero.
+    covered = 0
+    for record in sorted(records, key=lambda item: (item["start_byte"], item["end_byte"])):
+        if record["start_byte"] > covered:
+            break
+        covered = max(covered, record["end_byte"])
+    predictions = max(0, corpus_bytes - 1)
+    covered = min(covered, predictions)
     throughput = total_tokens / max(1, total_seconds)
     return {
         "sessions": len(records),
         "corpus_bytes": corpus_bytes,
         "end_byte": end_byte,
-        "corpus_fraction": end_byte / corpus_bytes if corpus_bytes else None,
-        "whole_corpus": end_byte >= corpus_bytes,
+        "covered_prediction_offsets": covered,
+        "corpus_fraction": covered / predictions if predictions else 1.0,
+        "whole_corpus": covered >= predictions,
         "total_tokens": total_tokens,
         "total_seconds": total_seconds,
         "tokens_per_second": throughput,

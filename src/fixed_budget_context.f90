@@ -76,6 +76,13 @@ module fixed_budget_context
    integer(int32), parameter, public :: FBC_ERR_NUMERIC = -1404_int32
    integer(int32), parameter, public :: FBC_ERR_ORDER = -1405_int32
 
+   ! Checkpoint versions carry both forward and training semantics. V5 keeps
+   ! its historical backward pass; V6 fixes the full ring and decay clamp; V7
+   ! additionally preserves distinct slot identities via deterministic anchors.
+   integer(int32), parameter, public :: FBC_TRAINING_RULE_V5 = 5_int32
+   integer(int32), parameter, public :: FBC_TRAINING_RULE_V6 = 6_int32
+   integer(int32), parameter, public :: FBC_TRAINING_RULE_V7 = 7_int32
+
    ! Context channels, in the order their logits are stored.
    integer(int32), parameter, public :: FBC_CHANNEL_LOCAL = 1_int32
    integer(int32), parameter, public :: FBC_CHANNEL_RETENTION = 2_int32
@@ -94,6 +101,9 @@ module fixed_budget_context
    integer(int32), parameter, public :: FBC_MAX_LOCAL_WINDOW = 4096_int32
    integer(int32), parameter, public :: FBC_MAX_MEMORY_SCALES = 16_int32
    integer(int32), parameter, public :: FBC_MAX_MEMORY_SLOTS = 1024_int32
+   ! Also keeps the int32 channel-router extent and every int64 resource
+   ! count representable for the maximum supported vocabulary/FFN dimensions.
+   integer(int32), parameter, public :: FBC_MAX_WIDTH = 16777216_int32
    integer(int32), parameter, public :: FBC_MAX_CHUNK_TOKENS = 8192_int32
 
    !> Static description of the engine.  Note which fields are *semantic*
@@ -124,6 +134,9 @@ module fixed_budget_context
    !> constant of the configuration or derived from it -- never from the horizon.
    type, public :: fbc_state_t
       logical :: initialized = .false.
+      ! The V7 multi-slot state has different reset/write semantics. Preserve
+      ! that fact so an API caller cannot silently switch rules on live state.
+      logical :: anchored_slots = .false.
       integer(int32) :: width = 0_int32
       integer(int32) :: heads = 0_int32
       integer(int32) :: head_width = 0_int32
@@ -131,6 +144,8 @@ module fixed_budget_context
       integer(int32) :: memory_scales = 0_int32
       integer(int32) :: memory_slots = 0_int32
       integer(int32) :: cache_head = 0_int32
+      ! Normally 0..local_window. During a deferred local commit only, encode
+      ! the previous count as -1-count; no additional window or vector is copied.
       integer(int32) :: cache_count = 0_int32
       integer(int64) :: steps = 0_int64
       real(real64), allocatable :: retention_numerator(:, :, :, :)   ! (dh, dh, head, scale)
@@ -147,6 +162,8 @@ module fixed_budget_context
    type, public :: fbc_model_t
       type(fbc_config_t) :: config
       logical :: initialized = .false.
+      ! v5 files retain the historical training rule when loaded and re-saved.
+      integer(int32) :: training_rule = FBC_TRAINING_RULE_V6
       integer(int32) :: head_width = 0_int32
       real(real64) :: effective_horizon = 0.0_real64
       logical :: horizon_clamped = .false.
@@ -251,6 +268,10 @@ module fixed_budget_context
       real(real64) :: inverse_rms_ffn = 0.0_real64
       real(real64), allocatable :: ffn_pre_gate(:), ffn_pre_value(:), ffn_gated(:)
       real(real64), allocatable :: hidden(:)                   ! (width)
+      ! Seven scalar dimensions bind API-owned buffers to their model shape.
+      ! They do not add a tensor, checkpoint payload or history-dependent cost.
+      integer(int32) :: layout(7) = 0_int32
+      integer(int64) :: forward_step = 0_int64
    end type fbc_workspace_t
 
    !> Structural resource accounting.  Every number here is a function of the
@@ -277,15 +298,36 @@ module fixed_budget_context
       module procedure fbc_fill_1d, fbc_fill_2d, fbc_fill_3d
    end interface
 
-   public :: fbc_config_is_valid
+   public :: fbc_config_is_valid, fbc_real64_is_finite, fbc_config_layout, fbc_layout_matches
    public :: fbc_model_init, fbc_model_destroy, fbc_model_is_ready
    public :: fbc_state_init, fbc_state_destroy, fbc_state_reset, fbc_state_is_ready
    public :: fbc_workspace_init, fbc_workspace_destroy
-   public :: fbc_plan, fbc_step, fbc_sigmoid, fbc_softplus, fbc_softplus_slope, fbc_parameter_count
+   public :: fbc_plan, fbc_step, fbc_finish_local_step, fbc_sigmoid, fbc_softplus, fbc_softplus_slope, &
+             fbc_parameter_count
    public :: fbc_configure_scales, fbc_state_bytes, fbc_parse_horizon, fbc_parse_count
    public :: fbc_refresh_dynamics, fbc_learned_horizon
 
 contains
+
+   ! Shape metadata is scalar-only and intentionally excludes logical_horizon:
+   ! that semantic setting does not determine any of these physical extents.
+   pure function fbc_config_layout(config) result(layout)
+      type(fbc_config_t), intent(in) :: config
+      integer(int32) :: layout(7)
+
+      layout = [config%vocabulary_size, config%width, config%heads, config%ffn_width, &
+                config%local_window, config%memory_scales, config%memory_slots]
+   end function fbc_config_layout
+
+   pure logical function fbc_layout_matches(layout, config) result(matches)
+      integer(int32), intent(in) :: layout(7)
+      type(fbc_config_t), intent(in) :: config
+
+      matches = layout(1) == config%vocabulary_size .and. layout(2) == config%width .and. &
+                layout(3) == config%heads .and. layout(4) == config%ffn_width .and. &
+                layout(5) == config%local_window .and. layout(6) == config%memory_scales .and. &
+                layout(7) == config%memory_slots
+   end function fbc_layout_matches
 
    !----------------------------------------------------------------------------
    !  Small numerically safe kernels
@@ -376,12 +418,31 @@ contains
    !  Validation and configuration
    !----------------------------------------------------------------------------
 
+   ! Bit inspection avoids an INVALID trap when an IEEE signaling NaN is
+   ! presented to a public configuration or loss API. Other real64 formats
+   ! fall back to the compiler's IEEE predicate.
+   pure elemental logical function fbc_real64_is_finite(value) result(finite)
+      real(real64), intent(in) :: value
+      integer(int64), parameter :: exponent_mask = int(z'7FF0000000000000', int64)
+      integer(int64) :: bits
+
+      if (radix(value) == 2 .and. digits(value) == 53 .and. maxexponent(value) == 1024 .and. &
+          minexponent(value) == -1021 .and. storage_size(value) == 64) then
+         bits = transfer(value, 0_int64)
+         finite = iand(bits, exponent_mask) /= exponent_mask
+      else
+         finite = ieee_is_finite(value)
+      end if
+   end function fbc_real64_is_finite
+
    pure logical function fbc_config_is_valid(config) result(valid)
       type(fbc_config_t), intent(in) :: config
       integer(int32) :: head_width
 
       valid = .false.
-      if (config%heads < 1_int32 .or. config%width < 2_int32) return
+      if (config%heads < 1_int32 .or. config%width < 2_int32 .or. config%width > FBC_MAX_WIDTH) return
+      if (.not. fbc_real64_is_finite(config%rms_epsilon) .or. .not. fbc_real64_is_finite(config%slot_decay) .or. &
+          .not. fbc_real64_is_finite(config%slot_temperature)) return
       head_width = config%width / config%heads
       if (modulo(config%width, config%heads) /= 0_int32) return
       if (head_width < 1_int32) return
@@ -811,23 +872,44 @@ contains
       end if
       state%initialized = .true.
       call fbc_state_reset(state, model, status)
+      if (status /= FBC_OK) call fbc_state_destroy(state)
    end subroutine fbc_state_init
 
    subroutine fbc_state_reset(state, model, status)
       type(fbc_state_t), intent(inout) :: state
       type(fbc_model_t), intent(in) :: model
       integer(int32), intent(out) :: status
+      integer(int32) :: slot
+      real(real64) :: anchor_scale
 
       status = FBC_OK
       if (.not. fbc_state_is_ready(state, model)) then
          status = FBC_ERR_NOT_READY
          return
       end if
+      if (model%training_rule /= FBC_TRAINING_RULE_V5 .and. model%training_rule /= FBC_TRAINING_RULE_V6 .and. &
+          model%training_rule /= FBC_TRAINING_RULE_V7) then
+         status = FBC_ERR_INVALID_ARGUMENT
+         return
+      end if
+      state%anchored_slots = model%training_rule == FBC_TRAINING_RULE_V7 .and. model%config%memory_slots > 1_int32
       state%retention_numerator = 0.0_real64
       state%retention_normalizer = 0.0_real64
       state%local_key = 0.0_real64
       state%local_value = 0.0_real64
       state%slot_key = 0.0_real64
+      ! With V5/V6, identical zero slots and identical writes stay identical
+      ! forever. V7 fixes one key component per slot as a persistent identity;
+      ! the remaining key components, all values and salience remain dynamic.
+      ! No parameter or recurrent-state array is added. A single slot retains
+      ! the complete V6 key update, since there is no symmetry to break.
+      if (state%anchored_slots) then
+         anchor_scale = 0.5_real64 * sqrt(real(model%config%width, real64))
+         do slot = 1_int32, model%config%memory_slots
+            state%slot_key(1_int32, slot) = anchor_scale * &
+               (real(2_int32 * slot - 1_int32, real64) / real(model%config%memory_slots, real64) - 1.0_real64)
+         end do
+      end if
       state%slot_value = 0.0_real64
       state%slot_salience = 0.0_real64
       state%cache_head = 0_int32
@@ -893,6 +975,7 @@ contains
          call fbc_workspace_destroy(workspace)
          return
       end if
+      workspace%layout = fbc_config_layout(model%config)
       workspace%initialized = .true.
    end subroutine fbc_workspace_init
 
@@ -947,6 +1030,8 @@ contains
       type(fbc_config_t), intent(in) :: config
       integer(int64) :: width, vocab, heads, head_width, ffn, window, scales
 
+      count = -1_int64
+      if (.not. fbc_config_is_valid(config)) return
       width = int(config%width, int64)
       vocab = int(config%vocabulary_size, int64)
       heads = int(config%heads, int64)
@@ -974,6 +1059,8 @@ contains
       type(fbc_config_t), intent(in) :: config
       integer(int64) :: width, heads, head_width, window, scales, slots
 
+      bytes = -1_int64
+      if (.not. fbc_config_is_valid(config)) return
       width = int(config%width, int64)
       heads = int(config%heads, int64)
       head_width = int(config%width / config%heads, int64)
@@ -988,8 +1075,7 @@ contains
       type(fbc_config_t), intent(in) :: config
       type(fbc_plan_t), intent(out) :: plan
       integer(int64) :: width, vocab, heads, head_width, ffn, window, scales, slots
-      real(real64) :: unused_decay(config%memory_scales)
-      logical :: unused_clamped
+      real(real64) :: unused_decay(FBC_MAX_MEMORY_SCALES)
 
       plan = fbc_plan_t()
       if (.not. fbc_config_is_valid(config)) return
@@ -1036,7 +1122,11 @@ contains
    !----------------------------------------------------------------------------
    !  Everything the step touches is bounded by the configuration.  The horizon
    !  appears only through model%scale_decay, which was computed at init.
-   subroutine fbc_step(model, state, workspace, token, hidden, logits, status)
+   !  A training caller can defer the local-ring write until after backward;
+   !  the same state and workspace must then be passed to fbc_finish_local_step
+   !  before another step. Other memory channels are already updated. Evaluation
+   !  and existing callers keep the default immediate commit.
+   subroutine fbc_step(model, state, workspace, token, hidden, logits, status, defer_local_commit)
       type(fbc_model_t), intent(in) :: model
       type(fbc_state_t), intent(inout) :: state
       type(fbc_workspace_t), intent(inout) :: workspace
@@ -1044,20 +1134,52 @@ contains
       real(real64), intent(out) :: hidden(:)
       real(real64), intent(out) :: logits(:)
       integer(int32), intent(out) :: status
+      logical, intent(in), optional :: defer_local_commit
       integer(int32) :: width, heads, head_width, scales, slots, window, ffn
       integer(int32) :: head, scale, component, slot, ordinal, position, channel
       real(real64) :: score, maximum, normalizer, weight, denominator, inverse_rms, mean_square
       real(real64) :: scale_factor, slot_scale, gate, salience, context_scale, write_gate
+      logical :: defer_commit
 
       status = FBC_OK
-      if (.not. fbc_model_is_ready(model) .or. .not. fbc_state_is_ready(state, model)) then
+      ! fbc_state_is_ready already validates the model; doing both checks here
+      ! repeated the same allocation checks on every token.
+      if (.not. fbc_state_is_ready(state, model)) then
          status = FBC_ERR_NOT_READY
          return
       end if
-      if (.not. workspace%initialized) then
+      if (.not. workspace%initialized .or. .not. fbc_layout_matches(workspace%layout, model%config)) then
          status = FBC_ERR_NOT_READY
          return
       end if
+      if (model%training_rule /= FBC_TRAINING_RULE_V5 .and. model%training_rule /= FBC_TRAINING_RULE_V6 .and. &
+          model%training_rule /= FBC_TRAINING_RULE_V7) then
+         status = FBC_ERR_INVALID_ARGUMENT
+         return
+      end if
+      if (state%anchored_slots .neqv. &
+          (model%training_rule == FBC_TRAINING_RULE_V7 .and. model%config%memory_slots > 1_int32)) then
+         status = FBC_ERR_ORDER
+         return
+      end if
+      ! A deferred step must be finished (or the state explicitly reset)
+      ! before it can be advanced again.
+      if (state%cache_count < 0_int32) then
+         status = FBC_ERR_ORDER
+         return
+      end if
+      if (state%cache_count > state%local_window .or. state%cache_head < 0_int32 .or. &
+          state%cache_head > state%local_window .or. &
+          (state%cache_count > 0_int32 .and. state%cache_head == 0_int32)) then
+         status = FBC_ERR_ORDER
+         return
+      end if
+      if (state%steps < 0_int64 .or. state%steps == huge(0_int64)) then
+         status = FBC_ERR_NUMERIC
+         return
+      end if
+      defer_commit = .false.
+      if (present(defer_local_commit)) defer_commit = defer_local_commit
       if (token < 1_int32 .or. token > model%config%vocabulary_size) then
          status = FBC_ERR_INVALID_ARGUMENT
          return
@@ -1073,6 +1195,9 @@ contains
       slots = model%config%memory_slots
       window = model%config%local_window
       ffn = model%config%ffn_width
+      ! Invalidate the previous activation before any operation that can fail;
+      ! a successful forward publishes its step stamp at the end.
+      workspace%forward_step = 0_int64
       workspace%local_count = state%cache_count
       workspace%token = token
 
@@ -1209,6 +1334,9 @@ contains
          ! The delta is kept so the backward pass can differentiate the write
          ! gate without storing the pre-write slot matrix.
          workspace%slot_key_delta(:, slot) = workspace%slot_write_key - state%slot_key(:, slot)
+         ! V7's first component is fixed, but still participates in the write
+         ! gate and in the query/read score. Its direct write delta is zero.
+         if (state%anchored_slots) workspace%slot_key_delta(1_int32, slot) = 0.0_real64
          workspace%slot_value_delta(:, slot) = workspace%slot_write_value - state%slot_value(:, slot)
          salience = state%slot_salience(slot)
          state%slot_key(:, slot) = state%slot_key(:, slot) + gate * workspace%slot_key_delta(:, slot)
@@ -1265,12 +1393,48 @@ contains
       logits = matmul(workspace%hidden, model%token_embedding) + model%output_bias
 
       ! ---- 8. commit the ring buffer (the current token becomes history) ----
-      position = modulo(state%cache_head, window) + 1_int32
+      ! If it is full, the next slot still contains a key/value used by this
+      ! forward pass.  Training delays the *same* writes until backward has
+      ! read them; no additional window, parameter pass or update is needed.
+      workspace%forward_step = state%steps + 1_int64
+      if (defer_commit) then
+         state%cache_count = -1_int32 - state%cache_count
+      else
+         position = modulo(state%cache_head, window) + 1_int32
+         state%local_key(:, :, position) = workspace%k
+         state%local_value(:, :, position) = workspace%v
+         state%cache_head = position
+         state%cache_count = min(state%cache_count + 1_int32, window)
+         state%steps = state%steps + 1_int64
+      end if
+   end subroutine fbc_step
+
+   !> Complete the local write of a deferred step, using its original workspace.
+   !> A second finish or a finish without a deferred step fails without writing.
+   subroutine fbc_finish_local_step(state, workspace, status)
+      type(fbc_state_t), intent(inout) :: state
+      type(fbc_workspace_t), intent(in) :: workspace
+      integer(int32), intent(out) :: status
+      integer(int32) :: previous_count, position
+
+      status = FBC_ERR_ORDER
+      if (.not. state%initialized .or. .not. workspace%initialized) return
+      if (state%cache_count >= 0_int32 .or. state%local_window < 1_int32) return
+      if (state%steps < 0_int64 .or. state%steps == huge(0_int64)) return
+      if (workspace%forward_step /= state%steps + 1_int64) return
+      previous_count = -1_int32 - state%cache_count
+      if (previous_count /= workspace%local_count .or. previous_count > state%local_window) return
+      if (.not. allocated(state%local_key) .or. .not. allocated(state%local_value) .or. &
+          .not. allocated(workspace%k) .or. .not. allocated(workspace%v)) return
+      if (size(workspace%k, 1) /= state%head_width .or. size(workspace%k, 2) /= state%heads .or. &
+          size(workspace%v, 1) /= state%head_width .or. size(workspace%v, 2) /= state%heads) return
+      position = modulo(state%cache_head, state%local_window) + 1_int32
       state%local_key(:, :, position) = workspace%k
       state%local_value(:, :, position) = workspace%v
       state%cache_head = position
-      state%cache_count = min(state%cache_count + 1_int32, window)
+      state%cache_count = min(previous_count + 1_int32, state%local_window)
       state%steps = state%steps + 1_int64
-   end subroutine fbc_step
+      status = FBC_OK
+   end subroutine fbc_finish_local_step
 
 end module fixed_budget_context

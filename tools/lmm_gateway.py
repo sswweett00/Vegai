@@ -28,15 +28,20 @@ from pathlib import Path
 import ssl
 import sys
 import tempfile
+import threading
 import time
 from typing import Any, Mapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
+import bounded_process
+import lmm_contract
+import lmm_process
 from lmm_process import run_bounded_process
 from lmm_contract import (
     GENERATION_REPORT_SCHEMA,
+    MAX_GENERATION_TOKENS,
     MAX_JSON_BYTES,
     WORKER_RESPONSE_SCHEMA,
     AssetRegistry,
@@ -62,7 +67,9 @@ from lmm_contract import (
     require,
     require_unchanged,
     resolve_package_path,
+    strict_json_value,
     validate_structured_response,
+    validate_unicode_text,
     verify_model_artifacts,
     write_json_atomic,
 )
@@ -71,6 +78,8 @@ from lmm_contract import (
 MAX_WORKER_OUTPUT_BYTES = 8 * 1024 * 1024
 MAX_WORKER_STDERR_BYTES = 1 * 1024 * 1024
 MAX_WORKER_INPUT_BYTES = 32 * 1024 * 1024
+# Includes the transport envelope and every repeated inline image occurrence.
+MAX_ENDPOINT_INPUT_BYTES = 32 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_MAX_INLINE_IMAGE_BYTES = 10 * 1024 * 1024
 # Snapshot delivery avoids a pathname TOCTOU for trusted multimodal workers.
@@ -101,9 +110,12 @@ def parse_positive_float(value: str) -> float:
 def load_command(path: Path) -> tuple[list[str], FileIdentity]:
     identity = file_identity(path, "worker command configuration", maximum_bytes=MAX_JSON_BYTES)
     try:
-        value = json.loads(path.resolve().read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise LMMContractError(f"cannot parse worker command configuration {path}: {error}") from error
+        with path.resolve().open("rb") as handle:
+            raw = handle.read(MAX_JSON_BYTES + 1)
+    except OSError as error:
+        raise LMMContractError(f"cannot read worker command configuration {path}: {error}") from error
+    require(len(raw) <= MAX_JSON_BYTES, f"worker command configuration exceeds {MAX_JSON_BYTES} bytes")
+    value = strict_json_value(raw, f"worker command configuration {path}")
     require(isinstance(value, list) and value, "worker command configuration must be a nonempty JSON array")
     require(all(isinstance(item, str) and item for item in value),
             "worker command configuration entries must be nonempty strings")
@@ -114,9 +126,9 @@ def load_command(path: Path) -> tuple[list[str], FileIdentity]:
 def parse_worker_response(output: bytes) -> GenerationResponse:
     require(len(output) <= MAX_WORKER_OUTPUT_BYTES, f"worker response exceeds {MAX_WORKER_OUTPUT_BYTES} bytes")
     try:
-        value = json.loads(output.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise LMMBackendError(f"worker did not emit one UTF-8 JSON response: {error}") from error
+        value = strict_json_value(output, "worker response")
+    except LMMContractError as error:
+        raise LMMBackendError("worker response is not strict UTF-8 JSON") from error
     response = GenerationResponse.from_mapping(value)
     require(value.get("schema_version") == WORKER_RESPONSE_SCHEMA, "worker response schema mismatch")
     return response
@@ -258,7 +270,7 @@ def run_openvino_genai(
         if request.temperature > 0.0:
             options.update({"do_sample": True, "temperature": request.temperature, "top_p": request.top_p})
         result = pipeline.generate(prompt, **options)
-        text = extract_openvino_text(result)
+        text = validate_unicode_text(extract_openvino_text(result), "OpenVINO GenAI response.text")
     except LMMBackendError:
         raise
     except Exception as error:  # Native extension errors differ by OpenVINO release/model package.
@@ -277,7 +289,25 @@ def run_openvino_genai(
 
 
 def openai_messages(context: PackedContext, registry: AssetRegistry, verified_assets: Mapping[str, tuple[Any, FileIdentity]]) -> list[dict[str, object]]:
+    # Count every occurrence before reading or base64-encoding any asset. A
+    # repeated 10 MiB image must not expand into an unbounded request in RAM.
+    encoded_image_bytes = 0
+    for message in context.messages:
+        for part in message.content:
+            if part.kind != "asset":
+                continue
+            assert part.asset_id is not None
+            record, identity = verified_assets[part.asset_id]
+            require(record.modality == "image",
+                    "openai-compatible backend only standardizes image asset blocks; use a worker backend for audio/video")
+            require(identity.bytes <= DEFAULT_MAX_INLINE_IMAGE_BYTES,
+                    f"image asset {record.asset_id} exceeds {DEFAULT_MAX_INLINE_IMAGE_BYTES} bytes")
+            encoded_image_bytes += 4 * ((identity.bytes + 2) // 3) + len(record.mime_type.encode("utf-8")) + 13
+            require(encoded_image_bytes <= MAX_ENDPOINT_INPUT_BYTES,
+                    f"inline image payload exceeds {MAX_ENDPOINT_INPUT_BYTES} bytes")
+
     messages: list[dict[str, object]] = []
+    encoded_assets: dict[str, str] = {}
     for message in context.messages:
         require(message.role != "tool",
                 "openai-compatible backend cannot serialize a tool role without a provider-specific tool_call_id; use a worker backend")
@@ -290,14 +320,14 @@ def openai_messages(context: PackedContext, registry: AssetRegistry, verified_as
                 continue
             assert part.asset_id is not None
             record, identity = verified_assets[part.asset_id]
-            require(record.modality == "image",
-                    "openai-compatible backend only standardizes image asset blocks; use a worker backend for audio/video")
-            image_bytes = read_verified_bytes(
-                identity,
-                f"image asset {record.asset_id}",
-                DEFAULT_MAX_INLINE_IMAGE_BYTES,
-            )
-            encoded = base64.b64encode(image_bytes).decode("ascii")
+            if part.asset_id not in encoded_assets:
+                image_bytes = read_verified_bytes(
+                    identity,
+                    f"image asset {record.asset_id}",
+                    DEFAULT_MAX_INLINE_IMAGE_BYTES,
+                )
+                encoded_assets[part.asset_id] = base64.b64encode(image_bytes).decode("ascii")
+            encoded = encoded_assets[part.asset_id]
             parts.append({"type": "image_url", "image_url": {"url": f"data:{record.mime_type};base64,{encoded}", "detail": "auto"}})
             has_asset = True
         if not has_asset and len(parts) == 1 and parts[0]["type"] == "text":
@@ -335,6 +365,129 @@ class RejectRedirects(HTTPRedirectHandler):
         return None
 
 
+def _endpoint_transport_worker(timeout_seconds: float) -> int:
+    """Trusted leaf process; credentials and payload arrive only through stdin.
+
+    A watchdog also bounds the worker if its caller is killed. It cannot cancel
+    a request already received by a remote provider or guarantee its rollback.
+    """
+    def watchdog() -> None:
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                os._exit(124)
+            time.sleep(min(remaining, 3600.0))
+
+    threading.Thread(target=watchdog, name="endpoint-deadline", daemon=True).start()
+
+    def emit_error(kind: str, **details: object) -> int:
+        sys.stdout.buffer.write(b"ERR\n" + canonical_json_bytes({"kind": kind, **details}))
+        sys.stdout.buffer.flush()
+        return 0
+
+    try:
+        raw_request = sys.stdin.buffer.read(MAX_ENDPOINT_INPUT_BYTES + 1)
+        require(len(raw_request) <= MAX_ENDPOINT_INPUT_BYTES, "endpoint request is too large")
+        envelope = strict_json_value(raw_request, "endpoint transport request")
+        require(isinstance(envelope, dict) and set(envelope) == {"endpoint", "payload", "token", "allow_proxy"},
+                "endpoint transport request is malformed")
+        endpoint = envelope["endpoint"]
+        payload = envelope["payload"]
+        token = envelope["token"]
+        allow_proxy = envelope["allow_proxy"]
+        require(isinstance(endpoint, str) and isinstance(payload, dict), "endpoint transport request is malformed")
+        require(token is None or isinstance(token, str), "endpoint transport token is malformed")
+        require(type(allow_proxy) is bool, "endpoint transport proxy setting is malformed")
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
+        http_request = Request(endpoint, data=canonical_json_bytes(payload), headers=headers, method="POST")
+        ssl_context = ssl.create_default_context() if urlparse(endpoint).scheme == "https" else None
+        # Ambient proxy routing is an explicit opt-in; redirects are rejected.
+        handlers: list[object] = [RejectRedirects()]
+        if not allow_proxy:
+            handlers.append(ProxyHandler({}))
+        if ssl_context is not None:
+            handlers.append(HTTPSHandler(context=ssl_context))
+        opener = build_opener(*handlers)
+        try:
+            with opener.open(http_request, timeout=timeout_seconds) as response:
+                raw_response = response.read(MAX_WORKER_OUTPUT_BYTES + 1)
+        except HTTPError as error:
+            if 300 <= error.code < 400:
+                # Reject before reading an attacker-controlled redirect body and
+                # never expose or follow Location with bearer credentials.
+                error.close()
+                return emit_error("redirect")
+            try:
+                error_body = error.read(MAX_WORKER_OUTPUT_BYTES + 1)
+            finally:
+                error.close()
+            truncated = len(error_body) > MAX_WORKER_OUTPUT_BYTES
+            digest = hashlib.sha256(error_body[:MAX_WORKER_OUTPUT_BYTES]).hexdigest()
+            return emit_error("http", status=error.code, sha256=digest, truncated=truncated)
+        except URLError:
+            return emit_error("network")
+        except OSError:
+            return emit_error("io")
+        if len(raw_response) > MAX_WORKER_OUTPUT_BYTES:
+            return emit_error("response-size")
+        sys.stdout.buffer.write(b"OK\n" + raw_response)
+        sys.stdout.buffer.flush()
+        return 0
+    except Exception:
+        # Never copy exception text, endpoint, bearer token, prompt, or response
+        # body into logs/argv when an unexpected worker failure occurs.
+        return emit_error("transport")
+
+
+def _run_endpoint_transport(
+    endpoint: str, payload: dict[str, object], token: str | None,
+    allow_environment_proxy: bool, timeout_seconds: float, *, secret_environment_name: str | None = None,
+) -> bytes:
+    envelope = canonical_json_bytes({
+        "endpoint": endpoint, "payload": payload, "token": token, "allow_proxy": allow_environment_proxy,
+    })
+    require(len(envelope) <= MAX_ENDPOINT_INPUT_BYTES,
+            f"endpoint request exceeds {MAX_ENDPOINT_INPUT_BYTES} bytes")
+    environment = os.environ.copy()
+    if secret_environment_name is not None:
+        environment.pop(secret_environment_name, None)
+    completed = run_bounded_process(
+        [sys.executable, str(Path(__file__).resolve()), "--_endpoint-transport", str(timeout_seconds)],
+        cwd=Path(__file__).resolve().parents[1], timeout_seconds=timeout_seconds,
+        stdout_limit_bytes=MAX_WORKER_OUTPUT_BYTES + 4, stderr_limit_bytes=MAX_WORKER_STDERR_BYTES,
+        stdin_bytes=envelope, stdin_limit_bytes=MAX_ENDPOINT_INPUT_BYTES,
+        environment=environment, label="OpenAI-compatible endpoint", isolate_process_group=False,
+    )
+    if completed.returncode == 124:
+        raise LMMBackendError(f"OpenAI-compatible endpoint exceeded {timeout_seconds:g} seconds")
+    require(completed.returncode == 0, "OpenAI-compatible endpoint transport process failed")
+    if completed.stdout.startswith(b"OK\n"):
+        return completed.stdout[3:]
+    require(completed.stdout.startswith(b"ERR\n"), "OpenAI-compatible endpoint transport protocol is invalid")
+    error = strict_json_value(completed.stdout[4:], "endpoint transport error")
+    require(isinstance(error, dict), "OpenAI-compatible endpoint transport error is invalid")
+    kind = error.get("kind")
+    if kind == "redirect":
+        raise LMMBackendError("OpenAI-compatible endpoint attempted a redirect; redirects are disabled")
+    if kind == "http":
+        status, digest, truncated = error.get("status"), error.get("sha256"), error.get("truncated")
+        require(type(status) is int and 400 <= status <= 599 and isinstance(digest, str)
+                and len(digest) == 64 and all(character in "0123456789abcdef" for character in digest)
+                and type(truncated) is bool, "OpenAI-compatible endpoint HTTP error is malformed")
+        digest_label = "response-prefix-sha256" if truncated else "response-sha256"
+        raise LMMBackendError(f"OpenAI-compatible endpoint returned HTTP {status}; {digest_label}={digest}")
+    if kind == "response-size":
+        raise LMMBackendError(f"endpoint response exceeds {MAX_WORKER_OUTPUT_BYTES} bytes")
+    if kind == "network":
+        raise LMMBackendError("cannot reach OpenAI-compatible endpoint")
+    if kind == "io":
+        raise LMMBackendError("OpenAI-compatible endpoint I/O failed")
+    raise LMMBackendError("OpenAI-compatible endpoint transport failed")
+
+
 def run_openai_compatible(
     endpoint: str,
     api_key_env: str | None,
@@ -347,9 +500,15 @@ def run_openai_compatible(
     verified_assets: Mapping[str, tuple[Any, FileIdentity]],
     timeout_seconds: float,
 ) -> GenerationResponse:
-    parsed = urlparse(endpoint)
-    require(parsed.scheme in {"https", "http"} and bool(parsed.netloc) and bool(parsed.hostname),
-            "--endpoint must be an absolute HTTP(S) URL")
+    try:
+        parsed = urlparse(endpoint)
+        port = parsed.port  # Force urllib's port/range/IPv6 validation before spawning.
+    except ValueError as error:
+        raise LMMContractError("--endpoint has an invalid host or port") from error
+    require(parsed.scheme in {"https", "http"} and bool(parsed.netloc) and bool(parsed.hostname)
+            and not parsed.netloc.endswith(":") and (port is None or 1 <= port <= 65535)
+            and not any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in endpoint),
+            "--endpoint must be an absolute HTTP(S) URL with a valid host and port")
     require(parsed.username is None and parsed.password is None and not parsed.fragment,
             "--endpoint must not contain credentials or a fragment")
     require(parsed.scheme == "https" or allow_insecure_http,
@@ -369,46 +528,20 @@ def run_openai_compatible(
         "top_p": request.top_p,
         "stream": False,
     }
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    if token is not None:
-        headers["Authorization"] = f"Bearer {token}"
-    http_request = Request(endpoint, data=canonical_json_bytes(payload), headers=headers, method="POST")
+    raw = _run_endpoint_transport(
+        endpoint, payload, token, allow_environment_proxy, timeout_seconds, secret_environment_name=api_key_env
+    )
     try:
-        ssl_context = ssl.create_default_context() if parsed.scheme == "https" else None
-        # Do not silently inherit HTTP(S)_PROXY for bearer-authenticated model
-        # traffic. An operator can opt in to a managed proxy explicitly.
-        handlers: list[object] = [RejectRedirects()]
-        if not allow_environment_proxy:
-            handlers.append(ProxyHandler({}))
-        if ssl_context is not None:
-            handlers.append(HTTPSHandler(context=ssl_context))
-        opener = build_opener(*handlers)
-        with opener.open(http_request, timeout=timeout_seconds) as response:
-            raw = response.read(MAX_WORKER_OUTPUT_BYTES + 1)
-    except HTTPError as error:
-        raw = error.read(MAX_WORKER_OUTPUT_BYTES + 1)
-        if 300 <= error.code < 400:
-            # Do not expose Location: it can contain query credentials, and do
-            # not let urllib replay our Authorization header to another host.
-            raise LMMBackendError("OpenAI-compatible endpoint attempted a redirect; redirects are disabled") from error
-        digest = hashlib.sha256(raw).hexdigest()
-        raise LMMBackendError(f"OpenAI-compatible endpoint returned HTTP {error.code}; response-sha256={digest}") from error
-    except URLError as error:
-        raise LMMBackendError(f"cannot reach OpenAI-compatible endpoint: {error}") from error
-    except OSError as error:
-        raise LMMBackendError(f"OpenAI-compatible endpoint I/O failed: {error}") from error
-    require(len(raw) <= MAX_WORKER_OUTPUT_BYTES, f"endpoint response exceeds {MAX_WORKER_OUTPUT_BYTES} bytes")
-    try:
-        parsed_payload = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise LMMBackendError(f"endpoint response is not UTF-8 JSON: {error}") from error
-    text = response_text_from_openai_payload(parsed_payload)
+        parsed_payload = strict_json_value(raw, "endpoint response")
+    except LMMContractError as error:
+        raise LMMBackendError("endpoint response is not strict UTF-8 JSON") from error
+    text = validate_unicode_text(response_text_from_openai_payload(parsed_payload), "endpoint response.text")
     usage = parsed_payload.get("usage") if isinstance(parsed_payload, Mapping) else None
     input_tokens = usage.get("prompt_tokens") if isinstance(usage, Mapping) else None
     output_tokens = usage.get("completion_tokens") if isinstance(usage, Mapping) else None
-    require(input_tokens is None or type(input_tokens) is int and input_tokens >= 0,
+    require(input_tokens is None or type(input_tokens) is int and 0 <= input_tokens <= MAX_GENERATION_TOKENS * 256,
             "endpoint usage.prompt_tokens is invalid")
-    require(output_tokens is None or type(output_tokens) is int and output_tokens >= 0,
+    require(output_tokens is None or type(output_tokens) is int and 0 <= output_tokens <= MAX_GENERATION_TOKENS * 256,
             "endpoint usage.completion_tokens is invalid")
     return GenerationResponse(
         text=text,
@@ -487,11 +620,22 @@ def output_collision(output: Path | None, dependencies: Sequence[Path]) -> None:
         require(not same, f"--output must not overwrite or be published inside immutable input {dependency}")
 
 
+def runtime_source_identities() -> dict[str, FileIdentity]:
+    """Bind the imported project helpers that execute the gateway contract."""
+    modules = {"lmm_contract": lmm_contract, "lmm_process": lmm_process, "bounded_process": bounded_process}
+    return {
+        name: file_identity(Path(module.__file__).resolve(), f"gateway runtime source {name}", maximum_bytes=MAX_JSON_BYTES)
+        for name, module in modules.items()
+    }
+
+
 def run_generate(arguments: argparse.Namespace) -> int:
     gateway_path = Path(__file__).resolve()
     model_path = arguments.model.resolve()
     request_path = arguments.request.resolve()
-    dependencies = [gateway_path, model_path, request_path]
+    source_identities = runtime_source_identities()
+    source_paths = [Path(identity.path) for identity in source_identities.values()]
+    dependencies = [gateway_path, model_path, request_path, *source_paths]
     gateway_identity = file_identity(gateway_path, "gateway tool", maximum_bytes=MAX_JSON_BYTES)
     model_identity = file_identity(model_path, "model manifest", maximum_bytes=MAX_JSON_BYTES)
     request_identity = file_identity(request_path, "generation request", maximum_bytes=MAX_JSON_BYTES)
@@ -610,6 +754,8 @@ def run_generate(arguments: argparse.Namespace) -> int:
     # be slow; a report is valid only if the request/model/evidence/assets it
     # actually used remained immutable across that transaction.
     require_unchanged(gateway_path, gateway_identity, "gateway tool")
+    for name, identity in source_identities.items():
+        require_unchanged(Path(identity.path), identity, f"gateway runtime source {name}")
     require_unchanged(model_path, model_identity, "model manifest")
     require_unchanged(request_path, request_identity, "generation request")
     if tokenizer_identity is not None and tokenizer_path is not None:
@@ -628,7 +774,7 @@ def run_generate(arguments: argparse.Namespace) -> int:
         require_unchanged(Path(identity.path), identity, f"asset {asset_id}")
     output_collision(
         arguments.output,
-        [gateway_path, model_path, request_path]
+        [gateway_path, model_path, request_path, *source_paths]
         + ([] if tokenizer_path is None else [tokenizer_path])
         + ([] if arguments.evidence is None else [arguments.evidence])
         + ([] if arguments.asset_registry is None else [arguments.asset_registry])
@@ -642,6 +788,7 @@ def run_generate(arguments: argparse.Namespace) -> int:
         "schema_version": GENERATION_REPORT_SCHEMA,
         "identities": {
             "gateway_tool": gateway_identity.to_mapping(),
+            "runtime_sources": {name: identity.to_mapping() for name, identity in source_identities.items()},
             "model_manifest": model_identity.to_mapping(),
             "request": request_identity.to_mapping(),
             "tokenizer": None if tokenizer_identity is None else tokenizer_identity.to_mapping(),
@@ -721,7 +868,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-environment-proxy", action="store_true",
                         help="explicitly allow HTTP(S)_PROXY environment routing for the endpoint request")
     parser.add_argument("--device", default="CPU", help="OpenVINO GenAI requested device, e.g. CPU/GPU/NPU")
-    parser.add_argument("--timeout-seconds", type=parse_positive_float, default=DEFAULT_TIMEOUT_SECONDS)
+    parser.add_argument("--timeout-seconds", type=parse_positive_float, default=DEFAULT_TIMEOUT_SECONDS,
+                        help="total worker/endpoint child deadline; excludes pre/post work and does not bound in-process OpenVINO")
     parser.add_argument("--output", type=Path, help="optional atomic provenance report path")
     parser.add_argument("--include-response-in-report", action="store_true", help="response text is sensitive; omit it by default")
     parser.add_argument("--print-json", action="store_true", help="emit response plus report JSON to stdout instead of text only")
@@ -738,4 +886,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--_endpoint-transport":
+        try:
+            deadline = parse_positive_float(sys.argv[2])
+        except argparse.ArgumentTypeError:
+            raise SystemExit(2)
+        raise SystemExit(_endpoint_transport_worker(deadline))
     raise SystemExit(main())

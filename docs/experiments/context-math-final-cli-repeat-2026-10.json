@@ -1,0 +1,204 @@
+{
+  "candidate_sha256": "5366c844ebf7153f722f05b456e010a9435f93d3e63581b563f16b6d559a1fa4",
+  "limitations": [
+    "Synthetic training NLL is printed to six decimals, not parameter identity.",
+    "Timings are noisy and do not establish cost, energy or general quality guarantees."
+  ],
+  "reference_sha256": "439920aa28b71844558377e3abbce0dab1aa9da0d7a9eec6808190497e8204c7",
+  "runs": [
+    {
+      "candidate_over_reference_time": 0.9502790642404543,
+      "candidate_train_tokens_per_s": 14087.677782,
+      "candidate_training_nll_6dp": 4.624569,
+      "chunk": 16,
+      "order": [
+        "reference",
+        "candidate"
+      ],
+      "parameters": 23317,
+      "reference_train_tokens_per_s": 13387.22526,
+      "reference_training_nll_6dp": 4.624569,
+      "seed": 21,
+      "state_bytes": 21120,
+      "tokens": 8192,
+      "updates": 512
+    },
+    {
+      "candidate_over_reference_time": 0.9841916552881561,
+      "candidate_train_tokens_per_s": 13752.45163,
+      "candidate_training_nll_6dp": 4.552442,
+      "chunk": 16,
+      "order": [
+        "candidate",
+        "reference"
+      ],
+      "parameters": 23317,
+      "reference_train_tokens_per_s": 13535.048134,
+      "reference_training_nll_6dp": 4.552442,
+      "seed": 42,
+      "state_bytes": 21120,
+      "tokens": 8192,
+      "updates": 512
+    },
+    {
+      "candidate_over_reference_time": 0.8242282576888033,
+      "candidate_train_tokens_per_s": 14655.717376,
+      "candidate_training_nll_6dp": 4.532524,
+      "chunk": 16,
+      "order": [
+        "reference",
+        "candidate"
+      ],
+      "parameters": 23317,
+      "reference_train_tokens_per_s": 12079.656398,
+      "reference_training_nll_6dp": 4.532524,
+      "seed": 73,
+      "state_bytes": 21120,
+      "tokens": 8192,
+      "updates": 512
+    },
+    {
+      "candidate_over_reference_time": 1.2626520310294136,
+      "candidate_train_tokens_per_s": 11199.094728,
+      "candidate_training_nll_6dp": 4.658081,
+      "chunk": 16,
+      "order": [
+        "candidate",
+        "reference"
+      ],
+      "parameters": 23317,
+      "reference_train_tokens_per_s": 14140.559704,
+      "reference_training_nll_6dp": 4.658081,
+      "seed": 101,
+      "state_bytes": 21120,
+      "tokens": 8192,
+      "updates": 512
+    },
+    {
+      "candidate_over_reference_time": 0.9968768953889634,
+      "candidate_train_tokens_per_s": 14800.148172,
+      "candidate_training_nll_6dp": 4.625185,
+      "chunk": 16,
+      "order": [
+        "reference",
+        "candidate"
+      ],
+      "parameters": 23317,
+      "reference_train_tokens_per_s": 14753.925761,
+      "reference_training_nll_6dp": 4.625185,
+      "seed": 137,
+      "state_bytes": 21120,
+      "tokens": 8192,
+      "updates": 512
+    },
+    {
+      "candidate_over_reference_time": 1.0321376130493014,
+      "candidate_train_tokens_per_s": 15806.744397,
+      "candidate_training_nll_6dp": 4.983223,
+      "chunk": 256,
+      "order": [
+        "reference",
+        "candidate"
+      ],
+      "parameters": 23317,
+      "reference_train_tokens_per_s": 16314.735432,
+      "reference_training_nll_6dp": 4.983223,
+      "seed": 21,
+      "state_bytes": 21120,
+      "tokens": 8192,
+      "updates": 32
+    },
+    {
+      "candidate_over_reference_time": 1.015144457516092,
+      "candidate_train_tokens_per_s": 14037.401721,
+      "candidate_training_nll_6dp": 4.930739,
+      "chunk": 256,
+      "order": [
+        "candidate",
+        "reference"
+      ],
+      "parameters": 23317,
+      "reference_train_tokens_per_s": 14249.990555,
+      "reference_training_nll_6dp": 4.930739,
+      "seed": 42,
+      "state_bytes": 21120,
+      "tokens": 8192,
+      "updates": 32
+    },
+    {
+      "candidate_over_reference_time": 0.8009690038233404,
+      "candidate_train_tokens_per_s": 15993.839061,
+      "candidate_training_nll_6dp": 4.90635,
+      "chunk": 256,
+      "order": [
+        "reference",
+        "candidate"
+      ],
+      "parameters": 23317,
+      "reference_train_tokens_per_s": 12810.56934,
+      "reference_training_nll_6dp": 4.90635,
+      "seed": 73,
+      "state_bytes": 21120,
+      "tokens": 8192,
+      "updates": 32
+    },
+    {
+      "candidate_over_reference_time": 0.9955205244090907,
+      "candidate_train_tokens_per_s": 16155.880422,
+      "candidate_training_nll_6dp": 5.011189,
+      "chunk": 256,
+      "order": [
+        "candidate",
+        "reference"
+      ],
+      "parameters": 23317,
+      "reference_train_tokens_per_s": 16083.51055,
+      "reference_training_nll_6dp": 5.011189,
+      "seed": 101,
+      "state_bytes": 21120,
+      "tokens": 8192,
+      "updates": 32
+    },
+    {
+      "candidate_over_reference_time": 0.8595197826909352,
+      "candidate_train_tokens_per_s": 15720.129861,
+      "candidate_training_nll_6dp": 4.968944,
+      "chunk": 256,
+      "order": [
+        "reference",
+        "candidate"
+      ],
+      "parameters": 23317,
+      "reference_train_tokens_per_s": 13511.762602,
+      "reference_training_nll_6dp": 4.968944,
+      "seed": 137,
+      "state_bytes": 21120,
+      "tokens": 8192,
+      "updates": 32
+    }
+  ],
+  "schema": "vegai-context-numeric-guard-ab/v1",
+  "shape": {
+    "ffn": 64,
+    "heads": 2,
+    "local_window": 8,
+    "memory_scales": 2,
+    "memory_slots": 16,
+    "vocabulary": 256,
+    "width": 32
+  },
+  "summary_by_chunk": {
+    "16": {
+      "max_time_ratio": 1.2626520310294136,
+      "median_time_ratio": 0.9841916552881561,
+      "min_time_ratio": 0.8242282576888033
+    },
+    "256": {
+      "max_time_ratio": 1.0321376130493014,
+      "median_time_ratio": 0.9955205244090907,
+      "min_time_ratio": 0.8009690038233404
+    }
+  },
+  "task": "markov",
+  "threads": 1
+}

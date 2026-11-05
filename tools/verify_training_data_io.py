@@ -22,6 +22,7 @@ from training_data_io import (
     DataReadError,
     ExactTextDeduplicator,
     ReadStats,
+    RecordWriter,
     TrainingDataError,
     TrainingRecord,
     arrow_record_schema,
@@ -117,6 +118,19 @@ def main() -> int:
             require_round_trip(workspace / "records.json", records, format="json", compression="none")
             require_round_trip(workspace / "records.parquet", records, format="parquet", compression="zstd")
             require_round_trip(workspace / "records.arrow", records, format="arrow", compression="zstd")
+
+            # Columnar writers buffer rows: snapshot mutable nested metadata at
+            # write time, not when a later batch happens to be flushed.
+            for columnar in ("parquet", "arrow"):
+                buffered_path = workspace / f"buffered.{columnar}"
+                original = TrainingRecord(text="row", metadata={"nested": [1]})
+                with RecordWriter(buffered_path, format=columnar, batch_size=10) as writer:
+                    writer.write(original)
+                    assert original.metadata is not None
+                    original.metadata["nested"].append(2)
+                restored = list(iter_records(buffered_path, format=columnar))
+                require(restored[0].metadata == {"nested": [1]},
+                        f"{columnar} buffered a mutable metadata alias")
 
             # TXT remains the intentionally narrow native-HDC text projection.
             text_records = [TrainingRecord(text="one two"), TrainingRecord(text="three four")]

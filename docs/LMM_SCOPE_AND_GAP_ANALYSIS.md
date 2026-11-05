@@ -4,15 +4,19 @@ Bu belge, repodaki kaynak, CLI, checkpoint, test ve operational tool'ların
 incelenmesinden sonra mevcut yetenek ile gerçek bir büyük dil/multimodal model
 (LMM/LLM) training system'i arasındaki sınırı açıklar. Amaç capability
 inflation'ı önlemektir: orchestration eklemek, HDC modelini Transformer veya
-multimodal neural runtime yapmaz.
+multimodal neural runtime yapmaz. Repoda HDC'den **ayrı** bir native neural
+causal yol da vardır; aşağıdaki değerlendirme bu iki yolu karıştırmaz. Native
+neural yolun ayrıntılı implementasyon ve sınırları için
+[NEURAL_CAUSAL_SYSTEM.md](NEURAL_CAUSAL_SYSTEM.md)'ye bakın.
 
 ## İncelenen mevcut sistem
 
 | Alan | Vegai'de doğrulanmış mevcut durum |
 |---|---|
-| Core representation | Fortran 2023 packed 16.384-bit hypervector/VSA (`hyper_types`, `symbolic_memory`) |
+| Core representation | Fortran 2018+ packed 16.384-bit hypervector/VSA (`hyper_types`, `symbolic_memory`) |
 | Tokenless byte-event field | Raw octet'i BPE/subword vocabulary olmadan bounded order/distribution HDC field'e indirger; exact Walsh/inverse/Parseval integer contract'i vardır, semantic/lossless/physical-world claim'i yoktur (`tokenless_field`) |
-| Learning | iki-pass ASCII corpus, frequency vocabulary, deterministic HDC context bundle ve source-ordered Hebbian prototype update (`hdc_pretraining`) |
+| HDC learning | iki-pass ASCII corpus, frequency vocabulary, deterministic HDC context bundle ve source-ordered Hebbian prototype update (`hdc_pretraining`) |
+| Ayrı native neural yol | Byte-BPE, causal local attention/retention decoder ve next-token cross-entropy ile tied output head eğitimi; SGD/AdamW/NOVA, checkpoint/resume; attention/retention/FFN çekirdeği frozen (`subword_bpe`, `neural_retention_decoder`, `neural_pretraining`) |
 | Factor reasoning | bounded exact certificate ile Resonator Network multi-factor factorization |
 | Determinism | fixed seeds, bounded allocation/error contracts, serial/OpenMP checkpoint byte equality, checkpoint/resume |
 | Continual data | strict ASCII/LF SHA-256 immutable shards, private snapshot/candidate generation/atomic state journal ile exactly-once commit |
@@ -25,10 +29,12 @@ multimodal neural runtime yapmaz.
 | LMM release control | Frozen portfolio/task/model/gateway/quality identity'leriyle aggregate-only shadow → canary → promote/rollback governor; verified artifact'ler için strict-LF canonical local hash-chain, single-host expected-state CAS ve privacy-safe head (`lmm_release_governor.py`, `lmm_release_registry.py`) |
 | Algorithm/optimizer evidence governor | Immutable algorithm/optimizer/training/artifact identity'lerini repeated held-out bounded observation ile Bonferroni-Hoeffding/Pareto gate'ten geçirir; actual optimizer veya neural training runtime değildir (`evidential_optimizer.py`) |
 
-Bu sistem, bounded semantic prototype/retrieval ve symbolic factor reasoning için
-üretim kalitesinde operation sözleşmeleri taşıyabilir. Model kapasitesi ve
-öğrenme semantiği HDC slot/vocabulary/context yapısına bağlıdır; neural parameter
-sayısı, next-token likelihood veya generative model kapasitesi değildir.
+HDC sistemi, bounded semantic prototype/retrieval ve symbolic factor reasoning
+için operation sözleşmeleri taşıyabilir. Onun kapasitesi ve öğrenme semantiği
+HDC slot/vocabulary/context yapısına bağlıdır; neural parameter sayısı veya
+next-token likelihood değildir. Ayrı neural decoder bu sınırı HDC checkpoint'ine
+taşımaz; frozen-core head eğitimi full-model backpropagation veya hazır bir
+Türkçe asistan/kalite kanıtı anlamına gelmez.
 
 `tokenless_field` bu sınırı değiştirmez. Learned BPE/subword tokenizer'a
 alternatif olarak ham octet event'lerini doğrudan işleyebilir ve finite
@@ -39,7 +45,8 @@ factuality ya da fiziksel ölçüm doğruluğu değildir. Bunun için source ide
 calibration/uncertainty ve target-domain evaluation ayrı gerekir. Ayrıntılı
 sınır [TOKENLESS_SIGNAL_FIELD.md](TOKENLESS_SIGNAL_FIELD.md)'dedir.
 
-`evidential_optimizer.py` de native AdamW/Lion/Transformer optimizer eklemez.
+`evidential_optimizer.py` kendi başına native optimizer eklemez; ayrı neural
+trainer'ın SGD/AdamW/NOVA uygulamaları bu evaluator ile karıştırılmamalıdır.
 Gerçek external algorithm/optimizer candidate'larının config/artifact identity'si
 ve aynı held-out benchmark üzerindeki repeated bounded ölçümleri için güçlü bir
 selection gate sağlar. Bu gate geçilirse yalnız declared domain/metric altında
@@ -80,18 +87,19 @@ dönüştürmez ve ağırlık/model kalitesi iddiası taşımaz. Ayrıntılı co
 
 ## Gerçek LMM/LLM için eksik zorunlu katmanlar
 
-Aşağıdakiler "flag" veya wrapper ile eklenebilecek küçük eksikler değildir;
-yeni data plane, model runtime ve test yüzeyi gerektirir.
+Aşağıdaki tablo mevcut kısmi bileşenleri ve hedef LMM/LLM için kalan boşlukları
+ayırır. Eksik kısımlar yalnızca "flag" veya wrapper ile tamamlanmaz; ilgili data
+plane, runtime ve değerlendirme yüzeyleri ayrıca gerekir.
 
 | Zorunlu LMM katmanı | Vegai'deki durum | Neden mevcut HDC katmanıyla ikame edilemez |
 |---|---|---|
-| Unicode/subword tokenizer | Optional `tokenizers-json` model package ile var; HDC `text_tokenizer` hâlâ ASCII-byte'dır | BPE/Unigram tokenizer gerçek model package'ine aittir; geniş tokenizer quality/normalization test suite'i model owner tarafından sağlanmalıdır |
-| Tensor/matrix runtime | Native Vegai'de yok; harici actual backend bağlanabilir | Transformer linear layers, embeddings, attention ve activations packed-HV XOR/majority işlemleri değildir |
-| Autodiff + optimizer | Native Vegai'de yok; EPO yalnız external candidate evidence selection yapar | Backpropagation, gradient accumulation, AdamW/Lion, clipping, loss scaling ve optimizer state gerekir |
-| Transformer/sequence objective | Harici model backend'de olabilir; repo model weight/architecture sağlamaz | Causal/encoder-decoder attention, positional encoding, logits, cross entropy ve sampling/generation gerçek model package'inde kanıtlanmalıdır |
+| Unicode/subword tokenizer | Native neural path'te byte-BPE; harici LMM için optional `tokenizers-json`; HDC `text_tokenizer` ASCII-byte'dır | Tokenizer/model uyumu, normalization ve hedef dil kalitesi ayrıca değerlendirilmelidir |
+| Tensor/matrix runtime | Ayrı native decoder'da `real32` diziler, embedding/attention/FFN matmul kernel'leri var; genel amaçlı veya accelerator tensor runtime'ı değildir | Bu işlemler packed-HV XOR/majority ile ikame edilemez; ölçeklenebilir kernel/ABI ayrıca gerekir |
+| Autodiff + optimizer | Native neural trainer tied output head için elle türetilmiş gradient ve SGD/AdamW/NOVA, accumulation ve checkpoint state sunar; EPO ayrı evidence selector'dır | Genel autodiff ve attention/retention/FFN üzerinden full-model backpropagation yoktur |
+| Causal sequence objective | Native decoder'da causal local attention/retention, logits, sampling ve frozen-core head üzerinde next-token cross-entropy var; LMM gateway dış model de kullanabilir | Eğitimli yetkin model ağırlıkları ve broad kalite sonucu bu kaynakların varlığından çıkmaz |
 | Multimodal encoders/fusion | Asset registry + worker protocol var; native encoder/fusion yok | image/audio/video decoding, vision/audio encoder, alignment/fusion, modality batching ve safety policy gerçek VLM/AV worker tarafından sağlanmalıdır |
 | Distributed training | Yok | data/model/pipeline parallelism, collectives, gradient synchronization, elastic fault recovery ve sharded optimizer/checkpoint gerekir |
-| Neural mixed precision | Native Vegai'de yok | BF16/FP16/FP8 numerical policy, master weights, loss scaling ve hardware kernels gerekir |
+| Neural mixed precision | Native neural path `real32` ağırlıklı; BF16/FP16/FP8 training yolu yok | Mixed-precision numerical policy, master weights, loss scaling ve hardware kernels gerekir |
 | LMM evaluation gate | Held-out gerçek gateway citation/abstention contract + release threshold var; broad model-quality gate yok | held-out perplexity/task suites, contamination policy, modality quality, safety/red-team ve calibration gerekir |
 | Release authority / traffic enforcement | Aggregate-only governor + local canonical hash-chain, single-host expected-state CAS ve privacy-safe head var | signed remote append-only registry, distributed lease/consensus, provider attestation, controller-to-route-config transaction ve live traffic enforcement gerekir |
 | Tool-use/reasoning control plane | Typed read-only plan, request+registry binding, no-shell executor, prior-result reference, declared separate verifier ve gateway evidence var | OS sandbox/network policy, mutation authorization, real independent audit, tool availability/retry, semantic plan/result correctness ve held-out tool-use score gerekir |
@@ -105,15 +113,15 @@ morfoloji-duyarlı lexical kanıt ve versioned/licensed dialogue package ile
 iyileştirilebilir; **HDC checkpoint'e decoder etiketi eklenerek causal model
 olduğu iddia edilmeyecektir.**
 
-Gerçek native Fortran causal model kararı ancak ayrı bir design/implementation
-ile alınabilir. En az şunlar artifact/test olarak mevcut olmalıdır: Unicode
-subword tokenizer ABI ve frozen vocabulary; causal mask/position contract'i;
-embedding-attention-MLP tensor kernels; forward cross-entropy, backward ve
-optimizer-state ABI; deterministic checkpoint/resume; bounded decoder
-sampling/stop policy; train/validation/test source-disjoint data registry;
-perplexity yanında Turkish dialogue relevance/factual grounding/abstention ve
-human preference evaluation. Bu maddeler uygulanana kadar `vegai_chat`in
-literal TSV response'u retrieval olarak etiketlenir.
+Ayrı native Fortran causal implementasyonu artık byte-BPE, causal
+attention/retention, tensor kernel'leri, frozen-core output-head cross-entropy,
+optimizer state, checkpoint/resume ve bounded sampling içerir. Bu, HDC'nin
+neural modele dönüştüğü veya full-model backward'ın tamamlandığı anlamına
+gelmez. Full attention/retention/FFN gradientleri, ölçeklenebilir eğitim ve
+train/validation/test source-disjoint governance ile perplexity yanında Türkçe
+dialogue relevance/factual grounding/abstention ve human-preference değerlendirmesi
+ayrı gereksinimlerdir. `vegai_chat`in literal TSV response'u, bu neural yolun
+varlığından bağımsız olarak retrieval olarak etiketlenir.
 
 Native data-plane başlangıcı
 [TURKISH_DIALOGUE_DATA_GOVERNANCE.md](TURKISH_DIALOGUE_DATA_GOVERNANCE.md)'nde

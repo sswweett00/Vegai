@@ -1,0 +1,7 @@
+started_utc=2026-11-04T20:27:14Z
+5bd8c15eadd02cd424c9841defdb5f4a0e0a0fdf5c1ca44456457a86ee65c3f2  /tmp/vegai-slot-prototype/tools/benchmark_slot_two.f90
+b5f93339bdedb5f4188b20f749751150014ce545f8bef7010cb0827ed74be4f5  /tmp/vegai-slot-prototype-final/benchmark_slot_two
+0889ecce1aabec92284cb4cb3994aaa1e862609487a2adc526fa02f71622ac74  /tmp/vegai-quality-data/train-200.txt
+5195714be1073baef5098ee87a6b68584579171510b537a77a721a40e3b8d48c  /tmp/vegai-quality-data/train-1000.txt
+fc9e7cddd57d6636f2baa0c6dfdadb61fbf9aa7091c3eae4b01ac3ad65ebd0f3  /tmp/vegai-quality-data/test-80.txt
+28a17570abc1031a2275f002b047d26c3a18c6f444589b9e6ec90850a42adc9c  /tmp/vegai-quality-pud/test-80.txt

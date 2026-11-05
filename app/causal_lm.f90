@@ -259,7 +259,8 @@ contains
 
    subroutine print_help()
       write(output_unit, '(A)') 'Usage:'
-      write(output_unit, '(A)') '  vegai_causal_lm train CORPUS CHECKPOINT [--max-vocab N --top-successors N --trigram-buckets N --trigram-ways N --min-estimated-frequency N]'
+      write(output_unit, '(A)') '  vegai_causal_lm train CORPUS CHECKPOINT [--max-vocab N --top-successors N ' // &
+                               '--trigram-buckets N --trigram-ways N --min-estimated-frequency N]'
       write(output_unit, '(A)') '  vegai_causal_lm generate CHECKPOINT "Türkçe istem" [--tokens N --temperature X --seed N]'
       write(output_unit, '(A)') '  vegai_causal_lm evaluate CHECKPOINT HELDOUT_CORPUS'
       write(output_unit, '(A)') '  vegai_causal_lm inspect CHECKPOINT'

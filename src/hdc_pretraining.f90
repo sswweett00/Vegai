@@ -2754,13 +2754,17 @@ contains
       end select
    end function pretrain_checkpoint_write_version
 
-   subroutine pretrain_checkpoint_save(model, checkpoint_path, status)
+   subroutine pretrain_checkpoint_save(model, checkpoint_path, status, replace_existing)
       type(hdc_pretrain_model_t), intent(in) :: model
       character(len=*), intent(in) :: checkpoint_path
       integer(int32), intent(out) :: status
-      integer :: unit, io_status
+      ! Existing callers retain replacement semantics. Callers writing a new
+      ! artifact can request an exclusive create without a checkpoint copy.
+      logical, intent(in), optional :: replace_existing
+      integer :: unit, io_status, close_status
       integer(int32) :: checkpoint_version
       integer(int64) :: checksum
+      character(len=7) :: open_status
 
       status = PT_OK
       if (.not. pretrain_model_is_ready(model)) then
@@ -2783,7 +2787,11 @@ contains
       end if
 
       checkpoint_version = pretrain_checkpoint_write_version(model)
-      open(newunit=unit, file=trim(checkpoint_path), status='replace', action='write', &
+      open_status = 'replace'
+      if (present(replace_existing)) then
+         if (.not. replace_existing) open_status = 'new'
+      end if
+      open(newunit=unit, file=trim(checkpoint_path), status=trim(open_status), action='write', &
            access='stream', form='unformatted', iostat=io_status)
       if (io_status /= 0) then
          status = PT_ERR_IO
@@ -2811,8 +2819,8 @@ contains
          checksum = model_checkpoint_checksum(model, checkpoint_version)
          write(unit, iostat=io_status) checksum
       end if
-      close(unit)
-      if (io_status /= 0) status = PT_ERR_CHECKPOINT
+      close(unit, iostat=close_status)
+      if (io_status /= 0 .or. close_status /= 0) status = PT_ERR_CHECKPOINT
    end subroutine pretrain_checkpoint_save
 
    subroutine pretrain_checkpoint_load(checkpoint_path, model, status)

@@ -1,0 +1,9 @@
+37b2af7310803ea25b7d452fc10aaf5e76bc78d5a2dffd94ceb50c0fb82c4473  /tmp/vegai-slot-experiments/checkpoints/5-before.vgfb
+37b2af7310803ea25b7d452fc10aaf5e76bc78d5a2dffd94ceb50c0fb82c4473  /tmp/vegai-slot-experiments/checkpoints/5-versioned.vgfb
+9a84e3aa5fb11c18ad03e769f65fd46a8b32afb55576bccacce17188d2aab787  /tmp/vegai-slot-experiments/checkpoints/6-before.vgfb
+9a84e3aa5fb11c18ad03e769f65fd46a8b32afb55576bccacce17188d2aab787  /tmp/vegai-slot-experiments/checkpoints/6-versioned.vgfb
+d1336f3334f0194ec8eb91c1a059d2a44516f0664fc9b5ce21806e402a53bf6c  /tmp/vegai-slot-experiments/checkpoints/7-anchor.vgfb
+d1336f3334f0194ec8eb91c1a059d2a44516f0664fc9b5ce21806e402a53bf6c  /tmp/vegai-slot-experiments/checkpoints/7-fast.vgfb
+f33f7c8a8667ced44457c21bc5081b272e079ea2d40ced59b3d6a5db80b29c18  /tmp/vegai-slot-experiments/checkpoints/input-5.vgfb
+5f5ded6c7eb5f96eb4e51262b8868a61fd67e3a99c5f89e1023c2b8c4b2c27b2  /tmp/vegai-slot-experiments/checkpoints/input-6.vgfb
+9be588a18abf6d422acaaf9216b75eb8a2c794802a26d825d5add1075322723d  /tmp/vegai-slot-experiments/checkpoints/input-7.vgfb

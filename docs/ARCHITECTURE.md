@@ -1,6 +1,6 @@
 # Vegai HDS-Fortran mimari sözleşmesi
 
-Bu belge, Fortran 2023 hedefli kaynak kodun koruması gereken semantik ve bellek
+Bu belge, Fortran 2018+ hedefli kaynak kodun koruması gereken semantik ve bellek
 invariantlarını tanımlar. API yorumlarıyla çelişki halinde kaynak kod + native testler
 referanstır; performans iddiaları ise hedef makinede ölçülmelidir.
 

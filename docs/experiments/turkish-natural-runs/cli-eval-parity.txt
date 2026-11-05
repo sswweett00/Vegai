@@ -1,0 +1,8 @@
+seed=21 arm=base data=boun cold_abs_difference=1.021405182655144e-14 prefix_abs_difference=8.8817841970012523e-16
+seed=21 arm=base data=kenet cold_abs_difference=2.6645352591003757e-15 prefix_abs_difference=7.1054273576010019e-15
+seed=21 arm=profile data=boun cold_abs_difference=1.0658141036401503e-14 prefix_abs_difference=7.9936057773011271e-15
+seed=21 arm=profile data=kenet cold_abs_difference=9.3258734068513149e-15 prefix_abs_difference=5.3290705182007514e-15
+seed=73 arm=base data=boun cold_abs_difference=3.9968028886505635e-15 prefix_abs_difference=5.3290705182007514e-15
+seed=73 arm=base data=kenet cold_abs_difference=7.1054273576010019e-15 prefix_abs_difference=4.4408920985006262e-16
+seed=73 arm=profile data=boun cold_abs_difference=1.2878587085651816e-14 prefix_abs_difference=1.2434497875801753e-14
+seed=73 arm=profile data=kenet cold_abs_difference=4.4408920985006262e-16 prefix_abs_difference=6.6613381477509392e-15
