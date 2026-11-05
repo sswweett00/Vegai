@@ -203,9 +203,11 @@ def main() -> int:
         # Compiler flags trigger object rebuilds; link-only changes relink but
         # do not recompile library modules. Quoting survives the config stamp.
         flags = "FFLAGS=-O0 -DVALUE='a b'"
+        time.sleep(1.05)
         changed = run_make("all", flags)
         require(compiled_sources(changed) == expected, "changed compiler flags reused stale objects")
         require(not run_make("all", flags), "identical compiler flags did not reuse the build")
+        time.sleep(1.05)
         link_changed = run_make("all", flags, "LDFLAGS=-Wl,--as-needed")
         require(not compiled_sources(link_changed), "link-only flag change unnecessarily recompiled modules")
         require_links(link_changed, HDS_APPLICATIONS | CONTEXT_APPLICATIONS, "link-only flag change")

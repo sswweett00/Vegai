@@ -424,6 +424,9 @@ def run_process(
         stderr_sha256=output.stderr_hash.hexdigest(),
         stderr_bytes=output.stderr_bytes,
         child_wall_seconds=(stopped_ns[0] - started_ns) / 1_000_000_000,
-        elapsed_seconds=time.monotonic() - started,
+        # Same monotonic clock as child_wall_seconds: Windows mono-
+        # tonic() has ~15.6 ms resolution and could otherwise report
+        # a total duration shorter than the measured child lifetime.
+        elapsed_seconds=(time.perf_counter_ns() - started_ns) / 1_000_000_000,
         stderr_tail=bytes(output.stderr_tail),
     )

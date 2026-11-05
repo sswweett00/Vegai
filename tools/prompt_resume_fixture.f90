@@ -201,14 +201,14 @@ contains
       character(len=*), intent(in) :: target
       integer, intent(in) :: first_token
       character(len=2048) :: token
-      integer :: index, argument_status, file_unit, io_status, star
+      integer :: slot, argument_status, file_unit, io_status, star
       integer(int64) :: count
 
       open(newunit=file_unit, file=target, status='new', action='write', access='stream', &
            form='unformatted', iostat=io_status)
       if (io_status /= 0) error stop 'byte fixture open failed'
-      do index = first_token, command_argument_count()
-         call get_command_argument(index, token, status=argument_status)
+      do slot = first_token, command_argument_count()
+         call get_command_argument(slot, token, status=argument_status)
          if (argument_status /= 0) error stop 'invalid byte fixture token'
          star = index(token, '*')
          if (star > 0) then
