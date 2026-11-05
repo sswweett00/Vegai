@@ -303,8 +303,10 @@ def read_validated_report(
         expected_provenance["process_runner"] = quality_binding["process_runner_sha256"]
     for name, expected_digest in expected_provenance.items():
         value = provenance.get(name)
-        require(isinstance(value, dict) and value.get("sha256") == expected_digest,
-                f"quality evaluator report has wrong {name} provenance")
+        observed_digest = value.get("sha256") if isinstance(value, dict) else None
+        require(isinstance(value, dict) and observed_digest == expected_digest,
+                f"quality evaluator report has wrong {name} provenance: "
+                f"report {observed_digest!r}, expected {expected_digest!r}")
 
     expected_requirements = quality_binding.get("requirements")
     expected_cases = quality_binding.get("case_count")

@@ -259,8 +259,14 @@ def verify(workspace: Path) -> None:
     ]
     completed = subprocess.run(comparison_command, text=True, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, timeout=15)
-    require(completed.returncode == 0 and json.loads(comparison_output.read_text())["status"] == "passed",
-            f"valid comparator fixture failed: {completed.stdout}")
+    if completed.returncode != 0:
+        fresh = evaluator.file_identity(copied_binary, "copied binary", evaluator.MAX_BINARY_BYTES)
+        recorded = comparator_payload["provenance"]["pretrain_binary"]
+        require(False,
+                f"valid comparator fixture failed: {completed.stdout}; "
+                f"recorded {recorded!r}, re-read {fresh.public()!r} for {copied_binary}")
+    require(json.loads(comparison_output.read_text())["status"] == "passed",
+            f"valid comparator fixture did not pass: {completed.stdout}")
     dependencies = (copied_comparator, copied_evaluator, copied_runner, copied_binary, checkpoint, baseline_report,
                     candidate_report, cases, policy, key, regression)
     for dependency in dependencies:
