@@ -4,12 +4,15 @@
 if(NOT DEFINED ENGINE OR NOT DEFINED FIXTURE OR NOT DEFINED WORK_ROOT)
   message(FATAL_ERROR "ENGINE, FIXTURE and WORK_ROOT are required")
 endif()
+# CMake writes native line endings (CRLF on Windows); the native helper
+# writes the exact bytes the contract asserts.
+include("${CMAKE_CURRENT_LIST_DIR}/native_exact_text.cmake")
 string(RANDOM LENGTH 24 ALPHABET 0123456789abcdef nonce)
 set(work "${WORK_ROOT}/native-prompt-${nonce}")
 file(MAKE_DIRECTORY "${work}")
 string(REPEAT "A Turkish byte training line for the resume fixture.\n" 3 text)
-file(WRITE "${work}/text.txt" "${text}")
-file(WRITE "${work}/probe.tsv" "fact\tx\tA\n")
+native_write_text("${work}/text.txt" "${text}")
+native_write_text("${work}/probe.tsv" "fact\tx\tA\n")
 execute_process(COMMAND "${FIXTURE}" corpus "${work}/bytes.bin" 6 RESULT_VARIABLE result ERROR_VARIABLE err)
 if(NOT "${result}" STREQUAL "0")
   message(FATAL_ERROR "cannot create byte fixture: ${result}: ${err}")
@@ -83,7 +86,7 @@ execute_process(COMMAND "${FIXTURE}" corrupt-loss "${work}/corrupt.vgfb" 6 RESUL
 if(NOT "${result}" STREQUAL "0")
   message(FATAL_ERROR "cannot corrupt loss header: ${result}: ${err}")
 endif()
-file(WRITE "${work}/corrupt-destination.vgfb" "sentinel must survive\n")
+native_write_text("${work}/corrupt-destination.vgfb" "sentinel must survive\n")
 execute_process(COMMAND "${ENGINE}" train --corpus "${work}/text.txt"
   --checkpoint "${work}/corrupt-destination.vgfb" --resume "${work}/corrupt.vgfb"
   --train-chunk-tokens 32 --max-updates 1 RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
@@ -171,7 +174,7 @@ foreach(rule IN ITEMS 6 7)
     message(FATAL_ERROR "v${rule} byte training did not complete its update: ${result}: ${err}")
   endif()
 endforeach()
-file(WRITE "${work}/protected.vgfb" "user-sentinel\n")
+native_write_text("${work}/protected.vgfb" "user-sentinel\n")
 execute_process(COMMAND "${ENGINE}" train --corpus "${work}/bytes.bin" --checkpoint "${work}/protected.vgfb"
   --resume "${work}/input-5.vgfb" --train-chunk-tokens 32 --max-updates 1
   RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
@@ -261,7 +264,7 @@ file(READ "${work}/protected.vgfb" sentinel)
 if(NOT sentinel STREQUAL "user-sentinel\n")
   message(FATAL_ERROR "invalid options replaced an existing checkpoint")
 endif()
-file(WRITE "${work}/same-file.txt" "training corpus sentinel\n")
+native_write_text("${work}/same-file.txt" "training corpus sentinel\n")
 execute_process(COMMAND "${ENGINE}" train --corpus "${work}/same-file.txt" --checkpoint "${work}/same-file.txt"
   RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
 if(NOT "${result}" MATCHES "^-?[0-9]+$" OR "${result}" STREQUAL "0" OR NOT err MATCHES "cannot be the training corpus")
@@ -274,10 +277,10 @@ endif()
 
 # Empty/one-byte files and bounded one-byte prefixes have no predictions;
 # exact-end and zero-update resumes must never claim they trained extra bytes.
-file(WRITE "${work}/empty.txt" "")
-file(WRITE "${work}/one.txt" "A")
-file(WRITE "${work}/two.txt" "AB")
-file(WRITE "${work}/three.txt" "ABC")
+native_write_text("${work}/empty.txt" "")
+native_write_text("${work}/one.txt" "A")
+native_write_text("${work}/two.txt" "AB")
+native_write_text("${work}/three.txt" "ABC")
 function(check_tiny_report name corpus expected_tokens expected_updates expected_end expected_whole expected_bound expected_fraction)
   execute_process(COMMAND "${ENGINE}" train --corpus "${work}/${corpus}.txt" --checkpoint "${work}/${name}.vgfb"
     ${ARGN} RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
@@ -323,7 +326,7 @@ check_tiny_report(two two 1 1 1 ON OFF 1.0)
 check_tiny_report(limit-one two 0 0 0 OFF ON 0.0 --bytes 1)
 check_tiny_report(limit-two three 1 1 1 OFF ON 0.5 --bytes 2)
 string(REPEAT "A" 2000001 long_corpus)
-file(WRITE "${work}/large-denominator.txt" "${long_corpus}")
+native_write_text("${work}/large-denominator.txt" "${long_corpus}")
 check_tiny_report(tiny-fraction large-denominator 1 1 1 OFF ON 5e-7 --bytes 2)
 check_tiny_report(at-end two 0 0 1 ON OFF 1.0 --start-byte 1)
 # --max-updates is an absolute cumulative checkpoint limit, not an additional

@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: MIT
 # The opt-in short Turkish profile must be only an LR choice, with exactly the
 # same training/checkpoint as an explicit rate and no change to old defaults.
-if(NOT DEFINED ENGINE OR NOT DEFINED WORK_ROOT)
-  message(FATAL_ERROR "ENGINE and WORK_ROOT are required")
+if(NOT DEFINED ENGINE OR NOT DEFINED FIXTURE OR NOT DEFINED WORK_ROOT)
+  message(FATAL_ERROR "ENGINE, FIXTURE and WORK_ROOT are required")
 endif()
+# CMake writes native line endings (CRLF on Windows); the native helper writes
+# the exact bytes the contract asserts.
+include("${CMAKE_CURRENT_LIST_DIR}/native_exact_text.cmake")
 string(RANDOM LENGTH 24 ALPHABET 0123456789abcdef nonce)
 set(work "${WORK_ROOT}/native-natural-profile-${nonce}")
 file(MAKE_DIRECTORY "${work}")
 string(REPEAT "A Turkish byte training record for a bounded profile.\n" 60 corpus)
-file(WRITE "${work}/train.txt" "${corpus}")
+native_write_text("${work}/train.txt" "${corpus}")
 foreach(arm IN ITEMS profile explicit)
   if(arm STREQUAL "profile")
     set(extra --training-profile turkish-short)
@@ -73,7 +76,7 @@ if(NOT json_error STREQUAL "NOTFOUND" OR NOT resumed_lr STREQUAL profile_lr OR a
   message(FATAL_ERROR "resume failed to retain stored profile LR: ${out}: ${json_error}")
 endif()
 
-file(WRITE "${work}/sentinel.vgfb" "do not overwrite")
+native_write_text("${work}/sentinel.vgfb" "do not overwrite")
 function(expect_failure expected)
   execute_process(COMMAND "${ENGINE}" ${ARGN} RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
   if(NOT "${result}" MATCHES "^-?[0-9]+$" OR "${result}" STREQUAL "0" OR NOT err MATCHES "${expected}")

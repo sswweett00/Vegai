@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import traceback
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -38,7 +39,11 @@ def reject(call, error_type: type[Exception], diagnostic: str) -> None:
     try:
         call()
     except error_type as error:
-        require(diagnostic in str(error), f"wrong diagnostic {error!s}; expected {diagnostic!r}")
+        # Report the raising line: interpreter-version-specific failure paths
+        # must be diagnosable from CI output alone.
+        require(diagnostic in str(error),
+                f"wrong diagnostic {error!s}; expected {diagnostic!r}; "
+                f"raised at {traceback.format_exc(limit=-3)}")
     else:
         raise AssertionError(f"accepted invalid input; expected {diagnostic!r}")
 

@@ -5,6 +5,9 @@ cmake_policy(SET CMP0054 NEW)
 if(NOT DEFINED ENGINE OR NOT DEFINED FIXTURE OR NOT DEFINED WORK_ROOT)
   message(FATAL_ERROR "ENGINE, FIXTURE and WORK_ROOT are required")
 endif()
+# CMake writes native line endings (CRLF on Windows); the native helper
+# writes the exact bytes the contract asserts.
+include("${CMAKE_CURRENT_LIST_DIR}/native_exact_text.cmake")
 string(RANDOM LENGTH 24 ALPHABET 0123456789abcdef nonce)
 set(work "${WORK_ROOT}/native-prompt-json-${nonce}")
 file(MAKE_DIRECTORY "${work}")
@@ -143,7 +146,7 @@ endif()
 
 # A final record without a newline and trailing spaces in both TSV fields must
 # survive parsing, rendering and the teacher-forced metric denominator.
-file(WRITE "${work}/spaces.tsv" "fact\tx ü  \tA  ")
+native_write_text("${work}/spaces.tsv" "fact\tx ü  \tA  ")
 foreach(token IN ITEMS a ff)
   execute_process(COMMAND "${ENGINE}" probe --checkpoint "${work}/${token}.vgfb" --probe "${work}/spaces.tsv"
     --max-new 1 --temperature 0.1 RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
@@ -241,7 +244,7 @@ endforeach()
 # Large finite NLL must use a compact JSON number, rather than overflowing an
 # internal fixed-decimal record. Unrepresentable sums must fail normally before
 # addition, with FPE traps enabled as well as in Release.
-file(WRITE "${work}/large.tsv" "fact\tx\tB\n")
+native_write_text("${work}/large.tsv" "fact\tx\tB\n")
 execute_process(COMMAND "${ENGINE}" probe --checkpoint "${work}/huge.vgfb" --probe "${work}/large.tsv" --max-new 1
   RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
 if(NOT "${result}" STREQUAL "0")
@@ -258,9 +261,9 @@ if(NOT json_error STREQUAL "NOTFOUND" OR NOT nll GREATER 1e99)
 endif()
 foreach(mode IN ITEMS within-row across-rows)
   if(mode STREQUAL "within-row")
-    file(WRITE "${work}/${mode}.tsv" "fact\tx\tBB\n")
+    native_write_text("${work}/${mode}.tsv" "fact\tx\tBB\n")
   else()
-    file(WRITE "${work}/${mode}.tsv" "fact\tx\tB\nfact\tx\tB\n")
+    native_write_text("${work}/${mode}.tsv" "fact\tx\tB\nfact\tx\tB\n")
   endif()
   execute_process(COMMAND "${ENGINE}" probe --checkpoint "${work}/overflow.vgfb" --probe "${work}/${mode}.tsv"
     --max-new 1 RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
@@ -271,7 +274,7 @@ foreach(mode IN ITEMS within-row across-rows)
 endforeach()
 
 function(expect_bad_probe name text expected_message)
-  file(WRITE "${work}/${name}.tsv" "${text}")
+  native_write_text("${work}/${name}.tsv" "${text}")
   execute_process(COMMAND "${ENGINE}" probe --checkpoint "${work}/a.vgfb" --probe "${work}/${name}.tsv"
     --max-new 1 RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
   if(NOT "${result}" MATCHES "^-?[0-9]+$" OR "${result}" STREQUAL "0" OR NOT err MATCHES "${expected_message}")
@@ -291,7 +294,7 @@ expect_bad_probe(invalid_utf8 "fact\tx\t${invalid_byte}\n" "probe row is not val
 # The engine scores at most 4096 rows; a further data row must be visible as
 # truncation rather than being presented as a complete probe set.
 string(REPEAT "fact\tx\tA\n" 4097 many_rows)
-file(WRITE "${work}/limit.tsv" "${many_rows}")
+native_write_text("${work}/limit.tsv" "${many_rows}")
 execute_process(COMMAND "${ENGINE}" probe --checkpoint "${work}/a.vgfb" --probe "${work}/limit.tsv" --max-new 1
   RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
 if(NOT "${result}" STREQUAL "0" OR NOT out MATCHES "\"rows\": 4096" OR NOT out MATCHES "\"truncated\": true")

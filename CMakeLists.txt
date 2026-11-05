@@ -401,6 +401,7 @@ if(VEGAI_BUILD_TESTS)
     set_tests_properties(vegai_prompt_json_contract PROPERTIES TIMEOUT 180)
     add_test(NAME vegai_natural_profile_contract
              COMMAND ${CMAKE_COMMAND} -DENGINE=$<TARGET_FILE:vegai_prompt_engine>
+                     -DFIXTURE=$<TARGET_FILE:vegai_prompt_resume_fixture>
                      -DWORK_ROOT=${CMAKE_CURRENT_BINARY_DIR}
                      -P ${CMAKE_CURRENT_SOURCE_DIR}/test/native_natural_profile.cmake)
     set_tests_properties(vegai_natural_profile_contract PROPERTIES TIMEOUT 180)

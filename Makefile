@@ -315,7 +315,8 @@ prompt-contract-check: $(PROMPT_ENGINE) $(PROMPT_FIXTURE) $(CONTEXT_ENGINE)
 	  -DFIXTURE="$(abspath $(PROMPT_FIXTURE))" -DWORK_ROOT="$(abspath $(BUILD_DIR))" -P test/native_prompt_resume.cmake
 	cmake -DENGINE="$(abspath $(PROMPT_ENGINE))" -DFIXTURE="$(abspath $(PROMPT_FIXTURE))" \
 	  -DWORK_ROOT="$(abspath $(BUILD_DIR))" -P test/native_prompt_json.cmake
-	cmake -DENGINE="$(abspath $(PROMPT_ENGINE))" -DWORK_ROOT="$(abspath $(BUILD_DIR))" -P test/native_natural_profile.cmake
+	cmake -DENGINE="$(abspath $(PROMPT_ENGINE))" -DFIXTURE="$(abspath $(PROMPT_FIXTURE))" \
+	  -DWORK_ROOT="$(abspath $(BUILD_DIR))" -P test/native_natural_profile.cmake
 
 context-tests: $(CONTEXT_TESTS)
 	OMP_NUM_THREADS=$${OMP_NUM_THREADS:-2} $(CONTEXT_TESTS)
