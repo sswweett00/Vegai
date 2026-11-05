@@ -47,6 +47,11 @@ POLICY_SCHEMA = "vegai-pretraining-quality-policy/v1"
 REPORT_SCHEMA = "vegai-pretraining-quality-report/v1"
 TOKEN_PATTERN = re.compile(r"[a-z0-9_']{1,48}\Z")
 IDENTIFIER_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+# Windows CRT text mode stops reads at the first 0x1A byte and rewrites LF,
+# so every descriptor that carries file content must be opened with
+# O_BINARY explicitly. The flag does not exist on POSIX, where it is 0.
+BINARY_OPEN_FLAG = getattr(os, "O_BINARY", 0)
+
 MAX_CASE_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_POLICY_BYTES = 256 * 1024
 MAX_PROVENANCE_TEXT_BYTES = 1_024
@@ -191,7 +196,7 @@ def read_snapshot(path: Path, label: str, maximum_bytes: int) -> tuple[bytes, Fi
     """Read one bounded regular-file snapshot and detect leaf replacement races."""
     require(maximum_bytes > 0, "internal snapshot limit must be positive")
     resolved = regular_resolved_path(path, label)
-    flags = os.O_RDONLY
+    flags = os.O_RDONLY | BINARY_OPEN_FLAG
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     if nofollow:
         flags |= nofollow
@@ -238,7 +243,7 @@ def read_snapshot(path: Path, label: str, maximum_bytes: int) -> tuple[bytes, Fi
 def file_identity(path: Path, label: str, maximum_bytes: int = MAX_INSPECT_OUTPUT_BYTES) -> FileIdentity:
     """Hash a bounded dependency without retaining all of its bytes in memory."""
     resolved = regular_resolved_path(path, label)
-    flags = os.O_RDONLY
+    flags = os.O_RDONLY | BINARY_OPEN_FLAG
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     if nofollow:
         flags |= nofollow
@@ -569,14 +574,16 @@ def copy_private_snapshot(source: Path, identity: FileIdentity, destination: Pat
     snapshot.  Both are verified while copying and live only in the temporary
     evaluation directory.
     """
-    flags = os.O_RDONLY
+    flags = os.O_RDONLY | BINARY_OPEN_FLAG
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     if nofollow:
         flags |= nofollow
     source_descriptor = None
     try:
         source_descriptor = os.open(source, flags)
-        destination_descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+        destination_descriptor = os.open(
+            destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | BINARY_OPEN_FLAG, mode
+        )
     except OSError as error:
         # The source descriptor only exists when its own open succeeded, so the
         # error path must not assume it was assigned.
