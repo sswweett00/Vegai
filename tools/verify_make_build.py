@@ -172,7 +172,8 @@ def main() -> int:
         require(not run_make("all"), "unchanged make all unexpectedly recompiled or relinked")
 
         # Only the changed module and its transitive USE consumers are rebuilt.
-        time.sleep(0.02)
+        # GNU Make 3.81 (macOS) compares second-resolution timestamps.
+        time.sleep(1.05)
         (root / "src" / "hdc_pretraining.f90").touch()
         updated = run_make("all")
         require(compiled_sources(updated) == {"hdc_pretraining", "dialogue_retrieval", "fortran_quality_gate", "fortran_control"},
@@ -191,7 +192,8 @@ def main() -> int:
 
         # A failed compiler can leave a partial .o; make must delete it and the
         # next invocation must rebuild it and dependent modules successfully.
-        time.sleep(0.02)
+        # GNU Make 3.81 (macOS) compares second-resolution timestamps.
+        time.sleep(1.05)
         (root / "src" / "turkish_text.f90").touch()
         run_make("all", fail_source="turkish_text.f90", expect_failure=True)
         require(not (root / "build" / "obj-hds" / "turkish_text.o").exists(), "failed compile retained a partial object")

@@ -360,6 +360,7 @@ if(VEGAI_BUILD_TESTS)
     set_tests_properties(vegai_corpus_overlap_contract PROPERTIES TIMEOUT 180)
     add_test(NAME vegai_ud_text_extract_contract
              COMMAND ${CMAKE_COMMAND} -DEXTRACT=$<TARGET_FILE:vegai_ud_text_extract>
+                     -DFIXTURE=$<TARGET_FILE:vegai_prompt_resume_fixture>
                      -DWORK_ROOT=${CMAKE_CURRENT_BINARY_DIR}
                      -P ${CMAKE_CURRENT_SOURCE_DIR}/test/native_ud_text_extract.cmake)
     set_tests_properties(vegai_ud_text_extract_contract PROPERTIES TIMEOUT 60)

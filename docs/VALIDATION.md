@@ -39,6 +39,30 @@ mimari/compiler, GPU/NPU ve üretim yükünde başarı veya certification iddias
 değildir. Legacy Python testleri ve harici provider/format entegrasyonları bu
 native matrisin parçası değildir.
 
+## Platformlar arası sözleşme düzeltmeleri — 2026-11-05
+
+GitHub Actions'ta Linux ve macOS işleri geçerken Windows işleri başarısız oldu.
+Kök nedenler testleri zayıflatarak değil, sözleşmeleri platformdan bağımsız hale
+getirerek giderildi:
+
+- **Bayt-tam fixture'lar:** CMake'ın `file(WRITE)` komutu metni ana işletim
+  sisteminin satır sonu kipinde yazar; Windows'ta her LF, CRLF olur. Bu yüzden
+  LF/CR baytına duyarlı testler artık derlenen Fortran yardımcı programıyla
+  (`vegai_prompt_resume_fixture bytes`, hex ve `xx*N` yineleme token'ları)
+  dosyaları bayt-tam üretir (`test/native_exact_text.cmake`). Python gerekmez.
+- **Çıkış kodları:** Fortran `ERROR STOP` kodu işlemciye bağlıdır. POSIX onu 8
+  bite indirgerken Windows işaretsiz değeri negatif sayı olarak raporlar. Negatif
+  sıfır olmayan sayısal durum, kontrollü reddetme sayılır; sinyal/başlatma
+  hatası sayılmaz. CLI'nın kendi 2/1 dönüş kodları değişmedi.
+- **JSON derinlik sınırı:** CPython 3.12+ çok daha derin JSON'u özyineleme
+  hatası vermeden işleyebilir. Bu nedenle `tools/lmm_contract.py` ve
+  `tools/training_data_io.py` artık açık, özyinelemesiz derinlik/düğüm
+  sınırları uygular. Bu, sürümden bağımsız fail-closed davranıştır.
+- **Make zaman damgası:** macOS'un GNU Make 3.81 sürümü saniye çözünürlüğünde
+  karşılaştırır; artımlı derleme testi bu nedenle en az bir saniye bekler.
+- **Depo satır sonları:** `.gitattributes` metin dosyalarını her platformda LF
+  olarak checkout eder; ikili fixture ve arşiv yamaları normalize edilmez.
+
 Aynı tarihli **güncel doğal dil değişikliklerinden sonra** yeni bootstrap GNU
 Fortran 12.2 ve CMake 3.28 ile tüm native CTest sonuçları: serial Release
 **41/41**, iki-thread OpenMP Release **42/42**, checked OpenMP Debug

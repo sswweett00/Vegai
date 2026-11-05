@@ -35,7 +35,7 @@ endif()
 
 function(expect_failure expected)
   execute_process(COMMAND "${BENCH}" ${ARGN} RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
-  if(NOT "${result}" MATCHES "^[0-9]+$" OR "${result}" STREQUAL "0" OR NOT err MATCHES "${expected}")
+  if(NOT "${result}" MATCHES "^-?[0-9]+$" OR "${result}" STREQUAL "0" OR NOT err MATCHES "${expected}")
     message(FATAL_ERROR "benchmark failed to reject ${ARGN}: ${result}: ${out}: ${err}")
   endif()
 endfunction()

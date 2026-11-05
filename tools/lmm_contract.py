@@ -33,6 +33,11 @@ GENERATION_REPORT_SCHEMA = "vegai-lmm-generation-report/v1"
 STRUCTURED_RESPONSE_SCHEMA = "vegai-lmm-structured-response-contract/v1"
 
 MAX_JSON_BYTES = 16 * 1024 * 1024
+# Recursive decode/serialization depth is bounded explicitly: interpreter
+# versions differ in when nested JSON raises RecursionError, so the contract
+# cannot rely on the runtime's stack. Operators may still use the much deeper
+# schema/value bounds below for legitimate documents.
+MAX_JSON_DEPTH = 64
 MAX_TEXT_BYTES = 1 * 1024 * 1024
 MAX_MESSAGE_PARTS = 64
 MAX_MESSAGES = 16_384
@@ -975,8 +980,23 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, ob
     return result
 
 
+def _require_bounded_json_depth(value: object, label: str) -> None:
+    """Reject over-nested parsed JSON with an explicit stack, not the C stack."""
+    pending: list[tuple[object, int]] = [(value, 1)]
+    while pending:
+        current, depth = pending.pop()
+        if depth > MAX_JSON_DEPTH:
+            raise LMMContractError(
+                f"{label} is not strict UTF-8 JSON: nesting depth exceeds {MAX_JSON_DEPTH}"
+            )
+        if isinstance(current, Mapping):
+            pending.extend((child, depth + 1) for child in current.values())
+        elif isinstance(current, list):
+            pending.extend((child, depth + 1) for child in current)
+
+
 def strict_json_value(raw: bytes, label: str) -> object:
-    """Parse one unambiguous, finite UTF-8 JSON value, including nested objects."""
+    """Parse one unambiguous, finite, depth-bounded UTF-8 JSON value."""
     def reject_constant(value: str) -> object:
         raise ValueError(f"unsupported JSON constant {value!r}")
 
@@ -987,12 +1007,14 @@ def strict_json_value(raw: bytes, label: str) -> object:
         return result
 
     try:
-        return json.loads(
+        value = json.loads(
             raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_json_keys,
             parse_constant=reject_constant, parse_float=finite_float,
         )
     except (LMMContractError, UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as error:
         raise LMMContractError(f"{label} is not strict UTF-8 JSON: {error}") from error
+    _require_bounded_json_depth(value, label)
+    return value
 
 
 def validate_bounded_structured_json_tree(value: object, field: str) -> None:

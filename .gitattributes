@@ -1,0 +1,28 @@
+# Keep the repository byte-stable on every platform.
+#
+# Native contracts compare exact bytes, so text files are stored and checked
+# out with LF on all hosts (including Windows with core.autocrlf=true). Binary
+# fixtures and archived diffs keep their exact bytes and are never normalized.
+* text=auto eol=lf
+*.f90 text eol=lf
+*.f90.in text eol=lf
+*.cmake text eol=lf
+*.fpp text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.jsonl text eol=lf
+*.csv text eol=lf
+*.tsv text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+Makefile text eol=lf
+*.patch -text
+*.conllu -text
+*.vgai -text
+*.vgfb -text
+*.vgnr -text
+*.vclm -text
+*.bpe -text

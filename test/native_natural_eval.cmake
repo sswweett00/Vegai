@@ -3,6 +3,7 @@
 if(NOT DEFINED EVAL OR NOT DEFINED ENGINE OR NOT DEFINED FIXTURE OR NOT DEFINED WORK_ROOT)
   message(FATAL_ERROR "EVAL, ENGINE, FIXTURE and WORK_ROOT are required")
 endif()
+include("${CMAKE_CURRENT_LIST_DIR}/native_exact_text.cmake")
 string(RANDOM LENGTH 24 ALPHABET 0123456789abcdef nonce)
 set(work "${WORK_ROOT}/native-natural-eval-${nonce}")
 file(MAKE_DIRECTORY "${work}")
@@ -14,8 +15,9 @@ execute_process(COMMAND "${FIXTURE}" nul-only "${work}/nul.txt" 6 RESULT_VARIABL
 if(NOT "${result}" STREQUAL "0")
   message(FATAL_ERROR "NUL fixture failed: ${result}: ${err}")
 endif()
-file(WRITE "${work}/held.txt" "AB\nCA\nx\n\n")
-file(WRITE "${work}/probe.tsv" "next\tA\tB\nnext\tC\tA\n")
+# CMake file(WRITE) would turn every LF into CRLF on Windows.
+native_write_text("${work}/held.txt" "AB\nCA\nx\n\n")
+native_write_text("${work}/probe.tsv" "next\tA\tB\nnext\tC\tA\n")
 file(SHA256 "${work}/model.vgfb" checkpoint_before)
 file(SHA256 "${work}/held.txt" corpus_before)
 execute_process(COMMAND "${EVAL}" "${work}/model.vgfb" "${work}/held.txt" 1
@@ -59,7 +61,7 @@ if(NOT json_error STREQUAL "NOTFOUND" OR NOT mean STREQUAL probe_mean)
 endif()
 
 # LF framing, multibyte UTF-8, no final LF and the inclusive 4096-byte bound.
-file(WRITE "${work}/utf8.txt" "Türkçe\nİstanbul")
+native_write_text("${work}/utf8.txt" "Türkçe\nİstanbul")
 execute_process(COMMAND "${EVAL}" "${work}/model.vgfb" "${work}/utf8.txt"
   RESULT_VARIABLE result OUTPUT_VARIABLE json ERROR_VARIABLE err)
 string(JSON predictions ERROR_VARIABLE json_error GET "${json}" predictions)
@@ -67,28 +69,30 @@ string(JSON records GET "${json}" records)
 if(NOT "${result}" STREQUAL "0" OR NOT json_error STREQUAL "NOTFOUND" OR NOT predictions EQUAL 15 OR NOT records EQUAL 2)
   message(FATAL_ERROR "UTF-8/no-final-LF evaluation failed: ${result}: ${json}: ${err}")
 endif()
-string(REPEAT "x" 4096 longest)
-file(WRITE "${work}/longest.txt" "${longest}")
+native_write_hex("${work}/longest.txt" "78*4096")
 execute_process(COMMAND "${EVAL}" "${work}/model.vgfb" "${work}/longest.txt"
   RESULT_VARIABLE result OUTPUT_VARIABLE json ERROR_VARIABLE err)
 string(JSON predictions ERROR_VARIABLE json_error GET "${json}" predictions)
 if(NOT "${result}" STREQUAL "0" OR NOT json_error STREQUAL "NOTFOUND" OR NOT predictions EQUAL 4095)
   message(FATAL_ERROR "4096-byte record rejected: ${result}: ${json}: ${err}")
 endif()
-file(APPEND "${work}/longest.txt" "x")
-file(WRITE "${work}/no-transitions.txt" "x\ny\n")
+native_write_hex("${work}/overlong.txt" "78*4097")
+native_write_text("${work}/no-transitions.txt" "x\ny\n")
 if(NOT WIN32)
-  string(ASCII 255 invalid_byte)
-  file(WRITE "${work}/invalid.txt" "A${invalid_byte}\n")
+  string(HEX "A" invalid_prefix)
+  native_write_hex("${work}/invalid.txt" "${invalid_prefix}" "ff" "0a")
 endif()
 
 function(expect_failure expected)
   execute_process(COMMAND "${EVAL}" ${ARGN} RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
-  if(NOT "${result}" MATCHES "^[0-9]+$" OR "${result}" STREQUAL "0" OR NOT err MATCHES "${expected}" OR NOT out STREQUAL "")
+  # Fortran ERROR STOP codes are processor dependent; on Windows an unsigned
+  # status is reported back as a negative number. Any nonzero number is a
+  # controlled rejection, while a signal/launch failure is not.
+  if(NOT "${result}" MATCHES "^-?[0-9]+$" OR "${result}" STREQUAL "0" OR NOT err MATCHES "${expected}" OR NOT out STREQUAL "")
     message(FATAL_ERROR "natural evaluator failed to reject ${ARGN}: ${result}: ${out}: ${err}")
   endif()
 endfunction()
-expect_failure("exceeds 4096" "${work}/model.vgfb" "${work}/longest.txt")
+expect_failure("exceeds 4096" "${work}/model.vgfb" "${work}/overlong.txt")
 expect_failure("contains NUL" "${work}/model.vgfb" "${work}/nul.txt")
 expect_failure("no within-record predictions" "${work}/model.vgfb" "${work}/no-transitions.txt")
 expect_failure("prefix length" "${work}/model.vgfb" "${work}/held.txt" 0)
@@ -106,7 +110,7 @@ if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
     if("${fifo_result}" STREQUAL "0")
       execute_process(COMMAND "${EVAL}" "${work}/model.vgfb" "${work}/held.fifo" TIMEOUT 5
         RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
-      if(NOT "${result}" MATCHES "^[0-9]+$" OR "${result}" STREQUAL "0" OR
+      if(NOT "${result}" MATCHES "^-?[0-9]+$" OR "${result}" STREQUAL "0" OR
          NOT out STREQUAL "" OR NOT err MATCHES "held-out file size is invalid")
         message(FATAL_ERROR "FIFO held-out input was accepted or blocked: ${result}: ${out}: ${err}")
       endif()

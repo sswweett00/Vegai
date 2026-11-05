@@ -53,7 +53,7 @@ endif()
 string(REPEAT "x" 8193 overlong_prompt)
 execute_process(COMMAND "${ENGINE}" ask --checkpoint "${work}/a.vgfb" --prompt "${overlong_prompt}" --max-new 1
   RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
-if(NOT "${result}" MATCHES "^[0-9]+$" OR "${result}" STREQUAL "0" OR NOT err MATCHES "argument is too long")
+if(NOT "${result}" MATCHES "^-?[0-9]+$" OR "${result}" STREQUAL "0" OR NOT err MATCHES "argument is too long")
   message(FATAL_ERROR "overlong prompt was not rejected: ${result}: ${out}: ${err}")
 endif()
 
@@ -264,7 +264,7 @@ foreach(mode IN ITEMS within-row across-rows)
   endif()
   execute_process(COMMAND "${ENGINE}" probe --checkpoint "${work}/overflow.vgfb" --probe "${work}/${mode}.tsv"
     --max-new 1 RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
-  if(NOT "${result}" MATCHES "^[0-9]+$" OR "${result}" STREQUAL "0" OR
+  if(NOT "${result}" MATCHES "^-?[0-9]+$" OR "${result}" STREQUAL "0" OR
      NOT err MATCHES "probe loss sum is not representable")
     message(FATAL_ERROR "${mode} probe overflow was not rejected normally: ${result}: ${out}: ${err}")
   endif()
@@ -274,7 +274,7 @@ function(expect_bad_probe name text expected_message)
   file(WRITE "${work}/${name}.tsv" "${text}")
   execute_process(COMMAND "${ENGINE}" probe --checkpoint "${work}/a.vgfb" --probe "${work}/${name}.tsv"
     --max-new 1 RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
-  if(NOT "${result}" MATCHES "^[0-9]+$" OR "${result}" STREQUAL "0" OR NOT err MATCHES "${expected_message}")
+  if(NOT "${result}" MATCHES "^-?[0-9]+$" OR "${result}" STREQUAL "0" OR NOT err MATCHES "${expected_message}")
     message(FATAL_ERROR "bad probe ${name} was not rejected: ${result}: ${out}: ${err}")
   endif()
 endfunction()

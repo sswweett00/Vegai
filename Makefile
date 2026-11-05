@@ -262,9 +262,9 @@ ud-text-extract: $(UD_TEXT_EXTRACT)
 $(UD_TEXT_EXTRACT): $(UD_TEXT_EXTRACT_APP) $(HDS_LIBRARY) $(LINK_CONFIG) | $(BUILD_DIR)
 	$(FC) $(FFLAGS) -J$(HDS_MOD_DIR) -I$(HDS_MOD_DIR) $(UD_TEXT_EXTRACT_APP) $(HDS_LIBRARY) -o $@ $(LDFLAGS)
 
-ud-text-extract-check: $(UD_TEXT_EXTRACT)
-	cmake -DEXTRACT="$(abspath $(UD_TEXT_EXTRACT))" -DWORK_ROOT="$(abspath $(BUILD_DIR))" \
-	  -P test/native_ud_text_extract.cmake
+ud-text-extract-check: $(UD_TEXT_EXTRACT) $(PROMPT_FIXTURE)
+	cmake -DEXTRACT="$(abspath $(UD_TEXT_EXTRACT))" -DFIXTURE="$(abspath $(PROMPT_FIXTURE))" \
+	  -DWORK_ROOT="$(abspath $(BUILD_DIR))" -P test/native_ud_text_extract.cmake
 
 sparse-bench: $(SPARSE_BENCH)
 

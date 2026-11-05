@@ -11,7 +11,7 @@ set(checkpoint "${work}/checkpoint.vgfb")
 if(MODE STREQUAL "partial-reject")
   execute_process(COMMAND "${ENGINE}" train --tokens 5 --train-chunk-tokens 4 --task markov
     --checkpoint "${checkpoint}" RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
-  if(NOT "${result}" MATCHES "^[0-9]+$" OR "${result}" STREQUAL "0" OR EXISTS "${checkpoint}"
+  if(NOT "${result}" MATCHES "^-?[0-9]+$" OR "${result}" STREQUAL "0" OR EXISTS "${checkpoint}"
      OR NOT err MATCHES "training tokens must be a multiple")
     message(FATAL_ERROR "partial budget must fail normally before publishing a checkpoint: ${result}: ${err}")
   endif()

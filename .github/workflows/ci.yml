@@ -761,7 +761,7 @@ jobs:
             else
               status=$?
               printf '%s\n' "$output" >&2
-              detail=${output: -4000}
+              detail=$(printf '%s' "$output" | tail -c 4000)
               detail=${detail//'%'/'%25'}
               detail=${detail//$'\r'/'%0D'}
               detail=${detail//$'\n'/'%0A'}
@@ -772,4 +772,18 @@ jobs:
           done
       - name: Verify parallel Make dependency graph
         if: runner.os != 'Windows'
-        run: python tools/verify_make_build.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          if output=$(python tools/verify_make_build.py 2>&1); then
+            printf '%s\n' "$output"
+          else
+            status=$?
+            printf '%s\n' "$output" >&2
+            detail=$(printf '%s' "$output" | tail -c 4000)
+            detail=${detail//'%'/'%25'}
+            detail=${detail//$'\r'/'%0D'}
+            detail=${detail//$'\n'/'%0A'}
+            printf '::error title=Make dependency graph::%s\n' "$detail"
+            exit "$status"
+          fi

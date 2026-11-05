@@ -180,7 +180,7 @@ jobs:
             else
               status=$?
               printf '%s\n' "$output" >&2
-              detail=${output: -4000}
+              detail=$(printf '%s' "$output" | tail -c 4000)
               detail=${detail//'%'/'%25'}
               detail=${detail//$'\r'/'%0D'}
               detail=${detail//$'\n'/'%0A'}

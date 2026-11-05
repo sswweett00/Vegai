@@ -22,6 +22,18 @@ program prompt_resume_fixture
    character(len=4096) :: large_line
    real(real64) :: expected_rate
 
+   if (command_argument_count() < 3) error stop 'expected action, path and arguments'
+   call get_command_argument(1, action, status=argument_status)
+   if (argument_status /= 0) error stop 'invalid action'
+   call get_command_argument(2, path, status=argument_status)
+   if (argument_status /= 0 .or. len_trim(path) == 0) error stop 'invalid path'
+   if (trim(action) == 'bytes') then
+      ! CMake's file(WRITE) emits native line endings (CRLF on Windows), so
+      ! byte-exact test corpora are written here from hexadecimal tokens.
+      ! A token is either hex text or "<one hex byte>*<repeat count>".
+      call write_hex_tokens(trim(path), 3)
+      stop 0
+   end if
    if (command_argument_count() /= 3 .and. command_argument_count() /= 4) &
       error stop 'expected action, path, training rule and optional seed'
    fixture_seed = 77_int64
@@ -31,10 +43,6 @@ program prompt_resume_fixture
       call cli_parse_integer64(trim(seed_text), fixture_seed, status)
       if (status /= CLI_OK) error stop 'invalid seed'
    end if
-   call get_command_argument(1, action, status=argument_status)
-   if (argument_status /= 0) error stop 'invalid action'
-   call get_command_argument(2, path, status=argument_status)
-   if (argument_status /= 0 .or. len_trim(path) == 0) error stop 'invalid path'
    call get_command_argument(3, rule_text, status=argument_status)
    if (argument_status /= 0) error stop 'invalid rule'
    select case (trim(rule_text))
@@ -186,4 +194,104 @@ program prompt_resume_fixture
    case default
       error stop 'unknown action'
    end select
+
+contains
+
+   subroutine write_hex_tokens(target, first_token)
+      character(len=*), intent(in) :: target
+      integer, intent(in) :: first_token
+      character(len=2048) :: token
+      integer :: index, argument_status, file_unit, io_status, star
+      integer(int64) :: count
+
+      open(newunit=file_unit, file=target, status='new', action='write', access='stream', &
+           form='unformatted', iostat=io_status)
+      if (io_status /= 0) error stop 'byte fixture open failed'
+      do index = first_token, command_argument_count()
+         call get_command_argument(index, token, status=argument_status)
+         if (argument_status /= 0) error stop 'invalid byte fixture token'
+         star = index(token, '*')
+         if (star > 0) then
+            call cli_parse_integer64(trim(token(star + 1:)), count, argument_status)
+            if (argument_status /= CLI_OK) error stop 'invalid byte fixture repeat count'
+            if (count < 0_int64 .or. count > 67108864_int64) error stop 'byte fixture repeat out of range'
+            call write_repeated_byte(file_unit, trim(token(:star - 1)), count)
+         else
+            call write_hex_text(file_unit, trim(token))
+         end if
+      end do
+      close(file_unit, iostat=io_status)
+      if (io_status /= 0) error stop 'byte fixture close failed'
+   end subroutine write_hex_tokens
+
+   subroutine write_hex_text(file_unit, text)
+      integer, intent(in) :: file_unit
+      character(len=*), intent(in) :: text
+      character(len=8192) :: chunk
+      integer :: position, produced, high, low, io_status
+
+      if (len(text) == 0 .or. mod(len(text), 2) /= 0) error stop 'byte fixture hex length is invalid'
+      position = 1
+      produced = 0
+      do while (position < len(text))
+         high = hex_value(text(position:position))
+         low = hex_value(text(position + 1:position + 1))
+         if (high < 0 .or. low < 0) error stop 'byte fixture token is not hexadecimal'
+         produced = produced + 1
+         chunk(produced:produced) = octet(high * 16 + low)
+         position = position + 2
+         if (produced == len(chunk)) then
+            write(file_unit, iostat=io_status) chunk
+            if (io_status /= 0) error stop 'byte fixture write failed'
+            produced = 0
+         end if
+      end do
+      if (produced > 0) then
+         write(file_unit, iostat=io_status) chunk(:produced)
+         if (io_status /= 0) error stop 'byte fixture write failed'
+      end if
+   end subroutine write_hex_text
+
+   subroutine write_repeated_byte(file_unit, pair, count)
+      integer, intent(in) :: file_unit
+      character(len=*), intent(in) :: pair
+      integer(int64), intent(in) :: count
+      character(len=8192) :: block
+      integer :: high, low, io_status
+      integer(int64) :: produced, remaining
+
+      if (len(pair) /= 2) error stop 'byte fixture repeat needs exactly one byte'
+      high = hex_value(pair(1:1))
+      low = hex_value(pair(2:2))
+      if (high < 0 .or. low < 0) error stop 'byte fixture repeat byte is not hexadecimal'
+      block = repeat(octet(high * 16 + low), len(block))
+      remaining = count
+      do while (remaining > 0_int64)
+         produced = min(remaining, int(len(block), int64))
+         write(file_unit, iostat=io_status) block(1:int(produced))
+         if (io_status /= 0) error stop 'byte fixture write failed'
+         remaining = remaining - produced
+      end do
+   end subroutine write_repeated_byte
+
+   integer function hex_value(digit) result(value)
+      character(len=1), intent(in) :: digit
+
+      select case (digit)
+      case ('0':'9')
+         value = iachar(digit) - iachar('0')
+      case ('a':'f')
+         value = iachar(digit) - iachar('a') + 10
+      case ('A':'F')
+         value = iachar(digit) - iachar('A') + 10
+      case default
+         value = -1
+      end select
+   end function hex_value
+
+   character(len=1) function octet(value) result(byte)
+      integer, intent(in) :: value
+
+      byte = transfer(int(value, int8), 'a')
+   end function octet
 end program prompt_resume_fixture

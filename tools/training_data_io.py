@@ -39,6 +39,7 @@ import gzip
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path
 import queue
@@ -59,6 +60,11 @@ DEFAULT_BATCH_SIZE = 4096
 DEFAULT_CHUNK_CHARS = 64 * 1024
 DEFAULT_MAX_RECORD_BYTES = 16 * 1024 * 1024
 DEFAULT_MAX_METADATA_BYTES = 64 * 1024
+# Nesting and node bounds are explicit: CPython versions differ in when
+# json.dumps raises RecursionError for deeply nested input (3.12+ can serialize
+# far deeper trees), so a metadata tree must be bounded independently.
+MAX_METADATA_DEPTH = 32
+MAX_METADATA_NODES = 131_072
 
 InputFormat = Literal["jsonl", "json", "txt", "parquet", "arrow"]
 ErrorPolicy = Literal["raise", "collect", "skip"]
@@ -94,6 +100,46 @@ class RecordIssue:
 
     def to_dict(self) -> dict[str, object]:
         return {"path": self.path, "record_number": self.record_number, "reason": self.reason}
+
+
+def _validate_metadata_tree(metadata: Mapping[str, Any]) -> None:
+    """Reject non-JSON values, pathological nesting and cycles iteratively.
+
+    The walk uses an explicit stack, so it cannot itself overflow the Python
+    stack. A cyclic structure keeps consuming the node budget until that budget
+    fails closed, which also bounds denial-of-service attempts.
+    """
+    pending: list[tuple[object, int]] = [(metadata, 1)]
+    nodes = 0
+    while pending:
+        current, depth = pending.pop()
+        nodes += 1
+        if nodes > MAX_METADATA_NODES:
+            raise SchemaValidationError(
+                f"record.metadata exceeds {MAX_METADATA_NODES} JSON nodes; split metadata upstream"
+            )
+        if depth > MAX_METADATA_DEPTH:
+            raise SchemaValidationError(
+                f"record.metadata exceeds {MAX_METADATA_DEPTH} levels of nesting"
+            )
+        if isinstance(current, Mapping):
+            pending.extend((value, depth + 1) for value in current.values())
+        elif isinstance(current, (list, tuple)):
+            pending.extend((value, depth + 1) for value in current)
+        elif isinstance(current, str):
+            try:
+                current.encode("utf-8", "strict")
+            except UnicodeEncodeError as error:
+                raise SchemaValidationError("record.metadata contains invalid Unicode") from error
+        elif current is None or isinstance(current, (bool, int)):
+            continue
+        elif isinstance(current, float):
+            if not math.isfinite(current):
+                raise SchemaValidationError("record.metadata contains a non-finite number")
+        else:
+            raise SchemaValidationError(
+                f"record.metadata contains a non-JSON value of type {type(current).__name__}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +185,7 @@ class TrainingRecord:
         if self.metadata is not None:
             if not isinstance(self.metadata, Mapping):
                 raise SchemaValidationError("record.metadata must be a JSON object or null")
+            _validate_metadata_tree(self.metadata)
             try:
                 rendered_metadata = json.dumps(
                     self.metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False

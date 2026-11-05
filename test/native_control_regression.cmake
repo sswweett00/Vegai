@@ -18,8 +18,11 @@ function(run_control expected_success)
       message(FATAL_ERROR "control ${ARGN} failed (${result}): ${err}")
     endif()
   else()
-    # A signal or launch failure is not a valid argument rejection.
-    if(NOT "${result}" MATCHES "^[0-9]+$" OR "${result}" STREQUAL "0")
+    # Any nonzero numeric status is a controlled rejection. A Fortran
+    # ERROR STOP code is processor dependent: POSIX truncates it to 8 bits
+    # while Windows reports the unsigned value back as a negative number.
+    # A signal or launch failure is not a valid rejection.
+    if(NOT "${result}" MATCHES "^-?[0-9]+$" OR "${result}" STREQUAL "0")
       message(FATAL_ERROR "control ${ARGN}: expected normal nonzero rejection, got ${result}: ${err}")
     endif()
   endif()

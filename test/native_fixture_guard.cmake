@@ -13,7 +13,7 @@ foreach(state IN ITEMS missing mismatch)
   endif()
   execute_process(COMMAND "${CMAKE_COMMAND}" -E env "VEGAI_TEST_SCRATCH_TOKEN=${nonce}" "${PROGRAM}"
     WORKING_DIRECTORY "${work}" RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
-  if(NOT "${result}" MATCHES "^[0-9]+$" OR "${result}" STREQUAL "0"
+  if(NOT "${result}" MATCHES "^-?[0-9]+$" OR "${result}" STREQUAL "0"
      OR NOT err MATCHES "isolated fixture directory")
     message(FATAL_ERROR "${state} scratch marker was not rejected normally: ${result}: ${out}: ${err}")
   endif()
