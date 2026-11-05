@@ -90,9 +90,8 @@ module neural_pretraining
 
    ! Upper bound on gradient_accumulation.  It bounds two stack allocations
    ! (the staging buffers are O(vocabulary * accumulation) and the flush
-   ! kernel's clipped-hidden block is O(width * accumulation)), and it costs
-   ! nothing in throughput: past a few hundred tokens per step the optimizer
-   ! state is amortized to noise and only the batch memory grows.
+   ! kernel's clipped-hidden block is O(width * accumulation)). Throughput
+   ! and memory effects depend on shape and hardware and must be measured.
    integer(int32), parameter, public :: NPT_MAX_GRADIENT_ACCUMULATION = 512_int32
 
    ! Learning-rate schedule identifiers.  The schedule is a pure function of
@@ -126,8 +125,10 @@ module neural_pretraining
 
    type, public :: neural_train_config_t
       integer(int32) :: trainable_mode = NPT_TRAINABLE_TIED_OUTPUT
-      ! Peak step size for the exact tied-output cross-entropy gradient.
-      real(real64) :: learning_rate = 0.025_real64
+      ! Match the CLI's conservative default for the normalized NOVA update.
+      ! The former 0.025 was the legacy SGD default and can overshoot badly
+      ! with NOVA; existing checkpoints retain their explicitly saved rate.
+      real(real64) :: learning_rate = 0.003_real64
       ! A conservative norm bound on the hidden vector used by the update.
       real(real64) :: gradient_clip_norm = 4.0_real64
       ! Per-value safety envelope for the mutable tied embedding matrix.
@@ -135,15 +136,14 @@ module neural_pretraining
       integer(int32) :: maximum_tokens_per_record = 8192_int32
       ! Training-system fields.  Defaults keep every pre-v2 named-arg
       ! construction valid; the CLI sets schedule/horizon explicitly.
-      ! NOVA-1 is the project default: it is the native optimizer of this
-      ! trainer (see the rule at the optimizer identifiers) and the one every
-      ! governed run uses.  AdamW and SGD remain selectable for comparison and
+      ! NOVA-1 is this native trainer's default. Runner applications may select
+      ! their own defaults; AdamW and SGD remain available for comparison and
       ! for reproducing older checkpoints.
       integer(int32) :: optimizer = NPT_OPTIMIZER_NOVA
       real(real64) :: adam_beta1 = 0.9_real64
       real(real64) :: adam_beta2 = 0.999_real64
       real(real64) :: adam_epsilon = 1.0e-8_real64
-      ! Decoupled AdamW weight decay, applied to embeddings only (not bias).
+      ! Decoupled NOVA/AdamW weight decay, applied to embeddings only (not bias).
       real(real64) :: weight_decay = 0.01_real64
       ! Label-smoothing mass in [0, 0.5).  Reported NLL stays unsmoothed.
       real(real64) :: label_smoothing = 0.0_real64
@@ -156,7 +156,7 @@ module neural_pretraining
       ! Prediction tokens accumulated into one optimizer step.  1 keeps the
       ! exact one-step-per-token path.  N > 1 evaluates N per-token gradients
       ! at the pre-step parameters, averages them, and applies a single step,
-      ! which is ordinary mini-batch SGD/AdamW.  The batch is always flushed
+      ! as one mini-batch optimizer step. The batch is always flushed
       ! at the end of a record, and every checkpoint boundary is a record
       ! boundary, so "chunk + checkpoint + chunk" stays bit-identical to the
       ! one-pass stream for any fixed accumulation.  The effective batch is
@@ -276,6 +276,56 @@ module neural_pretraining
 
 contains
 
+   ! Check raw IEEE binary32/binary64 exponent bits before doing floating-point
+   ! comparisons or conversions. ieee_is_finite itself can raise INVALID for a
+   ! signaling NaN when halting mode is enabled. Checkpoint files are untrusted
+   ! input; a corrupt payload must return an error even in FPE-debug builds.
+   ! Other real representations retain the processor's ieee_is_finite fallback.
+
+   ! Kept local to the hot softmax/checkpoint paths so optimizing compilers can
+   ! inline the bit check without requiring cross-module link-time optimization.
+   pure elemental logical function checkpoint_finite_real32(value) result(finite)
+      real(real32), intent(in) :: value
+      integer(int32) :: bits
+
+      if (radix(value) == 2 .and. digits(value) == 24 .and. maxexponent(value) == 128 .and. &
+          minexponent(value) == -125 .and. storage_size(value) == 32) then
+         bits = transfer(value, 0_int32)
+         finite = iand(bits, int(z'7F800000', int32)) /= int(z'7F800000', int32)
+      else
+         finite = ieee_is_finite(value)
+      end if
+   end function checkpoint_finite_real32
+
+   pure elemental logical function checkpoint_finite_nonnegative_real32(value) result(finite)
+      real(real32), intent(in) :: value
+      integer(int32) :: bits, magnitude
+
+      if (storage_size(value) == 32 .and. radix(value) == 2 .and. digits(value) == 24 .and. &
+          maxexponent(value) == 128 .and. minexponent(value) == -125) then
+         bits = transfer(value, 0_int32)
+         magnitude = iand(bits, int(z'7FFFFFFF', int32))
+         finite = iand(bits, int(z'7F800000', int32)) /= int(z'7F800000', int32) .and. &
+                  (.not. btest(bits, 31) .or. magnitude == 0_int32)
+      else
+         finite = ieee_is_finite(value)
+         if (finite) finite = value >= 0.0_real32
+      end if
+   end function checkpoint_finite_nonnegative_real32
+
+   pure elemental logical function checkpoint_finite_real64(value) result(finite)
+      real(real64), intent(in) :: value
+      integer(int64) :: bits
+
+      if (storage_size(value) == 64 .and. radix(value) == 2 .and. digits(value) == 53 .and. &
+          maxexponent(value) == 1024 .and. minexponent(value) == -1021) then
+         bits = transfer(value, 0_int64)
+         finite = iand(bits, int(z'7FF0000000000000', int64)) /= int(z'7FF0000000000000', int64)
+      else
+         finite = ieee_is_finite(value)
+      end if
+   end function checkpoint_finite_real64
+
    ! Two optimizer invariants are enforced here rather than trusted from the
    ! caller.  AdamW applies decoupled decay as theta <- (1 - lr*wd)*theta, so
    ! lr*wd >= 1 would annihilate (or invert the sign of) every embedding while
@@ -286,36 +336,67 @@ contains
    ! serialized into the checkpoint and the evidence report.
    pure logical function neural_train_config_is_valid(config)
       type(neural_train_config_t), intent(in) :: config
+      real(real64) :: scalar_min, scalar_max
 
+      ! Sequence finite checks before all arithmetic/comparisons. Fortran does
+      ! not guarantee short circuiting, and even the validator must not trap on
+      ! a NaN or overflow lr*weight_decay while rejecting a bad configuration.
+      neural_train_config_is_valid = .false.
+      if (.not. checkpoint_finite_real64(config%learning_rate) .or. &
+          .not. checkpoint_finite_real64(config%gradient_clip_norm) .or. &
+          .not. checkpoint_finite_real64(config%embedding_value_limit) .or. &
+          .not. checkpoint_finite_real64(config%adam_beta1) .or. &
+          .not. checkpoint_finite_real64(config%adam_beta2) .or. &
+          .not. checkpoint_finite_real64(config%adam_epsilon) .or. &
+          .not. checkpoint_finite_real64(config%weight_decay) .or. &
+          .not. checkpoint_finite_real64(config%label_smoothing) .or. &
+          .not. checkpoint_finite_real64(config%minimum_lr_ratio)) return
+      if (config%learning_rate <= 0.0_real64 .or. config%weight_decay < 0.0_real64) return
+      ! The update paths convert rate/limit and adaptive epsilon to parameter
+      ! precision. Reject values that would overflow or silently round to zero
+      ! before conversion, even in FPE-trapping debug builds. Use the normal
+      ! minimum so this contract also holds when subnormals are flushed.
+      scalar_min = real(tiny(0.0_real32), real64)
+      scalar_max = real(huge(0.0_real32), real64)
+      if (config%learning_rate < scalar_min .or. config%learning_rate > scalar_max) return
+      if (config%embedding_value_limit < scalar_min .or. config%embedding_value_limit > scalar_max) return
+      if (config%optimizer == NPT_OPTIMIZER_ADAMW .or. config%optimizer == NPT_OPTIMIZER_NOVA) then
+         if (config%adam_epsilon < scalar_min .or. config%adam_epsilon > scalar_max) return
+         if (config%optimizer == NPT_OPTIMIZER_ADAMW) then
+            if (config%adam_beta1 < 0.0_real64 .or. config%adam_beta1 >= 1.0_real64) return
+            ! First-step bias correction is the smallest denominator.
+            if (config%learning_rate >= scalar_max * (1.0_real64 - config%adam_beta1)) return
+         else if (config%adam_epsilon < 1.0_real64) then
+            ! NOVA's largest step scale occurs when the gradient energy is zero.
+            if (config%learning_rate >= scalar_max * config%adam_epsilon) return
+         end if
+      end if
+      ! If both factors are at least one, their product is invalid regardless
+      ! of its representability. Otherwise at least one factor is <= one, so
+      ! the product below cannot overflow for finite, non-negative inputs.
+      if (config%learning_rate >= 1.0_real64 .and. config%weight_decay >= 1.0_real64) return
       neural_train_config_is_valid = config%trainable_mode == NPT_TRAINABLE_TIED_OUTPUT .and. &
                                      config%gradient_accumulation >= 1_int32 .and. &
                                      config%gradient_accumulation <= NPT_MAX_GRADIENT_ACCUMULATION .and. &
                                      config%gradient_accumulation <= config%maximum_tokens_per_record .and. &
-                                     ieee_is_finite(config%learning_rate) .and. config%learning_rate > 0.0_real64 .and. &
-                                     ieee_is_finite(config%gradient_clip_norm) .and. config%gradient_clip_norm > 0.0_real64 .and. &
-                                     ieee_is_finite(config%embedding_value_limit) .and. &
+                                     config%gradient_clip_norm > 0.0_real64 .and. &
                                      config%embedding_value_limit > 0.0_real64 .and. &
                                      config%maximum_tokens_per_record >= 2_int32 .and. &
                                      (config%optimizer == NPT_OPTIMIZER_SGD .or. &
                                       config%optimizer == NPT_OPTIMIZER_ADAMW .or. &
                                       config%optimizer == NPT_OPTIMIZER_NOVA) .and. &
-                                     ieee_is_finite(config%adam_beta1) .and. config%adam_beta1 >= 0.0_real64 .and. &
-                                     config%adam_beta1 < 1.0_real64 .and. &
-                                     ieee_is_finite(config%adam_beta2) .and. config%adam_beta2 >= 0.0_real64 .and. &
-                                     config%adam_beta2 < 1.0_real64 .and. &
-                                     ieee_is_finite(config%adam_epsilon) .and. config%adam_epsilon > 0.0_real64 .and. &
-                                     ieee_is_finite(config%weight_decay) .and. config%weight_decay >= 0.0_real64 .and. &
+                                     config%adam_beta1 >= 0.0_real64 .and. config%adam_beta1 < 1.0_real64 .and. &
+                                     config%adam_beta2 >= 0.0_real64 .and. config%adam_beta2 < 1.0_real64 .and. &
+                                     config%adam_epsilon > 0.0_real64 .and. &
                                      config%learning_rate * config%weight_decay < 1.0_real64 .and. &
                                      (config%optimizer == NPT_OPTIMIZER_ADAMW .or. &
                                       config%optimizer == NPT_OPTIMIZER_NOVA .or. &
                                       config%weight_decay == 0.0_real64) .and. &
-                                     ieee_is_finite(config%label_smoothing) .and. &
                                      config%label_smoothing >= 0.0_real64 .and. config%label_smoothing < 0.5_real64 .and. &
                                      (config%lr_schedule == NPT_SCHEDULE_CONSTANT .or. &
                                       config%lr_schedule == NPT_SCHEDULE_WARMUP_INVSQRT .or. &
                                       config%lr_schedule == NPT_SCHEDULE_WARMUP_COSINE) .and. &
                                      config%warmup_updates >= 0_int64 .and. &
-                                     ieee_is_finite(config%minimum_lr_ratio) .and. &
                                      config%minimum_lr_ratio >= 0.0_real64 .and. config%minimum_lr_ratio <= 1.0_real64 .and. &
                                      (config%lr_schedule /= NPT_SCHEDULE_WARMUP_COSINE .or. &
                                       config%total_updates > config%warmup_updates)
@@ -424,22 +505,28 @@ contains
                                     plan%per_step_working_bytes + plan%optimizer_state_bytes_real64
    end subroutine neural_training_resource_plan
 
-   subroutine stable_softmax(logits, probabilities, status)
+   subroutine stable_softmax(logits, probabilities, maximum, normalizer, status)
       real(real32), contiguous, intent(in) :: logits(:)
       real(real64), contiguous, intent(out) :: probabilities(:)
+      real(real64), intent(out) :: maximum, normalizer
       integer(int32), intent(out) :: status
-      real(real64) :: maximum, normalizer
       real(real64) :: partial_sums(NPT_SOFTMAX_BLOCKS)
-      integer(int32) :: index, block, block_size
+      integer(int32) :: block
+      integer(int64) :: index, block_size, vocabulary_size, block_offset
       logical :: finite
 
       status = NPT_OK
-      if (size(logits, kind=int32) <= 0_int32 .or. size(probabilities, kind=int32) /= size(logits, kind=int32) .or. &
-          .not. all(ieee_is_finite(logits))) then
+      maximum = 0.0_real64
+      normalizer = 0.0_real64
+      vocabulary_size = size(logits, kind=int64)
+      if (vocabulary_size <= 0_int64 .or. size(probabilities, kind=int64) /= vocabulary_size .or. &
+          .not. all(checkpoint_finite_real32(logits))) then
          status = NPT_ERR_NUMERICAL
          return
       end if
-      block_size = (size(logits, kind=int32) + NPT_SOFTMAX_BLOCKS - 1_int32) / NPT_SOFTMAX_BLOCKS
+      ! Ceiling division without overflowing size + NPT_SOFTMAX_BLOCKS - 1.
+      block_size = vocabulary_size / int(NPT_SOFTMAX_BLOCKS, int64)
+      if (modulo(vocabulary_size, int(NPT_SOFTMAX_BLOCKS, int64)) /= 0_int64) block_size = block_size + 1_int64
       ! MAXVAL of the real32 logits, converted once.  The previous form converted
       ! the whole vocabulary to real64 first, allocating and filling a
       ! (vocabulary)-element temporary on every prediction; the maximum of the
@@ -450,7 +537,7 @@ contains
       ! fill stores bit-identical values, and the blocked normalizer below has a
       ! fixed combine order, so the distribution is identical at any thread count.
       !$omp parallel do schedule(static) if(size(logits) >= 1024)
-      do index = 1_int32, size(logits, kind=int32)
+      do index = 1_int64, vocabulary_size
          probabilities(index) = exp(real(logits(index), real64) - maximum)
       end do
       !$omp end parallel do
@@ -459,14 +546,13 @@ contains
       ! identical at any thread count and still deterministic, while the work is
       ! spread over the team.  A plain SUM here was a serial pass over the whole
       ! vocabulary (4096 real64 adds, ~2 us of the scoring phase).
-      !$omp parallel do schedule(static) if(size(logits) >= 1024)
+      !$omp parallel do schedule(static) private(index, block_offset) if(size(logits) >= 1024)
       do block = 0_int32, NPT_SOFTMAX_BLOCKS - 1_int32
-         ! The accumulator is the block's own array element, not a scalar
-         ! temporary: a scalar written inside a parallel do would be shared by
-         ! default and race between the threads.
+         ! The accumulator is the block's own array element. Explicitly keep
+         ! the inner index and offset private as well.
          partial_sums(block + 1_int32) = 0.0_real64
-         do index = block * block_size + 1_int32, &
-                   min(size(logits, kind=int32), block * block_size + block_size)
+         block_offset = int(block, int64) * block_size
+         do index = block_offset + 1_int64, block_offset + min(block_size, vocabulary_size - block_offset)
             partial_sums(block + 1_int32) = partial_sums(block + 1_int32) + probabilities(index)
          end do
       end do
@@ -484,7 +570,7 @@ contains
       ! division alone.  The reduction carries the status flag only, never a value.
       finite = .true.
       !$omp parallel do schedule(static) reduction(.and.: finite) if(size(probabilities) >= 1024)
-      do index = 1_int32, size(logits, kind=int32)
+      do index = 1_int64, vocabulary_size
          probabilities(index) = probabilities(index) / normalizer
          finite = finite .and. ieee_is_finite(probabilities(index))
       end do
@@ -608,8 +694,8 @@ contains
             status = NPT_ERR_ALLOCATION
             return
          end if
-         ! The logits projection consumes a whole lane group at a time, so the
-         ! columns past the last staged token must read defined values.
+         ! The padded logits projection consumes a whole lane group at a time,
+         ! so rows past the last staged token must contain defined zeroes.
          workspace%batch_hidden = 0.0_real32
       end if
       call neural_decoder_state_init(workspace%decoder_state, model, decoder_status)
@@ -651,7 +737,11 @@ contains
 
       hidden_norm = sqrt(sum(real(hidden, real64) * real(hidden, real64)))
       finite_norm = ieee_is_finite(hidden_norm)
-      clip_scale = min(1.0_real64, config%gradient_clip_norm / max(hidden_norm, tiny(1.0_real64)))
+      clip_scale = 1.0_real64
+      if (.not. finite_norm) return
+      ! Dividing by tiny() when hidden_norm is zero can overflow even though
+      ! no clipping is needed. Divide only when the ratio is strictly below 1.
+      if (hidden_norm > config%gradient_clip_norm) clip_scale = config%gradient_clip_norm / hidden_norm
    end subroutine hidden_clip
 
    ! One exact tied-output cross-entropy update.  neural_decoder_step uses
@@ -970,6 +1060,9 @@ contains
       update_index = state%updates_completed + 1_int64
       rate = neural_scheduled_learning_rate(config, update_index)
       inverse_batch = 1.0_real64 / real(batch_count, real64)
+      ! Both AdamW and NOVA consume this mean-gradient scale. Initializing it
+      ! only inside the AdamW branch leaves the NOVA batch path undefined.
+      inverse_batch_32 = real(inverse_batch, real32)
       value_limit = config%embedding_value_limit
       ! The per-token clip is folded into the staged hidden vectors: the
       ! embedding gradient is clip * residual * hidden and the output-bias
@@ -1023,7 +1116,6 @@ contains
          scaled_rate_32 = real(scaled_rate, real32)
          inverse_step_scale_32 = real(inverse_step_scale, real32)
          decay_factor_32 = real(decay_factor, real32)
-         inverse_batch_32 = real(inverse_batch, real32)
          ! Loop order matters: for one vocabulary column the batch reduction is
          ! a sequence of axpy updates over the width vector, so the inner loop
          ! runs over features (contiguous, 8-wide vectorizable) and each batch
@@ -1132,15 +1224,10 @@ contains
             ! keeps the whole step to two sweeps of the column (this one and the
             ! update) instead of three; normalizing in place first measured slower.
             !
-            ! The energy reduction was also replaced by the members' own energies
-            ! (mean_b r_b(v)^2 ||h_b||^2, B scalar operations instead of a
-            ! width-sized reduction) and that is measurably wrong for this rule:
-            ! with the 1/B^2 rescaling the held-out NLL at N=128 went 8.43 -> 10.35
-            ! (run 40664826946), and the native toy contract stopped reducing its
-            ! NLL at B=4 with or without the rescaling (verify run 40664826759).
-            ! ||mean_b g_b||^2 carries the cancellation between members, and that
-            ! cancellation is what keeps a large accumulation factor stable; the
-            ! member form has no way to see it.
+            ! Averaging members' individual squared norms is not the same as
+            ! the squared norm of their mean: it loses cancellation between
+            ! gradients. Keep the latter as specified by NOVA-1. Historical N>1
+            ! NOVA quality comparisons must be rerun after the batch-scale fix.
             energy = dot_product(column_gradient, column_gradient) * &
                      (inverse_batch_32 * inverse_batch_32) / width_32
             agreement = dot_product(column_gradient, state%nova_u_embedding(:, token))
@@ -1224,31 +1311,34 @@ contains
    ! the top-1/top-5 bookkeeping.  Both the per-token path and the resolving
    ! block path call it in token order, so a block of deferred predictions sums
    ! in exactly the order the per-token path would have used.
-   subroutine observe_prediction(metrics, probabilities, target, loss, status)
+   subroutine observe_prediction(metrics, logits, maximum, normalizer, target, loss, status)
       type(neural_train_metrics_t), intent(inout) :: metrics
-      real(real64), intent(in) :: probabilities(:)
+      real(real32), intent(in) :: logits(:)
+      real(real64), intent(in) :: maximum, normalizer
       integer(int32), intent(in) :: target
       real(real64), intent(out) :: loss
       integer(int32), intent(out) :: status
       integer(int32) :: target_rank
-      real(real64) :: target_probability
+      real(real32) :: target_logit
 
       status = NPT_OK
-      loss = -log(max(probabilities(target), tiny(1.0_real64)))
+      ! Computing -log(probability) after exponentiation clips an underflowed
+      ! target at -log(tiny) (~708), no matter how wrong the prediction was.
+      ! The normalizer and maximum already come from the same softmax pass;
+      ! real32 logit differences fit in real64 without overflow.
+      loss = (maximum - real(logits(target), real64)) + log(normalizer)
       if (.not. ieee_is_finite(loss)) then
          status = NPT_ERR_NUMERICAL
          return
       end if
       metrics%prediction_tokens = metrics%prediction_tokens + 1_int64
       metrics%cumulative_nll = metrics%cumulative_nll + loss
-      ! Rank of the true token under the pre-update distribution.  Ties
-      ! resolve to the lowest index, matching greedy argmax decoding.
-      target_probability = probabilities(target)
-      ! rank = #{p_c > p_t} + #{p_c == p_t, c < t}; the two counts are array
-      ! comparisons over contiguous slices, which vectorize, instead of a
-      ! scalar scan over the whole vocabulary for every prediction.
-      target_rank = count(probabilities(target + 1_int32:) > target_probability) + &
-                    count(probabilities(:target - 1_int32) >= target_probability)
+      ! Softmax is monotone in exact arithmetic. Rank the original logits so
+      ! distinct very-low probabilities that round or underflow to zero are
+      ! not mistaken for ties. Exact ties still go to the lowest index.
+      target_logit = logits(target)
+      target_rank = count(logits(int(target, int64) + 1_int64:) > target_logit) + &
+                    count(logits(:int(target, int64) - 1_int64) >= target_logit)
       if (target_rank == 0_int32) metrics%top1_correct = metrics%top1_correct + 1_int64
       if (target_rank < 5_int32) metrics%top5_correct = metrics%top5_correct + 1_int64
    end subroutine observe_prediction
@@ -1337,8 +1427,8 @@ contains
       type(neural_train_metrics_t), intent(inout) :: metrics
       real(real64), intent(inout) :: sequence_nll
       integer(int32), intent(out) :: status
-      integer(int32) :: count, slot, decoder_status
-      real(real64) :: loss, phase_start
+      integer(int32) :: count, slot, decoder_status, padded_rows
+      real(real64) :: loss, phase_start, softmax_maximum, softmax_normalizer
 
       status = NPT_OK
       count = workspace%batch_count
@@ -1347,8 +1437,13 @@ contains
          status = NPT_ERR_INVALID_ARGUMENT
          return
       end if
+      ! The last partial batch can follow a full batch, leaving stale values
+      ! in unused rows. The fixed-lane path requires those rows to be zero.
+      padded_rows = ((count + NRD_LOGIT_BLOCK_LANES - 1_int32) / NRD_LOGIT_BLOCK_LANES) * NRD_LOGIT_BLOCK_LANES
+      if (padded_rows > count) workspace%batch_hidden(count + 1_int32:padded_rows, :) = 0.0_real32
       phase_start = clock_seconds()
-      call neural_decoder_project_logits(model, workspace%batch_hidden, count, workspace%batch_logits, decoder_status)
+      call neural_decoder_project_logits(model, workspace%batch_hidden, count, workspace%batch_logits, &
+                                         decoder_status, padded=.true.)
       metrics%project_seconds = metrics%project_seconds + (clock_seconds() - phase_start)
       if (decoder_status /= NRD_OK) then
          status = NPT_ERR_MODEL
@@ -1356,10 +1451,14 @@ contains
       end if
       phase_start = clock_seconds()
       do slot = 1_int32, count
-         ! Row of the block: contiguous, so no staging copy is needed.
-         call stable_softmax(workspace%batch_logits(slot, :), workspace%probabilities, status)
+         ! A row of a Fortran column-major matrix is strided. Gather it into the
+         ! already allocated logits buffer rather than making a fresh contiguous
+         ! argument temporary on every prediction.
+         workspace%logits(:) = workspace%batch_logits(slot, :)
+         call stable_softmax(workspace%logits, workspace%probabilities, softmax_maximum, softmax_normalizer, status)
          if (status /= NPT_OK) return
-         call observe_prediction(metrics, workspace%probabilities, workspace%batch_targets(slot), loss, status)
+         call observe_prediction(metrics, workspace%logits, softmax_maximum, softmax_normalizer, &
+                                 workspace%batch_targets(slot), loss, status)
          if (status /= NPT_OK) return
          sequence_nll = sequence_nll + loss
          call stage_batch_residual(workspace, config, workspace%probabilities, workspace%batch_targets(slot), slot, status)
@@ -1387,7 +1486,7 @@ contains
       integer(int32), intent(out) :: status
       integer(int32) :: position, decoder_status, target
       integer(int32) :: batch_capacity
-      real(real64) :: loss, sequence_nll, phase_start
+      real(real64) :: loss, sequence_nll, phase_start, softmax_maximum, softmax_normalizer
       logical :: accumulating
 
       status = NPT_OK
@@ -1453,9 +1552,9 @@ contains
                exit
             end if
             phase_start = clock_seconds()
-            call stable_softmax(workspace%logits, workspace%probabilities, status)
+            call stable_softmax(workspace%logits, workspace%probabilities, softmax_maximum, softmax_normalizer, status)
             if (status /= NPT_OK) exit
-            call observe_prediction(metrics, workspace%probabilities, target, loss, status)
+            call observe_prediction(metrics, workspace%logits, softmax_maximum, softmax_normalizer, target, loss, status)
             metrics%score_seconds = metrics%score_seconds + (clock_seconds() - phase_start)
             if (status /= NPT_OK) exit
             sequence_nll = sequence_nll + loss
@@ -1501,6 +1600,14 @@ contains
       type(neural_train_workspace_t) :: workspace
 
       if (.not. state%ready) call neural_train_state_init(state)
+      if (.not. neural_train_config_is_valid(config)) then
+         status = NPT_ERR_INVALID_ARGUMENT
+         return
+      end if
+      if (.not. optimizer_state_matches(state, model, config)) then
+         status = NPT_ERR_INCOMPATIBLE
+         return
+      end if
       call process_token_sequence(model, tokens, token_count, config, state, metrics, .true., workspace, status)
       call workspace_destroy(workspace)
    end subroutine neural_train_token_sequence
@@ -1541,6 +1648,7 @@ contains
       ! explicit skip cursor this permits checkpointed continuous chunks.
       integer(int64), intent(in), optional :: maximum_new_source_records
       character(len=FILE_LINE_BYTES) :: line
+      type(utf8_stream_reader_t) :: reader
       type(neural_train_workspace_t) :: workspace
       integer(int32), allocatable :: tokens(:)
       integer(int32) :: token_count, bpe_status, line_bytes, stream_status
@@ -1561,6 +1669,12 @@ contains
          status = NPT_ERR_INVALID_ARGUMENT
          return
       end if
+      if (update_model) then
+         if (.not. optimizer_state_matches(state, model, config)) then
+            status = NPT_ERR_INCOMPATIBLE
+            return
+         end if
+      end if
       allocate(tokens(config%maximum_tokens_per_record), stat=allocation_status)
       if (allocation_status /= 0) then
          status = NPT_ERR_ALLOCATION
@@ -1573,11 +1687,18 @@ contains
          status = NPT_ERR_IO
          return
       end if
+      call utf8_stream_reader_init(reader, unit, stream_status)
+      if (stream_status /= UTF8_STREAM_OK) then
+         close(unit)
+         deallocate(tokens)
+         status = NPT_ERR_ALLOCATION
+         return
+      end if
       source_record = 0_int64
       source_records_this_call = 0_int64
       do
          if (source_records_this_call >= source_record_limit) exit
-         call utf8_stream_read_record(unit, line, line_bytes, end_of_file, oversized, stream_status)
+         call utf8_stream_read_record(unit, line, line_bytes, end_of_file, oversized, stream_status, reader)
          if (stream_status /= UTF8_STREAM_OK) then
             close(unit)
             deallocate(tokens)
@@ -1707,16 +1828,52 @@ contains
       if (io_status == 0) read(unit, iostat=io_status) model%global_mix_logit
    end subroutine read_model_payload
 
+   pure logical function checkpoint_model_layout_is_valid(model)
+      type(neural_decoder_t), intent(in) :: model
+      integer :: width, vocabulary, heads, ffn_width, head_width
+
+      checkpoint_model_layout_is_valid = .false.
+      ! Check finiteness separately: decoder config validation compares these
+      ! values, which can trap on signaling NaNs in checked builds.
+      if (.not. neural_decoder_is_ready(model)) return
+      if (.not. checkpoint_finite_real32(model%config%memory_decay) .or. &
+          .not. checkpoint_finite_real32(model%config%rms_epsilon)) return
+      if (.not. neural_decoder_config_is_valid(model%config)) return
+      width = model%config%width
+      vocabulary = model%config%vocabulary_size
+      heads = model%config%heads
+      ffn_width = model%config%ffn_width
+      head_width = width / heads
+      if (model%head_width /= head_width) return
+      if (any(shape(model%token_embedding) /= [width, vocabulary])) return
+      if (size(model%output_bias) /= vocabulary) return
+      if (size(model%attention_rms) /= width .or. size(model%ffn_rms) /= width) return
+      if (any(shape(model%query) /= [head_width, width, heads])) return
+      if (any(shape(model%key) /= [head_width, width, heads])) return
+      if (any(shape(model%value) /= [head_width, width, heads])) return
+      if (any(shape(model%attention_output) /= [width, width])) return
+      if (any(shape(model%ffn_gate) /= [ffn_width, width])) return
+      if (any(shape(model%ffn_value) /= [ffn_width, width])) return
+      if (any(shape(model%ffn_output) /= [width, ffn_width])) return
+      if (size(model%global_mix_logit) /= heads) return
+      checkpoint_model_layout_is_valid = .true.
+   end function checkpoint_model_layout_is_valid
+
    pure logical function model_payload_is_finite(model)
       type(neural_decoder_t), intent(in) :: model
 
-      model_payload_is_finite = all(ieee_is_finite(model%token_embedding)) .and. &
-                                all(ieee_is_finite(model%output_bias)) .and. all(ieee_is_finite(model%attention_rms)) .and. &
-                                all(ieee_is_finite(model%ffn_rms)) .and. all(ieee_is_finite(model%query)) .and. &
-                                all(ieee_is_finite(model%key)) .and. all(ieee_is_finite(model%value)) .and. &
-                                all(ieee_is_finite(model%attention_output)) .and. all(ieee_is_finite(model%ffn_gate)) .and. &
-                                all(ieee_is_finite(model%ffn_value)) .and. all(ieee_is_finite(model%ffn_output)) .and. &
-                                all(ieee_is_finite(model%global_mix_logit))
+      model_payload_is_finite = all(checkpoint_finite_real32(model%token_embedding)) .and. &
+                                all(checkpoint_finite_real32(model%output_bias)) .and. &
+                                all(checkpoint_finite_real32(model%attention_rms)) .and. &
+                                all(checkpoint_finite_real32(model%ffn_rms)) .and. &
+                                all(checkpoint_finite_real32(model%query)) .and. &
+                                all(checkpoint_finite_real32(model%key)) .and. &
+                                all(checkpoint_finite_real32(model%value)) .and. &
+                                all(checkpoint_finite_real32(model%attention_output)) .and. &
+                                all(checkpoint_finite_real32(model%ffn_gate)) .and. &
+                                all(checkpoint_finite_real32(model%ffn_value)) .and. &
+                                all(checkpoint_finite_real32(model%ffn_output)) .and. &
+                                all(checkpoint_finite_real32(model%global_mix_logit))
    end function model_payload_is_finite
 
    pure logical function optimizer_state_is_present(state)
@@ -1740,51 +1897,66 @@ contains
 
       optimizer_state_is_finite = .true.
       if (allocated(state%adam_m_embedding)) optimizer_state_is_finite = &
-         optimizer_state_is_finite .and. all(ieee_is_finite(state%adam_m_embedding))
+         optimizer_state_is_finite .and. all(checkpoint_finite_real32(state%adam_m_embedding))
       if (allocated(state%adam_v_embedding)) optimizer_state_is_finite = &
-         optimizer_state_is_finite .and. all(ieee_is_finite(state%adam_v_embedding)) .and. &
-         all(state%adam_v_embedding >= 0.0_real32)
+         optimizer_state_is_finite .and. all(checkpoint_finite_nonnegative_real32(state%adam_v_embedding))
       if (allocated(state%adam_m_bias)) optimizer_state_is_finite = &
-         optimizer_state_is_finite .and. all(ieee_is_finite(state%adam_m_bias))
+         optimizer_state_is_finite .and. all(checkpoint_finite_real32(state%adam_m_bias))
       if (allocated(state%adam_v_bias)) optimizer_state_is_finite = &
-         optimizer_state_is_finite .and. all(ieee_is_finite(state%adam_v_bias)) .and. &
-         all(state%adam_v_bias >= 0.0_real32)
+         optimizer_state_is_finite .and. all(checkpoint_finite_nonnegative_real32(state%adam_v_bias))
       if (allocated(state%nova_u_embedding)) optimizer_state_is_finite = &
-         optimizer_state_is_finite .and. all(ieee_is_finite(state%nova_u_embedding))
+         optimizer_state_is_finite .and. all(checkpoint_finite_real32(state%nova_u_embedding))
       if (allocated(state%nova_u_bias)) optimizer_state_is_finite = &
-         optimizer_state_is_finite .and. all(ieee_is_finite(state%nova_u_bias))
+         optimizer_state_is_finite .and. all(checkpoint_finite_real32(state%nova_u_bias))
       if (allocated(state%nova_energy)) optimizer_state_is_finite = &
-         optimizer_state_is_finite .and. all(ieee_is_finite(state%nova_energy)) .and. &
-         all(state%nova_energy >= 0.0_real32)
+         optimizer_state_is_finite .and. all(checkpoint_finite_nonnegative_real32(state%nova_energy))
    end function optimizer_state_is_finite
 
-   pure logical function optimizer_state_matches(state, model)
+   ! Check optimizer family, completeness, and shape before training or opening
+   ! an output checkpoint. This is O(1) in model size and is not in the token loop.
+   pure logical function optimizer_state_matches(state, model, config) result(matches)
       type(neural_train_state_t), intent(in) :: state
       type(neural_decoder_t), intent(in) :: model
+      type(neural_train_config_t), intent(in) :: config
+      logical :: any_adam, all_adam, any_nova, all_nova
 
-      optimizer_state_matches = .true.
-      if (allocated(state%adam_m_embedding)) then
-         if (.not. optimizer_state_is_present(state)) then
-            optimizer_state_matches = .false.
-         else if (size(state%adam_m_embedding, 1, kind=int32) /= model%config%width .or. &
-                  size(state%adam_m_embedding, 2, kind=int32) /= model%config%vocabulary_size .or. &
-                  size(state%adam_v_embedding, 1, kind=int32) /= model%config%width .or. &
-                  size(state%adam_v_embedding, 2, kind=int32) /= model%config%vocabulary_size .or. &
-                  size(state%adam_m_bias, kind=int32) /= model%config%vocabulary_size .or. &
-                  size(state%adam_v_bias, kind=int32) /= model%config%vocabulary_size) then
-            optimizer_state_matches = .false.
-         end if
+      matches = .false.
+      any_adam = allocated(state%adam_m_embedding) .or. allocated(state%adam_v_embedding) .or. &
+                 allocated(state%adam_m_bias) .or. allocated(state%adam_v_bias)
+      all_adam = allocated(state%adam_m_embedding) .and. allocated(state%adam_v_embedding) .and. &
+                 allocated(state%adam_m_bias) .and. allocated(state%adam_v_bias)
+      any_nova = allocated(state%nova_u_embedding) .or. allocated(state%nova_u_bias) .or. &
+                 allocated(state%nova_energy)
+      all_nova = nova_state_is_present(state)
+      if (state%updates_completed < 0_int64 .or. (any_adam .and. .not. all_adam) .or. &
+          (any_nova .and. .not. all_nova)) return
+      select case (config%optimizer)
+      case (NPT_OPTIMIZER_SGD)
+         if (any_adam .or. any_nova) return
+      case (NPT_OPTIMIZER_ADAMW)
+         if (any_nova .or. (state%updates_completed > 0_int64 .and. .not. all_adam)) return
+      case (NPT_OPTIMIZER_NOVA)
+         if (any_adam .or. (state%updates_completed > 0_int64 .and. .not. all_nova)) return
+      case default
+         return
+      end select
+      ! Guard SIZE with the complete-allocation test: Fortran does not promise
+      ! short circuiting of boolean expressions.
+      if (all_adam) then
+         if (size(state%adam_m_embedding, 1, kind=int32) /= model%config%width .or. &
+             size(state%adam_m_embedding, 2, kind=int32) /= model%config%vocabulary_size .or. &
+             size(state%adam_v_embedding, 1, kind=int32) /= model%config%width .or. &
+             size(state%adam_v_embedding, 2, kind=int32) /= model%config%vocabulary_size .or. &
+             size(state%adam_m_bias, kind=int32) /= model%config%vocabulary_size .or. &
+             size(state%adam_v_bias, kind=int32) /= model%config%vocabulary_size) return
       end if
-      if (allocated(state%nova_u_embedding)) then
-         if (.not. nova_state_is_present(state)) then
-            optimizer_state_matches = .false.
-         else if (size(state%nova_u_embedding, 1, kind=int32) /= model%config%width .or. &
-                  size(state%nova_u_embedding, 2, kind=int32) /= model%config%vocabulary_size .or. &
-                  size(state%nova_u_bias, kind=int32) /= model%config%vocabulary_size .or. &
-                  size(state%nova_energy, kind=int32) /= model%config%vocabulary_size) then
-            optimizer_state_matches = .false.
-         end if
+      if (all_nova) then
+         if (size(state%nova_u_embedding, 1, kind=int32) /= model%config%width .or. &
+             size(state%nova_u_embedding, 2, kind=int32) /= model%config%vocabulary_size .or. &
+             size(state%nova_u_bias, kind=int32) /= model%config%vocabulary_size .or. &
+             size(state%nova_energy, kind=int32) /= model%config%vocabulary_size) return
       end if
+      matches = .true.
    end function optimizer_state_matches
 
    ! Checkpoints include every mutable neural parameter and the update cursor.
@@ -1801,10 +1973,29 @@ contains
       integer :: unit, io_status, write_status
 
       status = NPT_OK
+      ! These checks must be sequenced: Fortran may evaluate every term in an
+      ! OR expression, including a payload scan of an unallocated model.
       if (len_trim(path) == 0 .or. .not. neural_decoder_is_ready(model) .or. .not. bpe_is_initialized(bpe) .or. &
           .not. neural_train_config_is_valid(config) .or. .not. state%ready .or. &
-          model%config%vocabulary_size < bpe%token_count .or. .not. model_payload_is_finite(model) .or. &
-          .not. optimizer_state_is_finite(state) .or. .not. optimizer_state_matches(state, model)) then
+          model%config%vocabulary_size < bpe%token_count) then
+         status = NPT_ERR_INVALID_ARGUMENT
+         return
+      end if
+      if (.not. checkpoint_model_layout_is_valid(model)) then
+         status = NPT_ERR_INVALID_ARGUMENT
+         return
+      end if
+      if (state%records_completed < 0_int64 .or. state%source_records_completed < 0_int64 .or. &
+          state%updates_completed < 0_int64 .or. state%tokens_seen < 0_int64 .or. &
+          .not. checkpoint_finite_real64(state%cumulative_nll)) then
+         status = NPT_ERR_INVALID_ARGUMENT
+         return
+      end if
+      if (.not. optimizer_state_matches(state, model, config)) then
+         status = NPT_ERR_INVALID_ARGUMENT
+         return
+      end if
+      if (.not. model_payload_is_finite(model) .or. .not. optimizer_state_is_finite(state)) then
          status = NPT_ERR_INVALID_ARGUMENT
          return
       end if
@@ -1932,6 +2123,15 @@ contains
          status = NPT_ERR_IO
          return
       end if
+      ! Validate real header fields before their range checks: Fortran may
+      ! evaluate every OR operand even when an earlier check has failed.
+      if (.not. checkpoint_finite_real32(decoder_config%memory_decay) .or. &
+          .not. checkpoint_finite_real32(decoder_config%rms_epsilon) .or. &
+          .not. checkpoint_finite_real64(state%cumulative_nll)) then
+         close(unit)
+         status = NPT_ERR_FORMAT
+         return
+      end if
       ! Legacy SGD checkpoints may carry a non-zero, then ignored, weight decay.
       ! Normalize that field before validation so the restored configuration
       ! describes the update that will actually run: SGD applies no decoupled
@@ -1944,8 +2144,18 @@ contains
           (stored_optimizer_flag /= 0_int32 .and. stored_optimizer_flag /= 1_int32) .or. &
           state%records_completed < 0_int64 .or. state%source_records_completed < 0_int64 .or. &
           state%updates_completed < 0_int64 .or. state%tokens_seen < 0_int64 .or. &
-          .not. ieee_is_finite(state%cumulative_nll)) then
+          .not. checkpoint_finite_real64(state%cumulative_nll)) then
          close(unit)
+         status = NPT_ERR_FORMAT
+         return
+      end if
+      ! A trained AdamW/NOVA checkpoint without moments is not resumable.
+      ! SGD legitimately has no optimizer payload, and zero-update checkpoints
+      ! intentionally allocate their state lazily.
+      if (state%updates_completed > 0_int64 .and. stored_optimizer_flag == 0_int32 .and. &
+          config%optimizer /= NPT_OPTIMIZER_SGD) then
+         close(unit)
+         state = neural_train_state_t()
          status = NPT_ERR_FORMAT
          return
       end if
@@ -2031,6 +2241,22 @@ contains
                if (io_status == 0) read(unit, iostat=io_status) m_bias_wide
                if (io_status == 0) read(unit, iostat=io_status) v_bias_wide
                if (io_status == 0) then
+                  ! Check the wide payload before conversion: REAL(real64,
+                  ! real32) can overflow (or trap on a signaling NaN) before a
+                  ! post-conversion finiteness check gets a chance to run.
+                  if (.not. all(checkpoint_finite_real64(m_wide)) .or. &
+                      .not. all(checkpoint_finite_real64(v_wide)) .or. &
+                      .not. all(checkpoint_finite_real64(m_bias_wide)) .or. &
+                      .not. all(checkpoint_finite_real64(v_bias_wide))) io_status = 1
+               end if
+               if (io_status == 0) then
+                  if (any(abs(m_wide) > real(huge(0.0_real32), real64)) .or. &
+                      any(abs(v_wide) > real(huge(0.0_real32), real64)) .or. &
+                      any(abs(m_bias_wide) > real(huge(0.0_real32), real64)) .or. &
+                      any(abs(v_bias_wide) > real(huge(0.0_real32), real64)) .or. &
+                      any(v_wide < 0.0_real64) .or. any(v_bias_wide < 0.0_real64)) io_status = 1
+               end if
+               if (io_status == 0) then
                   state%adam_m_embedding = real(m_wide, real32)
                   state%adam_v_embedding = real(v_wide, real32)
                   state%adam_m_bias = real(m_bias_wide, real32)
@@ -2039,19 +2265,38 @@ contains
                deallocate(m_wide, v_wide, m_bias_wide, v_bias_wide)
             end if
          end if
-         if (io_status /= 0 .or. .not. optimizer_state_is_finite(state)) then
+         ! Failed reads may leave an allocated array uninitialized; do not
+         ! inspect it as part of a non-short-circuit boolean expression.
+         if (io_status == 0) then
+            if (.not. optimizer_state_is_finite(state)) io_status = 1
+         end if
+         if (io_status /= 0) then
             close(unit)
             call neural_decoder_destroy(model)
             state = neural_train_state_t()
             status = NPT_ERR_IO
             return
          end if
+         if (config%optimizer == NPT_OPTIMIZER_SGD) then
+            ! Legacy SGD updates did not use these carried-over Adam moments.
+            ! Validate and consume them, then discard them so an SGD resume
+            ! keeps the original update semantics and saves consistently.
+            if (allocated(state%adam_m_embedding)) deallocate(state%adam_m_embedding)
+            if (allocated(state%adam_v_embedding)) deallocate(state%adam_v_embedding)
+            if (allocated(state%adam_m_bias)) deallocate(state%adam_m_bias)
+            if (allocated(state%adam_v_bias)) deallocate(state%adam_v_bias)
+         end if
       end if
 
       call read_model_payload(unit, model, io_status)
       read_status = io_status
       close(unit, iostat=io_status)
-      if (read_status /= 0 .or. io_status /= 0 .or. .not. model_payload_is_finite(model)) then
+      ! A failed read may leave a partially written element in the payload;
+      ! do not inspect it until every model array and the close have succeeded.
+      if (read_status == 0 .and. io_status == 0) then
+         if (.not. model_payload_is_finite(model)) read_status = 1
+      end if
+      if (read_status /= 0 .or. io_status /= 0) then
          call neural_decoder_destroy(model)
          state = neural_train_state_t()
          status = NPT_ERR_IO

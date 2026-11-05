@@ -2,24 +2,49 @@ cmake_minimum_required(VERSION 3.20)
 
 project(VegaiHDS VERSION 0.1.0 LANGUAGES Fortran)
 
-option(VEGAI_ENABLE_OPENMP "Enable OpenMP parallel cleanup scans" ON)
+option(VEGAI_ENABLE_OPENMP "Enable OpenMP parallel cleanup scans when available" ON)
+option(VEGAI_REQUIRE_OPENMP "Fail configuration unless Fortran OpenMP is available" OFF)
 option(VEGAI_BUILD_TESTS "Build property and integration tests" ON)
 option(VEGAI_ENABLE_LEGACY_PYTHON_TESTS
        "Enable migration-era Python integration/control-plane tests (not required by native Fortran runtime)" OFF)
 set(VEGAI_CPU_TARGET "portable" CACHE STRING
     "CPU code-generation profile: portable (no host ISA) or native (host-tuned)")
 set_property(CACHE VEGAI_CPU_TARGET PROPERTY STRINGS portable native)
+set(VEGAI_FORTRAN_STANDARD "2018" CACHE STRING
+    "Fortran standard profile: 2018 (portable default) or 2023 (opt-in)")
+set_property(CACHE VEGAI_FORTRAN_STANDARD PROPERTY STRINGS 2023 2018)
 
+if(NOT VEGAI_FORTRAN_STANDARD STREQUAL "2023" AND NOT VEGAI_FORTRAN_STANDARD STREQUAL "2018")
+    message(FATAL_ERROR "VEGAI_FORTRAN_STANDARD must be 2023 or 2018, got: ${VEGAI_FORTRAN_STANDARD}")
+endif()
 if(NOT VEGAI_CPU_TARGET STREQUAL "portable" AND NOT VEGAI_CPU_TARGET STREQUAL "native")
     message(FATAL_ERROR "VEGAI_CPU_TARGET must be portable or native, got: ${VEGAI_CPU_TARGET}")
 endif()
 
-# Vegai is specified and continuously compiled as a Fortran 2023 project.
-# CMake has no universally portable feature abstraction for every compiler, so
-# known compiler families receive their explicit conformance flags below.
-set(CMAKE_Fortran_STANDARD 2023)
-set(CMAKE_Fortran_STANDARD_REQUIRED ON)
-set(CMAKE_Fortran_EXTENSIONS OFF)
+# Fortran 2018 is the broad compatibility baseline; 2023 is an explicit newer
+# compiler profile. CMake has no portable Fortran standard feature abstraction,
+# so known compilers receive checked compiler-specific flags.
+if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+    include(CheckFortranCompilerFlag)
+    set(VEGAI_GNU_STANDARD_FLAG "-std=f${VEGAI_FORTRAN_STANDARD}")
+    set(_vegai_standard_check "VEGAI_GNU_F${VEGAI_FORTRAN_STANDARD}_SUPPORTED")
+    check_fortran_compiler_flag("${VEGAI_GNU_STANDARD_FLAG}" ${_vegai_standard_check})
+    if(NOT ${_vegai_standard_check})
+        if(VEGAI_FORTRAN_STANDARD STREQUAL "2023")
+            message(FATAL_ERROR
+                "GNU Fortran does not support ${VEGAI_GNU_STANDARD_FLAG}. Upgrade the compiler or explicitly configure -DVEGAI_FORTRAN_STANDARD=2018 for compatibility mode.")
+        else()
+            message(FATAL_ERROR "GNU Fortran does not support ${VEGAI_GNU_STANDARD_FLAG}; upgrade the compiler.")
+        endif()
+    endif()
+elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
+    if(VEGAI_FORTRAN_STANDARD STREQUAL "2018")
+        set(VEGAI_INTEL_STANDARD_FLAG "f18")
+    else()
+        set(VEGAI_INTEL_STANDARD_FLAG "f23")
+    endif()
+endif()
+message(STATUS "Vegai Fortran standard profile: ${VEGAI_FORTRAN_STANDARD}")
 
 add_library(vegai_hds STATIC
     src/hyper_types.f90
@@ -40,6 +65,8 @@ add_library(vegai_hds STATIC
     src/turkish_text.f90
     src/dialogue_retrieval.f90
     src/fortran_integrity.f90
+    src/corpus_preflight.f90
+    src/portable_cli.f90
     src/fortran_quality_gate.f90
     src/fortran_control.f90
     src/sparse_expert_layer.f90
@@ -54,22 +81,22 @@ target_include_directories(vegai_hds PUBLIC
 )
 
 if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
-    target_compile_options(vegai_hds PUBLIC -std=f2023)
+    target_compile_options(vegai_hds PUBLIC "${VEGAI_GNU_STANDARD_FLAG}")
     target_compile_options(vegai_hds PRIVATE
         -Wall -Wextra -Wimplicit-interface -Wcharacter-truncation
         -ffree-line-length-none
     )
 elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
     if(WIN32)
-        target_compile_options(vegai_hds PUBLIC /stand:f23)
+        target_compile_options(vegai_hds PUBLIC "/stand:${VEGAI_INTEL_STANDARD_FLAG}")
         target_compile_options(vegai_hds PRIVATE /warn:all)
     else()
-        target_compile_options(vegai_hds PUBLIC -stand f23)
+        target_compile_options(vegai_hds PUBLIC -stand "${VEGAI_INTEL_STANDARD_FLAG}")
         target_compile_options(vegai_hds PRIVATE -warn all)
     endif()
 else()
     message(WARNING
-        "Compiler-specific Fortran 2023 conformance flag is unknown; configure it explicitly.")
+        "Compiler-specific Fortran ${VEGAI_FORTRAN_STANDARD} conformance flag is unknown; configure it explicitly.")
 endif()
 
 # The portable profile intentionally emits no host-ISA flags.  A binary built
@@ -95,14 +122,22 @@ endif()
 message(STATUS "Vegai CPU target profile: ${VEGAI_CPU_TARGET}")
 message(STATUS "Vegai execution backend: portable CPU; GPU/NPU inventory is not accelerator dispatch and no vendor runtime is required")
 
+if(VEGAI_REQUIRE_OPENMP AND NOT VEGAI_ENABLE_OPENMP)
+    message(FATAL_ERROR "VEGAI_REQUIRE_OPENMP=ON conflicts with VEGAI_ENABLE_OPENMP=OFF")
+endif()
 if(VEGAI_ENABLE_OPENMP)
     find_package(OpenMP COMPONENTS Fortran)
     if(OpenMP_Fortran_FOUND)
         target_link_libraries(vegai_hds PUBLIC OpenMP::OpenMP_Fortran)
         target_compile_definitions(vegai_hds PUBLIC VEGAI_OPENMP=1)
+        message(STATUS "Vegai OpenMP Fortran: enabled")
+    elseif(VEGAI_REQUIRE_OPENMP)
+        message(FATAL_ERROR "Fortran OpenMP was required but was not found for the selected compiler")
     else()
         message(WARNING "OpenMP Fortran was not found; cleanup scans remain serial.")
     endif()
+else()
+    message(STATUS "Vegai OpenMP Fortran: disabled")
 endif()
 
 add_executable(hds_engine app/main.f90)
@@ -149,6 +184,14 @@ target_link_libraries(vegai_dialogue_eval PRIVATE vegai_hds)
 add_executable(vegai_control app/control.f90)
 target_link_libraries(vegai_control PRIVATE vegai_hds)
 
+# Optional exact-record train/held-out contamination check, outside training.
+add_executable(vegai_corpus_overlap app/corpus_overlap.f90)
+target_link_libraries(vegai_corpus_overlap PRIVATE vegai_hds)
+
+# Offline bounded UD text extraction for reproducible native experiments.
+add_executable(vegai_ud_text_extract app/ud_text_extract.f90)
+target_link_libraries(vegai_ud_text_extract PRIVATE vegai_hds)
+
 # Extreme-capacity sparse expert layer: an LSH-routed, hash-materialised layer
 # whose active parameters, active FLOPs and per-step wall clock do not depend on
 # total capacity.  The benchmark is the in-engine proof of that invariance.
@@ -166,10 +209,16 @@ target_link_libraries(vegai_sparse_layer_bench PRIVATE vegai_hds)
 # independently of the HDC stack, and so its tests can be run on their own.
 # ---------------------------------------------------------------------------
 add_library(vegai_context STATIC
+    # The prompt CLI uses the same bounded numeric parser as the control plane.
+    # Each library writes modules to its own directory; FPM builds it only once.
+    src/portable_cli.f90
+    src/utf8_record_stream.f90
+    src/utf8_generation.f90
     src/fixed_budget_context.f90
     src/fixed_budget_backward.f90
     src/fixed_budget_optimizer.f90
     src/fixed_budget_training.f90
+    src/fixed_budget_natural_eval.f90
 )
 set_target_properties(vegai_context PROPERTIES
     Fortran_MODULE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules-context"
@@ -178,16 +227,16 @@ target_include_directories(vegai_context PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/modules-context>
 )
 if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
-    target_compile_options(vegai_context PUBLIC -std=f2023)
+    target_compile_options(vegai_context PUBLIC "${VEGAI_GNU_STANDARD_FLAG}")
     target_compile_options(vegai_context PRIVATE
         -Wall -Wextra -Wimplicit-interface -Wcharacter-truncation
         -ffree-line-length-none
     )
 elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
     if(WIN32)
-        target_compile_options(vegai_context PUBLIC /stand:f23)
+        target_compile_options(vegai_context PUBLIC "/stand:${VEGAI_INTEL_STANDARD_FLAG}")
     else()
-        target_compile_options(vegai_context PUBLIC -stand f23)
+        target_compile_options(vegai_context PUBLIC -stand "${VEGAI_INTEL_STANDARD_FLAG}")
     endif()
 endif()
 
@@ -205,9 +254,22 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
     target_compile_options(vegai_prompt_engine PRIVATE -ffree-line-length-none)
 endif()
 
+# Cold-record next-byte NLL for caller-supplied held-out UTF-8 text.
+add_executable(vegai_natural_eval app/natural_eval.f90)
+target_link_libraries(vegai_natural_eval PRIVATE vegai_context)
+
 if(VEGAI_BUILD_TESTS)
     include(CTest)
     enable_testing()
+
+    if(VEGAI_REQUIRE_OPENMP)
+        add_executable(vegai_openmp_probe test/openmp_probe.f90)
+        target_link_libraries(vegai_openmp_probe PRIVATE vegai_hds)
+        add_test(NAME vegai_openmp_two_threads COMMAND vegai_openmp_probe)
+        set_tests_properties(vegai_openmp_two_threads PROPERTIES
+            ENVIRONMENT "OMP_NUM_THREADS=2;OMP_DYNAMIC=FALSE;OMP_THREAD_LIMIT=2"
+            PASS_REGULAR_EXPRESSION "OpenMP runtime team size: 2" TIMEOUT 30)
+    endif()
 
     add_executable(vegai_tests
         test/test_support.f90
@@ -219,7 +281,23 @@ if(VEGAI_BUILD_TESTS)
         target_compile_options(vegai_tests PRIVATE -ffree-line-length-none)
     endif()
 
-    add_test(NAME vegai_fortran_properties COMMAND vegai_tests)
+    add_test(NAME vegai_fortran_properties
+             COMMAND ${CMAKE_COMMAND} -DPROGRAM=$<TARGET_FILE:vegai_tests> -DWORK_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/test/run_native_in_temp.cmake)
+    add_test(NAME vegai_fixture_isolation_guard
+             COMMAND ${CMAKE_COMMAND} -DPROGRAM=$<TARGET_FILE:vegai_tests> -DWORK_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/test/native_fixture_guard.cmake)
+
+    # Compare read-ahead against the legacy byte reader on arbitrary octets,
+    # empty/oversized/final records and boundaries spanning multiple buffers.
+    add_executable(vegai_utf8_stream_tests test/test_utf8_record_stream.f90)
+    target_link_libraries(vegai_utf8_stream_tests PRIVATE vegai_hds)
+    add_test(NAME vegai_utf8_stream_contract COMMAND vegai_utf8_stream_tests)
+
+    # Single-pass SHA-256/record preflight and strict numeric/UTF-8 CLI input.
+    add_executable(vegai_corpus_preflight_tests test/corpus_preflight_tests.f90)
+    target_link_libraries(vegai_corpus_preflight_tests PRIVATE vegai_hds)
+    add_test(NAME vegai_corpus_preflight_contract COMMAND vegai_corpus_preflight_tests)
 
     # Contract tests for the sparse layer: routing determinism, page locality,
     # update locality, replay determinism, capacity invariance, trainability.
@@ -229,10 +307,13 @@ if(VEGAI_BUILD_TESTS)
         target_compile_options(vegai_sparse_layer_tests PRIVATE -ffree-line-length-none)
     endif()
     add_test(NAME vegai_sparse_layer_contract COMMAND vegai_sparse_layer_tests)
+    set_tests_properties(vegai_sparse_layer_contract PROPERTIES TIMEOUT 60)
     # The benchmark asserts flat latency across 1e3 -> 1e9 parameters, so it is a
     # test as well as a measurement: a regression in step complexity fails it.
     add_test(NAME vegai_sparse_layer_bench COMMAND vegai_sparse_layer_bench)
-    set_tests_properties(vegai_sparse_layer_bench PROPERTIES TIMEOUT 300)
+    # Keep other CTest workloads from distorting this wall-clock comparison.
+    # External system load can still affect it, so it remains a measurement.
+    set_tests_properties(vegai_sparse_layer_bench PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE)
 
     # Fixed-budget context engine contract suite: option parsing, horizon
     # invariance of every structural counter, no future leakage, chunk/stream
@@ -247,6 +328,86 @@ if(VEGAI_BUILD_TESTS)
     endif()
     add_test(NAME vegai_context_contract COMMAND vegai_context_tests)
     set_tests_properties(vegai_context_contract PROPERTIES TIMEOUT 900)
+
+    # Native, equal-token/update held-out comparison; it runs only when invoked
+    # explicitly with independently split input files, not as a timing test.
+    add_executable(vegai_context_quality_ab tools/benchmark_context_quality.f90)
+    target_link_libraries(vegai_context_quality_ab PRIVATE vegai_context)
+    add_test(NAME vegai_context_quality_ab_smoke
+             COMMAND vegai_context_quality_ab
+                     ${CMAKE_CURRENT_SOURCE_DIR}/examples/corpus/mini_turkish_ascii_pretrain.txt
+                     ${CMAKE_CURRENT_SOURCE_DIR}/examples/corpus/mini_turkish_causal_utf8.txt 32)
+    # The fixed-work five-seed A/B can exceed a minute under instrumented
+    # builds or contended CI; allow margin without changing its training budget.
+    set_tests_properties(vegai_context_quality_ab_smoke PROPERTIES TIMEOUT 180
+                         PASS_REGULAR_EXPRESSION "median_nll_delta=")
+
+    # The slot comparison trains each arm only once and evaluates two separate
+    # held-out byte streams after timing; NLL and timing are not CI thresholds.
+    add_executable(vegai_slot_quality_ab tools/benchmark_slot_quality.f90)
+    target_link_libraries(vegai_slot_quality_ab PRIVATE vegai_context)
+
+    # Equal-rule LR comparison with stream, cold-record and short-prefix NLL.
+    add_executable(vegai_natural_quality_ab tools/benchmark_natural_quality.f90)
+    target_link_libraries(vegai_natural_quality_ab PRIVATE vegai_context)
+
+    add_executable(vegai_prompt_resume_fixture tools/prompt_resume_fixture.f90)
+    target_link_libraries(vegai_prompt_resume_fixture PRIVATE vegai_context)
+    add_test(NAME vegai_corpus_overlap_contract
+             COMMAND ${CMAKE_COMMAND} -DOVERLAP=$<TARGET_FILE:vegai_corpus_overlap>
+                     -DFIXTURE=$<TARGET_FILE:vegai_prompt_resume_fixture> -DWORK_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/test/native_corpus_overlap.cmake)
+    set_tests_properties(vegai_corpus_overlap_contract PROPERTIES TIMEOUT 180)
+    add_test(NAME vegai_ud_text_extract_contract
+             COMMAND ${CMAKE_COMMAND} -DEXTRACT=$<TARGET_FILE:vegai_ud_text_extract>
+                     -DWORK_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/test/native_ud_text_extract.cmake)
+    set_tests_properties(vegai_ud_text_extract_contract PROPERTIES TIMEOUT 60)
+    add_test(NAME vegai_context_quality_input_contract
+             COMMAND ${CMAKE_COMMAND} -DBENCH=$<TARGET_FILE:vegai_context_quality_ab>
+                     -DFIXTURE=$<TARGET_FILE:vegai_prompt_resume_fixture> -DWORK_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/test/native_context_quality_cli.cmake)
+    set_tests_properties(vegai_context_quality_input_contract PROPERTIES TIMEOUT 30)
+    add_test(NAME vegai_slot_quality_input_contract
+             COMMAND ${CMAKE_COMMAND} -DBENCH=$<TARGET_FILE:vegai_slot_quality_ab>
+                     -DFIXTURE=$<TARGET_FILE:vegai_prompt_resume_fixture> -DWORK_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/test/native_slot_quality_cli.cmake)
+    set_tests_properties(vegai_slot_quality_input_contract PROPERTIES TIMEOUT 180)
+    add_test(NAME vegai_natural_quality_input_contract
+             COMMAND ${CMAKE_COMMAND} -DBENCH=$<TARGET_FILE:vegai_natural_quality_ab>
+                     -DFIXTURE=$<TARGET_FILE:vegai_prompt_resume_fixture> -DWORK_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/test/native_natural_quality_cli.cmake)
+    set_tests_properties(vegai_natural_quality_input_contract PROPERTIES TIMEOUT 180)
+    add_test(NAME vegai_natural_eval_contract
+             COMMAND ${CMAKE_COMMAND} -DEVAL=$<TARGET_FILE:vegai_natural_eval>
+                     -DENGINE=$<TARGET_FILE:vegai_prompt_engine> -DFIXTURE=$<TARGET_FILE:vegai_prompt_resume_fixture>
+                     -DWORK_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/test/native_natural_eval.cmake)
+    set_tests_properties(vegai_natural_eval_contract PROPERTIES TIMEOUT 60)
+    add_test(NAME vegai_prompt_resume_contract
+             COMMAND ${CMAKE_COMMAND} -DENGINE=$<TARGET_FILE:vegai_prompt_engine>
+                     -DCONTEXT=$<TARGET_FILE:vegai_context_engine> -DFIXTURE=$<TARGET_FILE:vegai_prompt_resume_fixture>
+                     -DWORK_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/test/native_prompt_resume.cmake)
+    set_tests_properties(vegai_prompt_resume_contract PROPERTIES TIMEOUT 60)
+    add_test(NAME vegai_prompt_json_contract
+             COMMAND ${CMAKE_COMMAND} -DENGINE=$<TARGET_FILE:vegai_prompt_engine>
+                     -DFIXTURE=$<TARGET_FILE:vegai_prompt_resume_fixture> -DWORK_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/test/native_prompt_json.cmake)
+    set_tests_properties(vegai_prompt_json_contract PROPERTIES TIMEOUT 180)
+    add_test(NAME vegai_natural_profile_contract
+             COMMAND ${CMAKE_COMMAND} -DENGINE=$<TARGET_FILE:vegai_prompt_engine>
+                     -DWORK_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/test/native_natural_profile.cmake)
+    set_tests_properties(vegai_natural_profile_contract PROPERTIES TIMEOUT 180)
+
+    add_test(NAME vegai_portable_runtime_smoke
+             COMMAND ${CMAKE_COMMAND} -DENGINE=$<TARGET_FILE:hds_engine>
+                     -DPRETRAIN=$<TARGET_FILE:vegai_pretrain>
+                     -DCORPUS=${CMAKE_CURRENT_SOURCE_DIR}/examples/corpus/toy_hdc_corpus.txt
+                     -DWORK_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/test/native_portable_runtime.cmake)
+    set_tests_properties(vegai_portable_runtime_smoke PROPERTIES TIMEOUT 300)
 
     # The CLI is part of the contract: a bad horizon must fail loudly, and the
     # plan/sweep/bench lines must be machine readable.
@@ -263,6 +424,22 @@ if(VEGAI_BUILD_TESTS)
     add_test(NAME vegai_context_cli_rejects_bad_local_window
              COMMAND vegai_context_engine plan --local-window 999999)
     set_tests_properties(vegai_context_cli_rejects_bad_local_window PROPERTIES WILL_FAIL TRUE)
+    add_test(NAME vegai_context_cli_rejects_nan_learning_rate
+             COMMAND vegai_context_engine plan --lr nan)
+    add_test(NAME vegai_context_cli_rejects_infinite_learning_rate
+             COMMAND vegai_context_engine plan --lr inf)
+    add_test(NAME vegai_context_cli_rejects_overflowing_learning_rate
+             COMMAND vegai_context_engine plan --lr 1e309)
+    add_test(NAME vegai_context_cli_rejects_underflowing_learning_rate
+             COMMAND vegai_context_engine plan --lr 1e-9999)
+    add_test(NAME vegai_context_cli_rejects_extra_real_token
+             COMMAND vegai_context_engine plan --lr 0.1,0.2)
+    add_test(NAME vegai_context_cli_accepts_scientific_learning_rate
+             COMMAND vegai_context_engine plan --lr 3D-3)
+    set_tests_properties(vegai_context_cli_rejects_nan_learning_rate vegai_context_cli_rejects_infinite_learning_rate
+                         vegai_context_cli_rejects_overflowing_learning_rate
+                         vegai_context_cli_rejects_underflowing_learning_rate vegai_context_cli_rejects_extra_real_token
+                         PROPERTIES WILL_FAIL TRUE TIMEOUT 30)
 
     # The default horizon is a design decision and is asserted, not assumed.
     add_test(NAME vegai_context_cli_plan_defaults
@@ -294,24 +471,27 @@ if(VEGAI_BUILD_TESTS)
                      --local-window 8 --memory-scales 2 --memory-slots 8)
     set_tests_properties(vegai_context_cli_sweep PROPERTIES TIMEOUT 300)
 
-    # Train -> inspect -> evaluate round trip through a real checkpoint file.
-    add_test(NAME vegai_context_cli_train
-             COMMAND vegai_context_engine train --tokens 256 --train-chunk-tokens 32
-                     --width 16 --heads 2 --ffn 32 --vocab 16 --local-window 8
-                     --memory-scales 2 --memory-slots 8 --window 1000000
-                     --checkpoint ${CMAKE_CURRENT_BINARY_DIR}/context-smoke.vgfb)
-    set_tests_properties(vegai_context_cli_train PROPERTIES
-        TIMEOUT 300 FIXTURES_SETUP context_checkpoint)
-    add_test(NAME vegai_context_cli_inspect
-             COMMAND vegai_context_engine inspect --checkpoint
-                     ${CMAKE_CURRENT_BINARY_DIR}/context-smoke.vgfb)
-    set_tests_properties(vegai_context_cli_inspect PROPERTIES
-        FIXTURES_REQUIRED context_checkpoint)
-    add_test(NAME vegai_context_cli_evaluate
-             COMMAND vegai_context_engine evaluate --tokens 256 --task needle --distance 32
-                     --checkpoint ${CMAKE_CURRENT_BINARY_DIR}/context-smoke.vgfb)
-    set_tests_properties(vegai_context_cli_evaluate PROPERTIES
-        TIMEOUT 300 FIXTURES_REQUIRED context_checkpoint)
+    # Use random test-owned directories to avoid the previous fixed checkpoint
+    # names, accidental overwrites and races between separate CTest invocations.
+    # As with all test scratch roots, WORK_ROOT must be a trusted directory.
+    foreach(case_name IN ITEMS rejects_partial_budget partial_budget_opt_in train inspect evaluate)
+        if(case_name STREQUAL "rejects_partial_budget")
+            set(case_mode partial-reject)
+        elseif(case_name STREQUAL "partial_budget_opt_in")
+            set(case_mode partial-allow)
+        else()
+            set(case_mode ${case_name})
+        endif()
+        add_test(NAME vegai_context_cli_${case_name}
+                 COMMAND ${CMAKE_COMMAND} -DENGINE=$<TARGET_FILE:vegai_context_engine>
+                         -DMODE=${case_mode} -DWORK_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+                         -P ${CMAKE_CURRENT_SOURCE_DIR}/test/native_context_cli.cmake)
+        if(case_name MATCHES "^.*partial.*$")
+            set_tests_properties(vegai_context_cli_${case_name} PROPERTIES TIMEOUT 30)
+        else()
+            set_tests_properties(vegai_context_cli_${case_name} PROPERTIES TIMEOUT 300)
+        endif()
+    endforeach()
     # The default native control-plane contract contains no Python process:
     # profile/report rendering, bounded resource arithmetic, and a real
     # same-host vocabulary/train/checkpoint/load smoke all run in Fortran.
@@ -329,24 +509,90 @@ if(VEGAI_BUILD_TESTS)
     )
     add_test(
         NAME vegai_fortran_control_smoke
-        COMMAND $<TARGET_FILE:vegai_control> smoke
-                ${CMAKE_CURRENT_SOURCE_DIR}/examples/corpus/toy_hdc_corpus.txt
-                ${CMAKE_CURRENT_BINARY_DIR}/fortran-control-smoke.vgai
+        COMMAND ${CMAKE_COMMAND}
+                -DCONTROL=$<TARGET_FILE:vegai_control>
+                -DCORPUS=${CMAKE_CURRENT_SOURCE_DIR}/examples/corpus/toy_hdc_corpus.txt
+                -DWORK_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/test/native_control_regression.cmake
     )
     set_tests_properties(vegai_fortran_control_smoke PROPERTIES TIMEOUT 120)
-    add_test(
-        NAME vegai_fortran_control_attest
-        COMMAND $<TARGET_FILE:vegai_control> attest
-                ${CMAKE_CURRENT_SOURCE_DIR}/examples/corpus/toy_hdc_corpus.txt
-                ${CMAKE_CURRENT_BINARY_DIR}/fortran-control-smoke.vgai --format json
-    )
-    set_tests_properties(vegai_fortran_control_attest PROPERTIES DEPENDS vegai_fortran_control_smoke)
 
     # Python remains available only as a migration-era verifier/control-plane
     # adapter. The default CMake build/test path is self-contained Fortran.
     if(VEGAI_ENABLE_LEGACY_PYTHON_TESTS)
         find_package(Python3 COMPONENTS Interpreter QUIET)
         if(Python3_Interpreter_FOUND)
+        add_test(
+            NAME vegai_bounded_process
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_bounded_process.py
+        )
+        set_tests_properties(vegai_bounded_process PROPERTIES TIMEOUT 60)
+        add_test(
+            NAME vegai_lmm_endpoint_transport
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_lmm_endpoint_transport.py
+        )
+        set_tests_properties(vegai_lmm_endpoint_transport PROPERTIES TIMEOUT 120)
+        add_test(
+            NAME vegai_lmm_source_binding
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_lmm_source_binding.py
+        )
+        set_tests_properties(vegai_lmm_source_binding PROPERTIES TIMEOUT 60)
+        add_test(
+            NAME vegai_system_contracts
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_system_contracts.py
+        )
+        set_tests_properties(vegai_system_contracts PROPERTIES TIMEOUT 60)
+        add_test(
+            NAME vegai_quality_runner_binding
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_quality_runner_binding.py
+        )
+        set_tests_properties(vegai_quality_runner_binding PROPERTIES TIMEOUT 60)
+        add_test(
+            NAME vegai_continuous_progress
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_continuous_progress.py
+        )
+        set_tests_properties(vegai_continuous_progress PROPERTIES TIMEOUT 60)
+        add_test(
+            NAME vegai_neural_equal_budget_quality
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_neural_quality_budget.py
+        )
+        set_tests_properties(vegai_neural_equal_budget_quality PROPERTIES TIMEOUT 60)
+        add_test(
+            NAME vegai_context_numeric_budget
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_context_numerics.py
+        )
+        set_tests_properties(vegai_context_numeric_budget PROPERTIES
+            TIMEOUT 60
+            ENVIRONMENT "VEGAI_CONTEXT_BIN=$<TARGET_FILE:vegai_context_engine>"
+        )
+        add_test(
+            NAME vegai_neural_turkish_epoch1_contract
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_neural_turkish_epoch1.py
+        )
+        set_tests_properties(vegai_neural_turkish_epoch1_contract PROPERTIES
+            TIMEOUT 180
+            ENVIRONMENT "VEGAI_NEURAL_BIN=$<TARGET_FILE:vegai_neural_pretrain>;OMP_NUM_THREADS=1"
+        )
+        add_test(
+            NAME vegai_training_streaming
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_training_streaming.py
+        )
+        set_tests_properties(vegai_training_streaming PROPERTIES TIMEOUT 60)
+        if(UNIX)
+            add_test(
+                NAME vegai_make_build_graph
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_make_build.py
+            )
+            set_tests_properties(vegai_make_build_graph PROPERTIES TIMEOUT 120)
+            if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+                add_test(
+                    NAME vegai_make_native_graph
+                    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_make_native.py
+                            --compiler ${CMAKE_Fortran_COMPILER} --standard f${VEGAI_FORTRAN_STANDARD}
+                )
+                set_tests_properties(vegai_make_native_graph PROPERTIES TIMEOUT 240)
+            endif()
+        endif()
         add_test(
             NAME vegai_tokenless_signal_field
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_tokenless_field.py
@@ -365,12 +611,12 @@ if(VEGAI_BUILD_TESTS)
         # inspects a same-host checkpoint. It deliberately does not imply that
         # stream-unformatted checkpoints are portable across compiler/ABI pairs.
         add_test(
-            NAME vegai_portable_runtime_smoke
+            NAME vegai_legacy_portable_runtime_smoke
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_portable_runtime.py
                     --engine-bin $<TARGET_FILE:hds_engine>
                     --pretrain-bin $<TARGET_FILE:vegai_pretrain>
         )
-        set_tests_properties(vegai_portable_runtime_smoke PROPERTIES TIMEOUT 120)
+        set_tests_properties(vegai_legacy_portable_runtime_smoke PROPERTIES TIMEOUT 120)
         add_test(
             NAME vegai_training_resource_plan
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_training_resource_plan.py

@@ -25,15 +25,19 @@
 !==============================================================================
 program sparse_layer_tests
    use, intrinsic :: iso_fortran_env, only: int32, int64, real64, output_unit
+   use hyper_types, only: splitmix64_next
    use sparse_expert_layer
    implicit none (type, external)
 
    integer(int32) :: checks = 0_int32, failures = 0_int32, status
 
+   call test_splitmix_sequence
    call test_invalid_configuration
    call test_distinct_and_deterministic_routing
    call test_cold_expert_has_no_page
    call test_update_touches_only_active_pages
+   call test_accumulated_dirty_pages
+   call test_cache_reuse
    call test_gradient_locality
    call test_replay_determinism
    call test_capacity_invariance
@@ -59,6 +63,43 @@ contains
          write (output_unit, '(A,A)') 'FAIL: ', description
       end if
    end subroutine check
+
+   subroutine test_splitmix_sequence
+      integer(int64), parameter :: expected(5) = [int(z'E220A8397B1DCDAF', int64), &
+         int(z'6E789E6AA1B965F4', int64), int(z'06C45D188009454F', int64), &
+         int(z'F88BB8A8724C81EC', int64), int(z'1B39896A51A8749B', int64)]
+      integer(int64) :: state, value
+      integer(int32) :: index
+
+      state = 0_int64
+      do index = 1_int32, size(expected, kind=int32)
+         call splitmix64_next(state, value)
+         call check(value == expected(index), 'SplitMix stream matches a known modular-arithmetic vector')
+      end do
+   end subroutine test_splitmix_sequence
+
+   ! Sum array payloads independently of the O(1) closed-form implementation.
+   pure function numeric_payload_bytes(layer) result(bytes)
+      type(sparse_layer_t), intent(in) :: layer
+      integer(int64) :: bytes, real_bytes, integer_bytes
+      integer(int32) :: slot
+
+      real_bytes = storage_size(1.0_real64) / 8_int64
+      integer_bytes = storage_size(1_int32) / 8_int64
+      bytes = 0_int64
+      if (allocated(layer%router)) bytes = bytes + size(layer%router, kind=int64) * real_bytes
+      if (allocated(layer%router_norm)) bytes = bytes + size(layer%router_norm, kind=int64) * real_bytes
+      if (allocated(layer%slot_table)) bytes = bytes + size(layer%slot_table, kind=int64) * integer_bytes
+      if (allocated(layer%dirty_slots)) bytes = bytes + size(layer%dirty_slots, kind=int64) * integer_bytes
+      do slot = 1_int32, layer%page_count
+         bytes = bytes + (size(layer%pages(slot)%weight, kind=int64) + &
+                          size(layer%pages(slot)%bias, kind=int64) + &
+                          size(layer%pages(slot)%weight_gradient, kind=int64) + &
+                          size(layer%pages(slot)%bias_gradient, kind=int64) + &
+                          size(layer%pages(slot)%velocity, kind=int64) + &
+                          size(layer%pages(slot)%energy, kind=int64)) * real_bytes
+      end do
+   end function numeric_payload_bytes
 
    pure function base_config() result(config)
       type(sparse_layer_config_t) :: config
@@ -90,11 +131,7 @@ contains
       integer(int64), intent(inout) :: state
       integer(int64) :: word
 
-      state = state + int(z'9E3779B97F4A7C15', int64)
-      word = state
-      word = ieor(word, ishft(word, -30_int32)) * int(z'BF58476D1CE4E5B9', int64)
-      word = ieor(word, ishft(word, -27_int32)) * int(z'94D049BB133111EB', int64)
-      word = ieor(word, ishft(word, -31_int32))
+      call splitmix64_next(state, word)
    end function mix
 
    subroutine test_invalid_configuration
@@ -162,10 +199,16 @@ contains
       config = base_config()
       call sparse_layer_init(layer, config, status)
       call check(layer%stats%pages_allocated == 0_int64, 'a fresh layer owns no expert page')
+      call check(layer%stats%resident_bytes == numeric_payload_bytes(layer), &
+                 'fresh-layer payload accounts for router norms and dirty list')
       input = probe_input(5_int64)
       call sparse_layer_forward(layer, input, output, cache, status)
       touched = int(cache%active_count, int64)
       call check(layer%stats%pages_allocated == touched, 'only the routed experts are materialised')
+      call check(layer%stats%resident_bytes == numeric_payload_bytes(layer), &
+                 'materialised pages are included in numeric payload bytes')
+      call check(count(layer%slot_table /= 0_int32) == layer%page_count, &
+                 'the sparse index contains exactly one entry per resident page')
       call check(layer%stats%pages_allocated < config%expert_capacity, 'page count is below capacity')
       call check(layer%stats%resident_bytes < sparse_layer_parameter_count(layer) * 8_int64, &
                  'resident bytes are a fraction of the virtual capacity')
@@ -201,8 +244,94 @@ contains
       call check(status == SE_OK, 'twenty train steps complete without error')
       call check(layer%stats%pages_allocated <= 20_int64 * int(config%active_experts, int64), &
                  'pages never exceed the touched set')
+      call check(count(layer%slot_table /= 0_int32) == layer%page_count, &
+                 'index growth never duplicates a page entry')
+      do step = 1_int32, layer%page_count
+         call check(count(layer%slot_table == step) == 1, 'each resident page occurs exactly once in the index')
+      end do
       call sparse_layer_destroy(layer)
    end subroutine test_update_touches_only_active_pages
+
+   !> Pending gradients may cover more than k experts across different forwards.
+   subroutine test_accumulated_dirty_pages
+      type(sparse_layer_config_t) :: config
+      type(sparse_layer_t) :: layer
+      type(sparse_forward_t) :: cache
+      real(real64) :: input(12), output(10), grad_output(10), grad_input(12)
+      integer(int32) :: status, step, first_count
+      integer(int64) :: updates_before
+
+      config = base_config()
+      call sparse_layer_init(layer, config, status)
+      do step = 1_int32, 20_int32
+         input = probe_input(1000_int64 + int(step, int64))
+         call sparse_layer_forward(layer, input, output, cache, status)
+         if (status /= SE_OK) exit
+         grad_output = output - 0.25_real64
+         call sparse_layer_backward(layer, cache, grad_output, grad_input, status)
+         if (status /= SE_OK) exit
+         if (step == 1_int32) then
+            first_count = layer%dirty_count
+            call sparse_layer_backward(layer, cache, grad_output, grad_input, status)
+            call check(status == SE_OK .and. layer%dirty_count == first_count, &
+                       'repeated backward accumulates without duplicating dirty pages')
+         end if
+      end do
+      call check(status == SE_OK .and. layer%dirty_count > config%active_experts, &
+                 'multiple forwards accumulate more than k distinct dirty pages safely')
+      call check(layer%dirty_count == layer%page_count, 'every touched page is registered for the update')
+      call check(size(layer%dirty_slots) > config%active_experts, 'the pending list actually grew')
+      call check(layer%stats%resident_bytes == numeric_payload_bytes(layer), &
+                 'numeric payload accounting follows dirty-list and index resizing')
+      do step = 1_int32, layer%page_count
+         call check(count(layer%dirty_slots(:layer%dirty_count) == step) == 1, &
+                    'each pending expert occurs once in the dirty list')
+      end do
+      updates_before = layer%stats%updates_applied
+      call sparse_layer_apply_update(layer, status)
+      call check(status == SE_OK .and. layer%dirty_count == 0_int32 .and. &
+                 layer%stats%updates_applied - updates_before == int(layer%page_count, int64), &
+                 'one update visits each accumulated page once and clears the list')
+      call check(.not. any(layer%pages(:layer%page_count)%gradient_ready), &
+                 'the update clears the per-page dirty flags')
+      call sparse_layer_destroy(layer)
+   end subroutine test_accumulated_dirty_pages
+
+   !> Reusing one cache at the same k with different widths must resize it.
+   subroutine test_cache_reuse
+      type(sparse_layer_config_t) :: first_config, second_config
+      type(sparse_layer_t) :: first, second
+      type(sparse_forward_t) :: cache
+      real(real64) :: input_first(12), output_first(10), input_second(8), output_second(20)
+      real(real64) :: grad_second(20), grad_input_second(8)
+      integer(int32) :: status
+
+      first_config = base_config()
+      second_config = first_config
+      second_config%input_width = 8_int32
+      second_config%output_width = 20_int32
+      call sparse_layer_init(first, first_config, status)
+      call sparse_layer_init(second, second_config, status)
+      input_first = probe_input(17_int64)
+      input_second = input_first(:8)
+      call sparse_layer_forward(first, input_first, output_first, cache, status)
+      call check(status == SE_OK, 'first cache shape is usable')
+      call sparse_layer_forward(second, input_second, output_second, cache, status)
+      call check(status == SE_OK .and. size(cache%input_copy) == 8 .and. &
+                 size(cache%expert_output, 1) == 20, 'same-k cache is resized for a different layer shape')
+      grad_second = output_second
+      call sparse_layer_backward(second, cache, grad_second, grad_input_second, status)
+      call check(status == SE_OK, 'backward accepts the resized cache')
+      call sparse_layer_forward(second, input_second(:7), output_second, cache, status)
+      call check(status == SE_ERR_INVALID_ARGUMENT .and. .not. cache%ready, &
+                 'a failed forward invalidates the old cache')
+      call sparse_layer_backward(second, cache, grad_second, grad_input_second, status)
+      call check(status == SE_ERR_ORDER, 'backward rejects the invalidated cache')
+      call sparse_layer_destroy(second)
+      call sparse_layer_forward(second, input_second, output_second, cache, status)
+      call check(status == SE_ERR_ORDER, 'forward on a destroyed layer is rejected')
+      call sparse_layer_destroy(first)
+   end subroutine test_cache_reuse
 
    !> Expert weights must be frozen unless their expert is routed to.  The test
    !> reads the page store directly through the public type, which is why the

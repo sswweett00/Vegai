@@ -14,7 +14,7 @@
 !    6. long stream stays finite and the recurrent state stays bounded
 !    7. finite-difference gradient check of the analytic backward pass
 !    8. training reduces the loss on a learnable synthetic task
-!    9. every memory component receives a gradient and changes under training
+!    9. legacy memory training paths and the symmetric-slot limitation
 !   10. remote influence: an answer 93 tokens behind the query reaches the
 !       query logits through the fixed-size state and provably cannot reach
 !       them through the local ring buffer alone
@@ -40,26 +40,46 @@
 !==============================================================================
 program fixed_budget_context_tests
    use, intrinsic :: iso_fortran_env, only: int32, int64, real64, output_unit
+   use portable_cli, only: cli_valid_utf8
+   use utf8_generation
    use fixed_budget_context
    use fixed_budget_backward
    use fixed_budget_optimizer
    use fixed_budget_training
+   use fixed_budget_natural_eval
    implicit none (type, external)
 
    integer(int32) :: checks = 0_int32, failures = 0_int32
 
    call test_defaults
+   call test_utf8_generation
+   call test_natural_record_eval
    call test_option_parsing
    call test_horizon_invariance
    call test_no_future_leakage
    call test_chunk_equivalence
    call test_determinism
    call test_long_stream_finite
-   call test_gradient_check
+   call test_legacy_slot_symmetry
+   call test_anchored_slot_diversity
+   call test_slot_rule_state_binding
+   call test_stable_loss
+   call test_numeric_boundaries
+   call test_stream_error_boundaries
+   call test_workspace_gradient_binding
+   call test_optimizer_rule
+   call test_gradient_check(FBC_TRAINING_RULE_V6)
+   call test_gradient_check(FBC_TRAINING_RULE_V7)
+   call test_outer_accumulation_parity
+   call test_full_ring_backward(FBC_TRAINING_RULE_V6)
+   call test_full_ring_backward(FBC_TRAINING_RULE_V7)
+   call test_clamped_decay_backward
    call test_training_reduces_loss
-   call test_memory_components_train
+   call test_partial_training_chunk
+   call test_legacy_memory_training
    call test_remote_influence
    call test_checkpoint_roundtrip
+   call test_full_ring_checkpoint_continuation
    call test_context_router_conditions_mixture
    call test_induction_read_is_shifted
    call test_plan_counts_match_reality
@@ -85,6 +105,740 @@ contains
          write(output_unit, '(A,A)') 'FAIL: ', description
       end if
    end subroutine check
+
+   !> UTF-8 generation masks, including boundary scalars and exhausted byte budgets.
+   subroutine test_utf8_generation
+      type(utf8_generation_state_t) :: state, copy
+      integer(int32) :: token, budget, count_allowed, lead, second, third, fourth, count_second, i, j
+      integer(int32) :: leads(4), minima(4), maxima(4), lengths(4), expected_counts(4), scalar_count, scalar_length
+      type(utf8_generation_state_t) :: after_lead, after_second, after_third
+      logical :: accepted, correct, independent_ok
+      character(len=4) :: codepoint
+
+      expected_counts = [96_int32, 126_int32, 142_int32, 147_int32]
+      do budget = 1_int32, 4_int32
+         call utf8_generation_reset(state)
+         count_allowed = 0_int32
+         do token = 1_int32, 256_int32
+            if (utf8_generation_allows(state, token, budget)) count_allowed = count_allowed + 1_int32
+         end do
+         call check(count_allowed == expected_counts(budget), 'UTF-8 lead mask respects remaining byte budget')
+      end do
+
+      ! A complete legal two-byte codepoint is independently checked using the
+      ! CLI validator, not the generation state itself.
+      independent_ok = .true.
+      do lead = 194_int32, 223_int32
+         do second = 128_int32, 191_int32
+            call utf8_generation_reset(state)
+            call utf8_generation_advance(state, lead, 2_int32, accepted)
+            independent_ok = independent_ok .and. accepted .and. .not. utf8_generation_complete(state)
+            call utf8_generation_advance(state, second, 1_int32, accepted)
+            codepoint = achar(lead) // achar(second) // '  '
+            independent_ok = independent_ok .and. accepted .and. utf8_generation_complete(state) .and. &
+                             cli_valid_utf8(codepoint(1:2))
+         end do
+      end do
+      call check(independent_ok, 'all 1,920 legal two-byte scalars agree with the independent validator')
+
+      ! Four constrained second-byte ranges prohibit overlong encodings,
+      ! surrogates and codepoints above U+10FFFF.
+      leads = [224_int32, 237_int32, 240_int32, 244_int32]
+      minima = [160_int32, 128_int32, 144_int32, 128_int32]
+      maxima = [191_int32, 159_int32, 191_int32, 143_int32]
+      lengths = [3_int32, 3_int32, 4_int32, 4_int32]
+      correct = .true.
+      do i = 1_int32, size(leads)
+         call utf8_generation_reset(state)
+         call utf8_generation_advance(state, leads(i), lengths(i), accepted)
+         correct = correct .and. accepted
+         count_second = 0_int32
+         do token = 1_int32, 256_int32
+            if (utf8_generation_allows(state, token, lengths(i) - 1_int32)) then
+               count_second = count_second + 1_int32
+               if (token < minima(i) .or. token > maxima(i)) correct = .false.
+            end if
+         end do
+         correct = correct .and. count_second == maxima(i) - minima(i) + 1_int32
+         correct = correct .and. .not. utf8_generation_allows(state, 10_int32, lengths(i) - 1_int32)
+         correct = correct .and. .not. utf8_generation_allows(state, 46_int32, lengths(i) - 1_int32)
+         copy = state
+         call utf8_generation_advance(copy, minima(i) - 1_int32, lengths(i) - 1_int32, accepted)
+         correct = correct .and. .not. accepted .and. &
+                   utf8_generation_allows(copy, minima(i), lengths(i) - 1_int32)
+         call utf8_generation_advance(state, minima(i), lengths(i) - 1_int32, accepted)
+         correct = correct .and. accepted
+         do j = 3_int32, lengths(i)
+            call utf8_generation_advance(state, 128_int32, lengths(i) - j + 1_int32, accepted)
+            correct = correct .and. accepted
+         end do
+         codepoint = achar(leads(i)) // achar(minima(i)) // achar(128) // achar(128)
+         correct = correct .and. utf8_generation_complete(state) .and. cli_valid_utf8(codepoint(1:lengths(i)))
+      end do
+      call check(correct, 'UTF-8 constrained continuation ranges and rejection preserve state')
+
+      ! Exhaust all legal three- and four-byte Unicode scalars. The independent
+      ! whole-string validator checks every completed state, including boundary
+      ! continuations after the specially restricted first byte.
+      scalar_count = 0_int32
+      independent_ok = .true.
+      do lead = 224_int32, 244_int32
+         if (lead <= 239_int32) then
+            scalar_length = 3_int32
+         else
+            scalar_length = 4_int32
+         end if
+         call utf8_generation_reset(after_lead)
+         call utf8_generation_advance(after_lead, lead, scalar_length, accepted)
+         independent_ok = independent_ok .and. accepted
+         do second = 128_int32, 191_int32
+            if (.not. utf8_generation_allows(after_lead, second, scalar_length - 1_int32)) cycle
+            after_second = after_lead
+            call utf8_generation_advance(after_second, second, scalar_length - 1_int32, accepted)
+            independent_ok = independent_ok .and. accepted
+            do third = 128_int32, 191_int32
+               after_third = after_second
+               call utf8_generation_advance(after_third, third, scalar_length - 2_int32, accepted)
+               independent_ok = independent_ok .and. accepted
+               if (scalar_length == 3_int32) then
+                  codepoint = achar(lead) // achar(second) // achar(third) // ' '
+                  independent_ok = independent_ok .and. utf8_generation_complete(after_third) .and. &
+                                   cli_valid_utf8(codepoint(1:3))
+                  scalar_count = scalar_count + 1_int32
+               else
+                  do fourth = 128_int32, 191_int32
+                     state = after_third
+                     call utf8_generation_advance(state, fourth, 1_int32, accepted)
+                     codepoint = achar(lead) // achar(second) // achar(third) // achar(fourth)
+                     independent_ok = independent_ok .and. accepted .and. utf8_generation_complete(state) .and. &
+                                      cli_valid_utf8(codepoint)
+                     scalar_count = scalar_count + 1_int32
+                  end do
+               end if
+            end do
+         end do
+      end do
+      call check(independent_ok .and. scalar_count == 1110016_int32, &
+                 'all 1,110,016 valid three- and four-byte scalars agree with the independent validator')
+
+      call utf8_generation_reset(state)
+      call check(.not. utf8_generation_allows(state, 194_int32, 1_int32) .and. &
+                 .not. utf8_generation_allows(state, 240_int32, 3_int32) .and. &
+                 .not. utf8_generation_allows(state, 255_int32, 4_int32) .and. &
+                 .not. utf8_generation_allows(state, 256_int32, 4_int32) .and. &
+                 .not. utf8_generation_allows(state, 0_int32, 4_int32), &
+                 'UTF-8 generation forbids incomplete, invalid and NUL byte tokens')
+      call utf8_generation_advance(state, 240_int32, 4_int32, accepted)
+      call check(accepted .and. .not. utf8_generation_allows(state, 144_int32, 2_int32), &
+                 'UTF-8 pending continuation cannot exceed the remaining byte budget')
+      call utf8_generation_reset(state)
+      call check(utf8_generation_complete(state) .and. utf8_generation_allows(state, 65_int32, 1_int32), &
+                 'UTF-8 decoder reset starts at a codepoint boundary')
+   end subroutine test_utf8_generation
+
+   !> Compare cold-record NLL with independent per-record stream evaluations.
+   subroutine test_natural_record_eval
+      type(fbc_config_t) :: config
+      type(fbc_model_t) :: model
+      type(fbc_state_t) :: state
+      type(fbc_workspace_t) :: workspace
+      type(fbc_record_metrics_t) :: metrics
+      integer(int32) :: status
+      integer(int64) :: answer_count, old_steps
+      real(real64) :: first_nll, first_prefix, second_nll, accuracy
+      integer(int32), parameter :: records(8) = [1_int32, 2_int32, 3_int32, 10_int32, &
+                                               4_int32, 5_int32, 10_int32, 6_int32]
+
+      config = fbc_config_t(vocabulary_size=32_int32, width=8_int32, heads=2_int32, ffn_width=16_int32, &
+                            local_window=4_int32, memory_scales=2_int32, memory_slots=4_int32, &
+                            logical_horizon=128_int64)
+      call fbc_model_init(model, config, 42_int64, status)
+      call check(status == FBC_OK, 'record evaluation model initialises')
+      call fbc_state_init(state, model, status)
+      call check(status == FBC_OK, 'record evaluation state initialises')
+      call fbc_workspace_init(workspace, model, status)
+      call check(status == FBC_OK, 'record evaluation workspace initialises')
+      call fbc_evaluate_lf_records(model, state, workspace, records, 1_int32, metrics, status)
+      call check(status == FBT_OK .and. metrics%records == 3_int64 .and. metrics%scored_records == 2_int64 .and. &
+                 metrics%predictions == 3_int64 .and. metrics%prefix_predictions == 2_int64, &
+                 'record evaluation excludes first bytes, separators and one-byte records')
+      call fbc_state_reset(state, model, status)
+      call fbc_evaluate_stream(model, state, records(1:3), 2_int32, [.false., .false.], workspace, &
+                               first_nll, accuracy, answer_count, status)
+      call check(status == FBT_OK, 'first record independently scores')
+      call fbc_state_reset(state, model, status)
+      call fbc_evaluate_stream(model, state, records(1:2), 1_int32, [.false.], workspace, &
+                               first_prefix, accuracy, answer_count, status)
+      call check(status == FBT_OK, 'first record prefix independently scores')
+      call fbc_state_reset(state, model, status)
+      call fbc_evaluate_stream(model, state, records(5:6), 1_int32, [.false.], workspace, &
+                               second_nll, accuracy, answer_count, status)
+      call check(status == FBT_OK, 'second record independently scores')
+      call check(abs(metrics%mean_nll - (2.0_real64 * first_nll + second_nll) / 3.0_real64) < 1.0e-12_real64, &
+                 'cold record NLL agrees with separate reset stream scores')
+      call check(abs(metrics%prefix_mean_nll - (first_prefix + second_nll) / 2.0_real64) < 1.0e-12_real64, &
+                 'short-prefix NLL agrees with separate reset stream scores')
+      old_steps = state%steps
+      call fbc_evaluate_lf_records(model, state, workspace, records, 0_int32, metrics, status)
+      call check(status == FBT_ERR_ARGUMENT .and. metrics%predictions == 0_int64 .and. state%steps == old_steps, &
+                 'record evaluator rejects a zero prefix before advancing state')
+      call fbc_evaluate_lf_records(model, state, workspace, [1_int32, 10_int32, 2_int32], 1_int32, metrics, status)
+      call check(status == FBT_ERR_ARGUMENT .and. metrics%predictions == 0_int64, &
+                 'record evaluator rejects inputs without within-record transitions')
+      call fbc_evaluate_lf_records(model, state, workspace, [1_int32, 33_int32], 1_int32, metrics, status)
+      call check(status == FBC_ERR_INVALID_ARGUMENT .and. metrics%predictions == 0_int64, &
+                 'record evaluator rejects an invalid target without publishing partial metrics')
+      call fbc_state_destroy(state)
+      call fbc_workspace_destroy(workspace)
+      call fbc_model_destroy(model)
+   end subroutine test_natural_record_eval
+
+   !> NLL must remain meaningful when the target softmax probability underflows.
+   subroutine test_stable_loss
+      real(real64) :: logits(3), dlogits(3), loss, reference
+      integer(int32) :: status
+
+      logits = [1000.0_real64, 0.0_real64, -1000.0_real64]
+      call fbc_loss_and_gradient(logits, 3_int32, dlogits, loss, status)
+      call check(status == FBC_OK .and. abs(loss - 2000.0_real64) < 1.0e-12_real64, &
+                 'cross entropy does not cap an underflowing target probability')
+      call check(abs(dlogits(1) - 1.0_real64) < 1.0e-12_real64 .and. &
+                 abs(dlogits(3) + 1.0_real64) < 1.0e-12_real64, &
+                 'extreme-logit gradient remains the exact softmax residual')
+      logits = logits - 1200.0_real64
+      call fbc_loss_and_gradient(logits, 3_int32, dlogits, loss, status)
+      call check(status == FBC_OK .and. abs(loss - 2000.0_real64) < 1.0e-12_real64, &
+                 'cross entropy is invariant to a common logit shift')
+      logits = [3.0_real64, 1.0_real64, -1.0_real64]
+      reference = 2.0_real64 + log(1.0_real64 + exp(-2.0_real64) + exp(-4.0_real64))
+      call fbc_loss_and_gradient(logits, 2_int32, dlogits, loss, status)
+      call check(status == FBC_OK .and. abs(loss - reference) < 1.0e-12_real64 .and. &
+                 abs(sum(dlogits)) < 1.0e-12_real64, 'normal cross entropy and gradient agree with reference')
+      block
+         real(real64) :: strided_logits(6), strided_gradient(6), strided_loss
+         strided_logits = -42.0_real64
+         strided_logits(1:5:2) = logits
+         strided_gradient = 42.0_real64
+         call fbc_loss_and_gradient(strided_logits(1:5:2), 2_int32, strided_gradient(1:5:2), strided_loss, status)
+         call check(status == FBC_OK .and. abs(strided_loss - loss) < 1.0e-14_real64 .and. &
+                    all(abs(strided_gradient(1:5:2) - dlogits) < 1.0e-14_real64) .and. &
+                    all(strided_gradient(2:6:2) == 42.0_real64), &
+                    'public cross entropy accepts strided views without changing intervening elements')
+      end block
+      call fbc_loss_and_gradient(logits, 2_int32, dlogits(:2), loss, status)
+      call check(status == FBC_ERR_INVALID_ARGUMENT, 'cross entropy rejects mismatched gradient shape')
+
+      logits = [huge(0.0_real64), -huge(0.0_real64), 0.0_real64]
+      call fbc_loss_and_gradient(logits, 1_int32, dlogits, loss, status)
+      call check(status == FBC_OK .and. loss == 0.0_real64 .and. all(dlogits == 0.0_real64), &
+                 'opposite finite extremes yield zero loss for the maximum without overflow')
+      call fbc_loss_and_gradient(logits, 3_int32, dlogits, loss, status)
+      call check(status == FBC_OK .and. loss == huge(0.0_real64) .and. &
+                 all(dlogits == [1.0_real64, 0.0_real64, -1.0_real64]), &
+                 'maximum representable target gap and its gradient remain finite')
+      call fbc_loss_and_gradient(logits, 2_int32, dlogits, loss, status)
+      call check(status == FBC_ERR_NUMERIC .and. all(dlogits == 0.0_real64), &
+                 'unrepresentable target NLL is rejected before overflowing')
+      logits = [0.5_real64 * huge(0.0_real64), -0.5_real64 * huge(0.0_real64), 0.0_real64]
+      call fbc_loss_and_gradient(logits, 2_int32, dlogits, loss, status)
+      call check(status == FBC_OK .and. loss == huge(0.0_real64), &
+                 'a representable extreme gap at the real64 boundary is accepted')
+      logits = -huge(0.0_real64)
+      call fbc_loss_and_gradient(logits, 2_int32, dlogits, loss, status)
+      call check(status == FBC_OK .and. abs(loss - log(3.0_real64)) < 1.0e-12_real64 .and. &
+                 abs(sum(dlogits)) < 1.0e-12_real64, 'equal negative extremes produce the correct uniform loss')
+      logits = [1.0_real64, transfer(int(z'7FF8000000000000', int64), 0.0_real64), 0.0_real64]
+      call fbc_loss_and_gradient(logits, 1_int32, dlogits, loss, status)
+      call check(status == FBC_ERR_NUMERIC, 'quiet NaN logit returns a numeric error')
+      logits(2) = transfer(int(z'7FF0000000000001', int64), 0.0_real64)
+      call fbc_loss_and_gradient(logits, 1_int32, dlogits, loss, status)
+      call check(status == FBC_ERR_NUMERIC, 'signaling NaN logit returns a numeric error without an FPE')
+      logits(2) = transfer(int(z'7FF0000000000000', int64), 0.0_real64)
+      call fbc_loss_and_gradient(logits, 1_int32, dlogits, loss, status)
+      call check(status == FBC_ERR_NUMERIC, 'infinite logit returns a numeric error')
+   end subroutine test_stable_loss
+
+   subroutine test_numeric_boundaries
+      type(fbc_config_t) :: config
+      type(fbc_plan_t) :: plan
+      type(fbc_model_t) :: model
+      type(fbc_gradient_t) :: gradient, uninitialized_gradient
+      type(fbc_optimizer_t) :: optimizer
+      integer(int32) :: status
+      integer(int32) :: tokens(20)
+      logical :: mask(20)
+      real(real64) :: norm
+
+      config = tiny_config(8192_int64)
+      config%width = FBC_MAX_WIDTH
+      config%heads = 1_int32
+      config%ffn_width = huge(0_int32)
+      config%vocabulary_size = huge(0_int32)
+      config%local_window = FBC_MAX_LOCAL_WINDOW
+      config%memory_scales = FBC_MAX_MEMORY_SCALES
+      config%memory_slots = FBC_MAX_MEMORY_SLOTS
+      call fbc_plan(config, plan)
+      call check(plan%parameter_count == 146366990473236533_int64 .and. &
+                 plan%parameter_bytes_real64 == 1170935923785892264_int64 .and. &
+                 plan%state_bytes_real64 == 36030173555990528_int64, &
+                 'context resource counts remain exact at the largest supported width')
+      call check(plan%forward_flops_per_token > 0_int64 .and. plan%backward_flops_per_token > 0_int64, &
+                 'maximum-width forward and backward cost estimates stay positive')
+      config%width = FBC_MAX_WIDTH + 1_int32
+      call fbc_plan(config, plan)
+      call check(plan%parameter_count == 0_int64 .and. fbc_parameter_count(config) == -1_int64, &
+                 'context plan rejects oversized dimensions rather than wrapping counts')
+      config = tiny_config(8192_int64)
+      config%heads = 0_int32
+      call fbc_plan(config, plan)
+      call fbc_optimizer_init(optimizer, config, status)
+      call check(status == FBC_ERR_INVALID_ARGUMENT .and. plan%parameter_count == 0_int64 .and. &
+                 fbc_parameter_count(config) == -1_int64 .and. fbc_state_bytes(config) == -1_int64, &
+                 'zero heads is rejected before optimizer/plan division')
+      config = tiny_config(8192_int64)
+      config%memory_scales = huge(0_int32)
+      call fbc_plan(config, plan)
+      call check(plan%parameter_count == 0_int64, 'plan validates scale count before allocating temporary storage')
+      config = tiny_config(8192_int64)
+      config%rms_epsilon = transfer(int(z'7FF0000000000001', int64), 0.0_real64)
+      call check(.not. fbc_config_is_valid(config), 'signaling NaN configuration is rejected without an FPE')
+      config = tiny_config(8192_int64)
+      config%slot_temperature = transfer(int(z'7FF0000000000000', int64), 0.0_real64)
+      call check(.not. fbc_config_is_valid(config), 'infinite slot temperature is rejected')
+      config = tiny_config(8192_int64)
+      config%slot_decay = transfer(int(z'7FF8000000000000', int64), 0.0_real64)
+      call check(.not. fbc_config_is_valid(config), 'NaN slot decay is rejected')
+
+      config = tiny_config(8192_int64)
+      call fbc_model_init(model, config, 29_int64, status)
+      call fbc_gradient_init(gradient, model, status)
+      call check(status == FBC_OK, 'gradient norm boundary fixture initializes')
+      call fbc_gradient_zero(gradient)
+      gradient%token_embedding(1, 1) = 3.0_real64
+      gradient%token_embedding(2, 1) = 4.0_real64
+      norm = fbc_gradient_norm(gradient)
+      call check(norm == 5.0_real64, 'ordinary gradient norm is the Euclidean norm')
+      call fbc_gradient_zero(gradient)
+      gradient%token_embedding(1:2, 1) = 1.0e200_real64
+      norm = fbc_gradient_norm(gradient)
+      call check(abs(norm / 1.0e200_real64 - sqrt(2.0_real64)) < 1.0e-14_real64, &
+                 'large representable gradient norm avoids squaring overflow')
+      call fbc_gradient_zero(gradient)
+      gradient%token_embedding(1:2, 1) = 1.0e-200_real64
+      norm = fbc_gradient_norm(gradient)
+      call check(abs(norm / 1.0e-200_real64 - sqrt(2.0_real64)) < 1.0e-14_real64, &
+                 'small representable gradient norm avoids squaring underflow')
+      call fbc_gradient_zero(gradient)
+      gradient%token_embedding(1:3, 1) = [3.0_real64, 4.0_real64, 1.0e-200_real64]
+      norm = fbc_gradient_norm(gradient)
+      call check(norm == 5.0_real64, 'ordinary and tiny values in one block are not counted twice')
+      call fbc_gradient_zero(gradient)
+      gradient%token_embedding(1, 1) = -3.0e200_real64
+      gradient%output_bias(1) = 4.0e200_real64
+      norm = fbc_gradient_norm(gradient)
+      call check(abs(norm / 1.0e200_real64 - 5.0_real64) < 1.0e-14_real64, &
+                 'scaled norm correctly combines large values across different arrays')
+      call fbc_gradient_zero(gradient)
+      gradient%token_embedding(1:2, 1) = huge(0.0_real64)
+      norm = fbc_gradient_norm(gradient)
+      call check(norm < 0.0_real64, 'unrepresentable gradient norm returns an error sentinel without overflow')
+      call fbc_gradient_zero(gradient)
+      gradient%token_embedding(1, 1) = huge(0.0_real64)
+      norm = fbc_gradient_norm(gradient)
+      call check(norm == huge(0.0_real64), 'one maximum finite component has a representable norm')
+      call fbc_gradient_zero(gradient)
+      gradient%token_embedding(1, 1) = transfer(int(z'7FF0000000000001', int64), 0.0_real64)
+      norm = fbc_gradient_norm(gradient)
+      call check(norm < 0.0_real64, 'signaling NaN gradient returns an error sentinel without an FPE')
+      norm = fbc_gradient_norm(uninitialized_gradient)
+      call check(norm < 0.0_real64, 'uninitialized gradient cannot silently report zero norm')
+      call fbc_gradient_destroy(gradient)
+      call fbc_model_destroy(model)
+
+      call fbc_generate_tokens(FBC_TASK_NEEDLE, 20_int32, 16_int32, 3_int32, 9_int64, tokens, mask, status)
+      call check(status == FBC_OK .and. all(tokens == [1, 4, 10, 15, 10, 2, 4, 1, 6, 14, &
+                                                      13, 9, 2, 6, 1, 4, 11, 14, 10, 2]), &
+                 'bounded needle generation preserves the established stream')
+      call check(count(mask) == 2 .and. mask(6) .and. mask(13), 'needle answer positions are unchanged')
+      call fbc_generate_tokens(FBC_TASK_NEEDLE, 20_int32, 16_int32, huge(0_int32), 9_int64, tokens, mask, status)
+      call check(status == FBC_OK .and. tokens(1) == 1_int32 .and. .not. any(mask) .and. &
+                 all(tokens >= 1_int32) .and. all(tokens <= 16_int32), &
+                 'maximum distance terminates after the available tokens without integer overflow')
+   end subroutine test_numeric_boundaries
+
+   ! Independent numerical oracle for both agreement signs, across the matrix,
+   ! vector and scalar update paths. This locks the historical restart rule.
+   subroutine test_optimizer_rule
+      type(fbc_config_t) :: config
+      type(fbc_update_config_t) :: update_config
+      type(fbc_model_t) :: model
+      type(fbc_gradient_t) :: gradient
+      type(fbc_optimizer_t) :: optimizer
+      integer(int32) :: status, sign_value
+      integer(int64) :: updates
+      real(real64) :: gamma, expected_energy, expected_velocity, expected_parameter, saved_parameter
+
+      config = tiny_config(8192_int64)
+      call fbc_model_init(model, config, 33_int64, status)
+      call fbc_gradient_init(gradient, model, status)
+      call fbc_optimizer_init(optimizer, config, status)
+      call check(status == FBC_OK, 'optimizer oracle fixture initializes')
+      update_config%learning_rate = 0.02_real64
+      update_config%momentum = 0.8_real64
+      update_config%energy_decay = 0.6_real64
+      update_config%restart_damp = 0.25_real64
+      update_config%weight_decay = 0.01_real64
+      update_config%epsilon = 0.1_real64
+      do sign_value = -1_int32, 1_int32, 2_int32
+         call fbc_gradient_zero(gradient)
+         call fbc_optimizer_reset(optimizer)
+         gradient%token_embedding(:, 1) = 2.0_real64
+         gradient%output_bias = 2.0_real64
+         gradient%slot_salience_weight = 2.0_real64
+         optimizer%velocity_token_embedding(:, 1) = real(sign_value, real64)
+         optimizer%velocity_output_bias = real(sign_value, real64)
+         optimizer%slot_salience_weight_velocity = real(sign_value, real64)
+         optimizer%energy_token_embedding(1) = 0.25_real64
+         optimizer%energy_output_bias = 0.25_real64
+         optimizer%slot_salience_weight_energy = 0.25_real64
+         model%token_embedding(:, 1) = 0.5_real64
+         model%output_bias = 0.5_real64
+         model%slot_salience_weight = 0.5_real64
+         gamma = 0.8_real64
+         if (sign_value < 0_int32) gamma = 0.8_real64 * 0.25_real64
+         expected_energy = 0.6_real64 * 0.25_real64 + 0.4_real64 * 4.0_real64
+         expected_velocity = gamma * real(sign_value, real64) + 0.2_real64 * 2.0_real64
+         expected_parameter = (1.0_real64 - 0.02_real64 * 0.01_real64) * 0.5_real64 - &
+                              0.02_real64 * expected_velocity / (sqrt(expected_energy) + 0.1_real64)
+         call fbc_optimizer_apply(optimizer, model, gradient, update_config, status, updates)
+         call check(status == FBC_OK .and. updates == fbc_parameter_count(config), &
+                    'optimizer oracle updates every parameter exactly once')
+         call check(maxval(abs(model%token_embedding(:, 1) - expected_parameter)) < 1.0e-14_real64 .and. &
+                    abs(optimizer%energy_token_embedding(1) - expected_energy) < 1.0e-14_real64 .and. &
+                    maxval(abs(optimizer%velocity_token_embedding(:, 1) - expected_velocity)) < 1.0e-14_real64, &
+                    'matrix optimizer agrees with independent positive/negative agreement oracle')
+         call check(maxval(abs(model%output_bias - expected_parameter)) < 1.0e-14_real64 .and. &
+                    abs(optimizer%energy_output_bias - expected_energy) < 1.0e-14_real64 .and. &
+                    maxval(abs(optimizer%velocity_output_bias - expected_velocity)) < 1.0e-14_real64, &
+                    'vector optimizer agrees with independent positive/negative agreement oracle')
+         call check(abs(model%slot_salience_weight - expected_parameter) < 1.0e-14_real64 .and. &
+                    abs(optimizer%slot_salience_weight_energy - expected_energy) < 1.0e-14_real64 .and. &
+                    abs(optimizer%slot_salience_weight_velocity - expected_velocity) < 1.0e-14_real64, &
+                    'scalar optimizer agrees with independent positive/negative agreement oracle')
+      end do
+      saved_parameter = model%token_embedding(1, 1)
+      update_config%momentum = transfer(int(z'7FF0000000000001', int64), 0.0_real64)
+      call fbc_optimizer_apply(optimizer, model, gradient, update_config, status, updates)
+      call check(status == FBC_ERR_INVALID_ARGUMENT .and. updates == 0_int64 .and. &
+                 model%token_embedding(1, 1) == saved_parameter, &
+                 'nonfinite optimizer settings fail before changing a parameter')
+      update_config = fbc_update_config_t()
+      call fbc_gradient_zero(gradient)
+      gradient%token_embedding(1, 1) = 1.0e200_real64
+      call fbc_optimizer_apply(optimizer, model, gradient, update_config, status, updates)
+      call check(status == FBC_ERR_NUMERIC .and. updates == 0_int64 .and. &
+                 model%token_embedding(1, 1) == saved_parameter, &
+                 'direct optimizer rejects a finite gradient whose square would overflow')
+      gradient%token_embedding(1, 1) = transfer(int(z'7FF0000000000001', int64), 0.0_real64)
+      call fbc_optimizer_apply(optimizer, model, gradient, update_config, status, updates)
+      call check(status == FBC_ERR_NUMERIC .and. updates == 0_int64 .and. &
+                 model%token_embedding(1, 1) == saved_parameter, &
+                 'direct optimizer rejects a signaling NaN gradient before any update')
+      update_config = fbc_update_config_t()
+      update_config%weight_decay = 1000.0_real64
+      call check(.not. fbc_update_config_is_valid(update_config), 'lr times weight decay must stay below one')
+      update_config = fbc_update_config_t()
+      update_config%learning_rate = huge(0.0_real64)
+      update_config%epsilon = tiny(0.0_real64)
+      call check(.not. fbc_update_config_is_valid(update_config), 'overflowing lr divided by epsilon is rejected')
+      config%heads = 0_int32
+      call fbc_optimizer_init(optimizer, config, status)
+      call check(status == FBC_ERR_INVALID_ARGUMENT .and. optimizer%initialized .and. &
+                 abs(optimizer%velocity_token_embedding(1, 1) - expected_velocity) < 1.0e-14_real64, &
+                 'invalid reinitialization preserves the existing optimizer state')
+      call fbc_optimizer_destroy(optimizer)
+      call fbc_gradient_destroy(gradient)
+      call fbc_model_destroy(model)
+   end subroutine test_optimizer_rule
+
+   !> A non-divisible budget must not silently add work; explicit opt-in must
+   !> match an explicit full + short update.
+   subroutine test_partial_training_chunk
+      type(fbc_config_t) :: config
+      type(fbc_update_config_t) :: update_config
+      type(fbc_model_t) :: combined_model, split_model
+      type(fbc_state_t) :: combined_state, split_state
+      type(fbc_workspace_t) :: combined_workspace, split_workspace
+      type(fbc_gradient_t) :: combined_gradient, split_gradient
+      type(fbc_optimizer_t) :: combined_optimizer, split_optimizer
+      type(fbc_metrics_t) :: combined_metrics, split_metrics
+      integer(int32), parameter :: tokens(6) = [4_int32, 5_int32, 6_int32, 7_int32, 8_int32, 9_int32]
+      integer(int32) :: status
+
+      config = tiny_config(512_int64)
+      call fbc_model_init(combined_model, config, 919_int64, status)
+      call check(status == FBC_OK, 'partial-chunk model initializes')
+      call fbc_model_init(split_model, config, 919_int64, status)
+      call fbc_state_init(combined_state, combined_model, status)
+      call fbc_state_init(split_state, split_model, status)
+      call fbc_workspace_init(combined_workspace, combined_model, status)
+      call fbc_workspace_init(split_workspace, split_model, status)
+      call fbc_gradient_init(combined_gradient, combined_model, status)
+      call fbc_gradient_init(split_gradient, split_model, status)
+      call fbc_optimizer_init(combined_optimizer, config, status)
+      call fbc_optimizer_init(split_optimizer, config, status)
+      call check(status == FBC_OK, 'partial-chunk optimizer and workspaces initialize')
+      update_config%momentum = 1.0_real64
+      call fbc_train_stream(combined_model, combined_optimizer, combined_state, tokens, 4_int32, 4_int32, &
+                            update_config, combined_workspace, combined_gradient, combined_metrics, status)
+      call check(status == FBT_ERR_ARGUMENT .and. combined_state%steps == 0_int64 .and. &
+                 combined_metrics%updates == 0_int64, 'invalid optimizer settings are rejected before training')
+      update_config = fbc_update_config_t()
+      call fbc_train_stream(combined_model, combined_optimizer, combined_state, tokens, 5_int32, 4_int32, &
+                            update_config, combined_workspace, combined_gradient, combined_metrics, status)
+      call check(status == FBT_ERR_ARGUMENT .and. combined_metrics%tokens == 0_int64 .and. &
+                 combined_metrics%updates == 0_int64 .and. combined_state%steps == 0_int64, &
+                 'non-divisible budget is rejected before any training work by default')
+      call check(all(combined_model%token_embedding == split_model%token_embedding) .and. &
+                 all(combined_optimizer%velocity_token_embedding == split_optimizer%velocity_token_embedding), &
+                 'rejected partial chunk leaves model and optimizer unchanged')
+      call fbc_train_stream(combined_model, combined_optimizer, combined_state, tokens, 5_int32, 4_int32, &
+                            update_config, combined_workspace, combined_gradient, combined_metrics, status, &
+                            allow_partial_chunk=.true.)
+      call check(status == FBT_OK .and. combined_metrics%tokens == 5_int64 .and. &
+                 combined_metrics%updates == 2_int64 .and. combined_state%steps == 5_int64, &
+                 'partial final chunk consumes all five predictions in two updates')
+      call fbc_train_stream(split_model, split_optimizer, split_state, tokens(:5), 4_int32, 4_int32, &
+                            update_config, split_workspace, split_gradient, split_metrics, status)
+      call fbc_train_stream(split_model, split_optimizer, split_state, tokens(5:), 1_int32, 1_int32, &
+                            update_config, split_workspace, split_gradient, split_metrics, status)
+      call check(status == FBT_OK .and. split_metrics%tokens == 5_int64 .and. split_metrics%updates == 2_int64, &
+                 'explicit short-chunk reference consumes the same budget')
+      call check(all(combined_model%token_embedding == split_model%token_embedding) .and. &
+                 all(combined_model%output_bias == split_model%output_bias) .and. &
+                 all(combined_model%query == split_model%query), &
+                 'partial chunk uses the same mean gradient as an explicit short update')
+      call check(all(combined_optimizer%velocity_token_embedding == split_optimizer%velocity_token_embedding) .and. &
+                 all(combined_optimizer%energy_token_embedding == split_optimizer%energy_token_embedding), &
+                 'partial chunk preserves optimizer state equivalence')
+      call fbc_train_stream(combined_model, combined_optimizer, combined_state, tokens, 0_int32, 4_int32, &
+                            update_config, combined_workspace, combined_gradient, combined_metrics, status)
+      call check(status == FBT_OK .and. combined_metrics%tokens == 5_int64, 'zero-token budget is a no-op')
+      call fbc_train_stream(combined_model, combined_optimizer, combined_state, tokens, -1_int32, 4_int32, &
+                            update_config, combined_workspace, combined_gradient, combined_metrics, status)
+      call check(status == FBT_ERR_ARGUMENT, 'negative token budget is rejected')
+      call fbc_gradient_destroy(combined_gradient)
+      call fbc_gradient_destroy(split_gradient)
+      call fbc_optimizer_destroy(combined_optimizer)
+      call fbc_optimizer_destroy(split_optimizer)
+      call fbc_workspace_destroy(combined_workspace)
+      call fbc_workspace_destroy(split_workspace)
+      call fbc_state_destroy(combined_state)
+      call fbc_state_destroy(split_state)
+      call fbc_model_destroy(combined_model)
+      call fbc_model_destroy(split_model)
+   end subroutine test_partial_training_chunk
+
+   ! Invalid lengths and unrepresentable counters/loss sums must not become
+   ! successful but wrong reports or undefined signed/float arithmetic.
+   subroutine test_stream_error_boundaries
+      type(fbc_config_t) :: config
+      type(fbc_model_t) :: model
+      type(fbc_state_t) :: state
+      type(fbc_workspace_t) :: workspace
+      type(fbc_gradient_t) :: gradient
+      type(fbc_optimizer_t) :: optimizer
+      type(fbc_update_config_t) :: update_config
+      type(fbc_metrics_t) :: metrics
+      integer(int32) :: status, tokens(3)
+      integer(int64) :: answer_count
+      real(real64) :: mean_nll, answer_accuracy, old_bias(16)
+      logical :: mask(2)
+
+      config = tiny_config(8192_int64)
+      call fbc_model_init(model, config, 47_int64, status)
+      call fbc_state_init(state, model, status)
+      call fbc_workspace_init(workspace, model, status)
+      call fbc_gradient_init(gradient, model, status)
+      call fbc_optimizer_init(optimizer, config, status)
+      tokens = [2_int32, 2_int32, 2_int32]
+      mask = .false.
+      call fbc_evaluate_stream(model, state, tokens, -1_int32, mask, workspace, &
+                               mean_nll, answer_accuracy, answer_count, status)
+      call check(status == FBT_ERR_ARGUMENT .and. state%steps == 0_int64, &
+                 'evaluation rejects a negative budget before state changes')
+      call fbc_evaluate_stream(model, state, tokens, huge(0_int32), mask, workspace, &
+                               mean_nll, answer_accuracy, answer_count, status)
+      call check(status == FBT_ERR_ARGUMENT .and. state%steps == 0_int64, &
+                 'evaluation rejects an overflowing budget before state changes')
+      call fbc_evaluate_stream(model, state, tokens, 2_int32, mask(:1), workspace, &
+                               mean_nll, answer_accuracy, answer_count, status)
+      call check(status == FBT_ERR_ARGUMENT .and. state%steps == 0_int64, &
+                 'evaluation rejects an undersized answer mask before state changes')
+      call fbc_evaluate_stream(model, state, tokens, 0_int32, mask(:0), workspace, &
+                               mean_nll, answer_accuracy, answer_count, status)
+      call check(status == FBT_OK .and. mean_nll == 0.0_real64 .and. answer_count == 0_int64 .and. &
+                 answer_accuracy == 0.0_real64 .and. state%steps == 0_int64, 'zero-token evaluation is a no-op')
+
+      metrics = fbc_metrics_t()
+      metrics%tokens = huge(0_int64)
+      call fbc_train_stream(model, optimizer, state, tokens, 2_int32, 2_int32, update_config, &
+                            workspace, gradient, metrics, status)
+      call check(status == FBT_ERR_ARGUMENT .and. state%steps == 0_int64, 'token counter overflow is rejected early')
+      metrics = fbc_metrics_t()
+      metrics%updates = huge(0_int64)
+      call fbc_train_stream(model, optimizer, state, tokens, 2_int32, 2_int32, update_config, &
+                            workspace, gradient, metrics, status)
+      call check(status == FBT_ERR_ARGUMENT .and. state%steps == 0_int64, 'update counter overflow is rejected early')
+      metrics = fbc_metrics_t()
+      metrics%parameter_updates = huge(0_int64)
+      call fbc_train_stream(model, optimizer, state, tokens, 2_int32, 2_int32, update_config, &
+                            workspace, gradient, metrics, status)
+      call check(status == FBT_ERR_ARGUMENT .and. state%steps == 0_int64, &
+                 'parameter-update counter overflow is rejected early')
+      metrics = fbc_metrics_t()
+      metrics%loss_sum = transfer(int(z'7FF0000000000001', int64), 0.0_real64)
+      call fbc_train_stream(model, optimizer, state, tokens, 2_int32, 2_int32, update_config, &
+                            workspace, gradient, metrics, status)
+      call check(status == FBT_ERR_NUMERIC .and. .not. metrics%numeric_ok .and. state%steps == 0_int64, &
+                 'a signaling NaN in the incoming loss sum fails before work')
+
+      model%output_bias = 0.0_real64
+      model%output_bias(1) = 0.75_real64 * huge(0.0_real64)
+      old_bias = model%output_bias
+      call fbc_evaluate_stream(model, state, tokens, 2_int32, mask, workspace, &
+                               mean_nll, answer_accuracy, answer_count, status)
+      call check(status == FBT_ERR_NUMERIC .and. state%steps == 2_int64, &
+                 'evaluation rejects an unrepresentable loss sum without floating overflow')
+      call fbc_state_reset(state, model, status)
+      metrics = fbc_metrics_t()
+      call fbc_train_stream(model, optimizer, state, tokens, 2_int32, 2_int32, update_config, &
+                            workspace, gradient, metrics, status)
+      call check(status == FBT_ERR_NUMERIC .and. .not. metrics%numeric_ok .and. metrics%tokens == 1_int64 .and. &
+                 metrics%updates == 0_int64 .and. state%steps == 2_int64 .and. all(model%output_bias == old_bias), &
+                 'overflowing training loss fails before an optimizer update and reports the advanced state')
+      call fbc_gradient_destroy(gradient)
+      call fbc_optimizer_destroy(optimizer)
+      call fbc_workspace_destroy(workspace)
+      call fbc_state_destroy(state)
+      call fbc_model_destroy(model)
+   end subroutine test_stream_error_boundaries
+
+   subroutine test_workspace_gradient_binding
+      type(fbc_config_t) :: config, other_config
+      type(fbc_model_t) :: model, other_model
+      type(fbc_state_t) :: state, missing_state
+      type(fbc_workspace_t) :: workspace, other_workspace, stale_workspace
+      type(fbc_gradient_t) :: gradient, other_gradient
+      type(fbc_optimizer_t) :: optimizer, other_optimizer
+      type(fbc_update_config_t) :: update_config
+      type(fbc_metrics_t) :: metrics
+      integer(int32) :: status, tokens(2), dimension
+      integer(int64) :: parameter_updates, old_steps
+      integer :: unit, io_status
+      real(real64) :: hidden(8), logits(16), dlogits(16), old_embedding(8, 16)
+      character(len=11) :: sentinel
+      character(len=*), parameter :: sentinel_path = 'fbc_layout_guard_sentinel.vgfb'
+
+      config = tiny_config(8192_int64)
+      other_config = config
+      other_config%ffn_width = 24_int32
+      call fbc_model_init(model, config, 97_int64, status)
+      call fbc_model_init(other_model, other_config, 97_int64, status)
+      call fbc_state_init(state, model, status)
+      call fbc_workspace_init(workspace, model, status)
+      call fbc_workspace_init(other_workspace, other_model, status)
+      call fbc_gradient_init(gradient, model, status)
+      call fbc_gradient_init(other_gradient, other_model, status)
+      call fbc_optimizer_init(optimizer, config, status)
+      call fbc_optimizer_init(other_optimizer, other_config, status)
+      tokens = [2_int32, 3_int32]
+      dlogits = 0.0_real64
+      dlogits(2) = -0.5_real64
+      dlogits(3) = 0.5_real64
+
+      do dimension = 1_int32, 7_int32
+         workspace%layout(dimension) = -1_int32
+         call fbc_step(model, state, workspace, 2_int32, hidden, logits, status)
+         call check(status == FBC_ERR_NOT_READY .and. state%steps == 0_int64, &
+                    'every workspace shape component is checked before the forward step')
+         workspace%layout = fbc_config_layout(config)
+      end do
+      call fbc_step(model, state, other_workspace, 2_int32, hidden, logits, status)
+      call check(status == FBC_ERR_NOT_READY .and. state%steps == 0_int64, &
+                 'a workspace initialized for a different model is rejected before state changes')
+      call fbc_step_backward(model, missing_state, workspace, dlogits, gradient, status)
+      call check(status == FBC_ERR_NOT_READY, 'backward rejects an uninitialized state')
+      call fbc_step_backward(model, state, workspace, dlogits, gradient, status)
+      call check(status == FBC_ERR_ORDER .and. all(gradient%token_embedding == 0.0_real64), &
+                 'backward rejects a workspace that has no completed forward')
+
+      call fbc_step(model, state, workspace, 2_int32, hidden, logits, status, defer_local_commit=.true.)
+      call check(status == FBC_OK .and. workspace%forward_step == 1_int64, 'a deferred forward publishes its step stamp')
+      call fbc_step_backward(model, state, workspace, dlogits, other_gradient, status)
+      call check(status == FBC_ERR_NOT_READY .and. all(other_gradient%token_embedding == 0.0_real64), &
+                 'backward rejects a gradient initialized for another shape before writing')
+      call fbc_finish_local_step(state, other_workspace, status)
+      call check(status == FBC_ERR_ORDER .and. state%steps == 0_int64, &
+                 'a workspace without the current forward cannot finish a deferred state')
+      call fbc_step_backward(model, state, workspace, dlogits, gradient, status)
+      call check(status == FBC_OK, 'matched deferred forward/backward succeeds')
+      call fbc_finish_local_step(state, workspace, status)
+      call check(status == FBC_OK .and. state%steps == 1_int64, 'matched deferred state commits')
+      stale_workspace = workspace
+      call fbc_step(model, state, workspace, 3_int32, hidden, logits, status)
+      call check(status == FBC_OK .and. state%steps == 2_int64, 'next forward advances the stamp')
+      call fbc_step_backward(model, state, stale_workspace, dlogits, gradient, status)
+      call check(status == FBC_ERR_ORDER, 'backward rejects activations from an older step')
+
+      old_steps = state%steps
+      old_embedding = model%token_embedding
+      metrics = fbc_metrics_t()
+      call fbc_train_stream(model, other_optimizer, state, tokens, 1_int32, 1_int32, update_config, &
+                            workspace, gradient, metrics, status)
+      call check(status == FBC_ERR_NOT_READY .and. state%steps == old_steps .and. metrics%tokens == 0_int64 .and. &
+                 all(model%token_embedding == old_embedding), 'mismatched optimizer is rejected before training')
+      call fbc_train_stream(model, optimizer, state, tokens, 1_int32, 1_int32, update_config, &
+                            workspace, other_gradient, metrics, status)
+      call check(status == FBC_ERR_NOT_READY .and. state%steps == old_steps .and. metrics%tokens == 0_int64, &
+                 'mismatched gradient is rejected before training')
+      call fbc_optimizer_apply(other_optimizer, model, gradient, update_config, status, parameter_updates)
+      call check(status == FBC_ERR_NOT_READY .and. parameter_updates == 0_int64 .and. &
+                 all(model%token_embedding == old_embedding), 'optimizer rejects a different model shape before writing')
+
+      open(newunit=unit, file=sentinel_path, status='replace', access='stream', form='unformatted', iostat=io_status)
+      if (io_status == 0) then
+         write(unit, iostat=io_status) 'layout-safe'
+         close(unit)
+      end if
+      call check(io_status == 0, 'layout checkpoint sentinel created')
+      call fbc_checkpoint_save(sentinel_path, model, other_optimizer, update_config, metrics, status)
+      call check(status == FBT_ERR_ARGUMENT, 'checkpoint rejects a mismatched optimizer shape')
+      sentinel = ''
+      open(newunit=unit, file=sentinel_path, status='old', access='stream', form='unformatted', iostat=io_status)
+      if (io_status == 0) then
+         read(unit, iostat=io_status) sentinel
+         close(unit, status='delete')
+      end if
+      call check(io_status == 0 .and. sentinel == 'layout-safe', &
+                 'mismatched optimizer cannot replace an existing checkpoint')
+
+      call fbc_state_reset(state, model, status)
+      state%steps = huge(0_int64)
+      call fbc_step(model, state, workspace, 2_int32, hidden, logits, status)
+      call check(status == FBC_ERR_NUMERIC .and. state%steps == huge(0_int64), &
+                 'state step counter cannot overflow on a forward pass')
+      call fbc_workspace_destroy(stale_workspace)
+      call fbc_optimizer_destroy(other_optimizer)
+      call fbc_optimizer_destroy(optimizer)
+      call fbc_gradient_destroy(other_gradient)
+      call fbc_gradient_destroy(gradient)
+      call fbc_workspace_destroy(other_workspace)
+      call fbc_workspace_destroy(workspace)
+      call fbc_state_destroy(state)
+      call fbc_model_destroy(other_model)
+      call fbc_model_destroy(model)
+   end subroutine test_workspace_gradient_binding
 
    !> Small shape used by the gradient and training checks: width 8, two heads
    !> of four, two scales, four slots.
@@ -166,6 +920,22 @@ contains
          call check(abs(fbc_learned_horizon(model) - effective) / effective < 0.01_real64, &
                     'the learned reach starts at the configured horizon')
          call fbc_model_destroy(model)
+      end block
+
+      ! The ladder's requested/effective horizon and the learned decay clamp
+      ! are distinct: the former can exceed what FBC_MAX_DECAY permits.
+      block
+         type(fbc_config_t) :: long_config
+         type(fbc_model_t) :: long_model
+         integer(int32) :: status
+         long_config = tiny_config(2000000000000_int64)
+         call fbc_model_init(long_model, long_config, 1_int64, status)
+         call check(status == FBC_OK .and. .not. long_model%horizon_clamped .and. &
+                    long_model%effective_horizon == 2.0e12_real64 .and. &
+                    long_model%scale_decay(long_config%memory_scales) == FBC_MAX_DECAY .and. &
+                    fbc_learned_horizon(long_model) < long_model%effective_horizon, &
+                    'decay-clamped learned reach is distinguished from the requested ladder horizon')
+         call fbc_model_destroy(long_model)
       end block
 
       ! And the degenerate case must stay visible: horizon = window collapses.
@@ -478,6 +1248,244 @@ contains
       call fbc_model_destroy(model)
    end subroutine test_long_stream_finite
 
+   ! V5/V6 checkpoints start every slot at zero and write them with the same
+   ! rule. Keep their trajectory unchanged, but do not mistake repeated slots
+   ! or floating-point roundoff for independently addressable memory.
+   subroutine test_legacy_slot_symmetry
+      type(fbc_config_t) :: config
+      type(fbc_model_t) :: model
+      type(fbc_state_t) :: state
+      type(fbc_workspace_t) :: workspace
+      integer(int32) :: rule, status, index, slot
+      real(real64) :: hidden(8), logits(16)
+      logical :: identical, succeeded
+
+      config = tiny_config(1024_int64)
+      config%memory_slots = 8_int32
+      do rule = FBC_TRAINING_RULE_V5, FBC_TRAINING_RULE_V6
+         call fbc_model_init(model, config, 5_int64, status)
+         model%training_rule = rule
+         call fbc_state_init(state, model, status)
+         call fbc_workspace_init(workspace, model, status)
+         identical = .true.
+         succeeded = .true.
+         do index = 1_int32, 512_int32
+            call fbc_step(model, state, workspace, 1_int32 + modulo(index * 7_int32, 16_int32), &
+                          hidden, logits, status)
+            if (status /= FBC_OK) then
+               succeeded = .false.
+               exit
+            end if
+            do slot = 2_int32, config%memory_slots
+               identical = identical .and. all(state%slot_key(:, slot) == state%slot_key(:, 1_int32)) .and. &
+                  all(state%slot_value(:, slot) == state%slot_value(:, 1_int32)) .and. &
+                  state%slot_salience(slot) == state%slot_salience(1_int32)
+            end do
+         end do
+         call check(succeeded, 'the legacy slot-symmetry stream completes')
+         call check(identical, 'legacy slots remain identical throughout a varying 512-token stream')
+         call fbc_state_destroy(state)
+         call fbc_workspace_destroy(workspace)
+         call fbc_model_destroy(model)
+      end do
+   end subroutine test_legacy_slot_symmetry
+
+   ! Multiple V7 slots retain their identities over a varied stream; values and
+   ! salience must also diverge, not just the fixed key coordinates. With one
+   ! slot the rule reduces exactly to V6, including the full key update.
+   subroutine test_anchored_slot_diversity
+      type(fbc_config_t) :: config
+      type(fbc_model_t) :: anchored, single_legacy
+      type(fbc_state_t) :: state, single_state
+      type(fbc_workspace_t) :: workspace, single_workspace
+      integer(int32), parameter :: counts(5) = [1_int32, 2_int32, 3_int32, 8_int32, 64_int32]
+      integer(int32) :: count_index, slots, status, index
+      real(real64) :: hidden(8), logits(16), other_hidden(8), other_logits(16)
+      real(real64), allocatable :: anchors(:)
+      logical :: succeeded, stable, single_identical
+
+      do count_index = 1_int32, size(counts, kind=int32)
+         config = tiny_config(1024_int64)
+         slots = counts(count_index)
+         config%memory_slots = slots
+         call fbc_model_init(anchored, config, 5_int64, status)
+         anchored%training_rule = FBC_TRAINING_RULE_V7
+         call fbc_state_init(state, anchored, status)
+         call fbc_workspace_init(workspace, anchored, status)
+         allocate(anchors(slots))
+         anchors = state%slot_key(1_int32, :)
+         if (slots > 1_int32) then
+            call check(all(anchors(2:) > anchors(:slots - 1_int32)), &
+                       'V7 assigns deterministically ordered, distinct slot anchors')
+         else
+            single_legacy = anchored
+            single_legacy%training_rule = FBC_TRAINING_RULE_V6
+            call fbc_state_init(single_state, single_legacy, status)
+            call fbc_workspace_init(single_workspace, single_legacy, status)
+         end if
+         succeeded = .true.
+         stable = .true.
+         single_identical = .true.
+         do index = 1_int32, 1500_int32
+            call fbc_step(anchored, state, workspace, 1_int32 + modulo(index * 7_int32, 16_int32), &
+                          hidden, logits, status)
+            if (status /= FBC_OK) then
+               succeeded = .false.
+               exit
+            end if
+            if (slots > 1_int32) stable = stable .and. all(state%slot_key(1_int32, :) == anchors)
+            if (slots == 1_int32) then
+               call fbc_step(single_legacy, single_state, single_workspace, &
+                             1_int32 + modulo(index * 7_int32, 16_int32), other_hidden, other_logits, status)
+               if (status /= FBC_OK) then
+                  succeeded = .false.
+                  exit
+               end if
+               single_identical = single_identical .and. all(hidden == other_hidden) .and. all(logits == other_logits) &
+                  .and. all(state%slot_key == single_state%slot_key) .and. all(state%slot_value == single_state%slot_value) &
+                  .and. all(state%slot_salience == single_state%slot_salience)
+            end if
+         end do
+         call check(succeeded, 'the anchored-slot stream completes')
+         if (slots > 1_int32) then
+            call check(stable, 'V7 anchors are bit-stable throughout a varying 1500-token stream')
+            call check(maxval(abs(state%slot_value(:, 1_int32) - state%slot_value(:, slots))) > 1.0e-6_real64 .and. &
+                       abs(state%slot_salience(1_int32) - state%slot_salience(slots)) > 1.0e-6_real64, &
+                       'different anchors produce meaningfully different values and salience')
+         else
+            call check(single_identical, 'one-slot V7 and V6 have identical stream outputs and slot state')
+            block
+               type(fbc_gradient_t) :: a_gradient, b_gradient
+               real(real64) :: a_dlogits(16), b_dlogits(16), a_loss, b_loss
+               call fbc_state_reset(state, anchored, status)
+               call fbc_state_reset(single_state, single_legacy, status)
+               call fbc_gradient_init(a_gradient, anchored, status)
+               call fbc_gradient_init(b_gradient, single_legacy, status)
+               do index = 1_int32, 4_int32
+                  call fbc_step(anchored, state, workspace, index + 1_int32, hidden, logits, status)
+                  call fbc_step(single_legacy, single_state, single_workspace, index + 1_int32, &
+                                other_hidden, other_logits, status)
+               end do
+               call fbc_loss_and_gradient(logits, 5_int32, a_dlogits, a_loss, status)
+               call fbc_loss_and_gradient(other_logits, 5_int32, b_dlogits, b_loss, status)
+               call fbc_step_backward(anchored, state, workspace, a_dlogits, a_gradient, status)
+               call fbc_step_backward(single_legacy, single_state, single_workspace, b_dlogits, b_gradient, status)
+               call check(status == FBC_OK .and. a_loss == b_loss .and. all(a_dlogits == b_dlogits) .and. &
+                          all(a_gradient%slot_key_proj == b_gradient%slot_key_proj) .and. &
+                          all(a_gradient%slot_query_proj == b_gradient%slot_query_proj) .and. &
+                          all(a_gradient%slot_value_proj == b_gradient%slot_value_proj) .and. &
+                          all(a_gradient%token_embedding == b_gradient%token_embedding), &
+                          'one-slot V7 and V6 produce identical loss and tested backward tensors')
+               call fbc_gradient_destroy(a_gradient)
+               call fbc_gradient_destroy(b_gradient)
+            end block
+            call fbc_state_destroy(single_state)
+            call fbc_workspace_destroy(single_workspace)
+            call fbc_model_destroy(single_legacy)
+         end if
+         call fbc_state_reset(state, anchored, status)
+         call check(status == FBC_OK .and. all(state%slot_key(1_int32, :) == anchors) .and. &
+                    all(state%slot_key(2_int32:, :) == 0.0_real64) .and. &
+                    all(state%slot_value == 0.0_real64) .and. all(state%slot_salience == 0.0_real64), &
+                    'reset recreates V7 slot identities and clears all dynamic components')
+         deallocate(anchors)
+         call fbc_state_destroy(state)
+         call fbc_workspace_destroy(workspace)
+         call fbc_model_destroy(anchored)
+      end do
+   end subroutine test_anchored_slot_diversity
+
+   ! A live V6 slot state cannot be silently reused with V7 semantics, or the
+   ! other way around. Reset is the explicit, allocation-free transition.
+   subroutine test_slot_rule_state_binding
+      type(fbc_config_t) :: config
+      type(fbc_model_t) :: model
+      type(fbc_state_t) :: state, before, rejected
+      type(fbc_workspace_t) :: workspace
+      type(fbc_gradient_t) :: gradient
+      integer(int32) :: status
+      real(real64) :: hidden(8), logits(16), dlogits(16), loss
+
+      config = tiny_config(1024_int64)
+      call fbc_model_init(model, config, 31_int64, status)
+      call fbc_state_init(state, model, status)
+      call fbc_workspace_init(workspace, model, status)
+      call fbc_gradient_init(gradient, model, status)
+      call fbc_step(model, state, workspace, 3_int32, hidden, logits, status)
+      call fbc_loss_and_gradient(logits, 7_int32, dlogits, loss, status)
+      call check(status == FBC_OK .and. .not. state%anchored_slots, 'state binding fixture starts with V6')
+      before = state
+      model%training_rule = FBC_TRAINING_RULE_V7
+      call fbc_step(model, state, workspace, 4_int32, hidden, logits, status)
+      call check(status == FBC_ERR_ORDER .and. state%steps == before%steps .and. &
+                 all(state%slot_key == before%slot_key) .and. all(state%slot_value == before%slot_value), &
+                 'V7 forward rejects a live V6 state without changing it')
+      call fbc_step_backward(model, state, workspace, dlogits, gradient, status)
+      call check(status == FBC_ERR_ORDER .and. all(gradient%token_embedding == 0.0_real64), &
+                 'V7 backward rejects a live V6 state without updating the gradient')
+      call fbc_state_reset(state, model, status)
+      call check(status == FBC_OK .and. state%anchored_slots .and. state%steps == 0_int64 .and. &
+                 state%slot_key(1_int32, 1_int32) < state%slot_key(1_int32, config%memory_slots), &
+                 'reset explicitly creates the V7 slot identities')
+      call fbc_step(model, state, workspace, 4_int32, hidden, logits, status)
+      call fbc_loss_and_gradient(logits, 7_int32, dlogits, loss, status)
+      before = state
+      model%training_rule = FBC_TRAINING_RULE_V6
+      call fbc_step(model, state, workspace, 5_int32, hidden, logits, status)
+      call check(status == FBC_ERR_ORDER .and. state%steps == before%steps .and. &
+                 all(state%slot_key == before%slot_key), 'V6 forward rejects a live V7 state unchanged')
+      call fbc_step_backward(model, state, workspace, dlogits, gradient, status)
+      call check(status == FBC_ERR_ORDER .and. all(gradient%token_embedding == 0.0_real64), &
+                 'V6 backward rejects a live V7 state unchanged')
+      call fbc_state_reset(state, model, status)
+      call check(status == FBC_OK .and. .not. state%anchored_slots .and. all(state%slot_key == 0.0_real64), &
+                 'reset explicitly returns to V6 slot semantics')
+      before = state
+      model%training_rule = 99_int32
+      call fbc_state_reset(state, model, status)
+      call check(status == FBC_ERR_INVALID_ARGUMENT .and. state%steps == before%steps .and. &
+                 all(state%slot_key == before%slot_key), 'reset rejects unknown rules without mutating state')
+      call fbc_state_init(rejected, model, status)
+      call check(status == FBC_ERR_INVALID_ARGUMENT .and. .not. rejected%initialized .and. &
+                 .not. allocated(rejected%slot_key), 'initializing an unknown rule leaves no live state')
+      call fbc_step(model, state, workspace, 3_int32, hidden, logits, status)
+      call check(status == FBC_ERR_INVALID_ARGUMENT .and. state%steps == before%steps, &
+                 'forward rejects an unknown rule before mutating state')
+      call fbc_state_destroy(rejected)
+      call fbc_state_destroy(before)
+      call fbc_state_destroy(state)
+      call fbc_workspace_destroy(workspace)
+      call fbc_gradient_destroy(gradient)
+      call fbc_model_destroy(model)
+      block
+         type(fbc_model_t) :: legacy
+         type(fbc_state_t) :: legacy_state
+         type(fbc_workspace_t) :: legacy_workspace
+         real(real64) :: legacy_hidden(8), legacy_logits(16)
+         config%memory_slots = 1_int32
+         call fbc_model_init(model, config, 31_int64, status)
+         call fbc_state_init(state, model, status)
+         call fbc_workspace_init(workspace, model, status)
+         call fbc_step(model, state, workspace, 3_int32, hidden, logits, status)
+         legacy = model
+         legacy_state = state
+         call fbc_workspace_init(legacy_workspace, legacy, status)
+         model%training_rule = FBC_TRAINING_RULE_V7
+         call fbc_step(model, state, workspace, 4_int32, hidden, logits, status)
+         call check(status == FBC_OK .and. .not. state%anchored_slots, &
+                    'one-slot V7 may use the equivalent V6 state without a reset')
+         call fbc_step(legacy, legacy_state, legacy_workspace, 4_int32, legacy_hidden, legacy_logits, status)
+         call check(status == FBC_OK .and. all(hidden == legacy_hidden) .and. all(logits == legacy_logits) .and. &
+                    all(state%slot_key == legacy_state%slot_key), 'one-slot rule transition remains V6-equivalent')
+         call fbc_workspace_destroy(legacy_workspace)
+         call fbc_state_destroy(legacy_state)
+         call fbc_model_destroy(legacy)
+         call fbc_workspace_destroy(workspace)
+         call fbc_state_destroy(state)
+         call fbc_model_destroy(model)
+      end block
+   end subroutine test_slot_rule_state_binding
+
    !----------------------------------------------------------------------------
    !  7. Finite-difference gradient check of the analytic backward
    !----------------------------------------------------------------------------
@@ -488,7 +1496,8 @@ contains
    !> network: readout weight, channel logit, the input-dependent channel and
    !> scale gates, the two slot write projections, the slot query projection,
    !> the distance bias, an FFN projection and the tied embedding.
-   subroutine test_gradient_check
+   subroutine test_gradient_check(rule)
+      integer(int32), intent(in) :: rule
       type(fbc_config_t) :: config
       type(fbc_model_t) :: model
       type(fbc_state_t) :: base, probe
@@ -505,6 +1514,7 @@ contains
 
       config = tiny_config(1024_int64)
       call fbc_model_init(model, config, 5_int64, status)
+      model%training_rule = rule
       ! The router starts at exactly zero, which makes the one-step loss linear
       ! in it: a central difference would then agree with any gradient built
       ! from the right channel derivatives alone, and would not test the term
@@ -537,6 +1547,11 @@ contains
       call fbc_step(model, probe, workspace, 9_int32, hidden, logits, status)
       call fbc_loss_and_gradient(logits, 5_int32, dlogits, loss, status)
       call fbc_step_backward(model, probe, workspace, dlogits, gradient, status)
+      if (rule == FBC_TRAINING_RULE_V7) then
+         call check(sum(abs(gradient%slot_query_proj)) > 1.0e-10_real64 .and. &
+                    abs(gradient%slot_salience_weight) > 1.0e-10_real64, &
+                    'distinct V7 slots provide nontrivial query and salience gradients')
+      end if
       delta = 1.0e-6_real64
 
       block
@@ -643,6 +1658,21 @@ contains
          call report_gradient(numeric, gradient%slot_key_proj(2_int32, 3_int32), &
                     'finite difference matches the slot write-key gradient (write-then-read)')
       end block
+      ! V7 freezes the first key component in the state, but its projection
+      ! still affects the write gate. Check that exact derivative independently.
+      if (rule == FBC_TRAINING_RULE_V7) then
+         original = model%slot_key_proj(1_int32, 3_int32)
+         model%slot_key_proj(1_int32, 3_int32) = original + delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, plus_loss, status)
+         model%slot_key_proj(1_int32, 3_int32) = original - delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
+         model%slot_key_proj(1_int32, 3_int32) = original
+         numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
+         call report_gradient(numeric, gradient%slot_key_proj(1_int32, 3_int32), &
+                              'anchored key component has the correct write-gate gradient')
+         call check(abs(gradient%slot_key_proj(1_int32, 3_int32)) > 1.0e-12_real64, &
+                    'the anchored gate gradient is not merely numerical zero')
+      end if
       block
          original = model%slot_value_proj(4_int32, 1_int32)
          model%slot_value_proj(4_int32, 1_int32) = original + delta
@@ -665,6 +1695,17 @@ contains
          call report_gradient(numeric, gradient%slot_query_proj(3_int32, 5_int32), &
                     'finite difference matches the slot recall-query gradient')
       end block
+      if (rule == FBC_TRAINING_RULE_V7) then
+         original = model%slot_salience_weight
+         model%slot_salience_weight = original + delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, plus_loss, status)
+         model%slot_salience_weight = original - delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
+         model%slot_salience_weight = original
+         numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
+         call report_gradient(numeric, gradient%slot_salience_weight, &
+                              'anchored salience-selection gradient matches finite difference')
+      end if
       block
          original = model%decay_logit(1_int32)
          model%decay_logit(1_int32) = original + delta
@@ -842,6 +1883,240 @@ contains
       call fbc_workspace_destroy(workspace)
       call fbc_model_destroy(model)
    end subroutine test_gradient_check
+
+   ! Before the ring is full and away from decay clamps, both training rules
+   ! must compute the same derivatives. This also checks v6's in-place outer
+   ! accumulation against the legacy expression, including a second addition.
+   subroutine test_outer_accumulation_parity
+      type(fbc_config_t) :: config
+      type(fbc_model_t) :: model
+      type(fbc_state_t) :: state
+      type(fbc_workspace_t) :: workspace
+      type(fbc_gradient_t) :: old_gradient, new_gradient
+      real(real64) :: hidden(8), logits(16), dlogits(16), loss
+      integer(int32) :: status, repetition
+      logical :: same
+
+      config = tiny_config(8192_int64)
+      call fbc_model_init(model, config, 42_int64, status)
+      call check(status == FBC_OK, 'outer parity model initializes')
+      model%training_rule = FBC_TRAINING_RULE_V6
+      call fbc_state_init(state, model, status)
+      call fbc_workspace_init(workspace, model, status)
+      call fbc_gradient_init(old_gradient, model, status)
+      call fbc_gradient_init(new_gradient, model, status)
+      call fbc_step(model, state, workspace, 3_int32, hidden, logits, status)
+      call fbc_loss_and_gradient(logits, 7_int32, dlogits, loss, status)
+      call check(status == FBC_OK, 'outer parity forward and loss succeed')
+      do repetition = 1_int32, 2_int32
+         model%training_rule = FBC_TRAINING_RULE_V5
+         call fbc_step_backward(model, state, workspace, dlogits, old_gradient, status)
+         call check(status == FBC_OK, 'legacy outer backward succeeds')
+         model%training_rule = FBC_TRAINING_RULE_V6
+         call fbc_step_backward(model, state, workspace, dlogits, new_gradient, status)
+         call check(status == FBC_OK, 'in-place outer backward succeeds')
+      end do
+      same = maxval(abs(old_gradient%ffn_output - new_gradient%ffn_output)) < 1.0e-12_real64 .and. &
+             maxval(abs(old_gradient%ffn_gate - new_gradient%ffn_gate)) < 1.0e-12_real64 .and. &
+             maxval(abs(old_gradient%ffn_value - new_gradient%ffn_value)) < 1.0e-12_real64 .and. &
+             maxval(abs(old_gradient%attention_output - new_gradient%attention_output)) < 1.0e-12_real64 .and. &
+             maxval(abs(old_gradient%slot_read_proj - new_gradient%slot_read_proj)) < 1.0e-12_real64
+      call check(same, 'v6 in-place outer products match repeated legacy accumulation')
+      call fbc_gradient_destroy(old_gradient)
+      call fbc_gradient_destroy(new_gradient)
+      call fbc_workspace_destroy(workspace)
+      call fbc_state_destroy(state)
+      call fbc_model_destroy(model)
+   end subroutine test_outer_accumulation_parity
+
+   !> The full ring used to overwrite the oldest key/value before backward read
+   !> them. Probe both a one-slot ring and a repeatedly wrapped four-slot ring;
+   !> all finite differences replay from the exact same frozen pre-step state.
+   subroutine test_full_ring_backward(rule)
+      integer(int32), intent(in) :: rule
+      type(fbc_config_t) :: config
+      type(fbc_model_t) :: model, saved
+      type(fbc_state_t) :: base, pending, immediate, error_state
+      type(fbc_workspace_t) :: workspace, immediate_workspace
+      type(fbc_gradient_t) :: gradient, legacy_gradient
+      type(fbc_optimizer_t) :: optimizer
+      type(fbc_update_config_t) :: update_config
+      type(fbc_metrics_t) :: metrics
+      integer(int32) :: status, window, index
+      integer(int32) :: invalid_tokens(2)
+      real(real64) :: hidden(8), logits(16), dlogits(16), immediate_hidden(8), immediate_logits(16)
+      real(real64) :: ignored_hidden(8), ignored_logits(16), loss, original, plus_loss, minus_loss, numeric, dot
+      real(real64), parameter :: delta = 1.0e-6_real64, direction_delta = 1.0e-7_real64
+
+      do window = 1_int32, 4_int32, 3_int32
+         config = tiny_config(1024_int64)
+         config%local_window = window
+         call fbc_model_init(model, config, 157_int64, status)
+         model%training_rule = rule
+         model%induction_mix = [0.4_real64, -0.25_real64]
+         model%channel_router(FBC_CHANNEL_RETENTION, 2_int32) = 0.30_real64
+         model%channel_router(FBC_CHANNEL_SLOTS, 4_int32) = -0.20_real64
+         call fbc_state_init(base, model, status)
+         call fbc_workspace_init(workspace, model, status)
+         call fbc_workspace_init(immediate_workspace, model, status)
+         call fbc_gradient_init(gradient, model, status)
+         call fbc_gradient_init(legacy_gradient, model, status)
+         do index = 1_int32, 2_int32 * window + 3_int32
+            call fbc_step(model, base, workspace, 1_int32 + modulo(3_int32 * index, 15_int32), hidden, logits, status)
+         end do
+         call check(status == FBC_OK .and. base%cache_count == window, 'full-ring gradient fixture wraps')
+
+         pending = base
+         call fbc_step(model, pending, workspace, 9_int32, hidden, logits, status, defer_local_commit=.true.)
+         call check(status == FBC_OK .and. pending%cache_count < 0_int32, 'full-ring local write is deferred')
+         call fbc_loss_and_gradient(logits, 5_int32, dlogits, loss, status)
+         call fbc_step(model, pending, workspace, 3_int32, ignored_hidden, ignored_logits, status)
+         call check(status == FBC_ERR_ORDER, 'another forward step is rejected while the write is pending')
+         call fbc_gradient_zero(gradient)
+         call fbc_step_backward(model, pending, workspace, dlogits, gradient, status)
+         call check(status == FBC_OK, 'v6 backward reads the pre-write full ring')
+         call fbc_finish_local_step(pending, workspace, status)
+         call check(status == FBC_OK, 'deferred local write commits')
+         call fbc_finish_local_step(pending, workspace, status)
+         call check(status == FBC_ERR_ORDER, 'a deferred write cannot be committed twice')
+
+         immediate = base
+         call fbc_step(model, immediate, immediate_workspace, 9_int32, immediate_hidden, immediate_logits, status)
+         call check(all(hidden == immediate_hidden) .and. all(logits == immediate_logits), &
+                    'deferred and immediate forward outputs are identical')
+         call check(all(pending%local_key == immediate%local_key) .and. &
+                    all(pending%local_value == immediate%local_value) .and. &
+                    all(pending%retention_numerator == immediate%retention_numerator) .and. &
+                    all(pending%retention_normalizer == immediate%retention_normalizer) .and. &
+                    all(pending%slot_key == immediate%slot_key) .and. all(pending%slot_value == immediate%slot_value) .and. &
+                    all(pending%slot_salience == immediate%slot_salience) .and. &
+                    pending%cache_head == immediate%cache_head .and. pending%cache_count == immediate%cache_count .and. &
+                    pending%steps == immediate%steps, 'deferred commit leaves the same complete stream state')
+         call fbc_gradient_zero(legacy_gradient)
+         call fbc_step_backward(model, immediate, immediate_workspace, dlogits, legacy_gradient, status)
+         call check(status == FBC_ERR_ORDER .and. all(legacy_gradient%query == 0.0_real64), &
+                    'v6 refuses a full-ring backward after the old entry has been overwritten')
+         if (rule == FBC_TRAINING_RULE_V6) then
+            ! V5 and V6 have the same forward state; compare their historical
+            ! and corrected full-ring derivatives without mixing V7 state.
+            model%training_rule = FBC_TRAINING_RULE_V5
+            call fbc_step_backward(model, immediate, immediate_workspace, dlogits, legacy_gradient, status)
+            call check(status == FBC_OK .and. sum(abs(legacy_gradient%query - gradient%query)) > 1.0e-9_real64, &
+                       'legacy v5 retains the historical full-ring gradient, distinct from v6')
+            model%training_rule = rule
+         end if
+
+         original = model%query(1_int32, 2_int32, 1_int32)
+         model%query(1_int32, 2_int32, 1_int32) = original + delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, plus_loss, status)
+         model%query(1_int32, 2_int32, 1_int32) = original - delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
+         model%query(1_int32, 2_int32, 1_int32) = original
+         numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
+         call report_gradient(numeric, gradient%query(1_int32, 2_int32, 1_int32), &
+                              'full-ring query projection matches frozen-state finite difference')
+
+         original = model%distance_bias(window + 1_int32)
+         model%distance_bias(window + 1_int32) = original + delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, plus_loss, status)
+         model%distance_bias(window + 1_int32) = original - delta
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
+         model%distance_bias(window + 1_int32) = original
+         numeric = (plus_loss - minus_loss) / (2.0_real64 * delta)
+         call report_gradient(numeric, gradient%distance_bias(window + 1_int32), &
+                              'full-ring oldest distance bias matches finite difference')
+
+         saved = model
+         call walk_direction(model, gradient, direction_delta, dot, .true.)
+         call fbc_refresh_dynamics(model)
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, plus_loss, status)
+         model = saved
+         call walk_direction(model, gradient, -direction_delta, dot, .true.)
+         call fbc_refresh_dynamics(model)
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
+         model = saved
+         call walk_direction(model, gradient, 0.0_real64, dot, .false.)
+         numeric = (plus_loss - minus_loss) / (2.0_real64 * direction_delta)
+         call check(abs(numeric - dot) < 1.0e-6_real64 + 1.0e-4_real64 * abs(dot), &
+                    'all-parameter directional gradient matches with a full ring')
+
+         ! Even a rejected target must leave a complete forward state, just as
+         ! the historical immediate-write path did, and perform no update.
+         error_state = base
+         call fbc_optimizer_init(optimizer, config, status)
+         metrics = fbc_metrics_t()
+         invalid_tokens = [9_int32, 17_int32]
+         call fbc_train_stream(model, optimizer, error_state, invalid_tokens, 1_int32, 1_int32, &
+                               update_config, workspace, gradient, metrics, status)
+         call check(status == FBC_ERR_INVALID_ARGUMENT .and. error_state%cache_count == window .and. &
+                    error_state%steps == immediate%steps .and. all(error_state%local_key == immediate%local_key) .and. &
+                    all(error_state%local_value == immediate%local_value) .and. metrics%updates == 0_int64, &
+                    'failed training target finishes the pending local write without an update')
+
+         call fbc_optimizer_destroy(optimizer)
+         call fbc_gradient_destroy(gradient)
+         call fbc_gradient_destroy(legacy_gradient)
+         call fbc_state_destroy(base)
+         call fbc_state_destroy(pending)
+         call fbc_state_destroy(immediate)
+         call fbc_state_destroy(error_state)
+         call fbc_workspace_destroy(workspace)
+         call fbc_workspace_destroy(immediate_workspace)
+         call fbc_model_destroy(model)
+         call fbc_model_destroy(saved)
+      end do
+   end subroutine test_full_ring_backward
+
+   !> The cached decay is clipped. A logit beyond either bound cannot change
+   !> the forward computation; its true frozen-state gradient must be zero.
+   subroutine test_clamped_decay_backward
+      type(fbc_config_t) :: config
+      type(fbc_model_t) :: model
+      type(fbc_state_t) :: base, probe
+      type(fbc_workspace_t) :: workspace
+      type(fbc_gradient_t) :: gradient
+      integer(int32) :: status, index, side
+      real(real64) :: hidden(8), logits(16), dlogits(16), loss, original, plus_loss, minus_loss
+      real(real64), parameter :: delta = 1.0e-4_real64
+
+      config = tiny_config(1024_int64)
+      call fbc_model_init(model, config, 81_int64, status)
+      call fbc_state_init(base, model, status)
+      call fbc_workspace_init(workspace, model, status)
+      call fbc_gradient_init(gradient, model, status)
+      do index = 1_int32, 3_int32
+         call fbc_step(model, base, workspace, 1_int32 + index, hidden, logits, status)
+      end do
+      do side = 1_int32, 2_int32
+         if (side == 1_int32) then
+            original = -20.0_real64
+         else
+            original = 40.0_real64
+         end if
+         model%decay_logit(1_int32) = original
+         call fbc_refresh_dynamics(model)
+         probe = base
+         call fbc_step(model, probe, workspace, 9_int32, hidden, logits, status, defer_local_commit=.true.)
+         call fbc_loss_and_gradient(logits, 5_int32, dlogits, loss, status)
+         call fbc_gradient_zero(gradient)
+         call fbc_step_backward(model, probe, workspace, dlogits, gradient, status)
+         call check(status == FBC_OK .and. gradient%decay_logit(1_int32) == 0.0_real64, &
+                    'v6 gives zero gradient outside a decay clamp')
+         call fbc_finish_local_step(probe, workspace, status)
+         model%decay_logit(1_int32) = original + delta
+         call fbc_refresh_dynamics(model)
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, plus_loss, status)
+         model%decay_logit(1_int32) = original - delta
+         call fbc_refresh_dynamics(model)
+         call replay_loss(model, base, workspace, 9_int32, 5_int32, minus_loss, status)
+         call check(plus_loss == minus_loss, 'clamped-decay loss is unchanged by a local logit perturbation')
+      end do
+      call fbc_gradient_destroy(gradient)
+      call fbc_state_destroy(base)
+      call fbc_state_destroy(probe)
+      call fbc_workspace_destroy(workspace)
+      call fbc_model_destroy(model)
+   end subroutine test_clamped_decay_backward
 
    !> Loss of one step replayed from a frozen state: exactly the objective the
    !> depth-1 truncated backward pass differentiates.
@@ -1280,9 +2555,9 @@ contains
    end subroutine test_training_reduces_loss
 
    !----------------------------------------------------------------------------
-   !  9. Every memory component is trained
+   !  9. Legacy memory training and the limits of symmetric slots
    !----------------------------------------------------------------------------
-   subroutine test_memory_components_train
+   subroutine test_legacy_memory_training
       type(fbc_config_t) :: config
       type(fbc_update_config_t) :: update_config
       type(fbc_model_t) :: model
@@ -1295,7 +2570,7 @@ contains
       integer(int32) :: status, index
       integer(int32), allocatable :: tokens(:)
       logical, allocatable :: mask(:)
-      real(real64) :: slots_before(32, 16), scales_before(3), channels_before(3), salience_before
+      real(real64) :: slots_before(32, 16), scales_before(3), channels_before(3)
       real(real64) :: decays_before(3), writes_before(3)
       real(real64), allocatable :: hidden(:), logits(:), dlogits(:)
       real(real64), allocatable :: gate_before(:, :), scale_gate_before(:, :)
@@ -1312,20 +2587,21 @@ contains
       tokens(token_count + 1_int32) = 1_int32
 
       call fbc_model_init(model, config, 9_int64, status)
+      model%training_rule = FBC_TRAINING_RULE_V6
       call fbc_state_init(state, model, status)
       call fbc_workspace_init(workspace, model, status)
       call fbc_gradient_init(gradient, model, status)
       call fbc_optimizer_init(optimizer, config, status)
       allocate(hidden(config%width), logits(config%vocabulary_size), dlogits(config%vocabulary_size))
 
-      ! Warm the stream first: a fresh store has every slot identical, so the
-      ! read is then independent of the keys and their gradient is exactly zero
-      ! for a legitimate reason. Four tokens make the slots distinct.
+      ! Warm the shared slot state before the write-key probe. In V6 the slots
+      ! remain identical, so neither query nor salience can choose among distinct
+      ! values; tiny roundoff is not evidence that those paths learned a choice.
       do index = 1_int32, 4
          call fbc_step(model, state, workspace, tokens(index), hidden, logits, status)
       end do
-      ! One single-token backward proves that every new component sits on a
-      ! differentiable path, including the slot write (write-then-read).
+      ! Probe the single-token write-then-read path. The value and shared write
+      ! gate can have real gradients even when recall-query selection cannot.
       call fbc_gradient_zero(gradient)
       call fbc_step(model, state, workspace, tokens(5_int32), hidden, logits, status)
       call fbc_loss_and_gradient(logits, tokens(6_int32), dlogits, loss, status)
@@ -1334,8 +2610,8 @@ contains
                  'the slot write-key projection receives a gradient')
       call check(sum(abs(gradient%slot_value_proj)) > 0.0_real64, &
                  'the slot write-value projection receives a gradient')
-      call check(sum(abs(gradient%slot_query_proj)) > 0.0_real64, &
-                 'the slot recall-query projection receives a gradient')
+      call check(sum(abs(gradient%slot_query_proj)) < 1.0e-12_real64, &
+                 'identical legacy slot values carry no meaningful recall-query gradient')
       call check(sum(abs(gradient%slot_read_proj)) > 0.0_real64, &
                  'the slot read projection receives a gradient')
       call check(sum(abs(gradient%scale_logit)) > 0.0_real64, &
@@ -1353,8 +2629,8 @@ contains
       call check(sum(abs(gradient%attention_rms)) > 0.0_real64 .and. &
                  sum(abs(gradient%ffn_rms)) > 0.0_real64, &
                  'both normalization scales receive a gradient')
-      call check(abs(gradient%slot_salience_weight) > 0.0_real64, &
-                 'the slot salience weight receives a gradient')
+      call check(abs(gradient%slot_salience_weight) < 1.0e-12_real64, &
+                 'identical legacy slot values carry no meaningful salience-selection gradient')
       call check(sum(abs(gradient%decay_logit)) > 0.0_real64, &
                  'the memory decay logits receive a gradient')
       call check(sum(abs(gradient%write_strength_logit)) > 0.0_real64, &
@@ -1367,7 +2643,6 @@ contains
       decays_before = model%decay_logit
       writes_before = model%write_strength_logit
       channels_before = model%channel_logit
-      salience_before = model%slot_salience_weight
       gate_before = model%channel_gate_proj
       scale_gate_before = model%scale_gate_proj
       router_before = model%channel_router
@@ -1388,7 +2663,7 @@ contains
                  'the context router is optimised, not just present')
       call check(any(model%induction_mix /= induction_before), &
                  'the induction weights are optimised, not just present')
-      call check(model%slot_salience_weight /= salience_before, 'the salience weight is optimised')
+      call check(fbc_real64_is_finite(model%slot_salience_weight), 'the legacy salience weight stays finite')
       call check(any(model%decay_logit /= decays_before), 'the memory decay is optimised')
       call check(any(model%write_strength_logit /= writes_before), 'the memory write strength is optimised')
       call check(all(model%scale_logit == model%scale_logit), 'the readout weights stay finite')
@@ -1400,7 +2675,7 @@ contains
       call fbc_gradient_destroy(gradient)
       call fbc_optimizer_destroy(optimizer)
       call fbc_model_destroy(model)
-   end subroutine test_memory_components_train
+   end subroutine test_legacy_memory_training
 
    !----------------------------------------------------------------------------
    !  10. Remote influence through the fixed-size state
@@ -1502,10 +2777,9 @@ contains
    !  11. Checkpoint round trip and legacy rejection
    !----------------------------------------------------------------------------
    subroutine test_checkpoint_roundtrip
-      character(len=*), parameter :: path = '/tmp/fbc-roundtrip.vgfb'
-      character(len=*), parameter :: legacy = '/tmp/fbc-legacy.vgfb'
+      character(len=128) :: path, legacy
       type(fbc_config_t) :: config
-      type(fbc_update_config_t) :: update_config, loaded_config
+      type(fbc_update_config_t) :: update_config, loaded_config, bad_update_config
       type(fbc_model_t) :: model, restored
       type(fbc_optimizer_t) :: optimizer, restored_optimizer
       type(fbc_metrics_t) :: counters, restored_counters
@@ -1515,6 +2789,18 @@ contains
       integer(int32) :: status, index
       real(real64) :: hidden(32), logits(32)
       integer :: unit, io_status
+
+      ! Reserve names in the writable working directory with exclusive CREATE.
+      ! This avoids Unix-only /tmp and collisions between concurrent tests.
+      call reserve_test_path('fbc-roundtrip-', path, io_status)
+      call check(io_status == 0, 'a unique checkpoint fixture can be reserved')
+      if (io_status /= 0) return
+      call reserve_test_path('fbc-legacy-', legacy, io_status)
+      call check(io_status == 0, 'a unique legacy fixture can be reserved')
+      if (io_status /= 0) then
+         call delete_test_path(path)
+         return
+      end if
 
       config = small_config(1000000000000_int64)
       call fbc_model_init(model, config, 13_int64, status)
@@ -1532,6 +2818,36 @@ contains
 
       call fbc_checkpoint_save(path, model, optimizer, update_config, counters, status)
       call check(status == FBT_OK, 'checkpoint save succeeds')
+      bad_update_config = update_config
+      bad_update_config%epsilon = transfer(int(z'7FF0000000000001', int64), 0.0_real64)
+      call fbc_checkpoint_save(path, model, optimizer, bad_update_config, counters, status)
+      call check(status == FBT_ERR_ARGUMENT, 'invalid optimizer state cannot overwrite a valid checkpoint')
+      block
+         type(fbc_metrics_t) :: bad_counters
+         real(real64) :: good_horizon, good_temperature
+         bad_counters = counters
+         bad_counters%loss_sum = transfer(int(z'7FF0000000000001', int64), 0.0_real64)
+         call fbc_checkpoint_save(path, model, optimizer, update_config, bad_counters, status)
+         call check(status == FBT_ERR_NUMERIC, 'nonfinite loss cannot replace a valid checkpoint')
+         bad_counters = counters
+         bad_counters%tokens = -1_int64
+         call fbc_checkpoint_save(path, model, optimizer, update_config, bad_counters, status)
+         call check(status == FBT_ERR_ARGUMENT, 'negative counters cannot replace a valid checkpoint')
+         bad_counters = counters
+         bad_counters%numeric_ok = .false.
+         call fbc_checkpoint_save(path, model, optimizer, update_config, bad_counters, status)
+         call check(status == FBT_ERR_NUMERIC, 'failed numerical training cannot replace a valid checkpoint')
+         good_horizon = model%effective_horizon
+         model%effective_horizon = transfer(int(z'7FF0000000000001', int64), 0.0_real64)
+         call fbc_checkpoint_save(path, model, optimizer, update_config, counters, status)
+         call check(status == FBT_ERR_NUMERIC, 'nonfinite horizon cannot replace a valid checkpoint')
+         model%effective_horizon = good_horizon
+         good_temperature = model%config%slot_temperature
+         model%config%slot_temperature = transfer(int(z'7FF0000000000001', int64), 0.0_real64)
+         call fbc_checkpoint_save(path, model, optimizer, update_config, counters, status)
+         call check(status == FBT_ERR_ARGUMENT, 'nonfinite model configuration cannot replace a valid checkpoint')
+         model%config%slot_temperature = good_temperature
+      end block
 
       call fbc_checkpoint_load(path, restored, restored_optimizer, loaded_config, restored_counters, status)
       call check(status == FBT_OK, 'checkpoint load succeeds')
@@ -1592,6 +2908,50 @@ contains
                  meta%memory_slots == config%memory_slots .and. &
                  meta%vocabulary_size == config%vocabulary_size, &
                  'the header reports the physical configuration')
+      call check(meta%format_version == FBC_TRAINING_RULE_V6 .and. &
+                 restored%training_rule == FBC_TRAINING_RULE_V6, 'default checkpoints identify the v6 rule')
+
+      ! V7 changes forward state semantics despite sharing the wire payload;
+      ! it must round-trip with its own version, never masquerade as V5/V6.
+      model%training_rule = FBC_TRAINING_RULE_V7
+      call fbc_checkpoint_save(legacy, model, optimizer, update_config, counters, status)
+      call check(status == FBT_OK, 'anchored V7 checkpoint saves')
+      call fbc_checkpoint_meta_read(legacy, meta, status)
+      call check(status == FBT_OK .and. meta%format_version == FBC_TRAINING_RULE_V7 .and. meta%convertible, &
+                 'anchored V7 metadata reports its exact semantics')
+      call fbc_checkpoint_load(legacy, restored, restored_optimizer, loaded_config, restored_counters, status)
+      call check(status == FBT_OK .and. restored%training_rule == FBC_TRAINING_RULE_V7 .and. &
+                 all(restored%token_embedding == model%token_embedding), 'anchored V7 model round-trips')
+      block
+         type(fbc_state_t) :: saved_state, restored_state
+         real(real64) :: reference_logits(32), loaded_logits(32)
+         call fbc_state_init(saved_state, model, status)
+         call fbc_state_init(restored_state, restored, status)
+         call fbc_step(model, saved_state, workspace, 11_int32, hidden, reference_logits, status)
+         call fbc_step(restored, restored_state, workspace, 11_int32, hidden, loaded_logits, status)
+         call check(status == FBC_OK .and. all(reference_logits == loaded_logits) .and. &
+                    all(saved_state%slot_key == restored_state%slot_key), &
+                    'V7 reload preserves anchored state and forward logits')
+         call fbc_state_destroy(saved_state)
+         call fbc_state_destroy(restored_state)
+      end block
+
+      ! The v5 and v6 payloads have identical layouts. Preserve v5's historical
+      ! rule across both load and re-save rather than silently changing resume.
+      model%training_rule = FBC_TRAINING_RULE_V5
+      call fbc_checkpoint_save(legacy, model, optimizer, update_config, counters, status)
+      call check(status == FBT_OK, 'historical v5 checkpoint can be written')
+      call fbc_checkpoint_meta_read(legacy, meta, status)
+      call check(status == FBT_OK .and. meta%format_version == FBC_TRAINING_RULE_V5 .and. meta%convertible, &
+                 'v5 metadata retains its version and is readable')
+      call fbc_checkpoint_load(legacy, restored, restored_optimizer, loaded_config, restored_counters, status)
+      call check(status == FBT_OK .and. restored%training_rule == FBC_TRAINING_RULE_V5 .and. &
+                 all(restored%token_embedding == model%token_embedding), 'v5 load retains weights and training rule')
+      call fbc_checkpoint_save(legacy, restored, restored_optimizer, loaded_config, restored_counters, status)
+      call fbc_checkpoint_meta_read(legacy, meta, status)
+      call check(status == FBT_OK .and. meta%format_version == FBC_TRAINING_RULE_V5, &
+                 're-saving a v5 model does not silently upgrade its training rule')
+      model%training_rule = FBC_TRAINING_RULE_V6
 
       ! A legacy header must be rejected with its own status, never converted.
       open(newunit=unit, file=legacy, status='replace', action='write', access='stream', &
@@ -1601,7 +2961,8 @@ contains
       write(unit) 5_int32
       close(unit)
       call fbc_checkpoint_meta_read(legacy, meta, status)
-      call check(status == FBT_ERR_LEGACY, 'a legacy VGNR header is rejected with a distinct status')
+      call check(status == FBT_ERR_LEGACY .and. .not. meta%convertible, &
+                 'a legacy VGNR header is rejected without claiming convertibility')
       call fbc_checkpoint_load(legacy, restored, restored_optimizer, loaded_config, &
                                restored_counters, status)
       call check(status == FBT_ERR_LEGACY, 'loading a legacy checkpoint never converts it silently')
@@ -1689,13 +3050,349 @@ contains
       call check(meta%format_version == 2_int32 .and. .not. meta%convertible, &
                  'the header keeps the real version number and marks the file non-convertible')
 
+      ! Complete v5 header with a signaling NaN optimizer epsilon: the loader
+      ! must reject it before model allocation or arithmetic on that value.
+      open(newunit=unit, file=legacy, status='replace', action='write', access='stream', &
+           form='unformatted', iostat=io_status)
+      write(unit) FBC_CHECKPOINT_MAGIC, 5_int32
+      write(unit) config%vocabulary_size, config%width, config%heads, config%ffn_width, &
+                  config%local_window, config%memory_scales, config%memory_slots, &
+                  config%logical_horizon, config%rms_epsilon, config%slot_decay, config%slot_temperature
+      write(unit) model%effective_horizon, 0_int32, counters%updates, counters%tokens, counters%loss_sum
+      write(unit) bad_update_config%learning_rate, bad_update_config%momentum, bad_update_config%energy_decay, &
+                  bad_update_config%restart_damp, bad_update_config%weight_decay, bad_update_config%epsilon, &
+                  bad_update_config%gradient_clip
+      close(unit)
+      call fbc_checkpoint_load(legacy, restored, restored_optimizer, loaded_config, restored_counters, status)
+      call check(status == FBT_ERR_FORMAT .and. .not. restored%initialized .and. .not. restored_optimizer%initialized, &
+                 'checkpoint with signaling NaN hyperparameter is rejected before allocation')
+      block
+         type(fbc_metrics_t) :: bad_counters
+         real(real64) :: bad_horizon
+         integer(int32) :: bad_flag, fixture
+         do fixture = 1_int32, 4_int32
+            bad_counters = counters
+            bad_horizon = model%effective_horizon
+            bad_flag = 0_int32
+            select case (fixture)
+            case (1_int32)
+               bad_counters%tokens = -1_int64
+            case (2_int32)
+               bad_counters%loss_sum = transfer(int(z'7FF0000000000001', int64), 0.0_real64)
+            case (3_int32)
+               bad_horizon = transfer(int(z'7FF0000000000001', int64), 0.0_real64)
+            case (4_int32)
+               bad_flag = 2_int32
+            end select
+            open(newunit=unit, file=legacy, status='replace', action='write', access='stream', &
+                 form='unformatted', iostat=io_status)
+            write(unit) FBC_CHECKPOINT_MAGIC, FBC_TRAINING_RULE_V6
+            write(unit) config%vocabulary_size, config%width, config%heads, config%ffn_width, &
+                        config%local_window, config%memory_scales, config%memory_slots, &
+                        config%logical_horizon, config%rms_epsilon, config%slot_decay, config%slot_temperature
+            write(unit) bad_horizon, bad_flag, bad_counters%updates, bad_counters%tokens, bad_counters%loss_sum
+            write(unit) update_config%learning_rate, update_config%momentum, update_config%energy_decay, &
+                        update_config%restart_damp, update_config%weight_decay, update_config%epsilon, &
+                        update_config%gradient_clip
+            close(unit)
+            call fbc_checkpoint_meta_read(legacy, meta, status)
+            call check(status == FBT_ERR_FORMAT .and. .not. meta%convertible, &
+                       'checkpoint inspection rejects invalid scalar header metadata')
+            call fbc_checkpoint_load(legacy, restored, restored_optimizer, loaded_config, restored_counters, status)
+            call check(status == FBT_ERR_FORMAT .and. .not. restored%initialized .and. &
+                       .not. restored_optimizer%initialized, 'invalid checkpoint metadata is rejected before allocation')
+         end do
+      end block
+      block
+         type(fbc_config_t) :: bad_config
+         integer(int32) :: fixture
+         ! Header inspection is intentionally not payload validation, but a
+         ! malformed physical model configuration must never be called usable.
+         do fixture = 1_int32, 9_int32
+            bad_config = config
+            select case (fixture)
+            case (1_int32)
+               bad_config%width = 0_int32
+            case (2_int32)
+               bad_config%heads = 0_int32
+            case (3_int32)
+               bad_config%heads = 3_int32
+            case (4_int32)
+               bad_config%ffn_width = bad_config%width - 1_int32
+            case (5_int32)
+               bad_config%slot_decay = transfer(int(z'7FF0000000000001', int64), 0.0_real64)
+            case (6_int32)
+               bad_config%rms_epsilon = -1.0_real64
+            case (7_int32)
+               bad_config%slot_temperature = transfer(int(z'7FF0000000000001', int64), 0.0_real64)
+            case (8_int32)
+               bad_config%logical_horizon = 0_int64
+            case (9_int32)
+               bad_config%local_window = FBC_MAX_LOCAL_WINDOW + 1_int32
+            end select
+            open(newunit=unit, file=legacy, status='replace', action='write', access='stream', &
+                 form='unformatted', iostat=io_status)
+            write(unit) FBC_CHECKPOINT_MAGIC, FBC_TRAINING_RULE_V6
+            write(unit) bad_config%vocabulary_size, bad_config%width, bad_config%heads, bad_config%ffn_width, &
+                        bad_config%local_window, bad_config%memory_scales, bad_config%memory_slots, &
+                        bad_config%logical_horizon, bad_config%rms_epsilon, &
+                        bad_config%slot_decay, bad_config%slot_temperature
+            write(unit) model%effective_horizon, 0_int32, counters%updates, counters%tokens, counters%loss_sum
+            write(unit) update_config%learning_rate, update_config%momentum, update_config%energy_decay, &
+                        update_config%restart_damp, update_config%weight_decay, update_config%epsilon, &
+                        update_config%gradient_clip
+            close(unit)
+            call fbc_checkpoint_meta_read(legacy, meta, status)
+            call check(status == FBT_ERR_FORMAT .and. .not. meta%convertible, &
+                       'inspection refuses a malformed or nonfinite physical model configuration')
+            call fbc_checkpoint_load(legacy, restored, restored_optimizer, loaded_config, restored_counters, status)
+            call check(status == FBT_ERR_FORMAT .and. .not. restored%initialized .and. &
+                       .not. restored_optimizer%initialized, &
+                       'malformed checkpoint model configuration is rejected before allocation')
+         end do
+      end block
+      block
+         type(fbc_config_t) :: header_only_config
+         integer(int32) :: fixture
+         do fixture = 1_int32, 2_int32
+            header_only_config = config
+            if (fixture == 2_int32) then
+               ! Valid extents near the supported maximum, but no payload. This
+               ! must be rejected before an attempted gigantic model allocation.
+               header_only_config%width = FBC_MAX_WIDTH
+               header_only_config%heads = 1_int32
+               header_only_config%ffn_width = huge(0_int32)
+               header_only_config%vocabulary_size = huge(0_int32)
+               header_only_config%local_window = FBC_MAX_LOCAL_WINDOW
+               header_only_config%memory_scales = FBC_MAX_MEMORY_SCALES
+               header_only_config%memory_slots = FBC_MAX_MEMORY_SLOTS
+            end if
+            open(newunit=unit, file=legacy, status='replace', action='write', access='stream', &
+                 form='unformatted', iostat=io_status)
+            write(unit) FBC_CHECKPOINT_MAGIC, FBC_TRAINING_RULE_V6
+            write(unit) header_only_config%vocabulary_size, header_only_config%width, &
+                        header_only_config%heads, header_only_config%ffn_width, header_only_config%local_window, &
+                        header_only_config%memory_scales, header_only_config%memory_slots, &
+                        header_only_config%logical_horizon, header_only_config%rms_epsilon, &
+                        header_only_config%slot_decay, header_only_config%slot_temperature
+            write(unit) model%effective_horizon, 0_int32, counters%updates, counters%tokens, counters%loss_sum
+            write(unit) update_config%learning_rate, update_config%momentum, update_config%energy_decay, &
+                        update_config%restart_damp, update_config%weight_decay, update_config%epsilon, &
+                        update_config%gradient_clip
+            close(unit)
+            call fbc_checkpoint_meta_read(legacy, meta, status)
+            call check(status == FBT_OK .and. meta%convertible, &
+                       'header-only inspection does not claim to check missing payload')
+            call fbc_checkpoint_load(legacy, restored, restored_optimizer, loaded_config, restored_counters, status)
+            call check(status == FBT_ERR_FORMAT .and. .not. restored%initialized .and. &
+                       .not. restored_optimizer%initialized, &
+                       'short checkpoint is rejected before its model or optimizer is allocated')
+         end do
+      end block
+
+      block
+         integer(int64) :: file_size
+         integer :: character_units
+         character(len=:), allocatable :: partial
+         file_size = -1_int64
+         inquire(iolength=character_units) 'x'
+         inquire(file=path, size=file_size, iostat=io_status)
+         call check(io_status == 0 .and. file_size > 1_int64 .and. file_size <= int(huge(0), int64), &
+                    'saved checkpoint size is available for a truncation fixture')
+         if (io_status == 0 .and. file_size > 1_int64 .and. file_size <= int(huge(0), int64) .and. &
+             character_units == 1) then
+            allocate(character(len=int(file_size - 1_int64)) :: partial)
+            open(newunit=unit, file=path, status='old', action='read', access='stream', &
+                 form='unformatted', iostat=io_status)
+            if (io_status == 0) then
+               read(unit, iostat=io_status) partial
+               close(unit)
+            end if
+            call check(io_status == 0, 'truncation fixture reads the checkpoint prefix')
+            if (io_status == 0) then
+               open(newunit=unit, file=legacy, status='replace', action='write', access='stream', &
+                    form='unformatted', iostat=io_status)
+               if (io_status == 0) then
+                  write(unit, iostat=io_status) partial
+                  close(unit)
+               end if
+               call check(io_status == 0, 'truncation fixture writes all but the final storage unit')
+               if (io_status == 0) then
+                  call fbc_checkpoint_load(legacy, restored, restored_optimizer, loaded_config, restored_counters, status)
+                  call check(status == FBT_ERR_FORMAT .and. .not. restored%initialized .and. &
+                             .not. restored_optimizer%initialized, &
+                             'a checkpoint truncated by one storage unit is rejected before allocation')
+               end if
+            end if
+            deallocate(partial)
+         end if
+      end block
+
       call fbc_state_destroy(state)
       call fbc_workspace_destroy(workspace)
       call fbc_model_destroy(model)
       call fbc_model_destroy(restored)
       call fbc_optimizer_destroy(optimizer)
       call fbc_optimizer_destroy(restored_optimizer)
+      call delete_test_path(path)
+      call delete_test_path(legacy)
    end subroutine test_checkpoint_roundtrip
+
+   subroutine reserve_test_path(prefix, path, io_status)
+      character(len=*), intent(in) :: prefix
+      character(len=*), intent(out) :: path
+      integer, intent(out) :: io_status
+      integer(int64) :: clock_value
+      integer :: attempt, unit
+
+      call system_clock(count=clock_value)
+      do attempt = 1, 1000
+         write(path, '(A,I0,A,I0,A)') prefix, clock_value, '-', attempt, '.vgfb'
+         open(newunit=unit, file=trim(path), status='new', action='write', &
+              access='stream', form='unformatted', iostat=io_status)
+         if (io_status == 0) then
+            close(unit, iostat=io_status)
+            return
+         end if
+      end do
+   end subroutine reserve_test_path
+
+   subroutine delete_test_path(path)
+      character(len=*), intent(in) :: path
+      integer :: unit, io_status
+      open(newunit=unit, file=trim(path), status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete', iostat=io_status)
+      call check(io_status == 0, 'the reserved checkpoint fixture is removed')
+   end subroutine delete_test_path
+
+   !> Checkpointed continuation is exact when the caller retains the recurrent
+   !> stream state. The file itself does not serialize that state; both rules
+   !> are checked with a ring that wraps many times before and after the save.
+   subroutine test_full_ring_checkpoint_continuation
+      type(fbc_config_t) :: config
+      type(fbc_update_config_t) :: update_config, loaded_config
+      type(fbc_model_t) :: whole_model, split_model, restored_model
+      type(fbc_optimizer_t) :: whole_optimizer, split_optimizer, restored_optimizer
+      type(fbc_state_t) :: whole_state, split_state
+      type(fbc_workspace_t) :: workspace
+      type(fbc_gradient_t) :: gradient
+      type(fbc_metrics_t) :: whole_metrics, split_metrics, restored_metrics
+      integer(int32), parameter :: n = 128_int32, chunk = 16_int32
+      integer(int32) :: tokens(n + 1_int32), status, rule
+      logical :: mask(n)
+      character(len=128) :: first_path, second_path
+      integer :: io_status
+
+      call reserve_test_path('fbc-continuation-a-', first_path, io_status)
+      call check(io_status == 0, 'reserve the first continuation fixture')
+      if (io_status /= 0) return
+      call reserve_test_path('fbc-continuation-b-', second_path, io_status)
+      call check(io_status == 0, 'reserve the second continuation fixture')
+      if (io_status /= 0) then
+         call delete_test_path(first_path)
+         return
+      end if
+      config = tiny_config(1024_int64)
+      update_config = fbc_update_config_t()
+      call fbc_generate_tokens(FBC_TASK_NEEDLE, n, config%vocabulary_size, 7_int32, 131_int64, tokens(:n), mask, status)
+      tokens(n + 1_int32) = 1_int32
+      do rule = FBC_TRAINING_RULE_V5, FBC_TRAINING_RULE_V7
+         call fbc_model_init(whole_model, config, 91_int64, status)
+         whole_model%training_rule = rule
+         split_model = whole_model
+         call fbc_state_init(whole_state, whole_model, status)
+         call fbc_state_init(split_state, split_model, status)
+         call fbc_workspace_init(workspace, whole_model, status)
+         call fbc_gradient_init(gradient, whole_model, status)
+         call fbc_optimizer_init(whole_optimizer, config, status)
+         call fbc_optimizer_init(split_optimizer, config, status)
+         whole_metrics = fbc_metrics_t()
+         split_metrics = fbc_metrics_t()
+         call fbc_train_stream(whole_model, whole_optimizer, whole_state, tokens, n, chunk, update_config, &
+                               workspace, gradient, whole_metrics, status)
+         call check(status == FBT_OK, 'full-ring one-pass training succeeds')
+         call fbc_train_stream(split_model, split_optimizer, split_state, tokens(:n / 2 + 1), n / 2, chunk, &
+                               update_config, workspace, gradient, split_metrics, status)
+         call check(status == FBT_OK, 'full-ring first training segment succeeds')
+         call fbc_checkpoint_save(first_path, split_model, split_optimizer, update_config, split_metrics, status)
+         call check(status == FBT_OK, 'full-ring partial checkpoint saves')
+         call fbc_checkpoint_load(first_path, restored_model, restored_optimizer, loaded_config, restored_metrics, status)
+         call check(status == FBT_OK .and. restored_model%training_rule == rule, &
+                    'full-ring checkpoint retains its training rule')
+         call fbc_train_stream(restored_model, restored_optimizer, split_state, tokens(n / 2 + 1:), n / 2, chunk, &
+                               loaded_config, workspace, gradient, restored_metrics, status)
+         call check(status == FBT_OK, 'full-ring continuation succeeds with retained stream state')
+         call check(whole_state%steps == split_state%steps .and. whole_state%cache_head == split_state%cache_head .and. &
+                    whole_state%cache_count == split_state%cache_count .and. &
+                    all(whole_state%local_key == split_state%local_key) .and. &
+                    all(whole_state%local_value == split_state%local_value) .and. &
+                    all(whole_state%retention_numerator == split_state%retention_numerator) .and. &
+                    all(whole_state%retention_normalizer == split_state%retention_normalizer) .and. &
+                    all(whole_state%slot_key == split_state%slot_key) .and. &
+                    all(whole_state%slot_value == split_state%slot_value) .and. &
+                    all(whole_state%slot_salience == split_state%slot_salience), &
+                    'checkpoint continuation retains the same recurrent stream state')
+         call fbc_checkpoint_save(first_path, whole_model, whole_optimizer, update_config, whole_metrics, status)
+         call check(status == FBT_OK, 'one-pass final checkpoint saves')
+         call fbc_checkpoint_save(second_path, restored_model, restored_optimizer, loaded_config, restored_metrics, status)
+         call check(status == FBT_OK .and. test_files_identical(first_path, second_path), &
+                    'one-pass and resumed model/optimizer checkpoints are byte-identical')
+         call fbc_model_destroy(whole_model)
+         call fbc_model_destroy(split_model)
+         call fbc_model_destroy(restored_model)
+         call fbc_optimizer_destroy(whole_optimizer)
+         call fbc_optimizer_destroy(split_optimizer)
+         call fbc_optimizer_destroy(restored_optimizer)
+         call fbc_state_destroy(whole_state)
+         call fbc_state_destroy(split_state)
+         call fbc_workspace_destroy(workspace)
+         call fbc_gradient_destroy(gradient)
+      end do
+      call delete_test_path(first_path)
+      call delete_test_path(second_path)
+   end subroutine test_full_ring_checkpoint_continuation
+
+   logical function test_files_identical(first_path, second_path) result(equal)
+      character(len=*), intent(in) :: first_path, second_path
+      character(len=4096) :: first_chunk, second_chunk
+      integer(int64) :: first_size, second_size, remaining
+      integer :: first_unit, second_unit, io_status, count
+
+      equal = .false.
+      open(newunit=first_unit, file=trim(first_path), status='old', action='read', access='stream', &
+           form='unformatted', iostat=io_status)
+      if (io_status /= 0) return
+      open(newunit=second_unit, file=trim(second_path), status='old', action='read', access='stream', &
+           form='unformatted', iostat=io_status)
+      if (io_status /= 0) then
+         close(first_unit)
+         return
+      end if
+      inquire(unit=first_unit, size=first_size, iostat=io_status)
+      if (io_status == 0) inquire(unit=second_unit, size=second_size, iostat=io_status)
+      if (io_status == 0) then
+         if (first_size == second_size .and. first_size >= 0_int64) then
+            equal = .true.
+            remaining = first_size
+            do while (remaining > 0_int64)
+               count = int(min(remaining, int(len(first_chunk), int64)))
+               read(first_unit, iostat=io_status) first_chunk(:count)
+               if (io_status == 0) read(second_unit, iostat=io_status) second_chunk(:count)
+               if (io_status /= 0) then
+                  equal = .false.
+                  exit
+               end if
+               if (first_chunk(:count) /= second_chunk(:count)) then
+                  equal = .false.
+                  exit
+               end if
+               remaining = remaining - int(count, int64)
+            end do
+         end if
+      end if
+      close(first_unit)
+      close(second_unit)
+   end function test_files_identical
 
    !----------------------------------------------------------------------------
    !  12. The context router conditions the mixture on what the channels returned
@@ -1823,7 +3520,7 @@ contains
       type(fbc_gradient_t) :: gradient
       type(fbc_update_config_t) :: update_config
       integer(int32) :: status
-      integer(int64) :: parameter_updates, state_elements
+      integer(int64) :: parameter_updates, state_elements, energy_elements, energy_formula
 
       config = small_config(4096_int64)
       call fbc_plan(config, plan)
@@ -1836,6 +3533,24 @@ contains
                  'the plan counts exactly the parameter elements the model allocates')
       call check(plan%parameter_bytes_real64 == 8_int64 * plan%parameter_count, &
                  'the parameter byte counter is eight bytes per element')
+      ! Independently sum the serialized reduced-energy array shapes. The ten
+      ! scalar energies cover vector groups and salience; every momentum has
+      ! the same shape as its model parameter. This protects the checkpoint
+      ! pre-allocation length formula against future optimizer layout drift.
+      energy_elements = size(optimizer%energy_token_embedding, kind=int64) + &
+         size(optimizer%energy_query, kind=int64) + size(optimizer%energy_key, kind=int64) + &
+         size(optimizer%energy_value, kind=int64) + size(optimizer%energy_attention_output, kind=int64) + &
+         size(optimizer%energy_ffn_gate, kind=int64) + size(optimizer%energy_ffn_value, kind=int64) + &
+         size(optimizer%energy_ffn_output, kind=int64) + size(optimizer%energy_channel_gate_proj, kind=int64) + &
+         size(optimizer%energy_channel_router, kind=int64) + size(optimizer%energy_scale_gate_proj, kind=int64) + &
+         size(optimizer%energy_slot_query_proj, kind=int64) + size(optimizer%energy_slot_key_proj, kind=int64) + &
+         size(optimizer%energy_slot_value_proj, kind=int64) + size(optimizer%energy_slot_read_proj, kind=int64) + &
+         10_int64
+      energy_formula = int(config%vocabulary_size, int64) + &
+                       3_int64 * int(config%width, int64) * int(config%heads, int64) + &
+                       12_int64 * int(config%width, int64) + int(config%ffn_width, int64) + 10_int64
+      call check(energy_elements == energy_formula, &
+                 'checkpoint reduced-energy length matches the optimizer arrays allocated by this layout')
 
       call check(plan%local_cache_elements == size(state%local_key) + size(state%local_value), &
                  'the local cache counter equals the ring buffer it describes')

@@ -1,0 +1,10 @@
+seed=21 arm=base
+seed=21 arm=profile
+seed=42 arm=profile
+seed=42 arm=base
+seed=73 arm=base
+seed=73 arm=profile
+seed=101 arm=profile
+seed=101 arm=base
+seed=137 arm=base
+seed=137 arm=profile

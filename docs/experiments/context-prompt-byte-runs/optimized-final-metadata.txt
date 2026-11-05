@@ -1,0 +1,15 @@
+Final-optimized benchmark rerun
+UTC=2026-11-02T16:02:00Z
+GNU Fortran 12.2.0; Release -O3 -std=f2018; bootstrap not production-certified
+OMP_NUM_THREADS=1; each tool internally alternates arm order
+Commands: vegai_context_quality_ab train{200,1000}.txt test80.txt 512 {3000,6000} prompt
+016e99b089c6d646a17a1a4910b3f3a4a875c47ea01ca7e7f19d5c3c882a9254  /tmp/vegai-now-release/vegai_context_quality_ab
+87d8f094ca97357cdacd998efc8ece5710c326e9f0cf7a329a39f04e5568632a  tools/benchmark_context_quality.f90
+396daac4b9e66d64888af13287a219d50f0a93120f8c5966053c6cc7ec3248d3  src/fixed_budget_context.f90
+c90c156b6f4c172784d7097056c31cf00df673d14a00b0e943faee68ef253af9  src/fixed_budget_backward.f90
+c403d1bbb29408c1229d3b2e6fc7e6dfe32bc0606e432cee3478158ceb2f1867  src/fixed_budget_optimizer.f90
+983ecabe2c66aacf7cccec7c08921e29b1c74809e13e0c932d5d23b16eee0fba  src/fixed_budget_training.f90
+0889ecce1aabec92284cb4cb3994aaa1e862609487a2adc526fa02f71622ac74  /tmp/vegai-boun-current/train200.txt
+5195714be1073baef5098ee87a6b68584579171510b537a77a721a40e3b8d48c  /tmp/vegai-boun-current/train1000.txt
+fc9e7cddd57d6636f2baa0c6dfdadb61fbf9aa7091c3eae4b01ac3ad65ebd0f3  /tmp/vegai-boun-current/test80.txt
+model name	: Intel(R) Xeon(R) Processor @ 2.60GHz

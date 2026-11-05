@@ -1,0 +1,17 @@
+PROBE_JSON {
+  "probe_file": "/tmp/vegai-data/results/dev-short-prompts.tsv"
+,  "text_output": "bytes"
+,  "warmup_bytes": 0
+,  "rows": 79
+,  "valid_utf8_responses": 52
+,  "invalid_utf8_responses": 27
+,  "empty_responses": 3
+,  "truncated": false
+,  "fact": {"correct": 0               , "accuracy": 0.000000, "n": 0               , "correct_bytes": 0               , "total_bytes": 0               , "byte_accuracy": 0.000000, "mean_nll": null}
+,  "copy": {"correct": 0               , "accuracy": 0.000000, "n": 0               , "correct_bytes": 0               , "total_bytes": 0               , "byte_accuracy": 0.000000, "mean_nll": null}
+,  "next": {"correct": 0               , "accuracy": 0.000000, "n": 79              , "correct_bytes": 98              , "total_bytes": 548             , "byte_accuracy": 0.178832, "mean_nll": 2.9592416819325069E+000}
+,  "accuracy": 0.000000
+,  "byte_accuracy": 0.178832
+,  "learned_reach": 8085.399542
+
+}

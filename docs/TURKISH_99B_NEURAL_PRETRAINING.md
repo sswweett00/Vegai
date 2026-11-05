@@ -53,19 +53,54 @@ veriyi **üreten ve her aşamasını sayan** bir boru hattı olarak tasarlandı.
 
 | Alan | Önce | Şimdi |
 |---|---|---|
-| Optimize edici | düz SGD, sabit LR 0.025 | **AdamW** (bias düzeltme, decoupled WD) + legacy SGD modu |
+| Optimize edici | düz SGD, sabit LR 0.025 | **NOVA** (native CLI/API varsayılanı), AdamW ve legacy SGD; epoch runner varsayılanı AdamW |
 | LR zamanlama | yok | warmup + inverse-sqrt / warmup + cosine / constant; update-counter'ın saf fonksiyonu |
-| Düzenlileştirme | yalnız gradyan kırpma + değer zarfı | + **label smoothing** (NLL raporu daima gerçek), AdamW weight decay (yalnız embedding'lere, `lr*wd < 1` doğrulanır; SGD modunda wd yok) |
+| Düzenlileştirme | yalnız gradyan kırpma + değer zarfı | + **label smoothing** (NLL raporu daima gerçek), NOVA/AdamW weight decay (yalnız embedding'lere, `lr*wd < 1`; SGD'de yok) |
 | Metrik | mean NLL | + perplexity, **top-1/top-5**, epoch token/sn |
-| Checkpoint | v2, yalnız parametre+imleç | **v3**: optimizer config + Adam momentleri bit-birebir; v2 geri-uyumlu yükleme (SGD semantiği korunur) |
+| Checkpoint | v2, yalnız parametre+imleç | **v5**: config, batch ve NOVA/AdamW durumları; v2–v4 yükleme, eski SGD semantiği korunur |
 | Devam (resume) | moment yok | 2+checkpoint+2 ≡ one-pass **bit-birebir** (CI testi) |
 | Değerlendirme | sequence API | + `evaluate` CLI (no-update dosya değerlendirmesi), `init-checkpoint` (başlangıç taban çizgisi) |
 | BPE eğitimi | exact-rescan, O(merge × korpus) dosya geçişi | + `tokenizer-train-fast` in-memory apply-merge; exact-rescan ile **bit-birebir aynı merge'ler** (testli) |
 | Performans | kayıt başına state realloc; token başına tam-matris finite taraması | workspace yeniden kullanımı; finite-kanıtı matematiksel sınırla (tama tarama yok) |
-| CLI yapılandırma | sabit 64/4/32/256 | `--width/--heads/--window/--ffn/--lr/--optimizer/--schedule/...`; resume'da boyut değişimi reddedilir |
+| CLI yapılandırma | sabit 64/4/32/256 | `--width/--heads/--window/--ffn/--lr/--optimizer/--schedule/...`; resume'da yalnız açık alanlar değiştirilir, boyut değişimi reddedilir |
 
 Kapsam değişmedi: yalnız bağlı çıktı katmanı eğitilir, çekirdek donuktur.
 Bu tam BPTT değildir ve öyle sunulmaz (bkz. `NEURAL_CAUSAL_SYSTEM.md`).
+
+`resume` ve mevcut checkpoint'e `train-chunk`, belirtilmeyen öğrenme hızı,
+zamanlama, birikim ve diğer eğitim ayarlarını saklanan config'ten alır; artık
+tek bir şekil seçeneği bütün alanları varsayılanlara döndürmez. `--seed` yalnız
+ilk model başlatmada kullanılır. Güncelleme almış checkpoint'te optimizer türünü
+değiştirmek reddedilir: mevcut optimizer durumu ve adım sayacı başka bir kurala
+sessizce taşınamaz. Sıfır güncellemeli başlangıç checkpoint'inde açık bir seçim
+yapılabilir. API de eksik/karma optimizer durumuyla eğitim veya checkpoint
+kaydetmeyi reddeder. Eski SGD checkpoint'indeki kullanılmayan Adam momentleri
+okunup doğrulanır ve atılır; SGD güncellemesi değişmez. Bozuk veya eksik
+optimizer state'i yükleme sırasında reddedilir; IEEE binary32/binary64 üzerinde
+NaN ve taşan eski v3 momentleri FPE-debug derlemesinde de hata olarak döner.
+Öğrenme hızı, adaptive epsilon ve embedding sınırı parametre precision'ındaki
+normal aralığa sığmalı; AdamW ilk-adım düzeltmesi ve NOVA sıfır-energy step
+ölçeği taşmamalıdır. Bu sınamalar tüm aşırı veri/model kombinasyonları için
+sayısal güvenlik garantisi değildir.
+
+Epoch runner mevcut `checkpoint.vgnr`, `tokenizer.bpe`, sonuç veya hata dosyası
+olan bir `--run-dir` üzerine yazmayı reddeder; yeni bir dizin kullanın. Aynı
+dizindeki runner örnekleri özel bir lock ile birbirini dışlar. Ani süreç
+sonlanmasından kalan `.vegai-neural-epoch1.lock`, ancak ilgili süreç artık
+çalışmıyorsa elle kaldırılmalıdır. Bu koruma otomatik resume değildir ve diğer
+uygulamaların aynı dosyalara yazmasını engellemez. Korpus hash'leri başlangıçta
+kontrol edilir, ancak eğitim sırasında girdilerin değişmezliği kilitlenmez;
+girdileri operatör sabit tutmalıdır. Önceden yüklenen tokenizer training/chunk
+sırasında tekrar yazılmaz. Model, optimizer, zamanlama, süre ve generation
+seçeneklerindeki yaygın geçersiz değerler pahalı tokenizer aşamasından önce
+reddedilir.
+
+`--threads N` OpenMP thread sayısını, `--omp-wait-policy active|passive` bekleme
+davranışını seçer. Verilmezlerse pozitif tek tamsayılı `OMP_NUM_THREADS` ve
+geçerli `OMP_WAIT_POLICY` kullanılır; yoksa CPU sayısı ve `ACTIVE` seçilir.
+`ACTIVE` gecikmeyi azaltabilse de beklerken CPU/enerji tüketebilir; sonuç
+kanıtındaki config seçimi kaydeder. Model boyutu ve thread seçimi kullanıcının
+sorumluluğundadır; bu seçenekler otomatik bir CPU/bellek maliyeti üst sınırı koymaz.
 
 ### 3.2 Veri boru hattı (`tools/build_turkish_wiki_corpus.py`)
 
@@ -83,10 +118,11 @@ Tokenizer → eğitimsiz baseline → **tam 1 epoch** → held-out → 10 prompt
 üretim süiti → `evidence.json` + `RESULTS.md`. Her artefakt hash'lenir;
 prompt/response'lar düzenlenmeden yazılır. `evidence.json` içindeki `config`
 bloğu optimize edicinin tam kimliğini taşır: optimizer, LR, zamanlama,
-`weight_decay` (kapsamı ile birlikte: AdamW'de yalnız embedding'ler, SGD'de
-uygulanmaz), `adam_beta1/beta2/adam_epsilon`, `gradient_accumulation`
-(bkz. §3.5) ve zamanlama ufuklarının hem token hem adım birimindeki değerleri
-(`*_updates_token_units`). `--weight-decay` yalnız `--optimizer adamw` ile
+`weight_decay` (NOVA ve AdamW'de yalnız embedding'ler; SGD'de uygulanmaz),
+`adam_beta1/beta2/adam_epsilon`, `gradient_accumulation` (bkz. §3.5) ve
+zamanlama ufuklarının hem token hem adım birimindeki değerleri
+(`*_updates_token_units`). Runner `--optimizer nova|adamw|sgd` kabul eder;
+varsayılanı uyumluluk için AdamW'dır. `--weight-decay` NOVA veya AdamW ile
 kabul edilir.
 
 ### 3.4 Kalite-korumalı hız çalışması (ölçüm-güdümlü A/B)
@@ -117,12 +153,20 @@ iyileşme; farklar FP yörünge gürültüsü bandındadır, üstünlük iddia e
 Yeni logits yolu, birim testte transpoze-matmul referansıyla 1e-4 tolerans
 ve aynı argmax ile kapılanır.
 
-Dayanıklılık: runner artık epoch'u N checkpoint'li `train-chunk` çağrısına
-bölebilir (aynı online sıra/config; timeout yalnız uçuşan parçayı kaybettirir,
-ilerleme `chunks.json`'da görünür; verifier mikro koşuda tek-çağrı ile aynı
-tahmin-tokenı tüketimini ve tam kaynak-kayıt kapsamasını denetler).
+Runner epoch'u N `train-chunk` çağrısına bölebilir; verifier mikro koşuda
+tek çağrı ve chunk'lı koşunun token sayısını ve checkpoint baytlarını
+karşılaştırır. **Arıza sınırı:** checkpoint aynı dosyaya yazılır; yazım
+sırasındaki timeout veya I/O hatası önceki checkpoint'i de bozabilir.
+`chunks.json` ile checkpoint arasında atomik transaction veya otomatik resume
+yoktur. Önemli koşularda ayrı ve doğrulanmış yedek tutun.
 
-### 3.5 Güncelleme birikimi (mini-batch) — darboğazın ölçülmüş yeri
+### 3.5 Güncelleme birikimi (mini-batch) — tarihî darboğaz incelemesi
+
+**Ölçüm sınırı:** Aşağıdaki eski sayılarda optimizer ve kaynak binary kimliği
+her tabloda korunmadığından, N>1 NOVA kullanmış olabilecek sonuçlar §3.6'daki
+başlatılmamış ölçek hatası nedeniyle geri çekilmiştir. Bu sayılar bugünkü
+binary için hız veya kalite garantisi değildir; AdamW kullanımı ve binary
+kimliği bağımsız doğrulanmayan her karşılaştırma yeniden koşulmalıdır.
 
 Ölçüm (run 40307841176, vocab 4096 × width 96, 4 thread): eğitim süresinin
 ~%80'i `tied_output_update` döngüsünde geçiyordu. O döngü **her tahmin
@@ -165,9 +209,12 @@ Sözleşmeler korunur:
   güncelleme gruplamasını sessizce değiştiremez.
 - **LR zamanlaması adım sayar.** Bu yüzden runner'ın `--warmup-updates` /
   `--total-updates` argümanları *tahmin tokenı* birimindedir ve runner
-  bunları `--gradient-accumulation`'a bölüp adım cinsine çevirir; token
-  birimindeki cosine ufku adım biriminde warmup'ın altına düşerse koşu
-  argüman hatasıyla (exit 2) durur.
+  bunları `--gradient-accumulation`'a bölüp adım cinsine **yaklaşık** çevirir;
+  cosine ufku adım cinsinde warmup'ın altına düşerse koşu argüman hatasıyla
+  (exit 2) durur. Kısmi batch her kayıt sonunda flush edildiğinden özellikle
+  kısa kayıtlarda gerçek token/adım oranı `N` olmayabilir; warmup ve horizon
+  istenen token sayısından erken gerçekleşebilir. Bu kesin token-saatli
+  zamanlama değildir; gerçek token/adım sayılarını doğrulayın.
 - Katsayı üst sınırı 512'dir (`NPT_MAX_GRADIENT_ACCUMULATION`): staging
   tamponları O(vocabulary × N), flush çekirdeğinin blok tamponu
   O(width × N). 512'nin üstü hız kazandırmaz, yalnız bellek büyütür.
@@ -252,8 +299,19 @@ zorlar; JSON kanıtı artifact olarak yayımlanır.
 Eğiticinin güncelleme kuralı artık AdamW değil: `src/neural_pretraining.f90`
 içinde, harici hiçbir kütüphane/çerçeve kullanılmadan yazılmış **NOVA-1**
 (`NPT_OPTIMIZER_NOVA`). AdamW ve eski SGD yolu seçilebilir karşılaştırma /
-eski checkpoint yolu olarak duruyor (`--optimizer nova|adamw|sgd`); CLI,
-`neural_train_config_t` ve benchmark varsayılanı NOVA.
+eski checkpoint yolu olarak duruyor (`--optimizer nova|adamw|sgd`); native CLI,
+`neural_train_config_t` ve throughput benchmark varsayılanı NOVA, epoch runner'ın
+varsayılanı ise AdamW'dır.
+
+**2026-10 düzeltme ve eski model uyarısı:** NOVA mini-batch yolunda `1/B`
+ölçeği AdamW dalı dışında başlatılmıyordu. `gradient_accumulation > 1` ile eski
+NOVA binary'sinden üretilmiş checkpoint'ler ve kalite/hız karşılaştırmaları
+geçersiz veya güvenilmez olabilir; checkpoint'in okunabilmesi yanlış eğitimi
+onarmaz. Kaynak/veri/ayarları koruyarak yeni binary ile yeniden eğitin ve
+held-out sonuçlarını yeniden ölçün. Varsayılan kütüphane LR'si legacy SGD'den
+kalan 0,025 yerine CLI ile aynı 0,003 oldu; mevcut checkpoint'in kaydedilmiş
+LR'si değişmez. Doğrudan API ile SGD seçip eski 0,025'i isteyenler bunu açıkça
+belirtmelidir. Her model ve korpus için LR ve batch ayrıca doğrulanmalıdır.
 
 **Kural.** Bağlı (tied) çıktı gradyanı bir tahmin için `r(v) · h`'dir, yani
 rank-1: her sütun aynı `h` yönünü kendi `r(v)` katsayısıyla alır. Bu yüzden
@@ -276,33 +334,27 @@ Checkpoint **v5** bu durumu optimizer kimliğiyle birlikte yazar; v2/v3/v4
 dosyaları yüklenmeye devam eder, farklı optimizer durumu yüklemek
 `NPT_ERR_FORMAT`'tır.
 
-#### Ölçüm — aynı ikili, aynı birikim faktörü, interleaved turlar
+#### Önceki NOVA karşılaştırmaları hakkında düzeltme
 
-`tools/benchmark_neural_batch_throughput.py --compare-optimizer adamw` aynı
-koşu içinde NOVA'yı ve AdamW'yu **aynı seed, korpus, şekil ve birikim
-faktörüyle** eğitir; tek fark kuraldır. Paylaşımlı runner'ın sürüklenmesi tek
-turda ölçülen farktan büyük olduğu için (aynı kod iki koşuda 0,963x ve
-1,242x verdi) turlar dönüşümlü koşulur ve **medyan** raporlanır.
+N=32/64 ile yayımlanmış eski NOVA–AdamW süre ve held-out karşılaştırmaları,
+başlatılmamış batch ölçeği nedeniyle **üstünlük kanıtı değildir**. Aynı veri,
+seed, batch ve bütçe ile düzeltilmiş binary üzerinde yeniden üretilmelidir;
+AdamW veya batch=1 sonuçları aynı spesifik hatayı taşımaz, ancak yeni build ve
+donanımda bunlar da ayrıca ölçülmelidir.
 
-| koşu (commit) | N | NOVA tok/sn | AdamW tok/sn | oran | held-out NLL farkı (NOVA−AdamW) |
-| --- | --- | --- | --- | --- | --- |
-| d54011e | 32 | 7507,5 · 7555,3 | 8080,6 · 8103,4 | **0,931x** | **−0,0322** |
-| 3627026 | 64 | 7621,3 · 7630,1 | 8042,2 · 6598,9 | **1,042x** | **−0,1016** |
+Eşit token/adım bütçeli, açıkça sentetik bir LR karşılaştırması için:
 
-- **Hız:** ölçülen bant **0,93–1,04x**, yani adım başına AdamW ile parite
-  bandında; NOVA örnekleri kendi içinde çok daha kararlı (7621–7630'a karşı
-  6598–8080). Adım süresinin baskın kısmı bu şekilde (vocab 4096 × width 96,
-  N=64) paylaşılan gradyan toplama (batch × width) olduğu için optimizer
-  farkının üst sınırı yapısal olarak küçüktür; NOVA'nın kazancı eleman başına
-  iş ve durum trafiğindedir.
-- **Kalite:** her iki koşuda da NOVA lehine; eşit birikimde fark birikim
-  büyüdükçe açılıyor (−0,032 → −0,102), çünkü sütun enerjisi batch ortalaması
-  üzerinden ölçülüyor ve `1/B` ölçekli ikinci momentin aksine gürültüden
-  etkilenmiyor.
-- **Uçtan uca:** aynı koşuda merge-base'e göre **3,119x** (yukarıdaki
-  3,24–3,60x bandıyla aynı sınıf). Faz bütçesi (tahmin başına): decoder
-  **33,5 µs**, blok projeksiyonu **23,8 µs**, skorlama **23,2 µs**, optimize
-  edici **46,8 µs**.
+```bash
+python3 tools/benchmark_neural_quality_budget.py \
+  --neural-bin ./build/vegai_neural_pretrain --accumulation 16 \
+  --reference-lr 0.025 --candidate-lr 0.003 --output /tmp/vegai-quality.json
+```
+
+Tokenizer yalnız eğitim bölümüyle kurulur; seed'ler arasında kol sırası
+dönüşür, aynı kayıtların bölümlere sızması ve eşit olmayan token/adım sayısı
+reddedilir. Bu ek çalışma isteğe bağlı bir deney maliyetidir, varsayılan
+eğitime ek forward/backward geçişi değildir. Küçük sentetik NLL kazancı gerçek
+Türkçe görev, güvenlik veya bütün dağılımlarda kalite garantisi değildir.
 
 Denenip **ölçümle reddedilen** iki NOVA optimizasyonu (kodda not düşülmüş):
 
@@ -320,6 +372,9 @@ hız dizisi, AdamW'dan küçük kaynak planı, v5 turu, parça+devam
 bit-birebirliği) ve `test_adamw_optimizer_contract` (eski yol bozulmadı).
 
 ### 3.7 Darboğaz denetimi — ölçülen faz bütçesi, düzeltilenler, reddedilenler
+
+Bu bölümde NOVA mini-batch içeren tarihî sayılar hata öncesidir; düzeltilmiş
+kodun performansı/kalitesi olarak kullanılmadan önce yeniden ölçülmelidir.
 
 Faz bütçesi artık **her kol için** yayımlanıyor (annotation'da
 `phases <kol>[d… p… s… u… t…]`). Bu, "hangi faz darboğaz" sorusunu tahminden
@@ -358,11 +413,11 @@ tablodan görünüyor, yani tek ölçümle iddia kurulmuyor.
   Aynı koşu içinde normalize edilmiş güncelleme 61,8 → 134,2 µs/tahmin.
 - **FFN'i satır-paralel yapmak** (`project_rows`): aynı model/şekilde decoder
   adımı 79,9 → 105,8 µs/tahmin (%32 yavaş).
-- **Enerjiyi üye enerjilerinden almak** (sütun başına `O(B)`): `1/B²` ölçeğiyle
-  N=128'de held-out NLL 8,43 → 10,35; ölçek kaldırılınca etkin adım `1/√B` gibi
-  küçülüyor; ikisinde de toy sözleşme B=4'te kayıp düşüşünü kaybediyor.
-  `||mean_b g_b||²` üyeler arasındaki götürümü taşıyor; büyük birikimi kararlı
-  kılan o.
+- **Enerjiyi üye enerjilerinden almak** (sütun başına `O(B)`):
+  `||mean_b g_b||²` ile `mean_b ||g_b||²` farklı matematiksel ifadelerdir;
+  ilki üyeler arası götürümü de taşır. Eski NOVA N>1 NLL ve toy karşılaştırması
+  ölçek hatası nedeniyle geçersizdir, bu alternatifin deneysel etkisi yeni
+  binary üzerinde tekrar ölçülmeden genellenmemelidir.
 - **Hız dizisini token-major saklamak** (daha önce): batched kol 0,623x.
 
 **Açık kalan, ölçülmüş darboğazlar** (yapılacaklar, iddia değil)
@@ -376,14 +431,18 @@ tablodan görünüyor, yani tek ölçümle iddia kurulmuyor.
    indirgeme yok; ölçülen güncelleme fazı NOVA 30,6 vs AdamW 18,5 µs/tahmin
    (aynı koşu) ve 8 koşuda toplam oran 0,82–1,24x, medyan ~0,93x. Yani
    "güncelleme fazında kanıtlanabilir hız" hedefi bu hâliyle **karşılanmış
-   değil**; NOVA'nın kanıtlanmış üstünlüğü kalitede (aynı N'de held-out NLL
-   −0,03…−0,10) ve yapıda (16 B vs 28 B durum trafiği, elemanda transandantal
-   yok).
+   değil**. Eski N>1 NOVA kalite ölçümleri yukarıdaki hata nedeniyle yeniden
+   koşulmadan üstünlük kanıtı değildir; durum yerleşiminin yapısal farkı
+   (16 B vs 28 B) bu gözlemden ayrı olarak belirtilir.
 3. **Skorlamanın `O(vocabulary)` taramaları**: vocab 32k'ya çıkınca faz lineer
    büyür; top-k/rank hesabı tek geçişe indirilebilir.
-4. **Korpus okuma bayt bayt**: `utf8_stream_read_record` akış üzerinden tek
-   bayt okuyor (833 baytlık kayıt ≈ 800 okuma çağrısı). Faz bütçesinin dışında
-   kaldığı için tabloda görünmüyor; 900 MB hattında kayıt başına sabit maliyet.
+Korpus okuma için önceki bayt başına I/O darboğazı ayrıca giderildi: native
+BPE/eğitim adaptörleri 64 KiB read-ahead kullanır; taşan kayıtlar sınırına kadar
+tüketilir, son LF'siz kayıt ve tüm LF-dışı baytlar korunur. Boyutu bilinmeyen
+akışlarda eski baytlık okuma kullanılır. Aynı Linux/GNU 12 sandbox'ında OS page
+cache içindeki sentetik 833 baytlık kayıtların yalnız okuma medyanı 2,191 s'den
+0,0311 s'ye düştü. Bu yaklaşık 70× fark eğitim veya disk benchmark'ı değildir;
+gerçek uçtan uca hız model, veri ve donanıma bağlıdır.
 
 ## 4. Koşu tarifi
 
@@ -398,8 +457,59 @@ dilimi) modları `neural-turkish-epoch1-evidence.yml` içindedir:
    varsayılarak yapılır (ör. 6409 token/sn ölçümü → ~3200 plan hızı).
 3. `mode=full` + `train_byte_budget`: bütün dump filtrelenir (gerçek
    toplam sayılır), epoch 1 bu dilimde tanımlı ve hash'lidir.
-4. Kalan veri, `train-chunk` + attested imleç ile sonraki koşularda aynı
-   checkpoint'ten devam edebilir; çift-uygulama yapılmaz.
+4. Operatör aynı veri/kayıt sırası ve kaynak imlecini ayrıca doğrulayarak
+   sağlam bir checkpoint'ten `train-chunk` ile devam edebilir. Araç bunları
+   kendiliğinden attest etmez; yanlış kaynak veya imleç çift uygulamaya yol açabilir.
+
+### Koşu bütünlüğü ve kurtarma sınırları
+
+- Corpus builder mevcut çıktıların üzerine yazmaz ve aynı dizindeki eşzamanlı
+  builder'ları kilitle dışlar. Kilit kalmışsa önce çalışan süreç olmadığını
+  doğrulayın; kısmi çıktıları incelemeden silmeyin. Negatif bütçeler ve metin
+  girdisinin içindeki çıktı dizinleri reddedilir. 8.191 baytı aşan native kayıt,
+  sessizce atılmak yerine açık hatadır; kayıt/başlık boyutunu küçültün. XML
+  işleyici bitmiş sayfa düğümlerini kökten kaldırır; tek dev sayfa ve operator
+  metin dosyaları için bellek yine girdi boyutuna bağlıdır, ayrıca belge/paragraf
+  dedupe hash kümeleri benzersiz öğe sayısıyla büyür. Wiki dump'ın stat kimliği
+  hash öncesi/sonrası ve okuma/yayım çevresinde kontrol edilir; bu eşzamanlı
+  kötü niyetli değiştirmeye karşı kesin kanıt değildir. Operator metin dizini
+  için bir bütün-dizin SHA-256'sı üretilmez.
+- Koşucu, corpus builder'ın v2 manifestini, göreli ve corpus dizini içinde
+  kalan yolları, pozitif kayıt/bayt sayılarını ve dört çıktının SHA-256'sını
+  kontrol eder. Boş held-out veya sıfır uygun held-out tahmini başarısızdır;
+  başlangıç ve final için manifest/limit ile okunan kayıt sayısı, uygun/atlanan
+  kayıtlar ve tahmin bütçesi doğrulanır. `max_eval_records` kanıtta kayıtlıdır
+  (0 tüm held-out kayıtlarıdır). Tamamen aynı
+  held-out ve eğitim/tokenizer dosyası reddedilir. Bu, kısmi belge veya kayıt
+  çakışmasını bağımsız olarak tarayıp dışlamaz; ayrık bölme hâlâ builder'ın
+  sözleşmesine dayanır.
+- Manifest ve native JSON'da yinelenen anahtarlar, eşlenmemiş Unicode
+  surrogate'ları, aşırı uzun sayı gösterimleri, sonlu olmayan değerler ve
+  sıfıra düşen sıfır-dışı sayılar reddedilir; taşacak perplexity `null` olur.
+  Native stdout 8 MiB,
+  stderr 2 MiB ve hata tanısı için saklanan stderr kuyruğu 8 KiB ile sınırlıdır.
+  İsteğe bağlı prompt dosyası en fazla 1 MiB / 1.000 satır, her prompt en fazla
+  8.192 UTF-8 bayttır. Hata çıktısı verilen yolları ve stderr kuyruğunu
+  içerebileceğinden saklama/erişim politikası uygulanmalıdır.
+- Koşu öncesi/sonrası stat kimliği, boyut ve zaman damgaları, olağan eşzamanlı
+  dosya değişikliklerini yakalamak içindir; düşmanca değiştirme veya tüm
+  ara okumaların aynı byte'ları gördüğü hakkında kriptografik kanıt değildir.
+  Kanıtta manifest, çalıştırılan binary, tokenizer ve checkpoint hash'leri
+  kaydedilir. Rapor metinleri tamamlandıktan sonra ayrı geçici dosyalardan
+  yayımlanır ve `evidence.json` en son yazılır; iki dosya ortak atomik işlem
+  değildir ve `fsync` yapılmaz. Üretim çıktısındaki geçersiz UTF-8 baytları değiştirme karakteriyle
+  gösterilir; ham byte'lar korunmaz, `evidence.json` yerine tablo görünümünde
+  satır sonları da görsel olarak düzleştirilir.
+- Native neural ve fixed-budget checkpoint kaydı varsayılan olarak dosyayı
+  **yerinde değiştirir**; yazım sırasında kesinti önceki checkpoint'i bozabilir.
+  `chunks.json` ve checkpoint ortak atomik işlem değildir; dosya yazımı ve
+  rename olsa bile `fsync` yapılmadığından güç kaybı dayanıklılığı iddia
+  edilmez. Operatör, güvenilir bağımsız yedek/snapshot ve onaylanmış kaynak
+  hash'i + kayıt imleci olmadan otomatik resume yapmamalıdır. Native CLI aynı
+  yazılı input/output yolunu reddeder; farklı yazılan symlink/hardlink veya
+  göreli yol alias'larını taşınabilir Fortran ile tespit edemez. Geçici ikinci
+  checkpoint ile atomik değiştirme, fazladan disk alanı gerektirdiğinden bu
+  varsayılan yolda uygulanmamıştır.
 
 ## 5. 99B'ye kalan mühendislik (yol haritası, iddia değil)
 

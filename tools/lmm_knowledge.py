@@ -36,6 +36,7 @@ from lmm_contract import (
     file_identity,
     require,
     require_unchanged,
+    strict_json_value,
     validate_identifier,
     validate_json_object,
     validate_unicode_text,
@@ -98,18 +99,12 @@ def iter_bounded_jsonl(path: Path, maximum_documents: int) -> Iterator[Knowledge
                 has_lf = raw.endswith(b"\n")
                 payload_bytes = len(raw) - 1 if has_lf else len(raw)
                 overlong = payload_bytes > MAX_DOCUMENT_LINE_BYTES or (not has_lf and len(raw) == limit)
-                if overlong and not has_lf:
-                    while raw and not raw.endswith(b"\n"):
-                        raw = handle.readline(limit)
                 require(not overlong, f"knowledge source line {number} exceeds {MAX_DOCUMENT_LINE_BYTES} bytes")
                 require(has_lf, f"knowledge source line {number} must terminate with LF")
                 raw = raw[:-1]
                 require(not raw.endswith(b"\r"), f"knowledge source line {number} uses CRLF; strict LF is required")
                 require(bool(raw.strip()), f"knowledge source line {number} is blank")
-                try:
-                    mapping = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                    raise LMMContractError(f"knowledge source line {number} is invalid JSON: {error}") from error
+                mapping = strict_json_value(raw, f"knowledge source line {number}")
                 document = KnowledgeDocument.from_mapping(mapping, f"knowledge source line {number}")
                 count += 1
                 require(count <= maximum_documents, f"knowledge source exceeds maximum_documents={maximum_documents}")

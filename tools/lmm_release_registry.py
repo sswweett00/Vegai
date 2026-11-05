@@ -39,6 +39,7 @@ from lmm_contract import (
     require_exact_fields,
     require_unchanged,
     sha256_bytes,
+    strict_json_value,
     validate_identifier,
     validate_sha256,
 )
@@ -241,24 +242,11 @@ def event_from_mapping(value: object, number: int, expected_previous: str) -> Re
     return event
 
 
-def reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ReleaseRegistryError(f"registry JSON object contains duplicate key {key!r}")
-        result[key] = value
-    return result
-
-
 def parse_strict_json(payload: bytes, field: str) -> object:
     try:
-        decoded = payload.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise ReleaseRegistryError(f"cannot decode {field} as UTF-8: {error}") from error
-    try:
-        return json.loads(decoded, object_pairs_hook=reject_duplicate_json_keys)
-    except json.JSONDecodeError as error:
-        raise ReleaseRegistryError(f"cannot parse {field} as JSON: {error}") from error
+        return strict_json_value(payload, field)
+    except LMMContractError as error:
+        raise ReleaseRegistryError(str(error)) from error
 
 
 def normalize_ledger_path(path: Path) -> Path:
@@ -283,9 +271,6 @@ def iter_events(path: Path) -> Iterator[RegistryEvent]:
                 has_lf = raw.endswith(b"\n")
                 payload_bytes = len(raw) - 1 if has_lf else len(raw)
                 overlong = payload_bytes > MAX_EVENT_LINE_BYTES or (not has_lf and len(raw) == MAX_EVENT_LINE_BYTES + 2)
-                if overlong and not has_lf:
-                    while raw and not raw.endswith(b"\n"):
-                        raw = handle.readline(MAX_EVENT_LINE_BYTES + 2)
                 require(not overlong, f"release registry event {number} exceeds {MAX_EVENT_LINE_BYTES} bytes")
                 require(has_lf, f"release registry event {number} must terminate with LF")
                 raw = raw[:-1]

@@ -27,11 +27,12 @@ jobs:
         run: |
           cmake -S . -B build-ci -G Ninja \
             -DVEGAI_ENABLE_OPENMP=ON \
+            -DVEGAI_REQUIRE_OPENMP=ON \
             -DVEGAI_CPU_TARGET=portable \
             -DVEGAI_BUILD_TESTS=ON \
             -DVEGAI_ENABLE_LEGACY_PYTHON_TESTS=ON \
             -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_Fortran_FLAGS='-std=f2023 -fcheck=all -fbacktrace -ffpe-trap=invalid,zero,overflow'
+            -DCMAKE_Fortran_FLAGS='-fcheck=all -finit-real=snan -fbacktrace -ffpe-trap=invalid,zero,overflow'
 
       - name: Compile
         run: |
@@ -56,6 +57,19 @@ jobs:
 
       - name: Run native Fortran property and integration tests (including direct attested-pretraining verification)
         run: ctest --test-dir build-ci --output-on-failure
+
+      - name: Verify explicit Fortran 2018 compatibility build
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-ci-f2018 -G Ninja \
+            -DVEGAI_FORTRAN_STANDARD=2018 \
+            -DVEGAI_ENABLE_OPENMP=OFF \
+            -DVEGAI_BUILD_TESTS=ON \
+            -DVEGAI_ENABLE_LEGACY_PYTHON_TESTS=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-ci-f2018 --parallel 4
+          ctest --test-dir build-ci-f2018 --output-on-failure \
+            -R '^(vegai_utf8_stream_contract|vegai_fortran_properties|vegai_context_contract)$'
 
       - name: Measure sparse extreme-capacity invariance (1e3 -> 1e9 parameters)
         run: |
@@ -711,3 +725,32 @@ jobs:
               print("```", file=summary)
           print(f"::notice title=Exact vocabulary lookup cache::{message}")
           PY
+
+  control-plane-portability:
+    name: Bounded control plane (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify bounded processes, endpoints, provenance, and strict JSON
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/verify_bounded_process.py
+          python tools/verify_lmm_endpoint_transport.py
+          python tools/verify_lmm_source_binding.py
+          python tools/verify_system_contracts.py
+          python tools/verify_quality_runner_binding.py
+          python tools/verify_continuous_progress.py
+          python tools/verify_training_streaming.py
+          python tools/verify_neural_turkish_epoch1.py
+      - name: Verify parallel Make dependency graph
+        if: runner.os != 'Windows'
+        run: python tools/verify_make_build.py

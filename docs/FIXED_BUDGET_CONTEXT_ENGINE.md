@@ -21,6 +21,28 @@ görünmez. Fiziksel boyutların tamamı ayrı düğmelerdir:
 | `--memory-scales` | sabit bozunma ölçeği | 4 | 1..16 |
 | `--memory-slots` | sabit bellek yuvası | 64 | 1..1024 |
 | `--train-chunk-tokens` | güncelleme başına tahmin | 256 | 1..8192 |
+| `--allow-partial-chunk` | kısa son güncellemeye açık izin | `false` | `true` / `false` |
+| genişlik (`width`) | model boyutu | CLI: 32 | Fortran API: 2..16.777.216; CLI: 2..1024 |
+
+Fortran API'sindeki genişlik üst sınırı, desteklenen en büyük int32 sözlük ve
+FFN boyutlarıyla da kaynak planının int64 çarpımlarını/byte sayılarını ve
+`3 × width` yönlendirici boyutunu taşırmamak için konmuş **muhafazakâr** bir
+sınırdır; böyle büyük bir modelin belleğe sığacağını söylemez. Geçersiz
+konfigürasyonda `fbc_plan` sıfır alanlı plan döndürür;
+`fbc_parameter_count` ve `fbc_state_bytes` ise `-1` döndürür. `heads=0`,
+NaN/sonsuz RMS epsilon, yuva sıcaklığı veya bozunması hesap yapılmadan
+reddedilir. CLI `--lr` için yalnız tek ondalık/bilimsel değer kabul edilir;
+NaN/sonsuz, taşan ve sıfıra yuvarlanan sıfır-dışı değerler ile ek list-directed
+veri reddedilir. Bu ayrıştırma eğitim başlamadan bir kez yapılır.
+
+Kırpma sonrası etkin eğitim token bütçesi, varsayılan olarak
+`--train-chunk-tokens` değerinin katı olmalıdır; aksi halde eğitim başlamadan
+hata döner. Eski davranış son parçayı
+sessizce atlıyordu. `--allow-partial-chunk true` (Fortran API'de
+`allow_partial_chunk=.true.`) kalan tüm tokenları ayrıca işler ve **bir ek
+optimizer güncellemesi ve ek hesaplama** gerektirir. Bütçesi zaten bölünebilen
+koşuların update sayısı değişmez. Bu seçenek yalnız `train`, `quality`, `bench`
+ve `sweep` eğitimine etki eder; değerlendirme token sayısını kısıtlamaz.
 
 `--window` varsayılanı **8192**'dir: 32 belirteçlik fiziksel pencerenin 256
 katı. Bu, dört varsayılan ölçeğin gerçekten farklı olduğu en kısa ufuktur
@@ -52,10 +74,19 @@ kontrol noktası başlığında `horizon_clamped` alanıyla **bildirilir**.
    ile fiziksel pencere arasında logaritmik olarak eşit aralıklı, **başlatmada
    bir kez** hesaplanır; belirteç başına `exp` yoktur. Durum boyutu yalnızca
    `heads × scales × (dh × dh + dh)`'dir.
-3. **Yuva (slot) kanalı.** `memory_slots` adet kapasite; her belirteç O(1)
-   içinde tüm yuvalara `g_m = σ((k·K_m)/√d / T)` geçidiyle yazar, önem
+3. **Yuva (slot) kanalı.** `memory_slots` adet fiziksel yuva ayrılır; her
+   belirteç tüm yuvalara `g_m = σ((k·K_m)/√d / T)` geçidiyle yazar, önem
    birikimini `s_m ← ρ s_m + (1-ρ) g_m` ile günceller, sonra softmax ile okur.
-   Tam geçmiş taraması yoktur.
+   Tam geçmiş taraması yoktur; maliyet mantıksal ufka değil, yapılandırılmış
+   yuva sayısı ve genişliğe bağlıdır. **V5 ve V6 için önemli sınır:** tüm
+   yuvalar sıfırdan başlar ve aynı güncellemeyi alır; dolayısıyla anahtar,
+   değer ve önemleri özdeş kalır. Fiziksel yuva sayısı, bağımsız
+   adreslenebilir hatırlama kapasitesi olarak yorumlanmamalıdır. Opt-in **V7**
+   çoklu yuvada anahtarın ilk bileşenini slot'a özgü sabit kimlik yapar; bu
+   bileşen okunur ama yazılmaz. Diğer bileşenler, değer ve önem öğrenilmeye
+   devam eder; tek yuva V6 davranışını korur. Kimlik için bir key bileşeni
+   kaybedilir; çeşitlilik kayıpsız hatırlama garantisi değildir.
+   [Eşit bütçe deney ve maliyet sınırları](experiments/context-slot-quality-2026-11.md).
 
 Kanallar üç öğrenilebilir lojistik üzerinden softmax ile karıştırılır; bu
 karışım da eğitilir. Karışım **girdiye bağımlıdır**: her kanal lojistiği
@@ -219,10 +250,56 @@ alınır (derinlik-1 BPTT):
 `fbc_refresh_dynamics` ile tazelenir: model kurulumunda, her optimizer
 güncellemesinden sonra ve kontrol noktası yüklendikten sonra. **Belirteç
 döngüsünde transandantal yok**, ufuk hiçbir boyutta kullanılmaz.
-`fbc_learned_horizon` öğrenilen erişimi (`max_j -1/log lambda_j`) bildirir;
-başlangıçta bu değer yapılandırılan ufka eşittir, çünkü `decay_logit` eski
-merdivenden, `write_strength_logit` ise sıfırdan başlar (`g = 1 - lambda`,
-yani eski ileri geçişle **bit düzeyinde aynı**).
+`fbc_learned_horizon` gerçek önbellekteki bozunumların erişimini
+(`max_j -1/log lambda_j`) bildirir. İlk merdiven çok uzun değilse bu değer
+istek ufkuna yakındır. Ancak `effective_horizon`/`horizon_clamped`, merdiven
+kurulumundaki `FBC_MAX_HORIZON` sınırını bildirir; **ayrıca** uygulanmış
+`FBC_MAX_DECAY = 1 - 1e-12` sınırını anlatmaz. Dolayısıyla çok büyük isteklerde
+(örneğin `2e12`) gerçek öğrenilen erişim yaklaşık `1e12` ile sınırlıdır; istek
+ufkunu gerçekleşmiş erişim gibi yorumlamayın. `write_strength_logit` sıfırdan
+başlar (`g = 1 - lambda`).
+
+V6 geri yayılımı kırpılmış bölgelerde `decay_logit` türevini sıfır alır;
+tam kırılma noktasında da sıfır alt-türev seçilir. V5'in eski türevi yalnızca
+V5 checkpoint soyunda devam ettirilir. İki uçtaki sonlu-fark testleri, ileri
+kayıp gerçekten değişmediği hâlde sahte bir türev yazılmasını önler.
+
+### 4.1.1 Dolu halkada geri yayılım
+
+İleri geçişte dolu yerel halkanın en eski anahtar/değer çifti de okunur.
+V5, yeni çifti geri yayılımdan önce aynı yuvaya yazdığı için, geri yayılım
+eski çift yerine yeni çifti okuyabiliyordu. V6 eğitim yolu yalnızca halka
+doluyken **mevcut yazmayı** geri yayılım sonrasına erteler; ikinci bir halka,
+yeni parametre taraması veya ek optimizer güncellemesi eklemez. İleri çıktı ve
+commit sonrası akış durumu aynıdır. Bir ve dört yuvalı halka, çoklu sarma,
+query/mesafe türevi ve tüm parametreleri kapsayan yönlü sonlu farklarla
+sınanır. V6 backward beş outer product'ı geçici matris üretmeden gradyana
+biriktirir; v5 devamı eski hesaplama ifadesini korur. Doğrudan API kullananlar
+dolu bir V6 halkasında şu sırayı izlemelidir:
+
+```fortran
+call fbc_step(model, state, workspace, token, hidden, logits, status, defer_local_commit=.true.)
+! Kayıp/residual ve fbc_step_backward burada; tüm status değerlerini denetleyin.
+call fbc_finish_local_step(state, workspace, status)
+```
+
+Aynı `state` ve `workspace` birlikte kullanılmalı; hata olsa da ertelenen
+adım bitirilmeli veya durum açıkça sıfırlanmalıdır. Bitirilmemiş durumla yeni
+ileri adım ve aynı yazmayı iki kez bitirme reddedilir. Olağan `fbc_step`
+çağrısı çıkarımda eskisi gibi hemen yazar. Tampon doluyken böyle bir çağrıdan
+sonra V6 geri yayılımı artık sessizce yanlış türev dönmez, `FBC_ERR_ORDER`
+döndürür. V5 modeli eski davranışı korur.
+
+Workspace, gradyan ve optimizer ilk kurulduğu fiziksel model boyutlarına
+bağlıdır. Yanlış boyutlu nesne eğitim/ileri/geri geçişte; yanlış optimizer da
+checkpoint yazılmadan önce reddedilir. Başarılı ileri adımın skaler sıra damgası,
+ileri adım yokken veya daha eski aktivasyonlarla geri yayılımı ve uyuşmayan
+ertelenmiş commit'i reddeder. Adım sayacı taşmadan durur. Bu kontroller yedi
+boyut tam sayısı ve bir sıra damgası kullanır; ek tensör taraması, checkpoint
+kopyası veya güncelleme eklemez. Bunlar tamper-proof nesne doğrulaması değildir:
+çağıran ayrılmış bileşenleri elle bozmaz, aynı adım sayısına sahip farklı
+akışlar için doğru `state`/`workspace` çiftini kullanır ve eşzamanlı erişimi
+kendisi eşgüdümler. Sıra damgası nesne kimliği veya thread kilidi sağlamaz.
 
 ### 4.2 Düzeltilen hata: bağlı gömme gradyanı yalnızca tek sütuna yazılıyordu
 
@@ -255,32 +332,124 @@ NOVA-1 biçimli, sütun başına tek hız + tek enerji:
 e_c   ← ρ e_c + (1-ρ) mean(g_c²)
 a     ← <g_c, v_c>                       (anlaşma sondası)
 γ     ← momentum  (a < 0 ise momentum × restart_damp)
-v_c   ← γ v_c + (1-γ) g_c                (momentum EMA)
+v_c   ← γ v_c + (1-momentum) g_c          (yalnız eski hız restart ile azaltılır)
 p_c   ← (1 - lr·wd) p_c - lr · v_c / (√e_c + ε)
 ```
 
-Momentum bir **EMA**'dır, koşan toplam değildir: toplam, enerji
-normalizasyonundan önce yer değiştirmeyi `1/(1-γ) = 10×` büyütür ve öğrenme
-oranının söylediğinin on katı adım atardı (bu, sözleşme testinde eğitimin
-ıraksamasına yol açtı ve düzeltildi). İkinci moment yoktur, eleman başına
-transandantal yoktur.
+Yeniden başlatma yokken momentum bir EMA'dır; negatif anlaşmada ise yeni
+gradyanın katsayısı `1-momentum` olarak kalır, yalnız taşınan eski hız azaltılır.
+Önceki belge ve kaynak yorumunda yazılan `1-γ` bununla aynı kural değildi.
+Mevcut checkpoint/devam davranışını sessizce değiştirmemek için uygulama kuralı
+korundu ve matris, vektör ve skaler yollarda iki anlaşma işareti için bağımsız
+sayısal referans testleri eklendi. İkinci moment ve eleman başına transandantal
+yoktur.
+
+Optimizer ayarları eğitim/güncelleme öncesinde sonlu ve geçerli aralıklarda
+olmalıdır; özellikle `lr × weight_decay < 1`, `epsilon > 0`, momentum ve enerji
+bozunması `[0,1)` aralığında olmalıdır. Geçersiz ayar checkpoint dosyasını
+üzerine yazmadan reddedilir; geçersiz ayarlı bir v5 checkpoint yüklenmez.
+`fbc_optimizer_init` geçersiz mimaride mevcut optimizer'ı korur, başarılı
+ayırmaların sonrasındaki bir ayırma hatası önceki hatayı gizlemez.
+`vegai_prompt_engine train --resume ... --lr X` yalnız öğrenme oranını değiştirir;
+momentum, enerji bozunması, restart, ağırlık bozunması, epsilon ve kırpma
+checkpoint'ten korunur. Her iki sürüm için gerçek CLI regresyonu bunu sınar.
+Yeni modellerde yalnız varsayılan prompt şekli, 512-token chunk ve reset kapalı
+iken LR 0,006'dır; diğer yeni konfigürasyonlarda 0,003, açık `--lr` ile seçilen
+değer, devamda ise checkpoint değeri geçerlidir. Bu seçim bir küçük Türkçe
+corpus deneyiyle sınırlıdır: [ayrı geliştirme/test ve maliyet sonuçları](experiments/context-prompt-byte-quality-2026-11.md).
+
+Byte tabanlı prompt yolunda `1..255` baytları aynı numaralı token'lara, V6/V7'de
+`0x00` kullanılmayan `256` token'ına karşılık gelir. V5 `0x00` verisini
+kodlayamaz ve bu durumda açık hatayla durur. Başarısız corpus okuması, reset
+veya eğitim artık kısmi checkpoint'i başarı gibi yazmaz; mevcut çıktı dosyası
+korunur. V6'da `0x00`/`0xff` eğitimi ve warm-up, V5'te hata ve sentinel,
+`ask`/`probe` byte eşlemesi CLI testindedir. Prompt CLI sayısal seçenekleri
+sonlu, aralık içinde ve kesilmemiş olarak doğrular; sıcaklık örnekleyicisi çok
+küçük değerlerde taşmayı önler ve yalnız normal aralığın altındaki olasılıkları
+sıfırlar. Aynı yazılı input/output yolu reddedilir; ancak standart Fortran
+farklı adların aynı symlink/hardlink dosyası olduğunu taşınabilir biçimde
+kanıtlayamaz, yolların ayrılığı işletim tarafında sağlanmalıdır. `end_byte`,
+sonraki oturumda tekrar okunacak örtüşen byte konumudur; N byte için son
+prediction `N−1` konumunda tamamlandığından `file_fraction` ve `whole_file`
+bunu esas alır. `whole_file` yalnız sona erişildiğini söyler, önceki
+aralıklarda boşluk olmadığını kanıtlamaz. Legacy özetleyici bitişi değil
+sıfırdan başlayarak kesintisiz örtülen prediction aralığını raporlar. Başarılı
+checkpoint yazımı crash-atomic değildir; bağımsız yedek gereksinimi sürer.
+
+Global gradyan normu sıradan girdide her diziyi bir kez okuyarak hesaplanır;
+çok büyük/küçük sayılarda ölçekli toplama geçilir. Başlatılmamış, sonlu olmayan
+veya normu real64'e sığmayan gradyanda `fbc_gradient_norm` negatif hata işareti
+döndürür ve eğitim kırpma/güncellemeden önce hata verir. Optimizer'ın kare ve
+nokta çarpımlarını taşırabilecek büyüklükte bir norm da açıkça reddedilir.
+Eğitim yolu zaten hesapladığı kırpılmış norm sınırını optimizer'a aktarır; ek
+tam gradyan taraması yapılmaz. `fbc_optimizer_apply` doğrudan çağrıldığında ise
+güvenli normu kendisi tarar. İsteğe bağlı `validated_gradient_norm` yalnızca
+**aynı gradyanın** doğru üst sınırı bilindiğinde kullanılmalıdır; yanlış bir
+sınır vermek API önkoşulunun ihlalidir.
+
+Çapraz entropide sonlu ama zıt işaretli real64 uç değerleri için taşmadan
+hesaplanabilen NLL ve residual döndürülür; hedefin NLL'si temsil edilemiyorsa
+veya logit NaN/sonsuzsa `FBC_ERR_NUMERIC` döner. Eğitim/değerlendirme kayıt
+sayılarını ve answer-mask boyutunu aritmetik taşmadan önce denetler; temsil
+edilemeyen birikmiş NLL `FBT_ERR_NUMERIC` ile durur. Eğitim sayaçları ve
+planlanan parametre-güncelleme sayısı her çağrı başında taşmaya karşı sınanır;
+ek parametre taraması yapılmaz. NLL toplamı hatasında o anki ileri durum zaten
+ilerlemiş olabilir, fakat ilgili chunk için optimizer güncellemesi yapılmaz;
+hata dönen akışı sıfırlayın veya bilinen sağlam checkpoint'ten yeniden başlatın.
+Bu denetim, ileri/geri geçişlerin içindeki tüm olası taşmaları veya bozuk
+checkpoint dizilerini genel olarak doğrulamaz. IEEE dışı real64 biçimlerinde
+sonlu-sayı fallback'i kullanılır; signaling NaN yakalayıcısı için aynı güvence
+iddia edilmez.
 
 ## 6. Kontrol noktası
 
-`VGFB0001` sihirli dizesi, **sürüm 5**. İçerik: sözlük/genişlik/kafa/ffn/yerel
-pencere/ölçek/yuva,
-**mantıksal ufuk**, etkin ufuk ve kırpma bayrağı, RMS epsilon, yuva bozunması ve
-sıcaklığı, güncelleme ve belirteç sayaçları, optimize edici hiper-parametreleri,
-tüm parametre yükü ve tüm optimize edici durumu.
+`VGFB0001` sihirli dizesi; varsayılan yeni modellerde **sürüm 6**, isteğe
+bağlı yuva kimliği için **sürüm 7**. İçerik:
+sözlük/genişlik/kafa/ffn/yerel pencere/ölçek/yuva, **mantıksal ufuk**, etkin
+ufuk ve kırpma bayrağı, RMS epsilon, yuva bozunması ve sıcaklığı, güncelleme
+ve belirteç sayaçları, optimize edici hiper-parametreleri, tüm parametre yükü
+ve tüm optimize edici durumu. Akışın yinelenen durumu dosyada **yoktur**;
+kesintiden sonra kesintisiz akışla bit-birebir devam için bu durum da güvenli
+biçimde elde tutulmalı veya yeniden oluşturulmalıdır. `prompt_engine --resume`
+varsayılan olarak yeni akış durumu açar, bu yüzden kesintisiz akışla bit eşitliği
+iddia edilmez. Kaydetme, geçersiz sayaç/kayıp/ufuk/optimizer bilgisini hedef
+dosyayı açmadan reddeder. Yükleme ve header incelemesi geçersiz sayacı, NaN,
+sonsuz veya geçersiz clamp bilgisini, hatalı model boyutlarını ve sayısal model
+konfigürasyonunu reddeder; yükleme bunu model ayırmadan önce yapar. Yükleyici,
+V5–V7 başlığının gerektirdiği minimum payload boyutunu da ayırmadan önce kontrol
+eder; kısa dosyadaki büyük sahte boyutlar için büyük ayırma girişiminde bulunmaz.
+Boyut bilgisi bilinmeyen veya sıfır olan kaynak açılmadan reddedilir; Linux'ta
+sıfır boyutlu FIFO da böylece bekletilmez. Standart Fortran her özel dosyayı
+saptamaz ve eşzamanlı yol değiştirme yarışını engellemez. Header'ın `convertible`
+alanı sadece sürüm, konfigürasyon ve temel metadata kontrolünü gösterir: payload'ın,
+optimizer ayarlarının/dizilerinin veya bir imzanın geçerliliğini **kanıtlamaz**.
+Boyut denetimi de tam dosyadaki bozuk içeriği, sparse dosyaları veya büyük,
+geçerli boyutlar için yeterli belleği garanti etmez; güvenilmeyen girdilerde
+harici kaynak sınırı ve bağımsız bütünlük/kimlik doğrulaması gerekir. Tam
+parametre taraması veya ek checkpoint kopyası yapılmaz; yazma sırasında kesintiye
+karşı bağımsız yedek gereklidir.
 
 Sürüm 2, öğrenilen dinamiği (ölçek başına `decay_logit` ve
 `write_strength_logit`) ve onların optimizer momentumunu ekler. Sürüm 3
 girdiye bağımlı iki geçit projeksiyonunu (`channel_gate_proj`,
 `scale_gate_proj`) ekler (yük 21 → 23 dizi). Sürüm 4 bağlam koşullu kanal
 yönlendiricisini (yük 23 → 25 dizi), sürüm 5 ise kafa başına indüksiyon
-ağırlığını ve onun momentumunu ekler (yük 25 → 27 dizi). Sürüm 1, 2, 3 ve 4
-dosyaları okunabilir ama **dönüştürülmez**: `FBT_ERR_VERSION` (−1506) ile
-reddedilir, çünkü o dosyalarda yeni parametrelerin değeri yoktur ve
+ağırlığını ve onun momentumunu ekler (yük 25 → 27 dizi). V6 yük düzeni V5 ile
+aynıdır ancak düzeltilmiş eğitim kuralını sürümle bağlar. V7 de aynı payload
+şekline sahiptir ama farklı ileri yuva semantiği nedeniyle ayrı sürümdür. V5,
+V6 ve V7 yüklenip kaydedilirken kendi kurallarını korur; önceki bir kuraldan
+V7'ye sessiz geçiş yapılmaz. Yeni model V6 kullanır. `vegai_prompt_engine train`
+ile yalnızca **sıfırdan** başlarken `--training-rule 7` seçilebilir; `--resume`
+ile kural override'ı reddedilir, JSON raporundaki `training_rule` kullanılan
+sürümü gösterir. API üzerinden kural değiştirmek ileri/geri davranışı ve eğitim
+yörüngesini değiştirir; çoklu-yuva V7 ile V5/V6 arasında geçerken mevcut
+özyinelemeli durum yeni kurala uygun biçimde sıfırlanmalıdır. Sıfırlamadan
+ileri/geri çağrısı durumu veya gradyanı değiştirmeden `FBC_ERR_ORDER` verir;
+bilinmeyen kural reddedilir. Tek yuvalı V7'nin yuva davranışı V6 ile aynıdır.
+Eski ikili tanımadığı V6/V7 checkpoint'i okuyamaz. Sürüm 1, 2,
+3 ve 4 dosyaları okunabilir ama
+**dönüştürülmez**: `FBT_ERR_VERSION` (−1506) ile reddedilir, çünkü o dosyalarda
+yeni parametrelerin değeri yoktur ve
 uydurulacak bir değer (örneğin sıfır geçit ya da sıfır yönlendirici) modeli
 sessizce değiştirirdi. Sürüm 2, 3 ve 4 reddi ayrı testlerdir: başlık
 yazılır, hem yükleyicinin hem başlık okuyucusunun `FBT_ERR_VERSION`
@@ -308,7 +477,9 @@ ctest --test-dir build -R vegai_context
 Sözleşme grupları: seçenek ayrıştırma; ufuk değişmezliği (yapısal sayaçlar);
 gelecek sızıntısı yok; parça/akış eşdeğerliği; belirlenimcilik; uzun akışta
 sonluluk ve sınırlı durum; sonlu fark gradyan kontrolü; eğitimde kayıp düşüşü;
-her bellek bileşeninin gradyan alması ve değişmesi; 93 belirteç uzaklıktaki
+bellek yazma ve okuma yollarının gradyanları, V5/V6 yuva simetrisi ve V7'nin
+çoklu-yuva kimliği/tek-yuva eşdeğerliği;
+93 belirteç uzaklıktaki
 cevabın sabit boyutlu durum üzerinden sorgu logitlerine ulaşması (ve bellek
 kanalları kapalıyken ulaşamaması); kontrol noktası gidiş-dönüşü ve eski
 biçimin (sürüm 2 ve sürüm 3) reddi; bağlam koşullu yönlendirici (sıfır
@@ -389,11 +560,12 @@ sayısı değişiyor. Ölçüm **ayrı** akıştan alınır, yani held-out.
 bir kazanç üretmiyor. 1024 belirteç uzaklık, 32 belirteçlik halka tamponun
 erişemediği bir mesafedir; yani zor rejim de ölçüldü ve orada da fark yok.
 
-Bu sonucun sınırı: görevler 32 bin belirteçte doyuma ulaşıyor (recall 0.9565 /
-0.80) ve 64 yuvalı yuva kanalı bu mesafeleri zaten taşıyor. Daha uzun eğitim,
-daha büyük model veya merdivenin orta bandının kritik olduğu bir görev
-ölçülmedi; bu yüzden "8 ölçek asla yardım etmez" denmiyor, "bu bütçede ve bu
-görevlerde yardım etmedi" deniyor.
+Bu sonucun sınırı: görevler 32 bin belirteçte bu sonuçlara ulaşıyor (recall
+0.9565 / 0.80); deney belirli bir kanalın bu mesafeleri tek başına taşıdığını
+kanıtlamaz. V5/V6 yuvalarının sıfırdan simetrik kalması da yukarıda belirtilen
+sınırlamadır. Daha uzun eğitim, daha büyük model veya merdivenin orta bandının
+kritik olduğu bir görev ölçülmedi; bu yüzden "8 ölçek asla yardım etmez"
+değil, "bu bütçede ve bu görevlerde yardım etmedi" deniyor.
 
 ## 9. Sınırlar (iddia edilmeyenler)
 

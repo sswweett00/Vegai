@@ -20,7 +20,8 @@
 !  Two timing modes per point
 !  --------------------------
 !    steady     the identical input every step, so after the warmup every expert
-!               page is resident: the number is pure arithmetic.
+!               page is resident; the reported latency is the median of five
+!               samples to reduce sensitivity to brief scheduling pauses.
 !    streaming  a fresh deterministic input every step, so the number also pays
 !               for materialising cold experts -- the real regime for a 1e9
 !               layer, where only a sliver of capacity is ever resident.
@@ -37,11 +38,13 @@
 !==============================================================================
 program sparse_layer_bench
    use, intrinsic :: iso_fortran_env, only: int32, int64, real64, output_unit
+   use hyper_types, only: splitmix64_next
    use sparse_expert_layer
    implicit none (type, external)
 
    integer(int32), parameter :: WARMUP_STEPS = 32_int32
    integer(int32), parameter :: MEASURED_STEPS = 256_int32
+   integer(int32), parameter :: STEADY_SAMPLE_COUNT = 5_int32
    real(real64), parameter :: LATENCY_TOLERANCE = 1.5_real64
    real(real64), parameter :: MEBIBYTE = 1048576.0_real64
 
@@ -85,8 +88,8 @@ program sparse_layer_bench
    points(3)%expert_capacity = 947000_int64
 
    write (output_unit, '(A)') '== sparse extreme-capacity layer: one training step =='
-   write (output_unit, '(A,I0,A,I0,A)') 'warmup ', WARMUP_STEPS, ' steps, measured ', &
-      MEASURED_STEPS, ' steps per mode'
+   write (output_unit, '(A,I0,A,I0,A,I0,A)') 'warmup ', WARMUP_STEPS, ' steps, measured ', &
+      MEASURED_STEPS, ' steps per sample; steady is median of ', STEADY_SAMPLE_COUNT, ' samples'
 
    do index = 1_int32, size(points, kind=int32)
       call measure_point(points(index), status)
@@ -133,7 +136,8 @@ contains
       type(sparse_layer_t) :: layer
       type(sparse_forward_t) :: cache
       real(real64), allocatable :: input(:), output(:), target(:), grad_output(:), grad_input(:)
-      integer(int32) :: allocation_status
+      real(real64) :: steady_samples(STEADY_SAMPLE_COUNT), temporary
+      integer(int32) :: allocation_status, sample, other
 
       status_out = SE_OK
       config%input_width = point%input_width
@@ -159,9 +163,21 @@ contains
       point%active_flops = active_flops_of(config)
 
       call deterministic_vector(input, 11_int64)
-      point%steady_microseconds = measure_mode(layer, cache, input, target, output, grad_output, &
+      do sample = 1_int32, STEADY_SAMPLE_COUNT
+         steady_samples(sample) = measure_mode(layer, cache, input, target, output, grad_output, &
                                                grad_input, .false., status_out)
-      if (status_out /= SE_OK) return
+         if (status_out /= SE_OK) return
+      end do
+      do sample = 1_int32, STEADY_SAMPLE_COUNT - 1_int32
+         do other = sample + 1_int32, STEADY_SAMPLE_COUNT
+            if (steady_samples(other) < steady_samples(sample)) then
+               temporary = steady_samples(sample)
+               steady_samples(sample) = steady_samples(other)
+               steady_samples(other) = temporary
+            end if
+         end do
+      end do
+      point%steady_microseconds = steady_samples((STEADY_SAMPLE_COUNT + 1_int32) / 2_int32)
       point%streaming_microseconds = measure_mode(layer, cache, input, target, output, grad_output, &
                                                   grad_input, .true., status_out)
       if (status_out /= SE_OK) return
@@ -246,15 +262,8 @@ contains
    function mix_word(state) result(word)
       integer(int64), intent(inout) :: state
       integer(int64) :: word
-      integer(int64), parameter :: gamma = int(z'9E3779B97F4A7C15', int64)
-      integer(int64), parameter :: mix_a = int(z'BF58476D1CE4E5B9', int64)
-      integer(int64), parameter :: mix_b = int(z'94D049BB133111EB', int64)
 
-      state = state + gamma
-      word = state
-      word = ieor(word, ishft(word, -30_int32)) * mix_a
-      word = ieor(word, ishft(word, -27_int32)) * mix_b
-      word = ieor(word, ishft(word, -31_int32))
+      call splitmix64_next(state, word)
    end function mix_word
 
    subroutine report_table(points)

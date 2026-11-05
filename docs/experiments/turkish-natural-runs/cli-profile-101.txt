@@ -1,0 +1,29 @@
+CORPUS_TRAIN_JSON {
+  "corpus": "/tmp/vegai-data/slices/train-1000.txt"
+,  "corpus_bytes": 83834
+,  "start_byte": 0
+,  "end_byte": 83456
+,  "consumed_bytes": 83456
+,  "file_fraction": 0.995503
+,  "bounded_by_bytes": false
+,  "whole_file": false
+,  "updates": 163
+,  "tokens": 83456
+,  "session_updates": 163
+,  "session_tokens": 83456
+,  "learning_rate": 1.2000000000000000E-002
+,  "training_profile_applied": true
+,  "mean_nll": 2.595527
+,  "session_mean_nll": 2.595527
+,  "tokens_per_second": 16691.200000
+,  "seconds": 5
+,  "session_seconds_precise": 5.0517836599999999E+000
+,  "session_tokens_per_second_precise": 1.6520105692728735E+004
+,  "learned_reach": 8254.086786
+,  "parameters": 23411
+,  "training_rule": 6
+,  "reset_every": 0
+,  "numeric_ok": true
+
+}
+note: partial pass: reached prediction offset 83456 of 83833

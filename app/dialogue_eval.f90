@@ -85,7 +85,8 @@ program vegai_dialogue_eval
       maximum_cases = 100000_int64
       call parse_options(5, argument_count, config, maximum_cases, status)
       if (status /= EVAL_OK) call fail_usage()
-      call load_dialogue(trim(checkpoint_path), trim(knowledge_path), config, model, dialogue_index, session, entries_loaded, status)
+      call load_dialogue(trim(checkpoint_path), trim(knowledge_path), config, model, dialogue_index, &
+                         session, entries_loaded, status)
       if (status /= EVAL_OK) call fail_with_status('dialogue initialization failed', status)
       call evaluate_tsv(trim(evaluation_path), dialogue_index, model, session, maximum_cases, metrics, status)
       if (status /= EVAL_OK) then
@@ -443,9 +444,11 @@ contains
       logical, intent(in) :: trailing_comma
 
       if (trailing_comma) then
-         write(output_unit, '(A,A,A,A,A,I0,A)') '    "', trim(name), '": {"sha256":"', trim(identity%sha256), '","bytes":', identity%bytes, '},'
+         write(output_unit, '(A,A,A,A,A,I0,A)') '    "', trim(name), '": {"sha256":"', &
+                                                   trim(identity%sha256), '","bytes":', identity%bytes, '},'
       else
-         write(output_unit, '(A,A,A,A,A,I0,A)') '    "', trim(name), '": {"sha256":"', trim(identity%sha256), '","bytes":', identity%bytes, '}'
+         write(output_unit, '(A,A,A,A,A,I0,A)') '    "', trim(name), '": {"sha256":"', &
+                                                   trim(identity%sha256), '","bytes":', identity%bytes, '}'
       end if
    end subroutine write_identity_json
 
@@ -472,8 +475,10 @@ contains
       call write_json_count('minimum_margin_millionths', int(nint(active_config%minimum_margin * 1000000.0), int64), .true.)
       call write_json_count('semantic_weight_millionths', int(nint(active_config%semantic_weight * 1000000.0), int64), .true.)
       call write_json_count('lexical_weight_millionths', int(nint(active_config%lexical_weight * 1000000.0), int64), .true.)
-      call write_json_count('minimum_hybrid_score_millionths', int(nint(active_config%minimum_hybrid_score * 1000000.0), int64), .true.)
-      call write_json_count('minimum_hybrid_margin_millionths', int(nint(active_config%minimum_hybrid_margin * 1000000.0), int64), .false.)
+      call write_json_count('minimum_hybrid_score_millionths', &
+                            int(nint(active_config%minimum_hybrid_score * 1000000.0), int64), .true.)
+      call write_json_count('minimum_hybrid_margin_millionths', &
+                            int(nint(active_config%minimum_hybrid_margin * 1000000.0), int64), .false.)
       write(output_unit, '(A)') '  },'
       write(output_unit, '(A)') '  "metrics": {'
       call write_json_count('total_cases', result%total_cases, .true.)

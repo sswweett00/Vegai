@@ -331,7 +331,8 @@ contains
       write(output_unit, '(A)') '  vegai_chat ask CHECKPOINT KNOWLEDGE.tsv --prompt "Turkish UTF-8 prompt" [options]'
       write(output_unit, '(A)') '  vegai_chat repl CHECKPOINT KNOWLEDGE.tsv [options]'
       write(output_unit, '(A)') 'Knowledge TSV: exactly one ASCII TAB per nonblank UTF-8 row: prompt<TAB>response'
-      write(output_unit, '(A)') 'Turkish prompt letters are folded to the checkpoint ASCII projection; UTF-8 responses stay verbatim.'
+      write(output_unit, '(A)') 'Turkish prompt letters are folded to the checkpoint ASCII projection; ' // &
+                               'UTF-8 responses stay verbatim.'
       write(output_unit, '(A)') 'Options:'
       write(output_unit, '(A)') '  --max-entries N --history-turns N --min-known-tokens N'
       write(output_unit, '(A)') '  --current-weight N --history-weight N --min-similarity R --min-margin R'

@@ -2,6 +2,10 @@
 ! Native teacher-forced pretraining utility for the neural retention decoder.
 program vegai_neural_pretrain
    use, intrinsic :: iso_fortran_env, only: int32, int64, real32, real64, output_unit, error_unit
+   use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+   use, intrinsic :: ieee_exceptions, only: ieee_status_type, ieee_get_status, ieee_set_status, &
+      ieee_support_halting, ieee_set_halting_mode, ieee_set_flag, ieee_get_flag, &
+      ieee_overflow, ieee_underflow, ieee_invalid
    use subword_bpe
    use subword_bpe_training
    use neural_retention_decoder
@@ -12,16 +16,22 @@ program vegai_neural_pretrain
    character(len=32) :: command
    integer :: argument_count
 
-   ! Host-associated CLI options (training-system v2).  Defaults reproduce
-   ! the legacy model shape while switching new runs to the AdamW +
-   ! warmup/inverse-square-root schedule defaults of the trainer library.
+   ! Host-associated CLI options. Defaults retain the model shape while using
+   ! NOVA and the warmup/inverse-square-root schedule for new runs. A loaded
+   ! checkpoint retains its stored config unless CLI options explicitly override it.
    integer(int32) :: opt_width = 64_int32
    integer(int32) :: opt_heads = 4_int32
    integer(int32) :: opt_window = 32_int32
    integer(int32) :: opt_ffn = 256_int32
    integer(int64) :: opt_seed = 20261025_int64
    logical :: opt_lr_set = .false.
-   logical :: opt_dims_set = .false.
+   logical :: opt_width_set = .false., opt_heads_set = .false., opt_window_set = .false., opt_ffn_set = .false.
+   logical :: opt_max_tokens_set = .false., opt_accumulation_set = .false.
+   logical :: opt_optimizer_set = .false., opt_schedule_set = .false.
+   logical :: opt_warmup_set = .false., opt_total_set = .false.
+   logical :: opt_beta1_set = .false., opt_beta2_set = .false., opt_adam_eps_set = .false.
+   logical :: opt_grad_clip_set = .false., opt_embedding_limit_set = .false.
+   logical :: opt_label_smoothing_set = .false., opt_min_lr_ratio_set = .false.
    real(real64) :: opt_lr = 0.0_real64
    real(real64) :: opt_weight_decay = 0.01_real64
    logical :: opt_weight_decay_set = .false.
@@ -44,7 +54,7 @@ program vegai_neural_pretrain
 
    argument_count = command_argument_count()
    if (argument_count < 1) call usage_and_stop()
-   call get_command_argument(1, command)
+   call get_positional_argument(1, command)
    select case (trim(command))
    case ('smoke')
       call run_smoke()
@@ -73,6 +83,180 @@ program vegai_neural_pretrain
    end select
 
 contains
+
+   ! GET_COMMAND_ARGUMENT otherwise truncates silently when STATUS is ignored.
+   ! Paths are trimmed by native file APIs, so reject a trailing blank rather
+   ! than accidentally opening or replacing a different file.
+   subroutine get_positional_argument(index, value, is_path, actual_length)
+      integer, intent(in) :: index
+      character(len=*), intent(out) :: value
+      logical, intent(in), optional :: is_path
+      integer, intent(out), optional :: actual_length
+      integer :: argument_length, argument_status
+
+      call get_command_argument(index, value, length=argument_length, status=argument_status)
+      if (argument_status /= 0 .or. argument_length > len(value)) then
+         write(error_unit, '(A,I0)') 'vegai_neural_pretrain: missing or truncated argument ', index
+         error stop 2
+      end if
+      if (present(is_path)) then
+         if (is_path) then
+            if (argument_length == 0 .or. len_trim(value) /= argument_length) then
+               write(error_unit, '(A,I0)') 'vegai_neural_pretrain: empty or trailing-blank path argument ', index
+               error stop 2
+            end if
+         end if
+      end if
+      if (present(actual_length)) actual_length = argument_length
+   end subroutine get_positional_argument
+
+   subroutine reject_matching_paths(first, second)
+      character(len=*), intent(in) :: first, second
+
+      ! Exact spelling only: portable Fortran cannot establish inode identity
+      ! or resolve all symlinks/hardlinks. Operators must also avoid aliases.
+      if (trim(first) == trim(second)) then
+         write(error_unit, '(A)') 'vegai_neural_pretrain: input and output paths must be distinct'
+         error stop 2
+      end if
+   end subroutine reject_matching_paths
+
+   ! Reject list-directed separators, repetition and slash before conversion;
+   ! otherwise e.g. "16,17" reads as 16 and "/" may leave an old value intact.
+   subroutine parse_integer64(raw, parsed, parse_status)
+      character(len=*), intent(in) :: raw
+      integer(int64), intent(out) :: parsed
+      integer(int32), intent(out) :: parse_status
+      character(len=len(raw)) :: token
+      integer :: position, last
+
+      parsed = 0_int64
+      parse_status = 1_int32
+      token = adjustl(raw)
+      last = len_trim(token)
+      if (last == 0) return
+      position = 1
+      if (token(position:position) == '+' .or. token(position:position) == '-') position = position + 1
+      if (position > last) return
+      do while (position <= last)
+         if (token(position:position) < '0' .or. token(position:position) > '9') return
+         position = position + 1
+      end do
+      read(token, *, iostat=parse_status) parsed
+      if (parse_status /= 0_int32) parsed = 0_int64
+   end subroutine parse_integer64
+
+   subroutine parse_integer32(raw, parsed, parse_status)
+      character(len=*), intent(in) :: raw
+      integer(int32), intent(out) :: parsed
+      integer(int32), intent(out) :: parse_status
+      integer(int64) :: wide
+
+      parsed = 0_int32
+      call parse_integer64(raw, wide, parse_status)
+      if (parse_status /= 0_int32) return
+      if (wide < -int(huge(0_int32), int64) - 1_int64 .or. wide > int(huge(0_int32), int64)) then
+         parse_status = 1_int32
+         return
+      end if
+      parsed = int(wide, int32)
+   end subroutine parse_integer32
+
+   ! Parse one decimal option without letting a library conversion of 1e309
+   ! trap before IOSTAT can report an error. Parsing is CLI-only, not per token.
+   ! The caller's IEEE modes and flags are restored even when conversion fails.
+   subroutine parse_real_option(raw, parsed, parse_status)
+      character(len=*), intent(in) :: raw
+      real(real64), intent(out) :: parsed
+      integer(int32), intent(out) :: parse_status
+      type(ieee_status_type) :: saved_status
+      character(len=len(raw)) :: token
+      character(len=1) :: digit
+      integer :: position, last, digit_count
+      integer(int64) :: bits
+      logical :: nonzero_mantissa, overflowed, invalid
+
+      parsed = 0.0_real64
+      parse_status = 1_int32
+      token = adjustl(raw)
+      last = len_trim(token)
+      if (last == 0) return
+      position = 1
+      if (token(position:position) == '+' .or. token(position:position) == '-') position = position + 1
+      digit_count = 0
+      nonzero_mantissa = .false.
+      do while (position <= last)
+         digit = token(position:position)
+         if (digit < '0' .or. digit > '9') exit
+         digit_count = digit_count + 1
+         nonzero_mantissa = nonzero_mantissa .or. digit /= '0'
+         position = position + 1
+      end do
+      if (position <= last) then
+         if (token(position:position) == '.') then
+            position = position + 1
+            do while (position <= last)
+               digit = token(position:position)
+               if (digit < '0' .or. digit > '9') exit
+               digit_count = digit_count + 1
+               nonzero_mantissa = nonzero_mantissa .or. digit /= '0'
+               position = position + 1
+            end do
+         end if
+      end if
+      if (digit_count == 0) return
+      if (position <= last) then
+         digit = token(position:position)
+         if (digit == 'e' .or. digit == 'E' .or. digit == 'd' .or. digit == 'D') then
+            position = position + 1
+            if (position <= last) then
+               if (token(position:position) == '+' .or. token(position:position) == '-') position = position + 1
+            end if
+            digit_count = 0
+            do while (position <= last)
+               digit = token(position:position)
+               if (digit < '0' .or. digit > '9') exit
+               digit_count = digit_count + 1
+               position = position + 1
+            end do
+            if (digit_count == 0) return
+         end if
+      end if
+      ! No list-directed separators, repeat counts, slash, or trailing tokens.
+      if (position <= last) return
+
+      call ieee_get_status(saved_status)
+      if (ieee_support_halting(ieee_overflow)) call ieee_set_halting_mode(ieee_overflow, .false.)
+      if (ieee_support_halting(ieee_underflow)) call ieee_set_halting_mode(ieee_underflow, .false.)
+      if (ieee_support_halting(ieee_invalid)) call ieee_set_halting_mode(ieee_invalid, .false.)
+      call ieee_set_flag(ieee_overflow, .false.)
+      call ieee_set_flag(ieee_invalid, .false.)
+      read(token, *, iostat=parse_status) parsed
+      call ieee_get_flag(ieee_overflow, overflowed)
+      call ieee_get_flag(ieee_invalid, invalid)
+      call ieee_set_status(saved_status)
+      if (parse_status /= 0_int32 .or. overflowed .or. invalid) then
+         parse_status = 1_int32
+         return
+      end if
+      if (storage_size(parsed) == 64 .and. radix(parsed) == 2 .and. digits(parsed) == 53 .and. &
+          maxexponent(parsed) == 1024 .and. minexponent(parsed) == -1021) then
+         bits = transfer(parsed, 0_int64)
+         if (iand(bits, int(z'7FF0000000000000', int64)) == int(z'7FF0000000000000', int64)) then
+            parse_status = 1_int32
+            return
+         end if
+      else
+         if (.not. ieee_is_finite(parsed)) then
+            parse_status = 1_int32
+            return
+         end if
+      end if
+      ! A nonzero decimal rounded entirely to zero must not silently disable an
+      ! option such as weight decay. Representable subnormals remain valid.
+      if (parsed == 0.0_real64 .and. nonzero_mantissa) parse_status = 1_int32
+   end subroutine parse_real_option
+
 
    subroutine require_ok(status, label)
       integer(int32), intent(in) :: status
@@ -105,50 +289,55 @@ contains
    subroutine parse_cli_options(first_index)
       integer, intent(in) :: first_index
       character(len=256) :: key, value
-      integer :: index, parse_status
-      integer(int32) :: int32_value
+      integer :: index, argument_status
+      integer(int32) :: int32_value, parse_status
       integer(int64) :: int64_value
       real(real64) :: real_value
 
       index = first_index
       do while (index <= command_argument_count())
-         call get_command_argument(index, key)
+         call get_command_argument(index, key, status=argument_status)
+         if (argument_status /= 0) call usage_and_stop()
          if (.not. starts_with_dashes(key) .or. index + 1 > command_argument_count()) call usage_and_stop()
-         call get_command_argument(index + 1, value)
+         call get_command_argument(index + 1, value, status=argument_status)
+         if (argument_status /= 0) call usage_and_stop()
          select case (trim(key))
          case ('--width', '--heads', '--window', '--ffn', '--max-tokens-per-record', '--gradient-accumulation')
-            read(value, *, iostat=parse_status) int32_value
+            call parse_integer32(value, int32_value, parse_status)
             if (parse_status /= 0) call usage_and_stop()
             select case (trim(key))
-            case ('--width'); opt_width = int32_value; opt_dims_set = .true.
-            case ('--heads'); opt_heads = int32_value; opt_dims_set = .true.
-            case ('--window'); opt_window = int32_value; opt_dims_set = .true.
-            case ('--ffn'); opt_ffn = int32_value; opt_dims_set = .true.
-            case ('--max-tokens-per-record'); opt_max_tokens_per_record = int32_value
-            case ('--gradient-accumulation'); opt_gradient_accumulation = int32_value
+            case ('--width'); opt_width = int32_value; opt_width_set = .true.
+            case ('--heads'); opt_heads = int32_value; opt_heads_set = .true.
+            case ('--window'); opt_window = int32_value; opt_window_set = .true.
+            case ('--ffn'); opt_ffn = int32_value; opt_ffn_set = .true.
+            case ('--max-tokens-per-record'); opt_max_tokens_per_record = int32_value; opt_max_tokens_set = .true.
+            case ('--gradient-accumulation'); opt_gradient_accumulation = int32_value; opt_accumulation_set = .true.
             end select
          case ('--seed', '--warmup-updates', '--total-updates')
-            read(value, *, iostat=parse_status) int64_value
+            call parse_integer64(value, int64_value, parse_status)
             if (parse_status /= 0) call usage_and_stop()
             select case (trim(key))
             case ('--seed'); opt_seed = int64_value
-            case ('--warmup-updates'); opt_warmup_updates = int64_value
-            case ('--total-updates'); opt_total_updates = int64_value
+            case ('--warmup-updates'); opt_warmup_updates = int64_value; opt_warmup_set = .true.
+            case ('--total-updates'); opt_total_updates = int64_value; opt_total_set = .true.
             end select
          case ('--lr', '--weight-decay', '--beta1', '--beta2', '--adam-eps', '--grad-clip', &
                '--embedding-limit', '--label-smoothing', '--min-lr-ratio')
-            read(value, *, iostat=parse_status) real_value
-            if (parse_status /= 0) call usage_and_stop()
+            call parse_real_option(value, real_value, parse_status)
+            if (parse_status /= 0) then
+               write(error_unit, '(A,A)') 'vegai_neural_pretrain: invalid real option ', trim(key)
+               call usage_and_stop()
+            end if
             select case (trim(key))
             case ('--lr'); opt_lr = real_value; opt_lr_set = .true.
             case ('--weight-decay'); opt_weight_decay = real_value; opt_weight_decay_set = .true.
-            case ('--beta1'); opt_beta1 = real_value
-            case ('--beta2'); opt_beta2 = real_value
-            case ('--adam-eps'); opt_adam_eps = real_value
-            case ('--grad-clip'); opt_grad_clip = real_value
-            case ('--embedding-limit'); opt_embedding_limit = real_value
-            case ('--label-smoothing'); opt_label_smoothing = real_value
-            case ('--min-lr-ratio'); opt_min_lr_ratio = real_value
+            case ('--beta1'); opt_beta1 = real_value; opt_beta1_set = .true.
+            case ('--beta2'); opt_beta2 = real_value; opt_beta2_set = .true.
+            case ('--adam-eps'); opt_adam_eps = real_value; opt_adam_eps_set = .true.
+            case ('--grad-clip'); opt_grad_clip = real_value; opt_grad_clip_set = .true.
+            case ('--embedding-limit'); opt_embedding_limit = real_value; opt_embedding_limit_set = .true.
+            case ('--label-smoothing'); opt_label_smoothing = real_value; opt_label_smoothing_set = .true.
+            case ('--min-lr-ratio'); opt_min_lr_ratio = real_value; opt_min_lr_ratio_set = .true.
             end select
          case ('--optimizer')
             select case (trim(value))
@@ -157,6 +346,7 @@ contains
             case ('sgd'); opt_optimizer = NPT_OPTIMIZER_SGD
             case default; call usage_and_stop()
             end select
+            opt_optimizer_set = .true.
          case ('--schedule')
             select case (trim(value))
             case ('constant'); opt_schedule = NPT_SCHEDULE_CONSTANT
@@ -164,6 +354,7 @@ contains
             case ('cosine'); opt_schedule = NPT_SCHEDULE_WARMUP_COSINE
             case default; call usage_and_stop()
             end select
+            opt_schedule_set = .true.
          case default
             call usage_and_stop()
          end select
@@ -185,10 +376,9 @@ contains
       else
          peak_lr = 0.025_real64
       end if
-      ! Decoupled weight decay exists only in the AdamW update.  An explicit
-      ! non-zero --weight-decay with --optimizer sgd would otherwise be
-      ! reported as active regularisation while doing nothing, so it is a
-      ! usage error; the AdamW-only default is simply dropped for SGD.
+      ! Decoupled weight decay exists in the NOVA and AdamW updates. An
+      ! explicit non-zero value with SGD would otherwise be reported as active
+      ! while doing nothing, so reject it and drop the default for SGD.
       effective_weight_decay = opt_weight_decay
       if (opt_optimizer == NPT_OPTIMIZER_SGD) then
          if (opt_weight_decay_set .and. opt_weight_decay /= 0.0_real64) then
@@ -236,17 +426,54 @@ contains
                                                local_window=opt_window, ffn_width=opt_ffn)
    end subroutine build_decoder_config
 
-   ! Overwrites the trainable-hyperparameter fields of a checkpoint-loaded
-   ! config with the CLI options.  Used only when the operator explicitly
-   ! passes options to resume/train-chunk; shape changes are rejected by
-   ! the callers before this is invoked.
-   subroutine apply_options_to_train_config(train_config)
+   ! Resume from the persisted config and override only explicitly supplied
+   ! fields. A shape-only option or an unrelated flag must not silently reset
+   ! the checkpoint's learning rate, optimizer, schedule or accumulation.
+   subroutine apply_options_to_train_config(train_config, train_state)
       type(neural_train_config_t), intent(inout) :: train_config
+      type(neural_train_state_t), intent(in) :: train_state
       type(neural_train_config_t) :: fresh
 
-      call build_train_config(fresh)
+      if (opt_optimizer_set .and. opt_optimizer /= train_config%optimizer .and. &
+          train_state%updates_completed > 0_int64) then
+         write(error_unit, '(A)') 'vegai_neural_pretrain: cannot change the optimizer of a trained checkpoint; '// &
+                                  'start a new run instead'
+         call usage_and_stop()
+      end if
+      fresh = train_config
+      if (opt_lr_set) fresh%learning_rate = opt_lr
+      if (opt_optimizer_set) then
+         fresh%optimizer = opt_optimizer
+         if (opt_optimizer == NPT_OPTIMIZER_SGD .and. .not. opt_weight_decay_set) fresh%weight_decay = 0.0_real64
+      end if
+      if (opt_weight_decay_set) fresh%weight_decay = opt_weight_decay
+      if (opt_beta1_set) fresh%adam_beta1 = opt_beta1
+      if (opt_beta2_set) fresh%adam_beta2 = opt_beta2
+      if (opt_adam_eps_set) fresh%adam_epsilon = opt_adam_eps
+      if (opt_grad_clip_set) fresh%gradient_clip_norm = opt_grad_clip
+      if (opt_embedding_limit_set) fresh%embedding_value_limit = opt_embedding_limit
+      if (opt_label_smoothing_set) fresh%label_smoothing = opt_label_smoothing
+      if (opt_min_lr_ratio_set) fresh%minimum_lr_ratio = opt_min_lr_ratio
+      if (opt_max_tokens_set) fresh%maximum_tokens_per_record = opt_max_tokens_per_record
+      if (opt_accumulation_set) fresh%gradient_accumulation = opt_gradient_accumulation
+      if (opt_schedule_set) fresh%lr_schedule = opt_schedule
+      if (opt_warmup_set) fresh%warmup_updates = opt_warmup_updates
+      if (opt_total_set) fresh%total_updates = opt_total_updates
+      if (.not. neural_train_config_is_valid(fresh)) then
+         write(error_unit, '(A)') 'vegai_neural_pretrain: invalid explicit overrides for checkpoint training config'
+         call usage_and_stop()
+      end if
       train_config = fresh
    end subroutine apply_options_to_train_config
+
+   pure logical function requested_shape_matches(config) result(matches)
+      type(neural_decoder_config_t), intent(in) :: config
+
+      matches = (.not. opt_width_set .or. opt_width == config%width) .and. &
+                (.not. opt_heads_set .or. opt_heads == config%heads) .and. &
+                (.not. opt_window_set .or. opt_window == config%local_window) .and. &
+                (.not. opt_ffn_set .or. opt_ffn == config%ffn_width)
+   end function requested_shape_matches
 
    function optimizer_name(optimizer) result(name)
       integer(int32), intent(in) :: optimizer
@@ -398,15 +625,16 @@ contains
       integer(int64) :: clock_start, clock_end, clock_rate
 
       if (command_argument_count() < 4) call usage_and_stop()
-      call get_command_argument(2, corpus_path)
-      call get_command_argument(3, tokenizer_path)
-      call get_command_argument(4, target_text)
-      read(target_text, *, iostat=parse_status) target_vocabulary
+      call get_positional_argument(2, corpus_path, is_path=.true.)
+      call get_positional_argument(3, tokenizer_path, is_path=.true.)
+      call reject_matching_paths(corpus_path, tokenizer_path)
+      call get_positional_argument(4, target_text)
+      call parse_integer32(target_text, target_vocabulary, parse_status)
       if (parse_status /= 0 .or. target_vocabulary < BPE_BASE_VOCABULARY) call usage_and_stop()
       minimum_frequency = 2_int32
       if (command_argument_count() >= 5) then
-         call get_command_argument(5, frequency_text)
-         read(frequency_text, *, iostat=parse_status) minimum_frequency
+         call get_positional_argument(5, frequency_text)
+         call parse_integer32(frequency_text, minimum_frequency, parse_status)
          if (parse_status /= 0 .or. minimum_frequency <= 0_int32) call usage_and_stop()
       end if
       maximum_merges = max(1_int32, target_vocabulary - BPE_BASE_VOCABULARY)
@@ -419,8 +647,8 @@ contains
          ! default; capacity only bounds memory, never merge choice.
          tokenizer_config%pair_table_capacity = 1048583_int32
          if (command_argument_count() >= 6) then
-            call get_command_argument(6, capacity_text)
-            read(capacity_text, *, iostat=parse_status) maximum_tokens
+            call get_positional_argument(6, capacity_text)
+            call parse_integer64(capacity_text, maximum_tokens, parse_status)
             if (parse_status /= 0 .or. maximum_tokens < 2_int64) call usage_and_stop()
             tokenizer_config%maximum_in_memory_tokens = maximum_tokens
          end if
@@ -482,17 +710,20 @@ contains
       logical :: tokenizer_exists, options_present
 
       if (command_argument_count() < 4) call usage_and_stop()
-      call get_command_argument(2, corpus_path)
-      call get_command_argument(3, checkpoint_path)
-      call get_command_argument(4, tokenizer_path)
+      call get_positional_argument(2, corpus_path, is_path=.true.)
+      call get_positional_argument(3, checkpoint_path, is_path=.true.)
+      call get_positional_argument(4, tokenizer_path, is_path=.true.)
+      call reject_matching_paths(corpus_path, checkpoint_path)
+      call reject_matching_paths(corpus_path, tokenizer_path)
+      call reject_matching_paths(tokenizer_path, checkpoint_path)
       epochs = 1_int32
       options_start = 5
       if (command_argument_count() >= 5) then
-         call get_command_argument(5, epochs_text)
+         call get_positional_argument(5, epochs_text)
          if (starts_with_dashes(epochs_text)) then
             options_start = 5
          else
-            read(epochs_text, *, iostat=parse_status) epochs
+            call parse_integer32(epochs_text, epochs, parse_status)
             if (parse_status /= 0 .or. epochs <= 0_int32) call usage_and_stop()
             options_start = 6
          end if
@@ -502,16 +733,15 @@ contains
       if (resume) then
          call bpe_load(bpe, trim(tokenizer_path), status)
          call require_ok(status, 'resume tokenizer load')
+         tokenizer_exists = .true.
          call neural_checkpoint_load(trim(checkpoint_path), bpe, model, train_config, train_state, status)
          call require_ok(status, 'resume neural checkpoint load')
          if (options_present) then
             ! Hyperparameters may be re-specified at an epoch boundary, but
             ! the serialized model shape can never change under a resume.
-            call require_true(.not. opt_dims_set .or. &
-                              (opt_width == model%config%width .and. opt_heads == model%config%heads .and. &
-                               opt_window == model%config%local_window .and. opt_ffn == model%config%ffn_width), &
+            call require_true(requested_shape_matches(model%config), &
                               'resume options must not change checkpoint model dimensions')
-            call apply_options_to_train_config(train_config)
+            call apply_options_to_train_config(train_config, train_state)
          end if
       else
          inquire(file=trim(tokenizer_path), exist=tokenizer_exists)
@@ -568,13 +798,17 @@ contains
             '"skipped_records":'//trim(i64_text(metrics%skipped_records))//','// &
             '"tokenizer_truncations":'//trim(i64_text(metrics%tokenizer_truncations))//'}'
       end do
-      call bpe_save(bpe, trim(tokenizer_path), status)
-      call require_ok(status, 'tokenizer checkpoint save')
+      ! Tokenization only reads the vocabulary. Rewriting an existing tokenizer
+      ! cannot improve the model and risks corrupting it on a failed save.
+      if (.not. tokenizer_exists) then
+         call bpe_save(bpe, trim(tokenizer_path), status)
+         call require_ok(status, 'tokenizer checkpoint save')
+      end if
       call neural_checkpoint_save(trim(checkpoint_path), model, bpe, train_config, train_state, status)
       call require_ok(status, 'neural checkpoint save')
       write(output_unit, '(A)') 'NEURAL_PRETRAIN_COMPLETE_JSON: {'// &
-         '"checkpoint":"'//trim(checkpoint_path)//'",'// &
-         '"tokenizer":"'//trim(tokenizer_path)//'",'// &
+         '"checkpoint":'//json_quote(trim(checkpoint_path))//','// &
+         '"tokenizer":'//json_quote(trim(tokenizer_path))//','// &
          '"records_completed":'//trim(i64_text(train_state%records_completed))//','// &
          '"source_records_completed":'//trim(i64_text(train_state%source_records_completed))//','// &
          '"tokens_seen":'//trim(i64_text(train_state%tokens_seen))//','// &
@@ -597,9 +831,12 @@ contains
       logical :: tokenizer_exists
 
       if (command_argument_count() < 3) call usage_and_stop()
-      call get_command_argument(2, tokenizer_path)
-      call get_command_argument(3, checkpoint_path)
+      call get_positional_argument(2, tokenizer_path, is_path=.true.)
+      call get_positional_argument(3, checkpoint_path, is_path=.true.)
+      call reject_matching_paths(tokenizer_path, checkpoint_path)
       if (command_argument_count() >= 4) call parse_cli_options(4)
+      ! Configuration rejection must precede creation of a fallback tokenizer.
+      call build_train_config(train_config)
       inquire(file=trim(tokenizer_path), exist=tokenizer_exists)
       if (tokenizer_exists) then
          call bpe_load(bpe, trim(tokenizer_path), status)
@@ -613,14 +850,13 @@ contains
       call build_decoder_config(decoder_config, bpe%token_count)
       call neural_decoder_init(model, decoder_config, opt_seed, status)
       call require_ok(status, 'init neural model initialization')
-      call build_train_config(train_config)
       call neural_train_state_init(train_state)
       call neural_checkpoint_save(trim(checkpoint_path), model, bpe, train_config, train_state, status)
       call require_ok(status, 'init neural checkpoint save')
       write(output_unit, '(A)') 'NEURAL_INIT_JSON: {'// &
          '"schema_version":"vegai-neural-init-checkpoint/v1",'// &
-         '"checkpoint":"'//trim(checkpoint_path)//'",'// &
-         '"tokenizer":"'//trim(tokenizer_path)//'",'// &
+         '"checkpoint":'//json_quote(trim(checkpoint_path))//','// &
+         '"tokenizer":'//json_quote(trim(tokenizer_path))//','// &
          '"vocabulary_size":'//trim(i32_text(bpe%token_count))//','// &
          '"width":'//trim(i32_text(decoder_config%width))//','// &
          '"heads":'//trim(i32_text(decoder_config%heads))//','// &
@@ -646,19 +882,22 @@ contains
       real(real64) :: wall_seconds, tokens_per_second
 
       if (command_argument_count() < 4) call usage_and_stop()
-      call get_command_argument(2, checkpoint_path)
-      call get_command_argument(3, tokenizer_path)
-      call get_command_argument(4, corpus_path)
+      call get_positional_argument(2, checkpoint_path, is_path=.true.)
+      call get_positional_argument(3, tokenizer_path, is_path=.true.)
+      call get_positional_argument(4, corpus_path, is_path=.true.)
+      record_limit = 0_int64
+      if (command_argument_count() >= 5) then
+         call get_positional_argument(5, limit_text)
+         call parse_integer64(limit_text, record_limit, parse_status)
+         if (parse_status /= 0 .or. record_limit < 1_int64) call usage_and_stop()
+      end if
       call bpe_load(bpe, trim(tokenizer_path), status)
       call require_ok(status, 'evaluate tokenizer load')
       call neural_checkpoint_load(trim(checkpoint_path), bpe, model, train_config, train_state, status)
       call require_ok(status, 'evaluate neural checkpoint load')
       call neural_train_metrics_reset(metrics)
       call system_clock(count=clock_start, count_rate=clock_rate)
-      if (command_argument_count() >= 5) then
-         call get_command_argument(5, limit_text)
-         read(limit_text, *, iostat=parse_status) record_limit
-         if (parse_status /= 0 .or. record_limit < 1_int64) call usage_and_stop()
+      if (record_limit > 0_int64) then
          call neural_evaluate_utf8_file(model, bpe, trim(corpus_path), train_config, metrics, status, &
                                         maximum_source_records=record_limit)
       else
@@ -697,8 +936,8 @@ contains
       integer(int32) :: status
 
       if (command_argument_count() /= 3) call usage_and_stop()
-      call get_command_argument(2, checkpoint_path)
-      call get_command_argument(3, tokenizer_path)
+      call get_positional_argument(2, checkpoint_path, is_path=.true.)
+      call get_positional_argument(3, tokenizer_path, is_path=.true.)
       call bpe_load(bpe, trim(tokenizer_path), status)
       call require_ok(status, 'training-plan tokenizer load')
       call neural_checkpoint_load(trim(checkpoint_path), bpe, model, train_config, train_state, status)
@@ -736,20 +975,23 @@ contains
       logical :: checkpoint_exists, tokenizer_exists, options_present
 
       if (command_argument_count() < 5) call usage_and_stop()
-      call get_command_argument(2, corpus_path)
-      call get_command_argument(3, checkpoint_path)
-      call get_command_argument(4, tokenizer_path)
-      call get_command_argument(5, limit_text)
-      read(limit_text, *, iostat=parse_status) record_limit
+      call get_positional_argument(2, corpus_path, is_path=.true.)
+      call get_positional_argument(3, checkpoint_path, is_path=.true.)
+      call get_positional_argument(4, tokenizer_path, is_path=.true.)
+      call reject_matching_paths(corpus_path, checkpoint_path)
+      call reject_matching_paths(corpus_path, tokenizer_path)
+      call reject_matching_paths(tokenizer_path, checkpoint_path)
+      call get_positional_argument(5, limit_text)
+      call parse_integer64(limit_text, record_limit, parse_status)
       if (parse_status /= 0 .or. record_limit < 1_int64) call usage_and_stop()
       options_start = 0
       start_record = -1_int64
       if (command_argument_count() >= 6) then
-         call get_command_argument(6, start_text)
+         call get_positional_argument(6, start_text)
          if (starts_with_dashes(start_text)) then
             options_start = 6
          else
-            read(start_text, *, iostat=parse_status) start_record
+            call parse_integer64(start_text, start_record, parse_status)
             if (parse_status /= 0 .or. start_record < 0_int64) call usage_and_stop()
             options_start = 7
          end if
@@ -760,14 +1002,13 @@ contains
       if (checkpoint_exists) then
          call bpe_load(bpe, trim(tokenizer_path), status)
          call require_ok(status, 'continuous tokenizer load')
+         tokenizer_exists = .true.
          call neural_checkpoint_load(trim(checkpoint_path), bpe, model, train_config, train_state, status)
          call require_ok(status, 'continuous checkpoint load')
          if (options_present) then
-            call require_true(.not. opt_dims_set .or. &
-                              (opt_width == model%config%width .and. opt_heads == model%config%heads .and. &
-                               opt_window == model%config%local_window .and. opt_ffn == model%config%ffn_width), &
+            call require_true(requested_shape_matches(model%config), &
                               'train-chunk options must not change checkpoint model dimensions')
-            call apply_options_to_train_config(train_config)
+            call apply_options_to_train_config(train_config, train_state)
          end if
          if (start_record < 0_int64) start_record = train_state%source_records_completed
       else
@@ -790,8 +1031,10 @@ contains
       call neural_train_utf8_file(model, bpe, trim(corpus_path), train_config, train_state, metrics, status, &
                                   skip_source_records=start_record, maximum_new_source_records=record_limit)
       call require_ok(status, 'continuous UTF-8 byte-BPE chunk')
-      call bpe_save(bpe, trim(tokenizer_path), status)
-      call require_ok(status, 'continuous tokenizer save')
+      if (.not. tokenizer_exists) then
+         call bpe_save(bpe, trim(tokenizer_path), status)
+         call require_ok(status, 'continuous tokenizer save')
+      end if
       call neural_checkpoint_save(trim(checkpoint_path), model, bpe, train_config, train_state, status)
       call require_ok(status, 'continuous checkpoint save')
       write(output_unit, '(A)') 'NEURAL_PRETRAIN_CHUNK_JSON: {'// &
@@ -825,22 +1068,22 @@ contains
       integer(int64) :: random_state, initial_random_state
       real(real32), allocatable :: hidden(:), logits(:)
       real(real64), allocatable :: logits64(:), probabilities(:)
-      integer :: allocation_status
+      integer :: allocation_status, prompt_length
 
       if (command_argument_count() < 4) call usage_and_stop()
-      call get_command_argument(2, checkpoint_path)
-      call get_command_argument(3, tokenizer_path)
-      call get_command_argument(4, prompt)
+      call get_positional_argument(2, checkpoint_path, is_path=.true.)
+      call get_positional_argument(3, tokenizer_path, is_path=.true.)
+      call get_positional_argument(4, prompt, actual_length=prompt_length)
       max_generated = 32_int32
       random_state = 1_int64
       if (command_argument_count() >= 5) then
-         call get_command_argument(5, count_text)
-         read(count_text, *, iostat=parse_status) max_generated
+         call get_positional_argument(5, count_text)
+         call parse_integer32(count_text, max_generated, parse_status)
          if (parse_status /= 0 .or. max_generated < 1_int32 .or. max_generated > 512_int32) call usage_and_stop()
       end if
       if (command_argument_count() >= 6) then
-         call get_command_argument(6, seed_text)
-         read(seed_text, *, iostat=parse_status) random_state
+         call get_positional_argument(6, seed_text)
+         call parse_integer64(seed_text, random_state, parse_status)
          if (parse_status /= 0) call usage_and_stop()
       end if
       initial_random_state = random_state
@@ -848,7 +1091,7 @@ contains
       call require_ok(status, 'generation tokenizer load')
       call neural_checkpoint_load(trim(checkpoint_path), bpe, model, train_config, train_state, status)
       call require_ok(status, 'generation model checkpoint load')
-      call bpe_encode(bpe, prompt, int(len_trim(prompt), int32), prompt_tokens, prompt_count, status)
+      call bpe_encode(bpe, prompt, int(prompt_length, int32), prompt_tokens, prompt_count, status)
       call require_ok(status, 'generation prompt byte-BPE encode')
       call require_true(prompt_count > 0_int32, 'generation requires a non-empty prompt')
       allocate(hidden(model%config%width), logits(model%config%vocabulary_size), &
@@ -902,6 +1145,40 @@ contains
       call bpe_destroy(bpe)
       deallocate(hidden, logits, logits64, probabilities)
    end subroutine run_generate
+
+   ! Quote CLI paths as JSON strings, including quotes, backslashes and all
+   ! ASCII control bytes. Non-ASCII UTF-8 bytes are passed through unchanged.
+   function json_quote(value) result(rendered)
+      character(len=*), intent(in) :: value
+      character(len=:), allocatable :: rendered
+      character(len=2 + 6 * len(value)) :: buffer
+      character(len=*), parameter :: hex_digits = '0123456789abcdef'
+      integer :: i, position, code, high, low
+
+      buffer = ''
+      buffer(1:1) = '"'
+      position = 2
+      do i = 1, len(value)
+         code = iand(iachar(value(i:i)), 255)
+         if (code == 34 .or. code == 92) then
+            buffer(position:position) = achar(92)
+            buffer(position + 1:position + 1) = value(i:i)
+            position = position + 2
+         else if (code < 32) then
+            high = code / 16 + 1
+            low = mod(code, 16) + 1
+            buffer(position:position + 3) = achar(92)//'u00'
+            buffer(position + 4:position + 4) = hex_digits(high:high)
+            buffer(position + 5:position + 5) = hex_digits(low:low)
+            position = position + 6
+         else
+            buffer(position:position) = value(i:i)
+            position = position + 1
+         end if
+      end do
+      buffer(position:position) = '"'
+      rendered = buffer(:position)
+   end function json_quote
 
    function i64_text(value) result(rendered)
       integer(int64), intent(in) :: value
@@ -958,8 +1235,11 @@ contains
                                 '--gradient-accumulation'
       write(output_unit, '(A)') '--total-updates and --warmup-updates count optimizer steps; with '// &
                                 '--gradient-accumulation N one step consumes up to N prediction tokens.'
+      write(output_unit, '(A)') 'Resume/chunk retain saved hyperparameters except explicit overrides; '// &
+                                '--seed is used only for initialization.'
+      write(output_unit, '(A)') 'Changing optimizer after a checkpoint has updates is rejected; start a new run.'
       write(output_unit, '(A)') 'The current trainer updates only tied output embeddings; it is not full BPTT.'
-      write(output_unit, '(A)') 'AdamW applies decoupled decay to the embeddings (never to the output bias) '// &
+      write(output_unit, '(A)') 'NOVA and AdamW apply decoupled decay to embeddings (never to the output bias) '// &
                                 'as theta <- (1 - lr*weight_decay) * theta.'
    end subroutine print_help
 

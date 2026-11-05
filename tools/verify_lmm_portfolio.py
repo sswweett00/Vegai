@@ -95,6 +95,10 @@ def quality_report(
 def generation_runtime_identity(model: Path, worker_command: Path) -> str:
     stable = {
         "gateway_tool": file_identity(GATEWAY, "gateway tool").to_mapping(),
+        "runtime_sources": {
+            name: file_identity(ROOT / "tools" / f"{name}.py", name).to_mapping()
+            for name in ("lmm_contract", "lmm_process", "bounded_process")
+        },
         "model_manifest": file_identity(model, "model manifest").to_mapping(),
         "tokenizer": None,
         "asset_registry": None,

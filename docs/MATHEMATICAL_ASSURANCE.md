@@ -132,7 +132,8 @@ model quality tarafından otomatik kanıtlanmaz.
 Native Fortran toolchain bulunan bir hostta:
 
 ```bash
-make check
+make check                 # native Fortran sözleşmeleri
+make legacy-python-check   # bağımsız Python oracle'ları; isteğe bağlı
 # veya
 cmake -S . -B build -DVEGAI_ENABLE_OPENMP=ON
 cmake --build build

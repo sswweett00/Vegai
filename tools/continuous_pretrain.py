@@ -22,7 +22,6 @@ not a reversible archive of corpus text.
 from __future__ import annotations
 
 import argparse
-from copy import deepcopy
 from dataclasses import dataclass, replace
 import hashlib
 import json
@@ -52,6 +51,7 @@ from corpus_manifest import (
 from pretraining_quality_evaluation import (
     MAX_CASES as QUALITY_MAX_CASES,
     MAX_CHECKPOINT_BYTES as QUALITY_MAX_CHECKPOINT_BYTES,
+    PROCESS_RUNNER_SOURCE,
     PretrainingQualityEvaluationError,
     evaluator_binding,
     scratch_directory,
@@ -170,9 +170,30 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def load_json(path: Path, label: str) -> dict[str, Any]:
+    """Reject ambiguous keys and non-finite numbers in durable input contracts."""
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"JSON object repeats key {key!r}")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"unsupported JSON constant {value!r}")
+
+    def finite_float(value: str) -> float:
+        result = float(value)
+        if not math.isfinite(result):
+            raise ValueError("JSON number is outside the finite floating-point range")
+        return result
+
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        value = json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=unique_object,
+            parse_constant=reject_constant, parse_float=finite_float,
+        )
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError) as error:
         raise ContinuousPretrainError(f"cannot load {label} {path}: {error}") from error
     require(isinstance(value, dict), f"{label} must be a JSON object: {path}")
     return value
@@ -273,8 +294,8 @@ def load_manifest(path: Path, expected_sha256: str | None = None) -> list[Shard]
         require(is_sha256(digest), f"manifest shard {position} has invalid SHA-256")
         require(identity.lower() == digest.lower(), f"manifest shard {position} id and SHA-256 disagree")
         require(isinstance(relative_path, str) and relative_path, f"manifest shard {position} has no path")
-        require(isinstance(byte_count, int) and byte_count >= 0, f"manifest shard {position} has invalid bytes")
-        require(isinstance(records, int) and records >= 0, f"manifest shard {position} has invalid record count")
+        require(type(byte_count) is int and byte_count >= 0, f"manifest shard {position} has invalid bytes")
+        require(type(records) is int and records >= 0, f"manifest shard {position} has invalid record count")
         require(isinstance(preflight, dict), f"manifest shard {position} has no preflight")
         expected_preflight = {
             "accepted_tokens",
@@ -286,7 +307,7 @@ def load_manifest(path: Path, expected_sha256: str | None = None) -> list[Shard]
             "records_with_tokenizer_truncation",
         }
         require(set(preflight) == expected_preflight, f"manifest shard {position} preflight fields are malformed")
-        require(all(isinstance(preflight[key], int) and preflight[key] >= 0 for key in expected_preflight),
+        require(all(type(preflight[key]) is int and preflight[key] >= 0 for key in expected_preflight),
                 f"manifest shard {position} preflight values are malformed")
         canonical_identity = identity.lower()
         canonical_digest = digest.lower()
@@ -420,11 +441,17 @@ def validate_quality_guard_binding(guard: object) -> dict[str, Any]:
         "mode", "evaluator_source_sha256", "case_manifest_sha256", "case_manifest_bytes", "policy_sha256", "policy_bytes",
         "case_count", "declared_split", "redaction", "requirements",
     }
-    require(isinstance(evidence, dict) and set(evidence) == expected_evidence,
+    # Older v1 journals did not have a separate process runner. Keep them
+    # readable for audit, while new preflight bindings include its identity
+    # and therefore cannot resume a legacy run under different code silently.
+    require(isinstance(evidence, dict) and
+            (set(evidence) == expected_evidence or set(evidence) == expected_evidence | {"process_runner_sha256"}),
             "continuous quality guard evidence binding is malformed")
     require(evidence.get("mode") == "held-out-semantic-neighbour/v1", "continuous quality guard evidence mode is invalid")
     for field in ("evaluator_source_sha256", "case_manifest_sha256", "policy_sha256"):
         require(is_sha256(evidence.get(field)), f"continuous quality guard {field} is invalid")
+    if "process_runner_sha256" in evidence:
+        require(is_sha256(evidence["process_runner_sha256"]), "continuous quality guard process_runner_sha256 is invalid")
     for field in ("case_manifest_bytes", "policy_bytes", "case_count"):
         require(type(evidence.get(field)) is int and evidence[field] > 0,
                 f"continuous quality guard {field} is invalid")
@@ -635,7 +662,7 @@ def validate_state_journal(state_directory: Path, state: dict[str, Any]) -> None
         require(is_sha256(entry.get("sha256")), f"state applied shard {expected_generation} has invalid SHA-256")
         require(entry["id"].lower() == entry["sha256"].lower(),
                 f"state applied shard {expected_generation} has inconsistent identity")
-        require(entry.get("generation") == expected_generation,
+        require(type(entry.get("generation")) is int and entry["generation"] == expected_generation,
                 f"state applied shard {expected_generation} has inconsistent generation")
         require(type(entry.get("bytes")) is int and entry["bytes"] >= 0,
                 f"state applied shard {expected_generation} has invalid byte count")
@@ -846,6 +873,10 @@ def validate_quality_evidence_entry(
             f"state applied shard {expected_generation} quality report policy provenance is invalid")
     require(isinstance(evaluator, dict) and evaluator.get("sha256") == evidence["evaluator_source_sha256"],
             f"state applied shard {expected_generation} quality report evaluator provenance is invalid")
+    if "process_runner_sha256" in evidence:
+        runner = report_provenance.get("process_runner")
+        require(isinstance(runner, dict) and runner.get("sha256") == evidence["process_runner_sha256"],
+                f"state applied shard {expected_generation} quality report process runner provenance is invalid")
 
     require(comparison_report.get("schema_version") == "vegai-continuous-quality-regression-report/v1"
             and comparison_report.get("status") == "passed" and comparison_report.get("failures") == [],
@@ -899,7 +930,7 @@ def load_state(
         return fresh_state(default_policy(arguments), requested_quality_guard, requested_binary_identity)
     state = load_json(state_path, "continuous state")
     require(state.get("schema") == STATE_SCHEMA, f"unsupported continuous state schema: {state.get('schema')!r}")
-    require(isinstance(state.get("generation"), int) and state["generation"] >= 0, "state generation is invalid")
+    require(type(state.get("generation")) is int and state["generation"] >= 0, "state generation is invalid")
     require(isinstance(state.get("applied_shards"), list), "state applied_shards is invalid")
     require(state["generation"] == len(state["applied_shards"]), "state generation does not match applied shard count")
     require(isinstance(state.get("policy"), dict), "state policy is invalid")
@@ -1152,7 +1183,11 @@ def run_quality_evaluator(
     # The evaluator's timeout governs real inspect work. Its wrapper can need
     # bounded snapshot I/O as well, so give it a fixed administrative margin.
     outer_timeout = float(guard["evaluation_timeout_seconds"]) + 300.0
+    expected_runner = guard["quality_evidence"].get("process_runner_sha256")
     try:
+        if expected_runner is not None:
+            require(file_sha256(PROCESS_RUNNER_SOURCE) == expected_runner,
+                    "bounded process runner changed after quality preflight")
         child = run_bounded_child(
             command,
             environment=os.environ.copy(),
@@ -1161,6 +1196,9 @@ def run_quality_evaluator(
             stderr_limit_bytes=MAX_TRAIN_STDERR_BYTES,
             label="pretraining quality evaluator",
         )
+        if expected_runner is not None:
+            require(file_sha256(PROCESS_RUNNER_SOURCE) == expected_runner,
+                    "bounded process runner changed while quality evaluator was running")
     except PretrainingRunError as error:
         raise ContinuousPretrainError(str(error)) from error
     require(child.returncode in {0, 3},
@@ -1320,6 +1358,25 @@ def quality_evidence_for_candidate(
         comparison_stage.unlink(missing_ok=True)
 
 
+def state_with_committed_shard(
+    state: dict[str, Any], generation: int, checkpoint: str, checkpoint_sha256: str, entry: dict[str, Any]
+) -> dict[str, Any]:
+    """Copy the journal spine, not its immutable historical entries.
+
+    Controller code treats policy, guard and prior entries as read-only.  The
+    new top-level object and list keep the old commit marker unchanged if the
+    atomic write fails, without recursively copying all previous evidence.
+    """
+    next_state = state.copy()
+    next_state.update({
+        "generation": generation,
+        "checkpoint": checkpoint,
+        "checkpoint_sha256": checkpoint_sha256,
+        "applied_shards": [*state["applied_shards"], entry],
+    })
+    return next_state
+
+
 def commit_one_shard(
     state_directory: Path,
     binary: Path,
@@ -1383,10 +1440,6 @@ def commit_one_shard(
         os.replace(candidate, final_checkpoint)
         fsync_directory(generations)
 
-        next_state = deepcopy(state)
-        next_state["generation"] = generation
-        next_state["checkpoint"] = str(final_checkpoint.relative_to(state_directory))
-        next_state["checkpoint_sha256"] = checkpoint_sha256
         entry: dict[str, Any] = {
             "id": shard.identity,
             "sha256": shard.sha256,
@@ -1403,7 +1456,9 @@ def commit_one_shard(
         }
         if quality is not None:
             entry["quality"] = quality
-        next_state["applied_shards"].append(entry)
+        next_state = state_with_committed_shard(
+            state, generation, str(final_checkpoint.relative_to(state_directory)), checkpoint_sha256, entry
+        )
         # The state file is the commit marker.  If the process fails before this
         # atomic replace, the finalized generation is an ignored orphan and the
         # next invocation replays the shard from the previous stable checkpoint.
@@ -1485,10 +1540,11 @@ def process_available(
         shard = shards[state["generation"]]
         state = commit_one_shard(state_directory, binary, state, shard, arguments)
         committed += 1
-        print(
-            f"committed generation={state['generation']} shard={shard.identity[:16]} "
-            f"tokens={shard.accepted_tokens} checkpoint_sha256={state['checkpoint_sha256']}"
-        )
+        if not getattr(arguments, "quiet_progress", False):
+            print(
+                f"committed generation={state['generation']} shard={shard.identity[:16]} "
+                f"tokens={shard.accepted_tokens} checkpoint_sha256={state['checkpoint_sha256']}"
+            )
     return state, committed
 
 
@@ -1504,6 +1560,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--follow", action="store_true", help="poll an atomically updated append-only manifest forever")
     parser.add_argument("--poll-seconds", type=float, default=5.0, help="follow polling interval (default: 5)")
     parser.add_argument("--max-shards", type=int, help="commit at most this many currently pending shards")
+    parser.add_argument("--quiet-progress", action="store_true",
+                        help="omit per-shard progress lines; committed state and final status remain available")
     parser.add_argument("--recover-lock", action="store_true", help="remove a stale lock only after operator review")
     parser.add_argument("--omp-threads", type=int, default=1,
                         help="explicit OMP_NUM_THREADS for each native training child (default: 1)")

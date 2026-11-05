@@ -40,6 +40,7 @@ on:
       - 'app/neural_pretrain.f90'
       - 'tools/benchmark_neural_batch_throughput.py'
       - 'tools/run_neural_turkish_epoch1.py'
+      - 'tools/bounded_process.py'
       - '.github/workflows/neural-batch-throughput.yml'
 
 concurrency:

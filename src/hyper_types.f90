@@ -63,6 +63,9 @@ module hyper_types
    public :: hv_bitacc_add_permuted_mixed_pair_words, hv_bitacc_finalize
    public :: hv_hebbian_update, hv_hebbian_update_percent
    public :: hv_inject_noise_exact, hv_inject_noise_percent
+   ! Shared standards-safe modulo arithmetic and SplitMix stream for native
+   ! components that need identical 64-bit wrap semantics without overflow.
+   public :: add_mod64, mul_mod64, splitmix64_next
 
    ! SplitMix64 constants are represented as BOZ values so their bit patterns
    ! are preserved even when a value is negative as a signed Fortran int64.

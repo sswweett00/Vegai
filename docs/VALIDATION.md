@@ -2,7 +2,7 @@
 
 Vegai'nin doğrulaması üç birbirini tamamlayan seviyededir:
 
-1. **native Fortran 2023 testleri** (`test/test_all.f90`): derlenen gerçek
+1. **native Fortran 2018+ testleri** (`test/test_all.f90`): derlenen gerçek
    API'nin contract/property testleri;
 2. **bağımsız Python referans modeli** (`tools/verify_reference.py`): bit
    cebiri, standart SplitMix64 oracle'ı ve demo senaryosunun farklı bir dilde
@@ -12,13 +12,54 @@ Vegai'nin doğrulaması üç birbirini tamamlayan seviyededir:
 
 Bu katmanlar aynı bug sınıfını farklı şekillerde yakalamaya yöneliktir. Python
 modeli Fortran derleyicisinin yerine geçmez; native testler de referans modelin
-yerine geçmez.
+yerine geçmez. Varsayılan native build/test ve aşağıdaki yerel native kanıtlar
+Python gerektirmez; Python referansı ve henüz taşınmamış araçlar ayrı/legacy'dir.
+
+## Yerel native doğrulama — 2026-11-05
+
+Linux x86-64 üzerinde kaynaklardan hazırlanmış GNU Fortran 12.2, CMake 3.28,
+FPM 0.12 ve portable CPU profiliyle, doğal dil profilinin eklenmesinden **önceki**
+çalışmalarda:
+
+- CMake Release serial **38/38**, OpenMP Release **39/39**, OpenMP checked
+  Debug **39/39** CTest geçti. Debug'da bounds/runtime denetimleri, signaling
+  NaN başlangıcı, integer overflow ve invalid/zero/overflow FPE trap açıktı.
+- Context suite **513 kontrol / 0 hata**; FPM serial ve OpenMP suite'leri geçti,
+  OpenMP probe gerçekten iki thread gördü. FPM ana property suite **1737/0**.
+- Python'un `PATH` üzerinde bulunmadığı ortamda genişletilmiş Make
+  `native-contract-check`, FPM serial/OpenMP ve Linux `portable-serial`
+  workflow adımları geçti. Bu,
+  kurulu araçların arz zincirini veya sistem genelinde Python yokluğunu kanıtlamaz.
+- Native UD çıkarıcı beş BOUN/PUD dosyasının beklenen SHA-256 değerlerini
+  üretti; test verileri repoya eklenmedi. Örnek ve sınırlar
+  [deney kaydında](experiments/context-slot-quality-2026-11.md).
+
+Bunlar tek host ve bu bootstrap toolchain için kanıttır; macOS, Windows, başka
+mimari/compiler, GPU/NPU ve üretim yükünde başarı veya certification iddiası
+değildir. Legacy Python testleri ve harici provider/format entegrasyonları bu
+native matrisin parçası değildir.
+
+Aynı tarihli **güncel doğal dil değişikliklerinden sonra** yeni bootstrap GNU
+Fortran 12.2 ve CMake 3.28 ile tüm native CTest sonuçları: serial Release
+**41/41**, iki-thread OpenMP Release **42/42**, checked OpenMP Debug
+**42/42**. Context suite **535/0**; FPM 0.12 serial ve iki-thread OpenMP,
+Python `PATH`'te olmadan paralel `make -j2 native-contract-check` ve güncel
+prompt sözleşmeleri geçti. Yeni profilin elle verilen LR ile aynı checkpoint'i,
+resume'da LR korunumu, gerçek geçersiz UTF-8 byte'ı, FIFO reddi ve sıfır
+ilerleme sıklığı checked build'de test edildi. İlk `make -j2` denemesi eksik
+Fortran modül bağımlılığı nedeniyle, ilk checked profil denemesi de sıfır
+progress sıklığında `MOD` nedeniyle başarısızdı; ikisi düzeltildi ve tekrar
+tam testler geçti. Önceki yük altı sparse latency testi sakin ortamda serial,
+OpenMP ve Debug tam suite içinde geçti. Test edilen host/derleyici sınırları
+ve sonuçlar [doğal dil deneyinde](experiments/turkish-natural-quality-2026-11.md).
 
 ## Çalıştırma matrisi
 
 | Komut | Kapsam | Beklenen sonuç |
 |---|---|---|
-| `make check` | bağımsız reference/property/demo + stdlib control-plane contract'leri | tüm çağrılar `PASS` |
+| `make check` | Python/CMake gerektirmeyen native property, corpus preflight, control ve fixed-budget context sözleşmeleri | tüm çağrılar `PASS` |
+| `make native-contract-check` | ayrıca prompt/resume, Türkçe profil, doğal dil NLL, overlap, UD çıkarıcı ve benchmark CLI sözleşmeleri; CMake test yürütücüsü gerekir | tüm çağrılar `PASS` |
+| `make legacy-python-check` | henüz taşınmamış bağımsız Python reference ve control-plane sözleşmeleri | tüm çağrılar `PASS` (isteğe bağlı adapter'lar ayrıca belirtilir) |
 | `make data-check` | optional PyArrow kurulumu; streaming JSONL/JSON/TXT/Parquet/Arrow round-trip, corruption, production adapter ve curriculum compiler'ın optional Parquet/Arrow replay'i | `training data I/O verification: PASS` + `capability curriculum verification: PASS (... Parquet/Arrow=checked)` |
 | `make capability-check` | stdlib-only policy-driven curriculum build/replay, strict text-only projection, held-out/source coverage, split/annotation conflict, no-output failure, controller-ledger ve tamper rejection | `capability curriculum verification: PASS` |
 | `make lmm-check` | optional Rust Unicode/BPE tokenizer; long context, session ledger, knowledge evidence, image/audio/video asset registry, real worker protocol, held-out citation/abstention quality release gate, measured domain-expert routing/panel, typed verified read-only tool plan, immutable shadow/canary governor + single-host authoritative registry ve capability gate | `lmm runtime verification: PASS` + `lmm portfolio verification: PASS` + `LMM tool orchestrator verification: PASS` + `LMM release governor verification: PASS` + `LMM release registry verification: PASS` |
@@ -333,7 +374,7 @@ latency benchmarkı ölçün.
 Bir sonuç raporlanırken en az şu bilgiler saklanmalıdır:
 
 - compiler ve version (`gfortran --version`);
-- Fortran 2023 conformance flag'i (`-std=f2023` veya compiler eşdeğeri);
+- seçilen Fortran conformance flag'i (varsayılan `-std=f2018`; isteğe bağlı `-std=f2023` veya compiler eşdeğeri);
 - `FFLAGS`, `OMP_NUM_THREADS`, CPU/OS;
 - symbol ID/seed seti;
 - bundle tie seedleri;
@@ -355,7 +396,7 @@ Bir değişiklik merge edilmeden önce:
 - [ ] `cmake` + `ctest` checked build
 - [ ] yeni public API için normal ve hata yolu testi
 - [ ] kaynakta signed-overflow'a dayanan yeni integer aritmetiği yok
-- [ ] Fortran derlemesi `-std=f2023` (veya compiler eşdeğeri) ile geçti
+- [ ] Varsayılan Fortran derlemesi `-std=f2018` (veya compiler eşdeğeri) ile geçti; 2023 iddiası varsa ayrı test edildi
 - [ ] exact ve approximate cleanup sözleşmeleri karıştırılmadı
 - [ ] Resonator sonucunda heuristic network residual ile certified final residual ayrıldı
 - [ ] pretraining corpus manifesti, lisans/PII/retention değerlendirmesi ve digest'i kaydedildi

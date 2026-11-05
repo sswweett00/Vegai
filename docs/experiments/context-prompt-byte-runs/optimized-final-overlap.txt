@@ -1,0 +1,49 @@
+Exact-record overlap check for the previously used BOUN subsets
+UTC=2026-11-02T16:26:42Z
+997515bc7734b49ca134d478c61f5cb454faf219473cc481b9bbeb25644f3a57  /tmp/vegai-now-release/vegai_corpus_overlap
+42cebcd1fcaed1167a661c2a4aa338b14c5bb68d65869618b6e6dc501fe1a285  app/corpus_overlap.f90
+0889ecce1aabec92284cb4cb3994aaa1e862609487a2adc526fa02f71622ac74  /tmp/vegai-boun-current/train200.txt
+5195714be1073baef5098ee87a6b68584579171510b537a77a721a40e3b8d48c  /tmp/vegai-boun-current/train1000.txt
+708a8a99c1f88b0f5c9313333c3f874f9fdd4ec527b2a1063998fd61a81fb9ab  /tmp/vegai-boun-current/dev80.txt
+fc9e7cddd57d6636f2baa0c6dfdadb61fbf9aa7091c3eae4b01ac3ad65ebd0f3  /tmp/vegai-boun-current/test80.txt
+=== train200 vs dev-80 ===
+{"schema":"vegai-exact-record-overlap/v1",
+"train_records":200,
+"heldout_records":80,
+"heldout_unique_records":80,
+"overlapping_train_records":0,
+"overlapping_heldout_unique_records":0,
+"first_train_line":0,
+"first_heldout_line":0,
+"overlap":false}
+=== train200 vs test-80 ===
+{"schema":"vegai-exact-record-overlap/v1",
+"train_records":200,
+"heldout_records":80,
+"heldout_unique_records":80,
+"overlapping_train_records":0,
+"overlapping_heldout_unique_records":0,
+"first_train_line":0,
+"first_heldout_line":0,
+"overlap":false}
+=== train1000 vs dev-80 ===
+{"schema":"vegai-exact-record-overlap/v1",
+"train_records":1000,
+"heldout_records":80,
+"heldout_unique_records":80,
+"overlapping_train_records":0,
+"overlapping_heldout_unique_records":0,
+"first_train_line":0,
+"first_heldout_line":0,
+"overlap":false}
+=== train1000 vs test-80 ===
+{"schema":"vegai-exact-record-overlap/v1",
+"train_records":1000,
+"heldout_records":80,
+"heldout_unique_records":80,
+"overlapping_train_records":0,
+"overlapping_heldout_unique_records":0,
+"first_train_line":0,
+"first_heldout_line":0,
+"overlap":false}
+This detects exact records only; it is not semantic leakage proof.

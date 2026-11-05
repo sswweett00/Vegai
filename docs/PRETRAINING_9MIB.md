@@ -120,8 +120,8 @@ full 9 MiB/1 epoch koşu yapar. Manifest, run report ve checkpoint kısa süreli
 GitHub artifact'i olarak saklanır. Böylece repository'ye 9 MiB corpus ya da
 checkpoint commit edilmez; CI sonucu yine de indirilebilir/denetlenebilir.
 
-`tools/verify_9mib_pretraining.py` ise normal CTest ve `make check` içinde
-çalışır. Tam 9 MiB üretimi, deterministic corpus/manifest, tamper reddi,
+`tools/verify_9mib_pretraining.py` ise isteğe bağlı legacy Python CTest ve
+`make legacy-python-check` içinde çalışır. Tam 9 MiB üretimi, deterministic corpus/manifest, tamper reddi,
 runner'ın output/input alias koruması ve fake executable ile success/failure
 rapor sözleşmesini denetler. CTest ayrıca
 `tools/verify_9mib_pretraining_real_binary.py` ile aynı schema'nın 256 KiB

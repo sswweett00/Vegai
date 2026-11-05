@@ -11,6 +11,7 @@ on:
       - 'src/**'
       - 'tools/synthetic_pretraining_fixture.py'
       - 'tools/run_9mib_pretraining.py'
+      - 'tools/bounded_process.py'
       - 'tools/verify_9mib_pretraining.py'
       - 'tools/verify_9mib_pretraining_real_binary.py'
       - 'tools/training_resource_plan.py'
@@ -24,6 +25,7 @@ on:
       - 'src/**'
       - 'tools/synthetic_pretraining_fixture.py'
       - 'tools/run_9mib_pretraining.py'
+      - 'tools/bounded_process.py'
       - 'tools/verify_9mib_pretraining.py'
       - 'tools/verify_9mib_pretraining_real_binary.py'
       - 'tools/training_resource_plan.py'
@@ -55,7 +57,7 @@ jobs:
       - name: Verify fixture and runner contracts before compilation
         run: python3 tools/verify_9mib_pretraining.py
 
-      - name: Compile portable Fortran 2023 pretraining binary
+      - name: Compile portable Fortran 2018 pretraining binary
         run: make pretrain BUILD_DIR=build-9mib
 
       - name: Allocate ignored runtime paths

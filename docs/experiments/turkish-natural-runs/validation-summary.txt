@@ -1,0 +1,35 @@
+2026-11-05 Linux x86_64 GNU Fortran 12.2.0 (bootstrap, non-certified) CMake 3.28.0, FPM 0.12.0
+== /tmp/vegai-full-serial-test.log
+ 6/41 Test  #6: vegai_sparse_layer_bench ...............................   Passed    0.28 sec
+100% tests passed, 0 tests failed out of 41
+Total Test time (real) =   5.10 sec
+== /tmp/vegai-full-openmp-test.log
+ 1/42 Test  #1: vegai_openmp_two_threads ...............................   Passed    0.00 sec
+ 7/42 Test  #7: vegai_sparse_layer_bench ...............................   Passed    0.27 sec
+100% tests passed, 0 tests failed out of 42
+Total Test time (real) =   5.50 sec
+== /tmp/vegai-full-debug-test.log
+ 1/42 Test  #1: vegai_openmp_two_threads ...............................   Passed    0.00 sec
+ 7/42 Test  #7: vegai_sparse_layer_bench ...............................   Passed    4.52 sec
+100% tests passed, 0 tests failed out of 42
+Total Test time (real) =  48.99 sec
+== FPM serial
+fixed-budget context checks: 535, failures: 0.
+PASS: all fixed-budget context contracts hold
+SKIP: OpenMP was not enabled for this test executable
+sparse layer checks: 124, failures: 0.
+PASS: all sparse-layer contracts hold
+Checks: 1737, failures: 0
+PASS: buffered UTF-8 record stream contracts
+== FPM OpenMP
+fixed-budget context checks: 535, failures: 0.
+PASS: all fixed-budget context contracts hold
+OpenMP runtime team size: 2
+sparse layer checks: 124, failures: 0.
+PASS: all sparse-layer contracts hold
+Checks: 1737, failures: 0
+PASS: buffered UTF-8 record stream contracts
+== Checked profile regression
+First Debug attempt: MOD by zero with --progress-every 0; fixed by nested conditions. Full Debug then passed.
+== Parallel Make regression
+First -j2 attempt: missing fixed_budget_natural_eval object dependency; added USE ordering. Final Python-free make -j2 native-contract-check: PASS.

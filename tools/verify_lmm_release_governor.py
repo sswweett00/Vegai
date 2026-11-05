@@ -83,6 +83,10 @@ def model_manifest(model_id: str, revision: str) -> dict[str, object]:
 def runtime_identity(model: Path, worker_config: Path) -> str:
     stable = {
         "gateway_tool": file_identity(GATEWAY, "gateway").to_mapping(),
+        "runtime_sources": {
+            name: file_identity(ROOT / "tools" / f"{name}.py", name).to_mapping()
+            for name in ("lmm_contract", "lmm_process", "bounded_process")
+        },
         "model_manifest": file_identity(model, "model").to_mapping(),
         "tokenizer": None,
         "asset_registry": None,

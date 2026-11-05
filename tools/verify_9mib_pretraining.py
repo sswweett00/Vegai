@@ -259,6 +259,42 @@ def verify_runner_contract(temp: Path) -> None:
     check("must not overlap" in alias_attempt.stderr, "output/input alias was not rejected before execution")
     check(sha256_file(corpus) == corpus_hash_before_alias_attempt, "output alias attempt modified input corpus")
 
+    # --overwrite must not erase previous artifacts when preflight rejects the
+    # other output or an input before a new training child can start.
+    previous_checkpoint = run_dir / "previous.vgai"
+    previous_report = run_dir / "previous.json"
+    previous_checkpoint.write_bytes(b"previous checkpoint")
+    previous_report.write_bytes(b"previous report")
+    common = [
+        PYTHON, str(RUNNER_TOOL), "--corpus", str(corpus), "--manifest", str(manifest),
+        "--checkpoint", str(previous_checkpoint), "--max-vocab", str(fixture["records"]["unique_tokens"]),
+        "--skip-resource-preflight", "--overwrite",
+    ]
+    run_checked(common + ["--pretrain-bin", str(run_dir / "missing-binary"), "--report", str(previous_report)],
+                expected_status=2)
+    check(previous_checkpoint.read_bytes() == b"previous checkpoint" and
+          previous_report.read_bytes() == b"previous report", "failed binary preflight erased previous artifacts")
+    report_directory = run_dir / "report-directory"
+    report_directory.mkdir()
+    run_checked(common + ["--pretrain-bin", str(fake), "--report", str(report_directory)], expected_status=2)
+    check(previous_checkpoint.read_bytes() == b"previous checkpoint", "invalid report destination erased checkpoint")
+
+    broken_target = run_dir / "unexpected-failure-target.json"
+    broken_link = run_dir / "broken-report-link"
+    try:
+        broken_link.symlink_to(broken_target)
+    except OSError:
+        pass  # Symlink creation may require extra privileges on Windows.
+    else:
+        run_checked(common + ["--pretrain-bin", str(fake), "--report", str(broken_link)], expected_status=2)
+        check(not broken_target.exists() and previous_checkpoint.read_bytes() == b"previous checkpoint",
+              "a rejected broken report symlink wrote a failure report or erased checkpoint")
+    same_output = run_dir / "same-new-output"
+    same_command = common.copy()
+    same_command[same_command.index(str(previous_checkpoint))] = str(same_output)
+    run_checked(same_command + ["--pretrain-bin", str(fake), "--report", str(same_output)], expected_status=2)
+    check(not same_output.exists(), "a rejected output collision wrote a failure report into the checkpoint path")
+
     # A zero-exit executable with an incomplete protocol cannot be passed off
     # as training. The runner must fail and persist a failed, non-success report.
     malformed = run_dir / "malformed_pretrain.py"

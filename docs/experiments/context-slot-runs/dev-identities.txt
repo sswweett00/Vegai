@@ -1,0 +1,15 @@
+started_utc=2026-11-04T20:17:30Z
+GNU Fortran (GCC) 12.2.0
+8ae732071ebdd24922bbfc7d99adbcb009c1aa766f9dc0d09bd454baa6138267  /tmp/vegai-slot-bias/src/fixed_budget_context.f90
+496a68c812a34f99657893507879f305561574fabf39ff67ad5fb01d000c8d0a  /tmp/vegai-slot-bias/src/fixed_budget_backward.f90
+ea01c29e98d622755e8891a2a0937ce56f55dfbc7041550ac9497d442c759d4e  /tmp/vegai-slot-bias/src/fixed_budget_training.f90
+0d411ee07b517f885729250453c5822d3c18ca26ccb14c87e56bf78c8fe8ba2b  /tmp/vegai-slot-prototype/src/fixed_budget_context.f90
+d448ec31f5c061e63e1156ea77401bbfe69294705daf78a9b31dd4a8b9766bca  /tmp/vegai-slot-prototype/src/fixed_budget_backward.f90
+ea01c29e98d622755e8891a2a0937ce56f55dfbc7041550ac9497d442c759d4e  /tmp/vegai-slot-prototype/src/fixed_budget_training.f90
+f5cf62cff070f0a3d53a4c9a81e4b1f85fd5ce9562be19fd5e2950c91de82566  /tmp/vegai-slot-bias/tools/benchmark_context_quality.f90
+f5cf62cff070f0a3d53a4c9a81e4b1f85fd5ce9562be19fd5e2950c91de82566  /tmp/vegai-slot-prototype/tools/benchmark_context_quality.f90
+5bc8a869714b7e299ff4d2cac9aefe7eb3c4adde783c402fbf0b6b481a7c439c  /tmp/vegai-slot-bias-final/vegai_context_quality_ab
+ee459eb9dc8030385250d483d810204aa44cc56272321c6996e8d69d3024e1c3  /tmp/vegai-slot-prototype-final/vegai_context_quality_ab
+0889ecce1aabec92284cb4cb3994aaa1e862609487a2adc526fa02f71622ac74  /tmp/vegai-quality-data/train-200.txt
+5195714be1073baef5098ee87a6b68584579171510b537a77a721a40e3b8d48c  /tmp/vegai-quality-data/train-1000.txt
+708a8a99c1f88b0f5c9313333c3f874f9fdd4ec527b2a1063998fd61a81fb9ab  /tmp/vegai-quality-data/dev-80.txt

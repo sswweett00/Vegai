@@ -1,0 +1,10 @@
+4ccab0acd3e5cedb75dd51a04e93dba2d7fc2128de3372a5e6bb328e437c2043  /tmp/vegai-data/results/cli-base-21.vgfb
+05f1eb5ee3e9fe491c27fa5c794bcdfe3a45b58843b88f25b94beb5f5536bfea  /tmp/vegai-data/results/cli-profile-21.vgfb
+d8715bf7844259114ac8bd2877135c6e31a1cf75d917632a0f3d14544e6b6db2  /tmp/vegai-data/results/cli-profile-42.vgfb
+cd842cc5e2cfefb33bc2c865bd7f227cddc96b9f707614208cb391eb0ad80330  /tmp/vegai-data/results/cli-base-42.vgfb
+9cc45c0e9a624ad654d9250f4219efd11386e82fba9a162ad6f065d116afb154  /tmp/vegai-data/results/cli-base-73.vgfb
+72a94200e8c3ba01f4ac8ec192fc8d75e3f4e5578996b75574556156496a8793  /tmp/vegai-data/results/cli-profile-73.vgfb
+ef95ff9c55628a57230fe15fe3e26c6fa2e15af62208b9c0da4ac499228ae924  /tmp/vegai-data/results/cli-profile-101.vgfb
+9dfbe95f77289570d06e9a2b2fb13b70f21b5e0936378faf04a64e78dc2d9ec0  /tmp/vegai-data/results/cli-base-101.vgfb
+b979e7b133f13848f7e646e2d199ff1139f3a95451167d2579f479fd55149eca  /tmp/vegai-data/results/cli-base-137.vgfb
+82a563dcf5fbf19b891acab28269c16d2704a08b3151551bbcbde78ed1494906  /tmp/vegai-data/results/cli-profile-137.vgfb

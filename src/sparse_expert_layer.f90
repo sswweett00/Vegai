@@ -68,6 +68,7 @@
 !==============================================================================
 module sparse_expert_layer
    use, intrinsic :: iso_fortran_env, only: int32, int64, real64
+   use hyper_types, only: add_mod64, mul_mod64
    implicit none (type, external)
    private
 
@@ -105,8 +106,8 @@ module sparse_expert_layer
       ! against expert specialisation (large: adults get their own).
       integer(int32) :: bucket_bits = 12_int32
       ! Deterministic seed of both the router hyperplanes and every expert's
-      ! virtual initialisation.  Same seed + same expert_id = same weights on
-      ! any host, so a checkpoint stores identity, not parameters.
+      ! virtual initialisation. The seed and id reproduce initial weights;
+      ! trained weights and optimizer state must also be saved for a resume.
       integer(int64) :: seed = 20261028_int64
       ! NOVA-1 hyperparameters (see module header).
       real(real64) :: learning_rate = 2.0e-3_real64
@@ -161,10 +162,9 @@ module sparse_expert_layer
       ! Open-addressing index: expert_id -> 1-based page index (0 = empty).
       integer(int32), allocatable :: slot_table(:)
       integer(int32) :: table_size = 0_int32
-      ! Pages that own a pending gradient, in the order they were touched.  This
-      ! is what keeps the update pass O(k) instead of O(pages): without it the
-      ! optimizer would have to sweep the page store, and a long-running layer
-      ! would slow down as cold pages accumulate.
+      ! Pages that own a pending gradient, in the order they were touched. The
+      ! list grows with distinct pending experts across backward calls; after an
+      ! update it is cleared. This avoids sweeping the whole resident store.
       integer(int32), allocatable :: dirty_slots(:)
       integer(int32) :: dirty_count = 0_int32
       type(sparse_layer_stats_t) :: stats
@@ -210,10 +210,10 @@ contains
       integer(int64), intent(inout) :: state
       integer(int64) :: value
 
-      state = state + SE_GAMMA
+      state = add_mod64(state, SE_GAMMA)
       value = state
-      value = ieor(value, ishft(value, -30_int32)) * SE_MIX_A
-      value = ieor(value, ishft(value, -27_int32)) * SE_MIX_B
+      value = mul_mod64(ieor(value, ishft(value, -30_int32)), SE_MIX_A)
+      value = mul_mod64(ieor(value, ishft(value, -27_int32)), SE_MIX_B)
       value = ieor(value, ishft(value, -31_int32))
    end function splitmix64
 
@@ -354,8 +354,8 @@ contains
       integer(int64), intent(in) :: word
       integer(int64) :: value
 
-      value = ieor(word, ishft(word, -30_int32)) * SE_MIX_A
-      value = ieor(value, ishft(value, -27_int32)) * SE_MIX_B
+      value = mul_mod64(ieor(word, ishft(word, -30_int32)), SE_MIX_A)
+      value = mul_mod64(ieor(value, ishft(value, -27_int32)), SE_MIX_B)
       value = ieor(value, ishft(value, -31_int32))
    end function splitmix64_of
 
@@ -450,6 +450,12 @@ contains
       integer(int32) :: allocation_status, new_capacity, slot, probe
 
       status = SE_OK
+      ! The power-of-two index needs at least four entries per page; bound
+      ! its int32 size and the capacity doubling before doing arithmetic.
+      if (layer%page_count >= huge(0_int32) / 8_int32) then
+         status = SE_ERR_ALLOCATION
+         return
+      end if
       if (layer%page_count >= layer%page_capacity) then
          new_capacity = max(8_int32, 2_int32 * layer%page_capacity)
          allocate(grown(new_capacity), stat=allocation_status)
@@ -461,10 +467,13 @@ contains
          call move_alloc(grown, layer%pages)
          layer%page_capacity = new_capacity
       end if
+      ! Rehash only existing pages before publishing the new one. Rehashing
+      ! after incrementing page_count and then inserting again duplicated the
+      ! new page in the table whenever its size changed.
+      if (allocate_table_shape(layer, 2_int32 * (layer%page_count + 1_int32), status) /= SE_OK) return
       layer%page_count = layer%page_count + 1_int32
       slot = layer%page_count
       layer%pages(slot) = page
-      if (allocate_table_shape(layer, 2_int32 * layer%page_count, status) /= SE_OK) return
       probe = probe_index(page%expert_id, layer%table_size)
       do
          if (layer%slot_table(probe) == 0_int32) then
@@ -514,8 +523,9 @@ contains
       layer%table_size = target
    end function allocate_table_shape
 
-   !> Resident bytes actually owned by this layer.  This is the number that stays
-   !> small while `sparse_layer_parameter_count` grows to billions.
+   !> Numeric-array bytes owned by this layer, excluding allocatable descriptors,
+   !> allocator overhead and transient resize copies. This stays proportional to
+   !> touched pages while the represented capacity can grow to billions.
    pure integer(int64) function resident_bytes_of(layer) result(bytes)
       type(sparse_layer_t), intent(in) :: layer
       integer(int64) :: per_page, router_bytes
@@ -531,7 +541,9 @@ contains
       bytes = int(layer%page_count, int64) * per_page
       router_bytes = int(layer%config%input_width, int64) * int(layer%config%router_bits, int64) * &
                      int(layer%config%active_experts, int64) * real64_bytes()
-      bytes = bytes + router_bytes + int(layer%table_size, int64) * 4_int64
+      bytes = bytes + router_bytes + int(layer%table_size, int64) * 4_int64 + &
+              int(size(layer%dirty_slots), int64) * 4_int64 + &
+              int(size(layer%router_norm), int64) * real64_bytes()
    end function resident_bytes_of
 
    !> Pure, because it has no dummy arguments and no side effect: `bytes` is the
@@ -596,6 +608,7 @@ contains
             end if
          end do
       end do
+      layer%stats%resident_bytes = resident_bytes_of(layer)
    end subroutine sparse_layer_init
 
    !> Releases every page and the router.  A destroyed layer is reusable: all
@@ -637,6 +650,20 @@ contains
    !  Forward: O(k) routing and O(k) dense work
    !----------------------------------------------------------------------------
 
+   !> Release partially allocated or shape-incompatible forward buffers.
+   subroutine clear_forward_cache(cache)
+      type(sparse_forward_t), intent(inout) :: cache
+
+      if (allocated(cache%expert_id)) deallocate(cache%expert_id)
+      if (allocated(cache%page_slot)) deallocate(cache%page_slot)
+      if (allocated(cache%gate)) deallocate(cache%gate)
+      if (allocated(cache%score)) deallocate(cache%score)
+      if (allocated(cache%expert_output)) deallocate(cache%expert_output)
+      if (allocated(cache%input_copy)) deallocate(cache%input_copy)
+      cache%ready = .false.
+      cache%active_count = 0_int32
+   end subroutine clear_forward_cache
+
    !> Routes one activation to k experts and evaluates only those experts.
    !>
    !> Order of operations, all of it O(k) or O(router_bits * width):
@@ -654,9 +681,18 @@ contains
       integer(int32) :: wanted, index, other, out_index, probe, slot, allocation_status
       integer(int64) :: signature, expert_id
       real(real64) :: maximum, normalizer
-      logical :: duplicate
+      logical :: duplicate, resize_cache
 
       status = SE_OK
+      ! A failed forward must never leave an old cache usable for backward.
+      cache%ready = .false.
+      cache%active_count = 0_int32
+      if (.not. allocated(layer%router) .or. .not. allocated(layer%router_norm) .or. &
+          .not. allocated(layer%pages) .or. .not. allocated(layer%slot_table) .or. &
+          .not. allocated(layer%dirty_slots)) then
+         status = SE_ERR_ORDER
+         return
+      end if
       wanted = layer%config%active_experts
       if (size(input, kind=int32) /= layer%config%input_width) then
          status = SE_ERR_INVALID_ARGUMENT
@@ -666,22 +702,28 @@ contains
          status = SE_ERR_INVALID_ARGUMENT
          return
       end if
-      if (.not. allocated(cache%expert_id)) then
-         allocate(cache%expert_id(wanted), cache%page_slot(wanted), cache%gate(wanted), &
-                  cache%score(wanted), cache%expert_output(layer%config%output_width, wanted), &
-                  cache%input_copy(layer%config%input_width), stat=allocation_status)
-         if (allocation_status /= 0) then
-            status = SE_ERR_ALLOCATION
-            return
-         end if
+      ! k alone is not a sufficient cache key: callers may reuse a cache for a
+      ! different layer with the same k but a different input/output width.
+      ! Check allocations separately before SIZE; Fortran need not short-circuit.
+      resize_cache = .true.
+      if (allocated(cache%expert_id) .and. allocated(cache%page_slot) .and. &
+          allocated(cache%gate) .and. allocated(cache%score) .and. &
+          allocated(cache%expert_output) .and. allocated(cache%input_copy)) then
+         resize_cache = size(cache%expert_id, kind=int32) /= wanted .or. &
+                        size(cache%page_slot, kind=int32) /= wanted .or. &
+                        size(cache%gate, kind=int32) /= wanted .or. &
+                        size(cache%score, kind=int32) /= wanted .or. &
+                        size(cache%expert_output, 1, kind=int32) /= layer%config%output_width .or. &
+                        size(cache%expert_output, 2, kind=int32) /= wanted .or. &
+                        size(cache%input_copy, kind=int32) /= layer%config%input_width
       end if
-      if (size(cache%expert_id, kind=int32) /= wanted) then
-         deallocate(cache%expert_id, cache%page_slot, cache%gate, cache%score, &
-                    cache%expert_output, cache%input_copy)
+      if (resize_cache) then
+         call clear_forward_cache(cache)
          allocate(cache%expert_id(wanted), cache%page_slot(wanted), cache%gate(wanted), &
                   cache%score(wanted), cache%expert_output(layer%config%output_width, wanted), &
                   cache%input_copy(layer%config%input_width), stat=allocation_status)
          if (allocation_status /= 0) then
+            call clear_forward_cache(cache)
             status = SE_ERR_ALLOCATION
             return
          end if
@@ -817,7 +859,9 @@ contains
       real(real64), intent(in) :: grad_output(:)
       real(real64), intent(out) :: grad_input(:)
       integer(int32), intent(out) :: status
-      integer(int32) :: index, slot
+      integer(int32) :: index, slot, needed, new_pages, new_capacity, allocation_status
+      integer(int32), allocatable :: grown_dirty(:)
+      logical :: was_dirty
 
       status = SE_OK
       if (.not. cache%ready .or. cache%active_count <= 0_int32) then
@@ -829,15 +873,56 @@ contains
          status = SE_ERR_INVALID_ARGUMENT
          return
       end if
+      if (.not. allocated(layer%pages) .or. .not. allocated(layer%dirty_slots) .or. &
+          .not. allocated(cache%page_slot) .or. .not. allocated(cache%expert_id) .or. &
+          .not. allocated(cache%gate) .or. .not. allocated(cache%input_copy)) then
+         status = SE_ERR_ORDER
+         return
+      end if
+      if (cache%active_count > size(cache%page_slot, kind=int32) .or. &
+          cache%active_count > size(cache%expert_id, kind=int32) .or. &
+          cache%active_count > size(cache%gate, kind=int32) .or. &
+          size(cache%input_copy, kind=int32) /= layer%config%input_width) then
+         status = SE_ERR_ORDER
+         return
+      end if
+      new_pages = 0_int32
+      do index = 1_int32, cache%active_count
+         slot = cache%page_slot(index)
+         if (slot < 1_int32 .or. slot > layer%page_count) then
+            status = SE_ERR_ORDER
+            return
+         end if
+         if (layer%pages(slot)%expert_id /= cache%expert_id(index)) then
+            status = SE_ERR_ORDER
+            return
+         end if
+         if (.not. layer%pages(slot)%gradient_ready) new_pages = new_pages + 1_int32
+      end do
+      ! Reserve before touching gradients, so an allocation failure does not
+      ! leave a partially registered update. Distinct forwards can accumulate
+      ! more than k pending experts before apply_update.
+      needed = layer%dirty_count + new_pages
+      if (needed > size(layer%dirty_slots, kind=int32)) then
+         new_capacity = max(needed, 2_int32 * size(layer%dirty_slots, kind=int32))
+         allocate(grown_dirty(new_capacity), stat=allocation_status)
+         if (allocation_status /= 0) then
+            status = SE_ERR_ALLOCATION
+            return
+         end if
+         if (layer%dirty_count > 0_int32) grown_dirty(:layer%dirty_count) = layer%dirty_slots(:layer%dirty_count)
+         call move_alloc(grown_dirty, layer%dirty_slots)
+         layer%stats%resident_bytes = resident_bytes_of(layer)
+      end if
       grad_input = 0.0_real64
       do index = 1_int32, cache%active_count
          slot = cache%page_slot(index)
+         ! The page already tracks membership: no O(pending pages) search per
+         ! active expert, even when gradients span many different forwards.
+         was_dirty = layer%pages(slot)%gradient_ready
          call expert_backward(layer%pages(slot), cache%input_copy, grad_output, &
                               cache%gate(index), grad_input)
-         ! Register the page once, even if backward is called twice before an
-         ! update: the list stays a set, and it is bounded by k because the
-         ! forward pass deduplicated the routed ids.
-         if (.not. page_is_dirty(layer, slot)) then
+         if (.not. was_dirty) then
             layer%dirty_count = layer%dirty_count + 1_int32
             layer%dirty_slots(layer%dirty_count) = slot
          end if
@@ -876,9 +961,9 @@ contains
    !  Sparse update: NOVA-1 on the pages that own a gradient
    !----------------------------------------------------------------------------
 
-   !> Applies the NOVA-1 rule to every page with a pending gradient and clears the
-   !> gradient.  Untouched pages are not visited, so the optimizer's traffic is
-   !> O(k) per step, like the forward and backward passes.
+   !> Applies NOVA-1 to each of D distinct pending pages and clears gradients.
+   !> Untouched pages are not visited. D <= k for one forward/backward per
+   !> update; accumulated backwards can make D larger.
    subroutine sparse_layer_apply_update(layer, status)
       type(sparse_layer_t), intent(inout) :: layer
       integer(int32), intent(out) :: status
@@ -893,22 +978,6 @@ contains
       end do
       layer%dirty_count = 0_int32
    end subroutine sparse_layer_apply_update
-
-   !> Membership test for the dirty list.  O(k) with k <= 64, called k times per
-   !> backward pass, so it costs less than one expert's matrix product.
-   pure logical function page_is_dirty(layer, slot) result(dirty)
-      type(sparse_layer_t), intent(in) :: layer
-      integer(int32), intent(in) :: slot
-      integer(int32) :: index
-
-      dirty = .false.
-      do index = 1_int32, layer%dirty_count
-         if (layer%dirty_slots(index) == slot) then
-            dirty = .true.
-            return
-         end if
-      end do
-   end function page_is_dirty
 
    !> NOVA-1 shape: per-column energy of the rank-one gradient, one velocity
    !> array, agreement-triggered restart, decoupled decay, and no transcendental

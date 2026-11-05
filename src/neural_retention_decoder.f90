@@ -33,6 +33,10 @@ module neural_retention_decoder
    integer(int32), parameter, public :: NRD_ERR_NOT_READY = -1002_int32
    integer(int32), parameter, public :: NRD_ERR_NUMERIC = -1003_int32
 
+   ! Conservative architectural bound: even with maximum int32 vocabulary and
+   ! FFN dimensions, all int64 parameter, byte and FLOP counts remain valid.
+   integer(int32), parameter, public :: NRD_MAX_WIDTH = 16777216_int32
+
    type, public :: neural_decoder_config_t
       integer(int32) :: vocabulary_size = 2048_int32
       integer(int32) :: width = 128_int32
@@ -91,25 +95,38 @@ module neural_retention_decoder
    public :: neural_decoder_state_is_ready, neural_decoder_step, neural_decoder_plan
    public :: neural_decoder_step_hidden, neural_decoder_project_logits
 
-   ! Number of staged tokens the block projection consumes at a time.  It is a
-   ! compile-time constant so the per-lane accumulators live in vector registers
-   ! instead of a runtime-sized stack array: with a dynamic size the fan-out loop
-   ! degrades to load/FMA/store per element, which measured ~8x slower than the
-   ! register form.  Callers allocate the hidden block with this many extra
-   ! zeroed columns, so the last partial group reads defined values.
+   ! Number of staged tokens the block projection consumes at a time.  The
+   ! padded fast path uses fixed-size accumulators for vector registers; callers
+   ! opting into that path must provide enough zero-initialized trailing rows.
+   ! The default public path also supports exactly count rows safely.
    integer(int32), parameter, public :: NRD_LOGIT_BLOCK_LANES = 16_int32
-   public :: neural_decoder_config_is_valid
+   public :: neural_decoder_config_is_valid, neural_real32_is_finite
 
 contains
+
+   pure elemental logical function neural_real32_is_finite(value) result(finite)
+      real(real32), intent(in) :: value
+      integer(int32) :: bits
+
+      if (radix(value) == 2 .and. digits(value) == 24 .and. maxexponent(value) == 128 .and. &
+          minexponent(value) == -125 .and. storage_size(value) == 32) then
+         bits = transfer(value, 0_int32)
+         finite = iand(bits, int(z'7F800000', int32)) /= int(z'7F800000', int32)
+      else
+         finite = ieee_is_finite(value)
+      end if
+   end function neural_real32_is_finite
 
    pure logical function neural_decoder_config_is_valid(config)
       type(neural_decoder_config_t), intent(in) :: config
       integer(int32) :: head_width
 
-      if (config%heads <= 0_int32) then
-         neural_decoder_config_is_valid = .false.
-         return
-      end if
+      neural_decoder_config_is_valid = .false.
+      if (config%heads <= 0_int32 .or. config%width > NRD_MAX_WIDTH) return
+      ! Test exponent bits before any floating comparison: signaling NaNs must
+      ! not reach a comparison when invalid-operation traps are enabled.
+      if (.not. neural_real32_is_finite(config%memory_decay) .or. &
+          .not. neural_real32_is_finite(config%rms_epsilon)) return
       head_width = config%width / config%heads
       neural_decoder_config_is_valid = config%vocabulary_size >= 2_int32 .and. config%width >= 2_int32 .and. &
                         modulo(config%width, config%heads) == 0_int32 .and. modulo(head_width, 2_int32) == 0_int32 .and. &
@@ -558,8 +575,9 @@ contains
       ! the decoder step got 32% slower (79.9 -> 105.8 us per prediction in the
       ! baseline and per-token arms of run 40662831639, the same model and shape),
       ! which is beyond the ~14% drift the same code shows between arms of one
-      ! run.  Per-row DOT_PRODUCT calls lose to the single blocked MATMUL above.  Fusing them (tanh(x) = 2*sigmoid(2x) - 1, or a one-exponential
-      ! tanh) does not pay here: see the note above on the same measurement.
+      ! run. Per-row DOT_PRODUCT calls lose to the single blocked MATMUL above.
+      ! Fusing them (tanh(x) = 2*sigmoid(2x) - 1, or a one-exponential tanh)
+      ! does not pay here: see the note above on the same measurement.
       ! The two gated branches are independent; their product is the widest
       ! dense work of a step, so they are the natural place to use the second
       ! thread.  Same MATMUL, same operands, disjoint results.
@@ -637,7 +655,7 @@ contains
    ! fixed size, which is what keeps the fan-out in registers.  Writes of one
    ! token's row step by vocabulary, but each cache line is shared by the
    ! following tokens of the block, so the output stays resident.
-   subroutine neural_decoder_project_logits(model, hidden_matrix, count, logits_matrix, status)
+   subroutine neural_decoder_project_logits(model, hidden_matrix, count, logits_matrix, status, padded)
       type(neural_decoder_t), intent(in) :: model
       ! CONTIGUOUS is load bearing: with a bare assumed-shape dummy gfortran
       ! cannot prove the inner fan-out has unit stride and leaves the loop
@@ -646,8 +664,13 @@ contains
       integer(int32), intent(in) :: count
       real(real32), contiguous, intent(out) :: logits_matrix(:, :)
       integer(int32), intent(out) :: status
+      ! Only opt in when all trailing rows through the next complete lane
+      ! group exist and are initialized to zero. The default never reads them.
+      logical, intent(in), optional :: padded
       integer(int32) :: width, vocabulary_size, token, feature, lane, group, first, available
+      integer(int64) :: padded_rows
       real(real32) :: weight, bias
+      logical :: use_padding
       ! Exactly one group of lanes: fixed size, therefore register resident.
       real(real32) :: accumulator(NRD_LOGIT_BLOCK_LANES)
 
@@ -662,6 +685,17 @@ contains
          status = NRD_ERR_INVALID_ARGUMENT
          return
       end if
+      use_padding = .false.
+      if (present(padded)) use_padding = padded
+      if (use_padding) then
+         padded_rows = ((int(count, int64) + int(NRD_LOGIT_BLOCK_LANES, int64) - 1_int64) / &
+                        int(NRD_LOGIT_BLOCK_LANES, int64)) * int(NRD_LOGIT_BLOCK_LANES, int64)
+         if (padded_rows > int(huge(0_int32), int64) .or. &
+             size(hidden_matrix, 1, kind=int64) < padded_rows) then
+            status = NRD_ERR_INVALID_ARGUMENT
+            return
+         end if
+      end if
       !$omp parallel do private(token, feature, lane, group, first, available, weight, bias, accumulator) &
       !$omp schedule(static) if(vocabulary_size >= 512_int32)
       do token = 1_int32, vocabulary_size
@@ -670,13 +704,28 @@ contains
             first = group * NRD_LOGIT_BLOCK_LANES + 1_int32
             available = min(NRD_LOGIT_BLOCK_LANES, count - first + 1_int32)
             accumulator = 0.0_real32
-            do feature = 1_int32, width
-               weight = model%token_embedding(feature, token)
-               !$omp simd
-               do lane = 1_int32, NRD_LOGIT_BLOCK_LANES
-                  accumulator(lane) = accumulator(lane) + weight * hidden_matrix(first + lane - 1_int32, feature)
+            if (use_padding .or. available == NRD_LOGIT_BLOCK_LANES) then
+               ! The trainer opts into this fixed-lane vector path after it has
+               ! supplied zeroed padding; complete groups need no padding.
+               do feature = 1_int32, width
+                  weight = model%token_embedding(feature, token)
+                  !$omp simd
+                  do lane = 1_int32, NRD_LOGIT_BLOCK_LANES
+                     accumulator(lane) = accumulator(lane) + weight * hidden_matrix(first + lane - 1_int32, feature)
+                  end do
                end do
-            end do
+            else
+               ! Public callers may provide exactly COUNT rows. Do not read
+               ! beyond the final partial group, even when another row happens
+               ! to exist but contains undefined or signalling-NaN data.
+               do feature = 1_int32, width
+                  weight = model%token_embedding(feature, token)
+                  !$omp simd
+                  do lane = 1_int32, available
+                     accumulator(lane) = accumulator(lane) + weight * hidden_matrix(first + lane - 1_int32, feature)
+                  end do
+               end do
+            end if
             do lane = 1_int32, available
                logits_matrix(first + lane - 1_int32, token) = accumulator(lane) + bias
             end do

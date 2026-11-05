@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: MIT
+# Direct execution without the runner's marker must not touch user fixtures.
+if(NOT DEFINED PROGRAM OR NOT DEFINED WORK_ROOT)
+  message(FATAL_ERROR "PROGRAM and WORK_ROOT are required")
+endif()
+string(RANDOM LENGTH 24 ALPHABET 0123456789abcdef nonce)
+set(work "${WORK_ROOT}/native-guard-${nonce}")
+file(MAKE_DIRECTORY "${work}")
+file(WRITE "${work}/test_neural_bpe_train.txt" "user-sentinel\n")
+foreach(state IN ITEMS missing mismatch)
+  if(state STREQUAL "mismatch")
+    file(WRITE "${work}/.vegai-test-scratch" "different-token\n")
+  endif()
+  execute_process(COMMAND "${CMAKE_COMMAND}" -E env "VEGAI_TEST_SCRATCH_TOKEN=${nonce}" "${PROGRAM}"
+    WORKING_DIRECTORY "${work}" RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
+  if(NOT "${result}" MATCHES "^[0-9]+$" OR "${result}" STREQUAL "0"
+     OR NOT err MATCHES "isolated fixture directory")
+    message(FATAL_ERROR "${state} scratch marker was not rejected normally: ${result}: ${out}: ${err}")
+  endif()
+  file(READ "${work}/test_neural_bpe_train.txt" sentinel)
+  if(NOT sentinel STREQUAL "user-sentinel\n")
+    message(FATAL_ERROR "property tests overwrote an existing user fixture")
+  endif()
+endforeach()
+file(REMOVE_RECURSE "${work}")
+message(STATUS "unisolated native property tests fail before fixture writes")

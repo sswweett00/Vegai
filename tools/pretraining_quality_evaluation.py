@@ -34,12 +34,13 @@ import stat
 import subprocess
 import sys
 import tempfile
-import threading
-import time
 from typing import Any, Mapping, Sequence
+
+from bounded_process import ProcessExecutionError, run_process
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PROCESS_RUNNER_SOURCE = Path(run_process.__code__.co_filename).resolve()
 CASESET_SCHEMA = "vegai-pretraining-quality-cases/v1"
 CASE_SCHEMA = "vegai-pretraining-quality-case/v1"
 POLICY_SCHEMA = "vegai-pretraining-quality-policy/v1"
@@ -452,9 +453,11 @@ def evaluator_binding(
     """
     inputs = load_evaluation_inputs(case_manifest_path, policy_path, redaction_key_path, maximum_cases)
     evaluator = file_identity(Path(__file__), "quality evaluator tool", MAX_CASE_MANIFEST_BYTES)
+    runner = file_identity(PROCESS_RUNNER_SOURCE, "bounded process runner", MAX_CASE_MANIFEST_BYTES)
     return {
         "mode": "held-out-semantic-neighbour/v1",
         "evaluator_source_sha256": evaluator.sha256,
+        "process_runner_sha256": runner.sha256,
         "case_manifest_sha256": inputs.case_manifest_identity.sha256,
         "case_manifest_bytes": inputs.case_manifest_identity.bytes,
         "policy_sha256": inputs.policy_identity.sha256,
@@ -612,87 +615,22 @@ def copy_private_snapshot(source: Path, identity: FileIdentity, destination: Pat
 
 
 def invoke_with_limited_output(command: Sequence[str], timeout_seconds: float) -> tuple[int, bytes, float]:
-    """Capture a child stream without allowing an untrusted stdout file to grow.
-
-    ``subprocess.run(..., stdout=file)`` can fill a filesystem before a later
-    size check. A drain thread keeps at most the protocol cap in memory and
-    terminates a child that exceeds it; the pipe provides back-pressure instead
-    of a durable unbounded scratch file. This works on Windows too, where
-    selector-based pipe polling is not portable.
-    """
+    """Run inspect with merged, bounded output and a bounded process lifetime."""
     try:
-        process = subprocess.Popen(
-            list(command), cwd=ROOT, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        result = run_process(
+            command, cwd=ROOT, timeout_seconds=timeout_seconds,
+            stdout_limit_bytes=MAX_INSPECT_OUTPUT_BYTES, stderr_limit_bytes=1,
+            label="vegai_pretrain inspect", merge_stderr=True,
         )
-    except OSError as error:
-        raise PretrainingQualityEvaluationError(f"cannot start vegai_pretrain inspect: {error}") from error
-    require(process.stdout is not None, "internal child stdout pipe is unavailable")
-    chunks: list[bytes] = []
-    captured_bytes = 0
-    overflow = threading.Event()
-    reader_errors: list[BaseException] = []
-
-    def drain() -> None:
-        nonlocal captured_bytes
-        try:
-            while True:
-                chunk = process.stdout.read(64 * 1024)
-                if not chunk:
-                    return
-                if captured_bytes + len(chunk) > MAX_INSPECT_OUTPUT_BYTES:
-                    overflow.set()
-                    try:
-                        process.terminate()
-                    except OSError:
-                        pass
-                    # Continue draining without retaining output so a child
-                    # that is terminating cannot deadlock on a full pipe.
-                    continue
-                chunks.append(chunk)
-                captured_bytes += len(chunk)
-        except Exception as error:  # surfaced in the controlling thread
-            reader_errors.append(error)
-
-    reader = threading.Thread(target=drain, name="vegai-quality-output-drain", daemon=True)
-    started = time.monotonic()
-    deadline = started + timeout_seconds
-    reader.start()
-    timed_out = False
-    while process.poll() is None:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0.0:
-            timed_out = True
-            break
-        try:
-            # Short waits let an oversized-output signal terminate a hostile
-            # child promptly rather than waiting for the whole inspect timeout.
-            process.wait(timeout=min(0.1, remaining))
-        except subprocess.TimeoutExpired:
-            if overflow.is_set():
-                break
-    if process.poll() is None:
-        try:
-            process.terminate()
-            process.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-    reader.join(timeout=5.0)
-    if reader.is_alive():
-        # The direct child is gone but a malformed descendant might retain the
-        # inherited pipe. Closing our read end makes this a fail-closed error
-        # without keeping a non-daemon thread alive at interpreter shutdown.
-        process.stdout.close()
-        reader.join(timeout=1.0)
-    elapsed = time.monotonic() - started
-    require(not reader.is_alive(), "vegai_pretrain inspect left its stdout pipe open after exit")
-    if reader_errors:
-        raise PretrainingQualityEvaluationError("cannot capture vegai_pretrain inspect output") from reader_errors[0]
-    require(not timed_out, f"vegai_pretrain inspect exceeded --timeout-seconds={timeout_seconds:g}")
-    require(not overflow.is_set(),
-            f"vegai_pretrain inspect emitted more than {MAX_INSPECT_OUTPUT_BYTES} bytes")
-    return process.returncode, b"".join(chunks), elapsed
+    except ProcessExecutionError as error:
+        if error.kind == "timeout":
+            message = f"vegai_pretrain inspect exceeded --timeout-seconds={timeout_seconds:g}"
+        elif error.kind == "stdout_limit":
+            message = f"vegai_pretrain inspect emitted more than {MAX_INSPECT_OUTPUT_BYTES} bytes"
+        else:
+            message = str(error)
+        raise PretrainingQualityEvaluationError(message) from error
+    return result.returncode, result.stdout, result.elapsed_seconds
 
 
 def execute_inspect(
@@ -826,6 +764,7 @@ def gate_failures(
 
 def build_report(
     evaluator_identity: FileIdentity,
+    runner_identity: FileIdentity,
     binary_identity: FileIdentity,
     checkpoint_identity: FileIdentity,
     inputs: EvaluationInputs,
@@ -872,6 +811,7 @@ def build_report(
         "status": "completed",
         "evaluator": evaluator_identity.public(),
         "provenance": {
+            "process_runner": runner_identity.public(),
             "pretrain_binary": binary_identity.public(),
             "checkpoint": checkpoint_identity.public(),
             "case_manifest": inputs.case_manifest_identity.public(),
@@ -966,6 +906,7 @@ def main() -> int:
             output,
             [
                 ("quality evaluator tool", evaluator_source),
+                ("bounded process runner", PROCESS_RUNNER_SOURCE),
                 ("pretraining executable", binary),
                 ("checkpoint", checkpoint),
                 ("quality case manifest", arguments.cases),
@@ -975,6 +916,7 @@ def main() -> int:
         )
         inputs = load_evaluation_inputs(arguments.cases, arguments.policy, arguments.redaction_key_file, arguments.max_cases)
         evaluator_identity = file_identity(evaluator_source, "quality evaluator tool", MAX_CASE_MANIFEST_BYTES)
+        runner_identity = file_identity(PROCESS_RUNNER_SOURCE, "bounded process runner", MAX_CASE_MANIFEST_BYTES)
         binary_identity = file_identity(binary, "pretraining executable", MAX_BINARY_BYTES)
         checkpoint_identity = file_identity(arguments.checkpoint, "checkpoint", MAX_CHECKPOINT_BYTES)
         output_bytes, elapsed = execute_inspect(
@@ -986,13 +928,14 @@ def main() -> int:
         # protects report identifiers, must remain byte/object stable through
         # the external process invocation.
         require_unchanged(evaluator_source, evaluator_identity, "quality evaluator tool", MAX_CASE_MANIFEST_BYTES)
+        require_unchanged(PROCESS_RUNNER_SOURCE, runner_identity, "bounded process runner", MAX_CASE_MANIFEST_BYTES)
         require_unchanged(binary, binary_identity, "pretraining executable", MAX_BINARY_BYTES)
         require_unchanged(arguments.checkpoint, checkpoint_identity, "checkpoint", MAX_CHECKPOINT_BYTES)
         require_unchanged(arguments.cases, inputs.case_manifest_identity, "quality case manifest", MAX_CASE_MANIFEST_BYTES)
         require_unchanged(arguments.policy, inputs.policy_identity, "quality policy", MAX_POLICY_BYTES)
         require_unchanged(arguments.redaction_key_file, inputs.hmac_key_identity, "case redaction key", MAX_HMAC_KEY_BYTES)
         report = build_report(
-            evaluator_identity, binary_identity, checkpoint_identity, inputs, observations, output_bytes, elapsed
+            evaluator_identity, runner_identity, binary_identity, checkpoint_identity, inputs, observations, output_bytes, elapsed
         )
         write_json_atomic(output, report)
         print(json.dumps(report, ensure_ascii=True, sort_keys=True))

@@ -1,0 +1,163 @@
+{
+  "binary_sha256": "b813947435e1ab6aa87805875859fd08df971180b759b215b99293cd3d36f5f7",
+  "configuration": {
+    "adam_eps": 1e-08,
+    "beta1": 0.9,
+    "beta2": 0.999,
+    "candidate_lr": 0.003,
+    "embedding_limit": 8.0,
+    "ffn": 64,
+    "grad_clip": 4.0,
+    "gradient_accumulation": 16,
+    "heads": 4,
+    "heldout_every": 9,
+    "label_smoothing": 0.0,
+    "max_tokens_per_record": 8192,
+    "min_lr_ratio": 0.1,
+    "min_pair_frequency": 2,
+    "optimizer": "nova",
+    "reference_lr": 0.025,
+    "requested_corpus_bytes": 200000,
+    "require_checkpoint_identity": false,
+    "schedule": "constant",
+    "threads": 1,
+    "total_updates": 0,
+    "vocab": 320,
+    "warmup_updates": 0,
+    "weight_decay": 0.01,
+    "width": 32,
+    "window": 8
+  },
+  "limitations": [
+    "Synthetic record-disjoint microbenchmark, not a real-world language or safety evaluation.",
+    "Equal tokens and updates do not prove equal energy, peak memory or cost on other hardware.",
+    "A learning rate better on these seeds need not generalize to other datasets or schedules.",
+    "The native trainer updates tied output embeddings only, not full backpropagation through the core."
+  ],
+  "reference_binary_sha256": "b813947435e1ab6aa87805875859fd08df971180b759b215b99293cd3d36f5f7",
+  "runs": [
+    {
+      "candidate_minus_reference_nll": -2.3324958487586933,
+      "candidate_nll": 3.663403125745882,
+      "candidate_over_reference_time": 0.902527686064802,
+      "candidate_train_seconds": 1.3263477099999363,
+      "corpus_sha256": "6e9778fd659059665d0a63072e5113f13ea3d3198db1296c9fbc664adfd9b29e",
+      "heldout_prediction_tokens": 10072,
+      "heldout_sha256": "2e70c202c08a831095dba8183e06fdfb6140d335bb35db481fab73223dbdb7fa",
+      "initial_heldout_nll": 5.878298483989242,
+      "optimizer_updates": 5015,
+      "order": [
+        "reference",
+        "candidate"
+      ],
+      "phase_seconds": {
+        "decode": {
+          "candidate_seconds": 0.6128583410200008,
+          "reference_seconds": 0.6758765491222221
+        },
+        "project": {
+          "candidate_seconds": 0.09286918701582181,
+          "reference_seconds": 0.10589544300819398
+        },
+        "score": {
+          "candidate_seconds": 0.2249478499761608,
+          "reference_seconds": 0.24379726001188828
+        },
+        "update": {
+          "candidate_seconds": 0.3615484410256613,
+          "reference_seconds": 0.4061751320186886
+        }
+      },
+      "reference_nll": 5.995898974504575,
+      "reference_train_seconds": 1.4695922690007137,
+      "seed": 21,
+      "tokenizer_sha256": "464bca4f2e228c684c1bb4e6a259dafb03cd7b65514ea555d646c7431fee82cd",
+      "train_prediction_tokens": 78633,
+      "train_sha256": "5b246fa3d5ddc1edca0511a4e43aa4846609b151b56ac1cd1b7b69a935ba8173"
+    },
+    {
+      "candidate_minus_reference_nll": -0.7462518057929732,
+      "candidate_nll": 3.648300514612964,
+      "candidate_over_reference_time": 0.989831464876173,
+      "candidate_train_seconds": 1.4114529360003871,
+      "corpus_sha256": "098b1cd7b6f4080fa94adece1ae4641554de43116420ed6abc662f0e309929de",
+      "heldout_prediction_tokens": 10303,
+      "heldout_sha256": "35c04944dbc528b187780a2fc2670527f22a1dd9d5da9d81b6e7f0403b6d2654",
+      "initial_heldout_nll": 5.883680149895415,
+      "optimizer_updates": 5196,
+      "order": [
+        "candidate",
+        "reference"
+      ],
+      "phase_seconds": {
+        "decode": {
+          "candidate_seconds": 0.6515510430808718,
+          "reference_seconds": 0.6567108729341271
+        },
+        "project": {
+          "candidate_seconds": 0.0988928630213195,
+          "reference_seconds": 0.10056772003372316
+        },
+        "score": {
+          "candidate_seconds": 0.2377861840341211,
+          "reference_seconds": 0.23934821601324074
+        },
+        "update": {
+          "candidate_seconds": 0.38741975704033393,
+          "reference_seconds": 0.39397403500424844
+        }
+      },
+      "reference_nll": 4.394552320405937,
+      "reference_train_seconds": 1.4259527869999147,
+      "seed": 42,
+      "tokenizer_sha256": "7854ba447066a048fe8dd43c3ed1ffc7383634a083394c4128ab898a156f7613",
+      "train_prediction_tokens": 81578,
+      "train_sha256": "fa54c9de2e00d5e2571b0da19003b0b3e7e1ec208ce3cbd2ad968b84cb43f1d6"
+    },
+    {
+      "candidate_minus_reference_nll": -1.1268424674123372,
+      "candidate_nll": 3.625583937829356,
+      "candidate_over_reference_time": 0.9542117067487702,
+      "candidate_train_seconds": 1.4115593299993634,
+      "corpus_sha256": "e5f9f3c6fb5a4a32c16abbfd248d5e8f07e18ea2ebe91cfe2ccb0c8d4de98349",
+      "heldout_prediction_tokens": 10456,
+      "heldout_sha256": "81e4bbb42ddb0ecf65cd3e0fd20d4bfb1ab9ae54ebd5accda381c20690d1dc86",
+      "initial_heldout_nll": 5.853315224027907,
+      "optimizer_updates": 5213,
+      "order": [
+        "reference",
+        "candidate"
+      ],
+      "phase_seconds": {
+        "decode": {
+          "candidate_seconds": 0.6486444130432574,
+          "reference_seconds": 0.6799138060177938
+        },
+        "project": {
+          "candidate_seconds": 0.09822882200114691,
+          "reference_seconds": 0.1047662450118878
+        },
+        "score": {
+          "candidate_seconds": 0.2381693739525872,
+          "reference_seconds": 0.24550122998061852
+        },
+        "update": {
+          "candidate_seconds": 0.3911694659973364,
+          "reference_seconds": 0.4119840019920957
+        }
+      },
+      "reference_nll": 4.752426405241693,
+      "reference_train_seconds": 1.4792936619996908,
+      "seed": 73,
+      "tokenizer_sha256": "e0c2f976bb7cde1d08cf667493274c1e0bb7363b12342438a064255df98b2b46",
+      "train_prediction_tokens": 81815,
+      "train_sha256": "57b2f8593a2e5e7453c37eff952fc8d4e762d39473feb811597ad0c277a8f745"
+    }
+  ],
+  "schema": "vegai-neural-equal-budget-quality/v1",
+  "summary": {
+    "candidate_better_seeds": 3,
+    "median_candidate_minus_reference_nll": -1.1268424674123372,
+    "median_candidate_over_reference_time": 0.9542117067487702
+  }
+}

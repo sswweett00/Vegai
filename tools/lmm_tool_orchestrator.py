@@ -49,6 +49,7 @@ from lmm_contract import (
     require_exact_fields,
     require_unchanged,
     sha256_bytes,
+    strict_json_value,
     validate_identifier,
     validate_sha256,
     validate_unicode_text,
@@ -150,33 +151,21 @@ class InvocationOutcome:
     elapsed_milliseconds: int
 
 
-def reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    """Refuse JSON's otherwise silent last-key-wins behavior."""
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ToolOrchestrationError(f"JSON object contains duplicate key {key!r}")
-        result[key] = value
-    return result
-
-
 def parse_strict_json(payload: bytes, label: str) -> object:
     try:
-        decoded = payload.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise ToolOrchestrationError(f"cannot decode {label} as UTF-8: {error}") from error
-    try:
-        return json.loads(decoded, object_pairs_hook=reject_duplicate_json_keys)
-    except json.JSONDecodeError as error:
-        raise ToolOrchestrationError(f"cannot parse {label} as JSON: {error}") from error
+        return strict_json_value(payload, label)
+    except LMMContractError as error:
+        raise ToolOrchestrationError(str(error)) from error
 
 
 def load_json_mapping(path: Path, label: str, *, maximum_bytes: int) -> tuple[dict[str, Any], FileIdentity]:
     identity = file_identity(path, label, maximum_bytes=maximum_bytes)
     try:
-        payload = path.resolve().read_bytes()
+        with path.resolve().open("rb") as handle:
+            payload = handle.read(maximum_bytes + 1)
     except OSError as error:
         raise ToolOrchestrationError(f"cannot read {label} {path}: {error}") from error
+    require(len(payload) <= maximum_bytes, f"{label} exceeds {maximum_bytes} bytes")
     value = parse_strict_json(payload, label)
     require(isinstance(value, Mapping), f"{label} must contain one JSON object")
     require_unchanged(path, identity, label)

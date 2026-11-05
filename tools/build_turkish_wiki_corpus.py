@@ -30,9 +30,12 @@ import argparse
 import bz2
 from dataclasses import dataclass, field
 import hashlib
+from itertools import islice
 import json
+import os
 from pathlib import Path
 import re
+import stat
 import sys
 import unicodedata
 import xml.etree.ElementTree as ET
@@ -43,6 +46,8 @@ TARGET_TOKENS_99B = 99_000_000_000
 SPLIT_MODULUS = 200
 SPLIT_HELDOUT_BUCKET = 0
 PARAGRAPH_DEDUPE_MIN_CHARS = 120
+CORPUS_OUTPUTS = ("train.txt", "heldout.txt", "train_epoch.txt", "tokenizer_sample.txt", "manifest.json")
+CORPUS_LOCK = ".vegai-turkish-corpus.lock"
 
 TURKISH_LETTERS = set(
     "abcçdefgğhıijklmnoöprsştuüvyzqwx"
@@ -106,9 +111,13 @@ def localname(tag: str) -> str:
 def iter_wiki_documents(path: Path) -> Iterator[Document]:
     """Stream namespace-tolerant MediaWiki export pages from a bz2 dump."""
     with bz2.open(path, "rb") as handle:
-        context = ET.iterparse(handle, events=("end",))
-        for _event, element in context:
-            if localname(element.tag) != "page":
+        context = ET.iterparse(handle, events=("start", "end"))
+        try:
+            _event, root = next(context)
+        except StopIteration as error:
+            raise CorpusError("wiki dump contains no XML root") from error
+        for event, element in context:
+            if event != "end" or localname(element.tag) != "page":
                 continue
             title = ""
             page_id = ""
@@ -130,6 +139,9 @@ def iter_wiki_documents(path: Path) -> Iterator[Document]:
                         if localname(grandchild.tag) == "text":
                             text = grandchild.text or ""
             element.clear()
+            # Removing completed pages from the document root avoids retaining
+            # one empty Element per page across a multi-million-page dump.
+            root.clear()
             if is_redirect or namespace != "0":
                 continue
             if title and text:
@@ -287,7 +299,9 @@ def is_heldout(document: Document) -> bool:
 class HashedWriter:
     def __init__(self, path: Path) -> None:
         self.path = path
-        self.handle = path.open("wb")
+        # Exclusive creation preserves an earlier corpus even if another
+        # writer creates a path after the directory conflict check.
+        self.handle = path.open("xb")
         self.hasher = hashlib.sha256()
         self.bytes_written = 0
         self.records = 0
@@ -320,34 +334,86 @@ def sha256_file(path: Path) -> str:
     return hasher.hexdigest()
 
 
+def source_stamp(path: Path) -> tuple[int, int, int, int, int]:
+    info = path.stat()
+    if not stat.S_ISREG(info.st_mode):
+        raise CorpusError(f"wiki dump must be a regular file: {path}")
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
 def write_byte_budget_slice(source: Path, destination: Path, budget: int) -> dict[str, Any]:
     writer = HashedWriter(destination)
     used = 0
-    with source.open("rb") as handle:
-        for raw in handle:
-            if budget > 0 and used + len(raw) > budget:
-                break
-            writer.handle.write(raw)
-            writer.hasher.update(raw)
-            writer.bytes_written += len(raw)
-            writer.records += 1
-            writer.approx_words += raw.count(b" ") + 1
-            used += len(raw)
-    result = writer.close()
+    try:
+        with source.open("rb") as handle:
+            for raw in handle:
+                if budget > 0 and used + len(raw) > budget:
+                    break
+                writer.handle.write(raw)
+                writer.hasher.update(raw)
+                writer.bytes_written += len(raw)
+                writer.records += 1
+                writer.approx_words += raw.count(b" ") + 1
+                used += len(raw)
+    finally:
+        result = writer.close()
     return result
 
 
 def build_corpus(args: argparse.Namespace) -> dict[str, Any]:
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     if bool(args.wiki_xml_bz2) == bool(args.text_dir):
         raise CorpusError("provide exactly one of --wiki-xml-bz2 or --text-dir")
+    budgets = (args.min_chars, args.max_chars, args.max_record_chars, args.max_docs,
+               args.tokenizer_sample_bytes, args.train_byte_budget)
+    if (any(type(value) is not int or not 0 <= value <= 2**63 - 1 for value in budgets)
+            or args.min_chars < 1 or args.max_chars < args.min_chars
+            or not 40 <= args.max_record_chars <= 8191):
+        raise CorpusError("invalid corpus filter, record, document or byte budget")
+    if not args.license.strip():
+        raise CorpusError("source license must be nonempty")
+    output_dir = Path(args.output_dir).resolve()
+    if args.wiki_xml_bz2:
+        if not Path(args.wiki_xml_bz2).is_file():
+            raise CorpusError(f"dump not found: {args.wiki_xml_bz2}")
+    else:
+        source_root = Path(args.text_dir).resolve(strict=True)
+        if not source_root.is_dir():
+            raise CorpusError(f"text dir not found: {source_root}")
+        try:
+            output_dir.relative_to(source_root)
+        except ValueError:
+            pass
+        else:
+            raise CorpusError("output directory must not be inside the recursive text input directory")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    lock = output_dir / CORPUS_LOCK
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as error:
+        raise CorpusError(f"corpus directory is locked: {lock}; verify the previous process has stopped") from error
+    try:
+        os.write(fd, f"pid={os.getpid()}\n".encode("ascii"))
+        conflicts = [name for name in CORPUS_OUTPUTS if os.path.lexists(output_dir / name)]
+        if conflicts:
+            raise CorpusError(f"corpus output(s) already exist: {', '.join(conflicts)}; choose a fresh directory")
+        return build_corpus_locked(args, output_dir)
+    finally:
+        os.close(fd)
+        try:
+            lock.unlink(missing_ok=True)
+        except OSError as error:
+            print(f"warning: could not remove corpus lock {lock}: {error}", file=sys.stderr)
+
+
+def build_corpus_locked(args: argparse.Namespace, output_dir: Path) -> dict[str, Any]:
     if args.wiki_xml_bz2:
         source_path = Path(args.wiki_xml_bz2)
         if not source_path.is_file():
             raise CorpusError(f"dump not found: {source_path}")
+        original_stamp = source_stamp(source_path)
         source_sha256 = sha256_file(source_path)
+        if source_stamp(source_path) != original_stamp:
+            raise CorpusError("wiki dump changed while being hashed")
         documents = iter_wiki_documents(source_path)
         source_meta = {
             "kind": "trwiki-pages-articles-xml-bz2",
@@ -363,7 +429,7 @@ def build_corpus(args: argparse.Namespace) -> dict[str, Any]:
         documents = iter_text_dir_documents(source_root)
         source_meta = {
             "kind": "operator-text-dir",
-            "file": source_root.name,
+            "file": source_root.resolve().name or source_root.resolve().anchor,
             "sha256": None,
             "url": args.source_url,
             "license": args.license,
@@ -373,12 +439,15 @@ def build_corpus(args: argparse.Namespace) -> dict[str, Any]:
     seen_documents: set[bytes] = set()
     seen_paragraphs: set[bytes] = set()
     train_writer = HashedWriter(output_dir / "train.txt")
-    heldout_writer = HashedWriter(output_dir / "heldout.txt")
     try:
-        for document in documents:
+        heldout_writer = HashedWriter(output_dir / "heldout.txt")
+    except BaseException:
+        train_writer.close()
+        raise
+    try:
+        selected_documents = islice(documents, args.max_docs) if args.max_docs else documents
+        for document in selected_documents:
             funnel.source_documents += 1
-            if args.max_docs and funnel.source_documents > args.max_docs:
-                break
             cleaned = clean_wikitext(document.text) if args.wiki_xml_bz2 else unicodedata.normalize("NFC", document.text)
             reason = quality_rejection_reason(cleaned, min_chars=args.min_chars, max_chars=args.max_chars)
             if reason is not None:
@@ -410,10 +479,16 @@ def build_corpus(args: argparse.Namespace) -> dict[str, Any]:
                 chunks = chunk_paragraph(paragraph, args.max_record_chars)
                 if index == 0 and title and not paragraph.startswith(title):
                     chunks[0] = f"{title}. {chunks[0]}"
-                    if len(chunks[0].encode('utf-8')) >= 8192:
-                        chunks = chunk_paragraph(chunks[0], args.max_record_chars)
                 records.extend(chunks)
-            records = [record for record in records if len(record.encode("utf-8")) < 8192 and len(record) >= 40]
+            usable_records: list[str] = []
+            for record in records:
+                if len(record) < 40:
+                    continue
+                if len(record.encode("utf-8")) >= 8192:
+                    raise CorpusError("a corpus record exceeds the native 8191-byte limit; "
+                                      "lower --max-record-chars or shorten the source title")
+                usable_records.append(record)
+            records = usable_records
             if not records:
                 funnel.reject("no_usable_records")
                 continue
@@ -430,6 +505,8 @@ def build_corpus(args: argparse.Namespace) -> dict[str, Any]:
         train_meta = train_writer.close()
         heldout_meta = heldout_writer.close()
 
+    if args.wiki_xml_bz2 and source_stamp(source_path) != original_stamp:
+        raise CorpusError("wiki dump changed while the corpus was being built")
     if train_meta["records"] == 0:
         raise CorpusError("quality pipeline accepted zero training records; refusing to publish an empty corpus")
 
@@ -440,6 +517,8 @@ def build_corpus(args: argparse.Namespace) -> dict[str, Any]:
         output_dir / "train.txt", output_dir / "train_epoch.txt", args.train_byte_budget
     )
 
+    if args.wiki_xml_bz2 and source_stamp(source_path) != original_stamp:
+        raise CorpusError("wiki dump changed before manifest publication")
     manifest: dict[str, Any] = {
         "schema": SCHEMA,
         "retrieved_at": args.retrieved_at,
@@ -453,7 +532,8 @@ def build_corpus(args: argparse.Namespace) -> dict[str, Any]:
             ),
         },
         "split": {
-            "rule": "sha256(vegai-trwiki-split-v1|page_id|title) mod 200 == 0 -> heldout",
+            "rule": ("big-endian first 8 bytes of SHA-256(UTF-8('vegai-trwiki-split-v1\\0' + "
+                     "page_id + '\\0' + original_title)) mod 200 == 0 -> heldout"),
             "level": "source-document",
             "heldout_fraction_nominal": 1 / SPLIT_MODULUS,
         },
@@ -476,9 +556,9 @@ def build_corpus(args: argparse.Namespace) -> dict[str, Any]:
         "train_byte_budget": args.train_byte_budget,
         "tokenizer_sample_bytes": args.tokenizer_sample_bytes,
     }
-    (output_dir / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    manifest_text = json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    with (output_dir / "manifest.json").open("x", encoding="utf-8", newline="\n") as stream:
+        stream.write(manifest_text)
     return manifest
 
 
@@ -503,7 +583,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(list(sys.argv[1:] if argv is None else argv))
     try:
         manifest = build_corpus(args)
-    except CorpusError as error:
+    except (CorpusError, OSError, UnicodeError, ET.ParseError, ValueError) as error:
         print(f"build_turkish_wiki_corpus: {error}", file=sys.stderr)
         return 2
     print(json.dumps({"status": "ok", "funnel": manifest["funnel"], "outputs": manifest["outputs"]},

@@ -1,0 +1,23 @@
+0889ecce1aabec92284cb4cb3994aaa1e862609487a2adc526fa02f71622ac74  /tmp/vegai-quality-data/train-200.txt
+5195714be1073baef5098ee87a6b68584579171510b537a77a721a40e3b8d48c  /tmp/vegai-quality-data/train-1000.txt
+28a17570abc1031a2275f002b047d26c3a18c6f444589b9e6ec90850a42adc9c  /tmp/vegai-quality-pud/test-80.txt
+BOUN train-200 / PUD test-80
+{"schema":"vegai-exact-record-overlap/v1",
+"train_records":200,
+"heldout_records":80,
+"heldout_unique_records":80,
+"overlapping_train_records":0,
+"overlapping_heldout_unique_records":0,
+"first_train_line":0,
+"first_heldout_line":0,
+"overlap":false}
+BOUN train-1000 / PUD test-80
+{"schema":"vegai-exact-record-overlap/v1",
+"train_records":1000,
+"heldout_records":80,
+"heldout_unique_records":80,
+"overlapping_train_records":0,
+"overlapping_heldout_unique_records":0,
+"first_train_line":0,
+"first_heldout_line":0,
+"overlap":false}

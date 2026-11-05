@@ -1,7 +1,7 @@
 # Resonator Network: çoklu-faktör VSA çözümleme
 
 `src/resonator_network.f90`, paketli binary/bipolar Vegai hipervektörlerinde
-çoklu-faktör ayrıştırma için Fortran 2023 hedefli bir **discrete Resonator
+çoklu-faktör ayrıştırma için Fortran 2018+ hedefli bir **discrete Resonator
 Network** uygular. Modül, yalnızca bir composite'a yakın olan bir öğeyi cleanup
 etmekten farklı olarak, her factor slot için ayrı candidate vocabulary ile
 
@@ -210,5 +210,5 @@ Native `test/test_all.f90` aşağıdakileri kapsar:
    kontrol edilir.
 
 `app/main.f90` da üç farklı semantic codebook üzerinden 3-factor demo
-çalıştırır. CI, Fortran 2023 strict mode, runtime checks, OpenMP ve executable
+çalıştırır. CI, Fortran 2018 strict mode, runtime checks, OpenMP ve executable
 assertion'ları ile bunu doğrular.

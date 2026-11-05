@@ -38,6 +38,7 @@ from lmm_contract import (
     require_exact_fields,
     require_unchanged,
     sha256_bytes,
+    strict_json_value,
     validate_identifier,
     validate_sha256,
     validate_unicode_text,
@@ -150,32 +151,21 @@ class ReleaseState:
     last_decision: str
 
 
-def reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ReleaseGovernorError(f"JSON object contains duplicate key {key!r}")
-        result[key] = value
-    return result
-
-
 def parse_strict_json(payload: bytes, label: str) -> object:
     try:
-        decoded = payload.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise ReleaseGovernorError(f"cannot decode {label} as UTF-8: {error}") from error
-    try:
-        return json.loads(decoded, object_pairs_hook=reject_duplicate_json_keys)
-    except json.JSONDecodeError as error:
-        raise ReleaseGovernorError(f"cannot parse {label} as JSON: {error}") from error
+        return strict_json_value(payload, label)
+    except LMMContractError as error:
+        raise ReleaseGovernorError(str(error)) from error
 
 
 def load_json_mapping(path: Path, label: str, *, maximum_bytes: int = MAX_JSON_BYTES) -> tuple[dict[str, Any], FileIdentity]:
     identity = file_identity(path, label, maximum_bytes=maximum_bytes)
     try:
-        payload = path.resolve().read_bytes()
+        with path.resolve().open("rb") as handle:
+            payload = handle.read(maximum_bytes + 1)
     except OSError as error:
         raise ReleaseGovernorError(f"cannot read {label} {path}: {error}") from error
+    require(len(payload) <= maximum_bytes, f"{label} exceeds {maximum_bytes} bytes")
     value = parse_strict_json(payload, label)
     require(isinstance(value, Mapping), f"{label} must contain one JSON object")
     require_unchanged(path, identity, label)
@@ -662,9 +652,6 @@ def iter_observations(path: Path, policy: ReleasePolicy) -> tuple[list[Observati
                 has_lf = raw.endswith(b"\n")
                 payload_bytes = len(raw) - 1 if has_lf else len(raw)
                 overlong = payload_bytes > MAX_OBSERVATION_LINE_BYTES or (not has_lf and len(raw) == limit)
-                if overlong and not has_lf:
-                    while raw and not raw.endswith(b"\n"):
-                        raw = handle.readline(limit)
                 require(not overlong, f"release observation line {number} exceeds {MAX_OBSERVATION_LINE_BYTES} bytes")
                 require(has_lf, f"release observation line {number} must terminate with LF")
                 raw = raw[:-1]

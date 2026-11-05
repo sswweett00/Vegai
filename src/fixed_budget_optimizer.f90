@@ -9,14 +9,13 @@
 !      e_c   <- rho e_c + (1 - rho) mean(g_c * g_c)        per-column energy
 !      a     <- <g_c, v_c>                                 agreement probe
 !      gamma <- momentum  (momentum * restart_damp when a < 0)
-!      v_c   <- gamma v_c + (1 - gamma) g_c                momentum as an EMA
+!      v_c   <- gamma v_c + (1 - momentum) g_c             damp only old velocity
 !      p_c   <- (1 - lr * wd) p_c - lr * v_c / (sqrt(e_c) + eps)
 !
-!  The momentum is an exponential moving average, not a running sum: a sum
-!  amplifies the displacement by 1/(1 - momentum) = 10x, which makes the
-!  learning rate mean ten times what it says.  With the EMA the displacement
-!  per update is of the order of the learning rate whatever the gradient scale,
-!  because the energy is estimated from the same gradients.
+!  Without a restart this is an exponential moving average, not a running
+!  sum. On negative agreement only the carried velocity is damped; the new
+!  gradient's coefficient remains (1 - momentum). This is the historical
+!  update/checkpoint rule, not the distinct (1 - gamma) restart variant.
 !
 !  State is one velocity array plus one energy per column, not the two full
 !  moment arrays AdamW needs, and there is no per-element transcendental.
@@ -27,8 +26,11 @@
 !==============================================================================
 module fixed_budget_optimizer
    use, intrinsic :: iso_fortran_env, only: int32, int64, real64
-   use fixed_budget_context, only: fbc_model_t, fbc_config_t
-   use fixed_budget_backward, only: fbc_gradient_t
+   use fixed_budget_context, only: fbc_model_t, fbc_config_t, fbc_state_t, fbc_workspace_t, fbc_state_is_ready, &
+                                   fbc_config_is_valid, fbc_config_layout, fbc_layout_matches, fbc_real64_is_finite, &
+                                   FBC_OK, FBC_ERR_INVALID_ARGUMENT, FBC_ERR_ALLOCATION, FBC_ERR_NUMERIC, &
+                                   FBC_ERR_NOT_READY
+   use fixed_budget_backward, only: fbc_gradient_t, fbc_gradient_norm
    implicit none (type, external)
    private
 
@@ -97,11 +99,60 @@ module fixed_budget_optimizer
       real(real64), allocatable :: energy_slot_read_proj(:)
       real(real64) :: slot_salience_weight_velocity = 0.0_real64
       real(real64) :: slot_salience_weight_energy = 0.0_real64
+      integer(int32) :: layout(7) = 0_int32
    end type fbc_optimizer_t
 
    public :: fbc_optimizer_init, fbc_optimizer_destroy, fbc_optimizer_reset, fbc_optimizer_apply
+   public :: fbc_update_config_is_valid, fbc_training_inputs_are_ready
 
 contains
+
+   ! Once per training call, bind all API-owned buffers to the model shape.
+   ! This checks only scalar metadata; it does not traverse parameter arrays.
+   pure logical function fbc_training_inputs_are_ready(model, state, workspace, gradient, optimizer) result(ready)
+      type(fbc_model_t), intent(in) :: model
+      type(fbc_state_t), intent(in) :: state
+      type(fbc_workspace_t), intent(in) :: workspace
+      type(fbc_gradient_t), intent(in) :: gradient
+      type(fbc_optimizer_t), intent(in) :: optimizer
+
+      ready = .false.
+      if (.not. fbc_state_is_ready(state, model) .or. .not. workspace%initialized .or. &
+          .not. gradient%initialized .or. .not. optimizer%initialized) return
+      ready = fbc_layout_matches(workspace%layout, model%config) .and. &
+              fbc_layout_matches(gradient%layout, model%config) .and. &
+              fbc_layout_matches(optimizer%layout, model%config)
+   end function fbc_training_inputs_are_ready
+
+   pure logical function fbc_update_config_is_valid(config) result(valid)
+      type(fbc_update_config_t), intent(in) :: config
+
+      valid = .false.
+      if (.not. fbc_real64_is_finite(config%learning_rate) .or. &
+          .not. fbc_real64_is_finite(config%momentum) .or. &
+          .not. fbc_real64_is_finite(config%energy_decay) .or. &
+          .not. fbc_real64_is_finite(config%restart_damp) .or. &
+          .not. fbc_real64_is_finite(config%weight_decay) .or. &
+          .not. fbc_real64_is_finite(config%epsilon) .or. &
+          .not. fbc_real64_is_finite(config%gradient_clip)) return
+      if (config%learning_rate <= 0.0_real64 .or. config%epsilon <= 0.0_real64 .or. &
+          config%gradient_clip < 0.0_real64 .or. config%weight_decay < 0.0_real64) return
+      if (config%momentum < 0.0_real64 .or. config%momentum >= 1.0_real64 .or. &
+          config%energy_decay < 0.0_real64 .or. config%energy_decay >= 1.0_real64 .or. &
+          config%restart_damp < 0.0_real64 .or. config%restart_damp > 1.0_real64) return
+      ! Guard both the decay product and the worst-case lr/epsilon division
+      ! before they are evaluated by any update kernel.
+      if (config%learning_rate >= 1.0_real64) then
+         if (config%weight_decay >= 1.0_real64 / config%learning_rate) return
+      else if (config%weight_decay >= 1.0_real64) then
+         if (config%learning_rate >= 1.0_real64 / config%weight_decay) return
+      end if
+      if (config%learning_rate * config%weight_decay >= 1.0_real64) return
+      if (config%epsilon < 1.0_real64) then
+         if (config%learning_rate >= huge(0.0_real64) * config%epsilon) return
+      end if
+      valid = .true.
+   end function fbc_update_config_is_valid
 
    subroutine fbc_optimizer_init(optimizer, config, status)
       type(fbc_optimizer_t), intent(inout) :: optimizer
@@ -110,8 +161,12 @@ contains
       integer(int32) :: allocation_status
       integer(int32) :: width, vocab, heads, head_width, ffn, window_plus_one, scales, nchannels
 
+      status = FBC_OK
+      if (.not. fbc_config_is_valid(config)) then
+         status = FBC_ERR_INVALID_ARGUMENT
+         return
+      end if
       call fbc_optimizer_destroy(optimizer)
-      status = 0_int32
       width = config%width
       vocab = config%vocabulary_size
       heads = config%heads
@@ -122,49 +177,50 @@ contains
       nchannels = 3_int32
       allocation_status = 0_int32
       allocate(optimizer%velocity_token_embedding(width, vocab), &
-               optimizer%energy_token_embedding(vocab), stat=allocation_status)
-      allocate(optimizer%velocity_output_bias(vocab), stat=allocation_status)
-      allocate(optimizer%velocity_query(head_width, width, heads), &
-               optimizer%energy_query(width, heads), stat=allocation_status)
-      allocate(optimizer%velocity_key(head_width, width, heads), &
-               optimizer%energy_key(width, heads), stat=allocation_status)
-      allocate(optimizer%velocity_value(head_width, width, heads), &
-               optimizer%energy_value(width, heads), stat=allocation_status)
-      allocate(optimizer%velocity_attention_output(width, width), &
-               optimizer%energy_attention_output(width), stat=allocation_status)
-      allocate(optimizer%velocity_attention_rms(width), stat=allocation_status)
-      allocate(optimizer%velocity_ffn_rms(width), stat=allocation_status)
-      allocate(optimizer%velocity_ffn_gate(ffn, width), &
-               optimizer%energy_ffn_gate(width), stat=allocation_status)
-      allocate(optimizer%velocity_ffn_value(ffn, width), &
-               optimizer%energy_ffn_value(width), stat=allocation_status)
-      allocate(optimizer%velocity_ffn_output(width, ffn), &
-               optimizer%energy_ffn_output(ffn), stat=allocation_status)
-      allocate(optimizer%velocity_distance_bias(window_plus_one), stat=allocation_status)
-      allocate(optimizer%velocity_scale_logit(scales), stat=allocation_status)
-      allocate(optimizer%velocity_decay_logit(scales), stat=allocation_status)
-      allocate(optimizer%velocity_write_strength_logit(scales), stat=allocation_status)
-      allocate(optimizer%velocity_channel_logit(nchannels), stat=allocation_status)
-      allocate(optimizer%velocity_channel_gate_proj(nchannels, width), &
-               optimizer%energy_channel_gate_proj(width), stat=allocation_status)
-      allocate(optimizer%velocity_channel_router(nchannels, nchannels * width), &
-               optimizer%energy_channel_router(nchannels * width), stat=allocation_status)
-      allocate(optimizer%velocity_induction_mix(heads), stat=allocation_status)
-      allocate(optimizer%velocity_scale_gate_proj(scales, width), &
-               optimizer%energy_scale_gate_proj(width), stat=allocation_status)
-      allocate(optimizer%velocity_slot_query_proj(width, width), &
-               optimizer%energy_slot_query_proj(width), stat=allocation_status)
-      allocate(optimizer%velocity_slot_key_proj(width, width), &
-               optimizer%energy_slot_key_proj(width), stat=allocation_status)
-      allocate(optimizer%velocity_slot_value_proj(width, width), &
-               optimizer%energy_slot_value_proj(width), stat=allocation_status)
-      allocate(optimizer%velocity_slot_read_proj(width, width), &
+               optimizer%energy_token_embedding(vocab), &
+               optimizer%velocity_output_bias(vocab), &
+               optimizer%velocity_query(head_width, width, heads), &
+               optimizer%energy_query(width, heads), &
+               optimizer%velocity_key(head_width, width, heads), &
+               optimizer%energy_key(width, heads), &
+               optimizer%velocity_value(head_width, width, heads), &
+               optimizer%energy_value(width, heads), &
+               optimizer%velocity_attention_output(width, width), &
+               optimizer%energy_attention_output(width), &
+               optimizer%velocity_attention_rms(width), &
+               optimizer%velocity_ffn_rms(width), &
+               optimizer%velocity_ffn_gate(ffn, width), &
+               optimizer%energy_ffn_gate(width), &
+               optimizer%velocity_ffn_value(ffn, width), &
+               optimizer%energy_ffn_value(width), &
+               optimizer%velocity_ffn_output(width, ffn), &
+               optimizer%energy_ffn_output(ffn), &
+               optimizer%velocity_distance_bias(window_plus_one), &
+               optimizer%velocity_scale_logit(scales), &
+               optimizer%velocity_decay_logit(scales), &
+               optimizer%velocity_write_strength_logit(scales), &
+               optimizer%velocity_channel_logit(nchannels), &
+               optimizer%velocity_channel_gate_proj(nchannels, width), &
+               optimizer%energy_channel_gate_proj(width), &
+               optimizer%velocity_channel_router(nchannels, nchannels * width), &
+               optimizer%energy_channel_router(nchannels * width), &
+               optimizer%velocity_induction_mix(heads), optimizer%energy_induction_mix, &
+               optimizer%velocity_scale_gate_proj(scales, width), &
+               optimizer%energy_scale_gate_proj(width), &
+               optimizer%velocity_slot_query_proj(width, width), &
+               optimizer%energy_slot_query_proj(width), &
+               optimizer%velocity_slot_key_proj(width, width), &
+               optimizer%energy_slot_key_proj(width), &
+               optimizer%velocity_slot_value_proj(width, width), &
+               optimizer%energy_slot_value_proj(width), &
+               optimizer%velocity_slot_read_proj(width, width), &
                optimizer%energy_slot_read_proj(width), stat=allocation_status)
       if (allocation_status /= 0) then
-         status = -1_int32
+         status = FBC_ERR_ALLOCATION
          call fbc_optimizer_destroy(optimizer)
          return
       end if
+      optimizer%layout = fbc_config_layout(config)
       optimizer%initialized = .true.
       call fbc_optimizer_reset(optimizer)
    end subroutine fbc_optimizer_init
@@ -255,6 +311,7 @@ contains
       if (allocated(optimizer%velocity_channel_router)) deallocate(optimizer%velocity_channel_router)
       if (allocated(optimizer%energy_channel_router)) deallocate(optimizer%energy_channel_router)
       if (allocated(optimizer%velocity_induction_mix)) deallocate(optimizer%velocity_induction_mix)
+      if (allocated(optimizer%energy_induction_mix)) deallocate(optimizer%energy_induction_mix)
       if (allocated(optimizer%velocity_scale_gate_proj)) deallocate(optimizer%velocity_scale_gate_proj)
       if (allocated(optimizer%energy_scale_gate_proj)) deallocate(optimizer%energy_scale_gate_proj)
       if (allocated(optimizer%velocity_slot_query_proj)) deallocate(optimizer%velocity_slot_query_proj)
@@ -270,19 +327,49 @@ contains
 
    !> Applies the rule to every parameter array.  `parameter_updates` counts the
    !> scalars written, the structural companion of "one update step".
-   subroutine fbc_optimizer_apply(optimizer, model, gradient, config, status, parameter_updates)
+   subroutine fbc_optimizer_apply(optimizer, model, gradient, config, status, parameter_updates, validated_gradient_norm)
       type(fbc_optimizer_t), intent(inout) :: optimizer
       type(fbc_model_t), intent(inout) :: model
       type(fbc_gradient_t), intent(in) :: gradient
       type(fbc_update_config_t), intent(in) :: config
       integer(int32), intent(out) :: status
       integer(int64), intent(out) :: parameter_updates
+      ! Internal fast path: the trainer just computed this norm on the same
+      ! gradient. Other callers omit it and get a checked norm here.
+      real(real64), intent(in), optional :: validated_gradient_norm
       integer(int32) :: index
+      real(real64) :: gradient_norm
 
       status = 0_int32
       parameter_updates = 0_int64
-      if (.not. optimizer%initialized) then
+      if (.not. optimizer%initialized .or. .not. model%initialized .or. .not. gradient%initialized) then
          status = -2_int32
+         return
+      end if
+      if (.not. fbc_layout_matches(optimizer%layout, model%config) .or. &
+          .not. fbc_layout_matches(gradient%layout, model%config)) then
+         status = FBC_ERR_NOT_READY
+         return
+      end if
+      if (.not. fbc_update_config_is_valid(config)) then
+         status = FBC_ERR_INVALID_ARGUMENT
+         return
+      end if
+      if (present(validated_gradient_norm)) then
+         gradient_norm = validated_gradient_norm
+         if (.not. fbc_real64_is_finite(gradient_norm)) then
+            status = FBC_ERR_NUMERIC
+            return
+         end if
+      else
+         gradient_norm = fbc_gradient_norm(gradient)
+      end if
+      ! The existing kernels form dot_product(g,g) and dot_product(g,v).
+      ! Bound the gradient norm before those products. The half-sqrt margin
+      ! also leaves room for rounding; the normal clipped path reuses the norm
+      ! already calculated by fbc_train_stream rather than scanning again.
+      if (gradient_norm < 0.0_real64 .or. gradient_norm >= 0.5_real64 * sqrt(huge(0.0_real64))) then
+         status = FBC_ERR_NUMERIC
          return
       end if
       call nova_columns(model%token_embedding, gradient%token_embedding, optimizer%velocity_token_embedding, &

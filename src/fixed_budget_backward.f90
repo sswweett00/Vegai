@@ -26,11 +26,14 @@
 !      trained: the slot write (key, value, gate, salience) and the multi-scale
 !      retention update (phi(k), v).  Only the previous steps' writes are frozen.
 !
-!  This routine is the exact derivative of the implemented computation, which
-!  is precisely what the finite-difference contract test checks.
+!  For v6 models this is the derivative of the implemented computation with
+!  pre-step state frozen. A full local ring requires fbc_step's deferred write,
+!  followed by fbc_finish_local_step after backward. V5 checkpoints deliberately
+!  retain their historical, inexact full-ring/clamped-decay training rule.
 !==============================================================================
 module fixed_budget_backward
    use, intrinsic :: iso_fortran_env, only: int32, int64, real64
+   use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
    use fixed_budget_context
    implicit none (type, external)
    private
@@ -63,6 +66,7 @@ module fixed_budget_backward
       real(real64), allocatable :: slot_value_proj(:, :)
       real(real64), allocatable :: slot_read_proj(:, :)
       real(real64) :: slot_salience_weight = 0.0_real64
+      integer(int32) :: layout(7) = 0_int32
    end type fbc_gradient_t
 
    public :: fbc_gradient_init, fbc_gradient_destroy, fbc_gradient_zero, fbc_gradient_norm
@@ -114,6 +118,7 @@ contains
          call fbc_gradient_destroy(gradient)
          return
       end if
+      gradient%layout = fbc_config_layout(model%config)
       gradient%initialized = .true.
       call fbc_gradient_zero(gradient)
    end subroutine fbc_gradient_init
@@ -179,29 +184,243 @@ contains
       gradient = fbc_gradient_t()
    end subroutine fbc_gradient_destroy
 
-   !> Global L2 norm, used by gradient clipping and by the optimiser statistic.
+   ! Local copy of the IEEE exponent check: the norm walks every gradient
+   ! element, so cross-module calls here would prevent normal inlining.
+   pure elemental logical function gradient_value_is_finite(value) result(finite)
+      real(real64), intent(in) :: value
+      integer(int64) :: bits
+
+      if (radix(value) == 2 .and. digits(value) == 53 .and. maxexponent(value) == 1024 .and. &
+          minexponent(value) == -1021 .and. storage_size(value) == 64) then
+         bits = transfer(value, 0_int64)
+         finite = iand(bits, int(z'7FF0000000000000', int64)) /= int(z'7FF0000000000000', int64)
+      else
+         finite = ieee_is_finite(value)
+      end if
+   end function gradient_value_is_finite
+
+   !> Global L2 norm in one pass per array. A negative result is an explicit
+   !> error sentinel for an uninitialized/nonfinite gradient or a norm outside
+   !> real64's representable range. The ordinary path keeps inexpensive sums of
+   !> squares; very large or subnormal-scale values switch to a scaled norm
+   !> without rescanning the elements already consumed.
    pure real(real64) function fbc_gradient_norm(gradient) result(norm)
       type(fbc_gradient_t), intent(in) :: gradient
-      real(real64) :: squares
+      real(real64) :: squares, scale, scaled_squares, upper, lower, root
+      logical :: scaled, valid
+      integer(int64) :: total_elements
 
-      if (.not. gradient%initialized) then
+      norm = -1.0_real64
+      if (.not. gradient%initialized) return
+      total_elements = size(gradient%token_embedding, kind=int64) + &
+                       size(gradient%output_bias, kind=int64) + &
+                       size(gradient%query, kind=int64) + &
+                       size(gradient%key, kind=int64) + &
+                       size(gradient%value, kind=int64) + &
+                       size(gradient%attention_output, kind=int64) + &
+                       size(gradient%attention_rms, kind=int64) + &
+                       size(gradient%ffn_rms, kind=int64) + &
+                       size(gradient%ffn_gate, kind=int64) + &
+                       size(gradient%ffn_value, kind=int64) + &
+                       size(gradient%ffn_output, kind=int64) + &
+                       size(gradient%distance_bias, kind=int64) + &
+                       size(gradient%decay_logit, kind=int64) + &
+                       size(gradient%write_strength_logit, kind=int64) + &
+                       size(gradient%scale_logit, kind=int64) + &
+                       size(gradient%channel_logit, kind=int64) + &
+                       size(gradient%channel_gate_proj, kind=int64) + &
+                       size(gradient%scale_gate_proj, kind=int64) + &
+                       size(gradient%channel_router, kind=int64) + &
+                       size(gradient%induction_mix, kind=int64) + &
+                       size(gradient%slot_query_proj, kind=int64) + &
+                       size(gradient%slot_key_proj, kind=int64) + &
+                       size(gradient%slot_value_proj, kind=int64) + &
+                       size(gradient%slot_read_proj, kind=int64) + 1_int64
+      ! With |x| <= upper the sum of all x*x is bounded by huge/4, with
+      ! headroom for rounding. Values below lower would lose precision when
+      ! squared and therefore use the scaled path too.
+      upper = sqrt(huge(0.0_real64) / (4.0_real64 * real(total_elements, real64)))
+      lower = sqrt(tiny(0.0_real64))
+      squares = 0.0_real64
+      scale = 0.0_real64
+      scaled_squares = 0.0_real64
+      scaled = .false.
+      valid = .true.
+      call add_norm_values(gradient%token_embedding, size(gradient%token_embedding, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%output_bias, size(gradient%output_bias, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%query, size(gradient%query, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%key, size(gradient%key, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%value, size(gradient%value, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%attention_output, size(gradient%attention_output, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%attention_rms, size(gradient%attention_rms, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%ffn_rms, size(gradient%ffn_rms, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%ffn_gate, size(gradient%ffn_gate, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%ffn_value, size(gradient%ffn_value, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%ffn_output, size(gradient%ffn_output, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%distance_bias, size(gradient%distance_bias, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%decay_logit, size(gradient%decay_logit, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%write_strength_logit, size(gradient%write_strength_logit, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%scale_logit, size(gradient%scale_logit, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%channel_logit, size(gradient%channel_logit, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%channel_gate_proj, size(gradient%channel_gate_proj, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%scale_gate_proj, size(gradient%scale_gate_proj, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%channel_router, size(gradient%channel_router, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%induction_mix, size(gradient%induction_mix, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%slot_query_proj, size(gradient%slot_query_proj, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%slot_key_proj, size(gradient%slot_key_proj, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%slot_value_proj, size(gradient%slot_value_proj, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values(gradient%slot_read_proj, size(gradient%slot_read_proj, kind=int64), &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      call add_norm_values([gradient%slot_salience_weight], 1_int64, &
+                           upper, lower, squares, scale, scaled_squares, scaled, valid)
+      if (.not. valid) return
+      if (.not. scaled) then
+         norm = sqrt(squares)
+      else if (scale == 0.0_real64) then
          norm = 0.0_real64
-         return
+      else
+         root = sqrt(scaled_squares)
+         if (root == 1.0_real64) then
+            norm = scale
+         else
+            ! Equality is rejected conservatively because huge/root can round
+            ! upward before the subsequent multiplication.
+            if (scale >= huge(0.0_real64) / root) return
+            norm = scale * root
+         end if
       end if
-      squares = sum(gradient%token_embedding**2) + sum(gradient%output_bias**2) + &
-                sum(gradient%query**2) + sum(gradient%key**2) + sum(gradient%value**2) + &
-                sum(gradient%attention_output**2) + sum(gradient%attention_rms**2) + &
-                sum(gradient%ffn_rms**2) + sum(gradient%ffn_gate**2) + sum(gradient%ffn_value**2) + &
-                sum(gradient%ffn_output**2) + sum(gradient%distance_bias**2) + &
-                sum(gradient%decay_logit**2) + sum(gradient%write_strength_logit**2) + &
-                sum(gradient%scale_logit**2) + sum(gradient%channel_logit**2) + &
-                sum(gradient%channel_gate_proj**2) + sum(gradient%scale_gate_proj**2) + &
-                sum(gradient%channel_router**2) + sum(gradient%induction_mix**2) + &
-                sum(gradient%slot_query_proj**2) + sum(gradient%slot_key_proj**2) + &
-                sum(gradient%slot_value_proj**2) + sum(gradient%slot_read_proj**2) + &
-                gradient%slot_salience_weight**2
-      norm = sqrt(squares)
    end function fbc_gradient_norm
+
+   ! Sequence association lets rank-1/2/3 contiguous allocatables share this
+   ! single streaming kernel without materializing a flattened copy.
+   pure subroutine add_norm_values(values, count, upper, lower, squares, scale, scaled_squares, scaled, valid)
+      real(real64), intent(in) :: values(*)
+      integer(int64), intent(in) :: count
+      real(real64), intent(in) :: upper, lower
+      real(real64), intent(inout) :: squares, scale, scaled_squares
+      logical, intent(inout) :: scaled, valid
+      integer, parameter :: block_size = 256
+      integer(int64), parameter :: magnitude_mask = int(z'7FFFFFFFFFFFFFFF', int64)
+      integer(int64) :: first, index, bits, magnitude_bits, upper_bits, lower_bits
+      integer :: index_in_block, block_length
+      real(real64) :: safe_value, block_squares, magnitude, ratio
+      logical :: exceptional, ordinary, binary64
+
+      if (.not. valid) return
+      binary64 = storage_size(upper) == 64 .and. radix(upper) == 2 .and. digits(upper) == 53 .and. &
+                 maxexponent(upper) == 1024 .and. minexponent(upper) == -1021
+      if (binary64) then
+         upper_bits = transfer(upper, 0_int64)
+         lower_bits = transfer(lower, 0_int64)
+      else
+         upper_bits = 0_int64
+         lower_bits = 0_int64
+      end if
+      first = 1_int64
+      do while (first <= count)
+         block_length = int(min(int(block_size, int64), count - first + 1_int64))
+         if (.not. scaled .and. binary64) then
+            ! Mask unsafe bit patterns to zero before floating arithmetic;
+            ! both the finite check and squared reduction share this pass.
+            exceptional = .false.
+            block_squares = 0.0_real64
+            do index_in_block = 1, block_length
+               index = first + int(index_in_block - 1, int64)
+               bits = transfer(values(index), 0_int64)
+               magnitude_bits = iand(bits, magnitude_mask)
+               ordinary = magnitude_bits <= upper_bits .and. &
+                          (magnitude_bits == 0_int64 .or. magnitude_bits >= lower_bits)
+               safe_value = transfer(merge(bits, 0_int64, ordinary), 0.0_real64)
+               block_squares = block_squares + safe_value * safe_value
+               exceptional = exceptional .or. .not. ordinary
+            end do
+            squares = squares + block_squares
+            if (exceptional) then
+               ! Reread only an exceptional block, not a full gradient array.
+               ! Normal elements in it have already contributed above.
+               do index_in_block = 1, block_length
+                  index = first + int(index_in_block - 1, int64)
+                  bits = transfer(values(index), 0_int64)
+                  magnitude_bits = iand(bits, magnitude_mask)
+                  ordinary = magnitude_bits <= upper_bits .and. &
+                             (magnitude_bits == 0_int64 .or. magnitude_bits >= lower_bits)
+                  if (ordinary) cycle
+                  if (.not. gradient_value_is_finite(values(index))) then
+                     valid = .false.
+                     return
+                  end if
+                  magnitude = abs(values(index))
+                  if (.not. scaled) then
+                     scale = sqrt(squares)
+                     if (scale > 0.0_real64) scaled_squares = 1.0_real64
+                     scaled = .true.
+                  end if
+                  if (scale < magnitude) then
+                     ratio = scale / magnitude
+                     scaled_squares = 1.0_real64 + scaled_squares * ratio * ratio
+                     scale = magnitude
+                  else
+                     ratio = magnitude / scale
+                     scaled_squares = scaled_squares + ratio * ratio
+                  end if
+               end do
+            end if
+         else
+            ! A prior exceptional value, or a non-IEEE representation, uses
+            ! the scalar scaled recurrence without any additional array pass.
+            do index = first, first + int(block_length - 1, int64)
+               if (.not. gradient_value_is_finite(values(index))) then
+                  valid = .false.
+                  return
+               end if
+               magnitude = abs(values(index))
+               if (.not. scaled) then
+                  if (magnitude > upper .or. (magnitude > 0.0_real64 .and. magnitude < lower)) then
+                     scale = sqrt(squares)
+                     if (scale > 0.0_real64) scaled_squares = 1.0_real64
+                     scaled = .true.
+                  else
+                     squares = squares + values(index) * values(index)
+                     cycle
+                  end if
+               end if
+               if (magnitude == 0.0_real64) cycle
+               if (scale < magnitude) then
+                  ratio = scale / magnitude
+                  scaled_squares = 1.0_real64 + scaled_squares * ratio * ratio
+                  scale = magnitude
+               else
+                  ratio = magnitude / scale
+                  scaled_squares = scaled_squares + ratio * ratio
+               end if
+            end do
+         end if
+         first = first + int(block_length, int64)
+      end do
+   end subroutine add_norm_values
 
    !> dLoss/dParameters for the step whose activations are in `workspace`.
    !>
@@ -266,13 +485,61 @@ contains
       real(real64) :: ddecay, dwrite, dgate_raw, lambda, gate_cached, write_signoid
 
       status = FBC_OK
-      if (.not. fbc_model_is_ready(model) .or. .not. gradient%initialized) then
+      if (.not. fbc_state_is_ready(state, model) .or. .not. workspace%initialized .or. .not. gradient%initialized) then
+         status = FBC_ERR_NOT_READY
+         return
+      end if
+      if (.not. fbc_layout_matches(workspace%layout, model%config) .or. &
+          .not. fbc_layout_matches(gradient%layout, model%config)) then
          status = FBC_ERR_NOT_READY
          return
       end if
       if (size(dlogits) /= model%config%vocabulary_size) then
          status = FBC_ERR_INVALID_ARGUMENT
          return
+      end if
+      if (model%training_rule /= FBC_TRAINING_RULE_V5 .and. model%training_rule /= FBC_TRAINING_RULE_V6 .and. &
+          model%training_rule /= FBC_TRAINING_RULE_V7) then
+         status = FBC_ERR_INVALID_ARGUMENT
+         return
+      end if
+      if (state%anchored_slots .neqv. &
+          (model%training_rule == FBC_TRAINING_RULE_V7 .and. model%config%memory_slots > 1_int32)) then
+         status = FBC_ERR_ORDER
+         return
+      end if
+      if (workspace%token < 1_int32 .or. workspace%token > model%config%vocabulary_size .or. &
+          workspace%local_count < 0_int32 .or. workspace%local_count > state%local_window .or. &
+          workspace%forward_step <= 0_int64 .or. state%steps < 0_int64) then
+         status = FBC_ERR_ORDER
+         return
+      end if
+      if (state%cache_count < 0_int32) then
+         if (state%steps == huge(0_int64)) then
+            status = FBC_ERR_ORDER
+            return
+         end if
+         if (workspace%forward_step /= state%steps + 1_int64) then
+            status = FBC_ERR_ORDER
+            return
+         end if
+         if (model%training_rule == FBC_TRAINING_RULE_V5 .or. &
+             -1_int32 - state%cache_count /= workspace%local_count) then
+            status = FBC_ERR_ORDER
+            return
+         end if
+      else
+         if (state%cache_count > state%local_window .or. workspace%forward_step /= state%steps) then
+            status = FBC_ERR_ORDER
+            return
+         end if
+         if (model%training_rule /= FBC_TRAINING_RULE_V5 .and. &
+             workspace%local_count == model%config%local_window) then
+            ! The evicted key/value are no longer available: returning a plausible
+            ! but wrong gradient would be worse than failing explicitly.
+            status = FBC_ERR_ORDER
+            return
+         end if
       end if
       attention_input = workspace%rhat_attention * model%attention_rms
       width = model%config%width
@@ -302,7 +569,11 @@ contains
 
       ! ---- 2. residual stream and the gated FFN -----------------------------
       dr = dn
-      gradient%ffn_output = gradient%ffn_output + fbc_outer(dr, workspace%ffn_gated)
+      if (model%training_rule == FBC_TRAINING_RULE_V5) then
+         gradient%ffn_output = gradient%ffn_output + fbc_outer(dr, workspace%ffn_gated)
+      else
+         call fbc_outer_add(gradient%ffn_output, dr, workspace%ffn_gated)
+      end if
       dv_ffn = matmul(dr, model%ffn_output)
       do component = 1_int32, ffn
          sigmoid_value = fbc_sigmoid(workspace%ffn_pre_gate(component))
@@ -310,8 +581,13 @@ contains
          dh_ffn(component) = dv_ffn(component) * tanh_value * sigmoid_value * (1.0_real64 - sigmoid_value)
          du_ffn(component) = dv_ffn(component) * sigmoid_value * (1.0_real64 - tanh_value * tanh_value)
       end do
-      gradient%ffn_gate = gradient%ffn_gate + fbc_outer(dh_ffn, workspace%normalized)
-      gradient%ffn_value = gradient%ffn_value + fbc_outer(du_ffn, workspace%normalized)
+      if (model%training_rule == FBC_TRAINING_RULE_V5) then
+         gradient%ffn_gate = gradient%ffn_gate + fbc_outer(dh_ffn, workspace%normalized)
+         gradient%ffn_value = gradient%ffn_value + fbc_outer(du_ffn, workspace%normalized)
+      else
+         call fbc_outer_add(gradient%ffn_gate, dh_ffn, workspace%normalized)
+         call fbc_outer_add(gradient%ffn_value, du_ffn, workspace%normalized)
+      end if
       dn2 = matmul(dh_ffn, model%ffn_gate) + matmul(du_ffn, model%ffn_value)
 
       ! ---- 3. second RMSNorm -------------------------------------------------
@@ -326,7 +602,11 @@ contains
       dr = dr + dn
 
       ! ---- 4. attention residual and the output projection ------------------
-      gradient%attention_output = gradient%attention_output + fbc_outer(dr, workspace%combined)
+      if (model%training_rule == FBC_TRAINING_RULE_V5) then
+         gradient%attention_output = gradient%attention_output + fbc_outer(dr, workspace%combined)
+      else
+         call fbc_outer_add(gradient%attention_output, dr, workspace%combined)
+      end if
       dc = matmul(dr, model%attention_output)
       dx = dr
 
@@ -363,8 +643,11 @@ contains
       dslot_channel = workspace%channel_alpha(FBC_CHANNEL_SLOTS) * dc + &
                       dcontext_source(:, FBC_CHANNEL_SLOTS)
       dslot_read = matmul(dslot_channel, model%slot_read_proj)
-      gradient%slot_read_proj = gradient%slot_read_proj + &
-         fbc_outer(dslot_channel, workspace%slot_read)
+      if (model%training_rule == FBC_TRAINING_RULE_V5) then
+         gradient%slot_read_proj = gradient%slot_read_proj + fbc_outer(dslot_channel, workspace%slot_read)
+      else
+         call fbc_outer_add(gradient%slot_read_proj, dslot_channel, workspace%slot_read)
+      end if
       do slot = 1_int32, slots
          dslot_read_score(slot) = dot_product(dslot_read, state%slot_value(:, slot))
       end do
@@ -397,6 +680,9 @@ contains
                         dot_product(dslot_value_after, workspace%slot_value_delta(:, slot)) + &
                         (1.0_real64 - model%config%slot_decay) * dsalience(slot))
          write_slope = gate * (1.0_real64 - gate) * write_slope / model%config%slot_temperature
+         ! The anchored component is not written from slot_write_key. Keep its
+         ! gate/read derivatives, but omit the direct write derivative only.
+         if (state%anchored_slots) dslot_key_after(1_int32) = 0.0_real64
          dslot_key = dslot_key + gate * dslot_key_after
          dslot_value = dslot_value + gate * dslot_value_after
          ! K_before is recovered exactly: K_after = K_before + g * delta.
@@ -483,8 +769,15 @@ contains
             ! refreshes the cache, which is exactly what the probe caught.
             write_signoid = fbc_sigmoid(model%write_strength_logit(scale))
             dgate_raw = 2.0_real64 * write_signoid
-            gradient%decay_logit(scale) = gradient%decay_logit(scale) + &
-               (ddecay - dwrite * dgate_raw) * lambda * (1.0_real64 - lambda)
+            ! lambda is clamped in fbc_refresh_dynamics. Outside the open
+            ! interval it is locally constant, so the v6 derivative is zero
+            ! (also chosen at the two nondifferentiable boundary points). The
+            ! v5 branch is retained exactly for legacy checkpoint continuation.
+            if (model%training_rule == FBC_TRAINING_RULE_V5 .or. &
+                (lambda > FBC_MIN_DECAY .and. lambda < FBC_MAX_DECAY)) then
+               gradient%decay_logit(scale) = gradient%decay_logit(scale) + &
+                  (ddecay - dwrite * dgate_raw) * lambda * (1.0_real64 - lambda)
+            end if
             ! d g / d write_logit = (1 - lambda) * 2 s (1 - s).
             gradient%write_strength_logit(scale) = gradient%write_strength_logit(scale) + &
                dwrite * (1.0_real64 - lambda) * dgate_raw * (1.0_real64 - write_signoid)
@@ -609,6 +902,20 @@ contains
 
    !> outer(a, b) with the model's exact ranks, so no allocatable temporary is
    !> created per token.
+   ! V6 accumulates the outer product by columns directly into the existing
+   ! gradient, avoiding a fresh matrix temporary for each token. Each element
+   ! still sees one multiplication and one addition; V5 keeps the original
+   ! expression to avoid changing legacy continuation on other compilers.
+   pure subroutine fbc_outer_add(accumulator, left, right)
+      real(real64), intent(inout) :: accumulator(:, :)
+      real(real64), intent(in) :: left(:), right(:)
+      integer(int32) :: column
+
+      do column = 1_int32, size(right, kind=int32)
+         accumulator(:, column) = accumulator(:, column) + left * right(column)
+      end do
+   end subroutine fbc_outer_add
+
    pure function fbc_outer(left, right) result(product)
       real(real64), intent(in) :: left(:), right(:)
       real(real64) :: product(size(left, kind=int32), size(right, kind=int32))

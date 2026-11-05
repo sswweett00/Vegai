@@ -26,18 +26,27 @@ program test_all
    use calibrated_decoder
    use vocabulary
    use test_support
+!$ use omp_lib, only: omp_get_max_threads, omp_set_num_threads
    implicit none
 
+   ! This legacy property suite uses fixed fixture names and replacement writes.
+   ! Never run it in an arbitrary working directory without the runner's marker.
+   call require_isolated_fixture_directory()
    call test_hypervector_algebra()
    call test_symbolic_memory()
    call test_reasoning_pipeline()
    call test_resonator_network()
    call test_tokenless_signal_field()
    call test_utf8_record_stream()
+   call test_neural_projection_boundaries()
+   call test_neural_loss_and_ranking()
+   call test_neural_resource_safety()
    call test_neural_causal_design()
    call test_neural_continuation_checkpoint()
+   call test_nova_batch_mean()
    call test_nova_optimizer_contract()
    call test_adamw_optimizer_contract()
+   call test_neural_checkpoint_corruption()
    call test_batched_optimizer_contract()
    call test_text_ingest()
    call test_fortran_control()
@@ -49,6 +58,24 @@ program test_all
    call finish_tests()
 
 contains
+
+   subroutine require_isolated_fixture_directory()
+      character(len=128) :: token, marker
+      integer :: unit, io_status, env_status, token_length, close_status
+
+      token = ''
+      marker = ''
+      call get_environment_variable('VEGAI_TEST_SCRATCH_TOKEN', token, length=token_length, status=env_status)
+      if (env_status /= 0 .or. token_length < 1 .or. token_length > len(token)) &
+         error stop 'property tests require an isolated fixture directory; use CTest, make test, or the fpm runner'
+      open(newunit=unit, file='.vegai-test-scratch', status='old', action='read', form='formatted', iostat=io_status)
+      if (io_status /= 0) &
+         error stop 'property tests require an isolated fixture directory; scratch marker is missing'
+      read(unit, '(A)', iostat=io_status) marker
+      close(unit, iostat=close_status)
+      if (io_status /= 0 .or. close_status /= 0 .or. token /= marker) &
+         error stop 'property tests require an isolated fixture directory; scratch marker does not match'
+   end subroutine require_isolated_fixture_directory
 
    subroutine test_hypervector_algebra()
       type(hv_t) :: a, b, c, d, zero, noisy, noisy_again, bundled, expected
@@ -621,6 +648,185 @@ contains
       if (io_status == 0) close(unit, status='delete')
    end subroutine test_utf8_record_stream
 
+   subroutine test_neural_projection_boundaries()
+      type(neural_decoder_t) :: model
+      type(neural_decoder_config_t) :: config
+      integer(int32), parameter :: widths = 8_int32, vocabulary_size = 16_int32
+      integer(int32), parameter :: counts(*) = [1_int32, 2_int32, 15_int32, 16_int32, 17_int32, 31_int32, 32_int32]
+      real(real32), allocatable :: hidden(:, :), padded_hidden(:, :), projected(:, :), padded_logits(:, :)
+      real(real32) :: expected(vocabulary_size)
+      integer(int32) :: status, count, padding, i, feature
+      integer :: index
+
+      config = neural_decoder_config_t(vocabulary_size=vocabulary_size, width=widths, heads=2_int32, &
+                                       local_window=4_int32, ffn_width=16_int32)
+      call neural_decoder_init(model, config, 313131_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'projection boundary model initializes')
+      if (status /= NRD_OK) return
+      do index = 1, size(counts)
+         count = counts(index)
+         padding = ((count + NRD_LOGIT_BLOCK_LANES - 1_int32) / NRD_LOGIT_BLOCK_LANES) * NRD_LOGIT_BLOCK_LANES
+         allocate(hidden(count, widths), padded_hidden(padding, widths), &
+                  projected(count, vocabulary_size), padded_logits(count, vocabulary_size))
+         do feature = 1_int32, widths
+            do i = 1_int32, count
+               hidden(i, feature) = real(modulo(i * 7_int32 + feature * 11_int32, 17_int32) - 8_int32, real32) / &
+                                    8.0_real32
+            end do
+         end do
+         padded_hidden = 0.0_real32
+         padded_hidden(1:count, :) = hidden
+         ! The default API accepts exactly COUNT rows, including partial lane
+         ! groups. -fcheck=all must not find an out-of-bounds read here.
+         call neural_decoder_project_logits(model, hidden, count, projected, status)
+         call assert_i32_equal(status, NRD_OK, 'unpadded projection accepts an exact-size hidden block')
+         do i = 1_int32, count
+            expected = matmul(hidden(i, :), model%token_embedding) + model%output_bias
+            call assert_true(maxval(abs(projected(i, :) - expected)) < 1.0e-5_real32, &
+                             'unpadded projection agrees with independent matrix product')
+         end do
+         call neural_decoder_project_logits(model, padded_hidden, count, padded_logits, status, padded=.true.)
+         call assert_i32_equal(status, NRD_OK, 'zero-padded projection accepts a full lane block')
+         call assert_true(maxval(abs(projected - padded_logits)) < 1.0e-6_real32, &
+                          'padded fast projection matches safe projection')
+         if (padding > count) then
+            call neural_decoder_project_logits(model, hidden, count, padded_logits, status, padded=.true.)
+            call assert_i32_equal(status, NRD_ERR_INVALID_ARGUMENT, 'padded projection rejects insufficient rows')
+         end if
+         deallocate(hidden, padded_hidden, projected, padded_logits)
+      end do
+      call neural_decoder_destroy(model)
+   end subroutine test_neural_projection_boundaries
+
+   subroutine test_neural_loss_and_ranking()
+      type(neural_decoder_t) :: model, batched_model, single_model, wide_model
+      type(neural_decoder_config_t) :: architecture
+      type(neural_train_config_t) :: config
+      type(neural_train_state_t) :: state, single_state
+      type(neural_train_metrics_t) :: metrics, batched_metrics, single_metrics, one_thread, four_threads
+      integer(int32) :: status, index
+      integer(int32), parameter :: eval_tokens(2) = [1_int32, 2_int32]
+      integer(int32), parameter :: train_tokens(3) = [1_int32, 2_int32, 2_int32]
+      integer(int32), parameter :: tie_tokens(2) = [1_int32, 5_int32]
+      integer(int32), parameter :: wide_tokens(4) = [1_int32, 2_int32, 513_int32, 1024_int32]
+      real(real64) :: wide_gap
+!$    integer :: previous_threads
+
+      architecture%vocabulary_size = 8_int32
+      architecture%width = 8_int32
+      architecture%heads = 2_int32
+      architecture%ffn_width = 16_int32
+      architecture%local_window = 4_int32
+      call neural_decoder_init(model, architecture, 42_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'extreme neural loss fixture initializes')
+      model%token_embedding = 0.0_real32
+      model%output_bias = [1000.0_real32, -1000.0_real32, -600.0_real32, -700.0_real32, &
+                           -800.0_real32, -900.0_real32, -1100.0_real32, -1200.0_real32]
+      batched_model = model
+      call neural_evaluate_token_sequence(model, eval_tokens, 2_int32, config, metrics, status)
+      call assert_i32_equal(status, NPT_OK, 'extreme neural logits evaluate successfully')
+      call assert_true(abs(metrics%cumulative_nll - 2000.0_real64) < 1.0e-12_real64, &
+                       'neural NLL retains a 2000-nat loss despite probability underflow')
+      call assert_true(metrics%top1_correct == 0_int64 .and. metrics%top5_correct == 0_int64, &
+                       'underflowed distinct logits retain their true top-five ranking')
+
+      config%optimizer = NPT_OPTIMIZER_SGD
+      config%weight_decay = 0.0_real64
+      single_model = model
+      config%gradient_accumulation = 1_int32
+      call neural_train_token_sequence(single_model, eval_tokens, 2_int32, config, single_state, single_metrics, status)
+      call assert_true(status == NPT_OK .and. single_state%updates_completed == 1_int64, &
+                       'zero hidden-vector clipping succeeds in single-token training')
+      config%gradient_accumulation = 2_int32
+      call neural_train_token_sequence(batched_model, train_tokens, 3_int32, config, state, batched_metrics, status)
+      call assert_i32_equal(status, NPT_OK, 'extreme batched neural logits train successfully')
+      call assert_true(abs(batched_metrics%cumulative_nll - 4000.0_real64) < 1.0e-12_real64 .and. &
+                       batched_metrics%top5_correct == 0_int64, 'batched scoring uses the same stable loss and ranking')
+
+      model%output_bias = 0.0_real32
+      metrics = neural_train_metrics_t()
+      call neural_evaluate_token_sequence(model, tie_tokens, 2_int32, config, metrics, status)
+      call assert_true(status == NPT_OK .and. metrics%top5_correct == 1_int64 .and. metrics%top1_correct == 0_int64, &
+                       'exact logit ties rank lower token indices first')
+      model%output_bias(1) = -huge(0.0_real32)
+      model%output_bias(2) = huge(0.0_real32)
+      metrics = neural_train_metrics_t()
+      call neural_evaluate_token_sequence(model, [2_int32, 1_int32], 2_int32, config, metrics, status)
+      wide_gap = 2.0_real64 * real(huge(0.0_real32), real64)
+      call assert_true(status == NPT_OK .and. abs(metrics%cumulative_nll / wide_gap - 1.0_real64) < 1.0e-12_real64, &
+                       'opposite finite real32 extremes have a finite real64 logit-space NLL')
+      call neural_decoder_destroy(model)
+      call neural_decoder_destroy(batched_model)
+      call neural_decoder_destroy(single_model)
+
+      architecture%vocabulary_size = 1024_int32
+      call neural_decoder_init(wide_model, architecture, 42_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'parallel softmax fixture initializes')
+      wide_model%token_embedding = 0.0_real32
+      do index = 1_int32, architecture%vocabulary_size
+         wide_model%output_bias(index) = real(modulo(index, 37_int32) - 18_int32, real32) / 3.0_real32
+      end do
+!$    previous_threads = omp_get_max_threads()
+!$    call omp_set_num_threads(1)
+      call neural_evaluate_token_sequence(wide_model, wide_tokens, 4_int32, config, one_thread, status)
+      call assert_i32_equal(status, NPT_OK, 'single-thread blocked softmax evaluation succeeds')
+!$    call omp_set_num_threads(4)
+      call neural_evaluate_token_sequence(wide_model, wide_tokens, 4_int32, config, four_threads, status)
+!$    call omp_set_num_threads(previous_threads)
+      call assert_i32_equal(status, NPT_OK, 'multi-thread blocked softmax evaluation succeeds')
+      call assert_true(one_thread%cumulative_nll == four_threads%cumulative_nll .and. &
+                       one_thread%top1_correct == four_threads%top1_correct .and. &
+                       one_thread%top5_correct == four_threads%top5_correct, &
+                       'blocked softmax and ranking are thread-count deterministic')
+      call neural_decoder_destroy(wide_model)
+   end subroutine test_neural_loss_and_ranking
+
+   subroutine test_neural_resource_safety()
+      type(neural_decoder_config_t) :: config
+      type(neural_resource_plan_t) :: plan
+      type(neural_training_resource_plan_t) :: train_plan
+      type(neural_train_config_t) :: train_config
+      type(bpe_model_t) :: bpe
+      integer(int32) :: status
+
+      config%width = NRD_MAX_WIDTH
+      config%heads = 1_int32
+      config%ffn_width = huge(0_int32)
+      config%vocabulary_size = huge(0_int32)
+      config%local_window = 4096_int32
+      call neural_decoder_plan(config, plan, status)
+      call assert_true(status == NRD_OK .and. plan%parameter_count == 145241090096627712_int64 .and. &
+                       plan%parameter_bytes_real32 == 580964360386510848_int64 .and. &
+                       plan%per_stream_state_bytes_real32 == 1126449729765376_int64, &
+                       'neural resource counts remain exact at the largest supported width')
+      call bpe_init(bpe, 1_int32, status)
+      call assert_i32_equal(status, BPE_OK, 'resource-bound tokenizer fixture initializes')
+      call neural_training_resource_plan(config, bpe, train_config, train_plan, status)
+      call assert_true(status == NPT_OK .and. train_plan%minimum_resident_bytes > &
+                       plan%parameter_bytes_real32 .and. train_plan%optimizer_state_bytes_real64 > 0_int64, &
+                       'neural training resident estimate remains positive and non-wrapping')
+      call bpe_destroy(bpe)
+      config%width = NRD_MAX_WIDTH + 2_int32
+      call neural_decoder_plan(config, plan, status)
+      call assert_true(status == NRD_ERR_INVALID_ARGUMENT .and. plan%parameter_count == 0_int64, &
+                       'neural plan rejects a width outside the safe int64 resource bound')
+      config = neural_decoder_config_t()
+      config%heads = 0_int32
+      call neural_decoder_plan(config, plan, status)
+      call assert_i32_equal(status, NRD_ERR_INVALID_ARGUMENT, 'neural plan rejects zero heads before division')
+      config = neural_decoder_config_t()
+      config%rms_epsilon = transfer(int(z'7F800000', int32), 0.0_real32)
+      call neural_decoder_plan(config, plan, status)
+      call assert_i32_equal(status, NRD_ERR_INVALID_ARGUMENT, 'neural plan rejects infinite epsilon')
+      config%rms_epsilon = transfer(int(z'7F800001', int32), 0.0_real32)
+      call neural_decoder_plan(config, plan, status)
+      call assert_i32_equal(status, NRD_ERR_INVALID_ARGUMENT, 'neural plan rejects signaling NaN without an FPE')
+      config = neural_decoder_config_t()
+      config%memory_decay = transfer(int(z'7FC00000', int32), 0.0_real32)
+      call neural_decoder_plan(config, plan, status)
+      call assert_i32_equal(status, NRD_ERR_INVALID_ARGUMENT, 'neural plan rejects NaN decay')
+   end subroutine test_neural_resource_safety
+
    subroutine test_neural_causal_design()
       type(bpe_model_t) :: bpe, trained_bpe, fast_bpe
       type(bpe_training_config_t) :: tokenizer_train_config
@@ -992,12 +1198,80 @@ contains
    ! single velocity array, a checkpoint that round-trips its state bit-exactly,
    ! and chunk+resume identity.  The last one is the strongest: it fails if any
    ! part of the optimizer state is not persisted.
+   subroutine test_nova_batch_mean()
+      type(neural_decoder_t) :: model
+      type(neural_decoder_config_t) :: decoder_config
+      type(neural_decoder_state_t) :: decoder_state
+      type(neural_train_config_t) :: config
+      type(neural_train_state_t) :: state
+      type(neural_train_metrics_t) :: metrics
+      integer(int32), parameter :: width = 8_int32, vocabulary_size = 16_int32
+      integer(int32), parameter :: tokens(3) = [1_int32, 2_int32, 3_int32]
+      real(real32) :: hidden(2, width), logits(2, vocabulary_size), residuals(vocabulary_size, 2)
+      real(real32) :: expected_bias(vocabulary_size), expected_gradient(width), expected_energy
+      real(real64) :: probabilities(vocabulary_size), maximum
+      integer(int32) :: status, slot, token
+
+      decoder_config = neural_decoder_config_t(vocabulary_size=vocabulary_size, width=width, heads=2_int32, &
+                                               local_window=4_int32, ffn_width=16_int32)
+      call neural_decoder_init(model, decoder_config, 919191_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'NOVA batch-mean model initializes')
+      if (status /= NRD_OK) return
+      call neural_decoder_state_init(decoder_state, model, status)
+      call assert_i32_equal(status, NRD_OK, 'NOVA batch-mean decoder state initializes')
+      if (status /= NRD_OK) then
+         call neural_decoder_destroy(model)
+         return
+      end if
+      do slot = 1_int32, 2_int32
+         call neural_decoder_step_hidden(model, decoder_state, tokens(slot), hidden(slot, :), status)
+         call assert_i32_equal(status, NRD_OK, 'NOVA reference hidden state is computed')
+      end do
+      call neural_decoder_project_logits(model, hidden, 2_int32, logits, status)
+      call assert_i32_equal(status, NRD_OK, 'NOVA reference logits are computed')
+      do slot = 1_int32, 2_int32
+         maximum = real(maxval(logits(slot, :)), real64)
+         probabilities = exp(real(logits(slot, :), real64) - maximum)
+         probabilities = probabilities / sum(probabilities)
+         residuals(:, slot) = real(probabilities, real32)
+         residuals(tokens(slot + 1_int32), slot) = real(probabilities(tokens(slot + 1_int32)) - 1.0_real64, real32)
+      end do
+      expected_bias = (residuals(:, 1) + residuals(:, 2)) * 0.5_real32
+
+      config = neural_train_config_t(learning_rate=0.01_real64, gradient_clip_norm=1000.0_real64, &
+                                     embedding_value_limit=8.0_real64, maximum_tokens_per_record=8_int32, &
+                                     optimizer=NPT_OPTIMIZER_NOVA, weight_decay=0.0_real64, &
+                                     gradient_accumulation=2_int32)
+      call neural_train_state_init(state)
+      call neural_train_metrics_reset(metrics)
+      call neural_train_token_sequence(model, tokens, 3_int32, config, state, metrics, status)
+      call assert_i32_equal(status, NPT_OK, 'NOVA one-batch update succeeds')
+      call assert_true(state%updates_completed == 1_int64, 'NOVA two predictions produce one update')
+      if (allocated(state%nova_u_bias) .and. allocated(state%nova_u_embedding) .and. allocated(state%nova_energy)) then
+         call assert_true(maxval(abs(state%nova_u_bias - expected_bias)) < 2.0e-6_real32, &
+                          'NOVA bias velocity is the arithmetic mean of batch residuals')
+         do token = 1_int32, vocabulary_size
+            expected_gradient = (residuals(token, 1) * hidden(1, :) + residuals(token, 2) * hidden(2, :)) * &
+                                0.5_real32
+            expected_energy = dot_product(expected_gradient, expected_gradient) / real(width, real32)
+            call assert_true(maxval(abs(state%nova_u_embedding(:, token) - expected_gradient)) < 2.0e-6_real32, &
+                             'NOVA embedding velocity is the arithmetic mean gradient')
+            call assert_true(abs(state%nova_energy(token) - expected_energy) < 2.0e-6_real32, &
+                             'NOVA first-step energy uses the squared mean gradient')
+         end do
+      else
+         call assert_true(.false., 'NOVA batch-mean state is allocated')
+      end if
+      call neural_decoder_state_destroy(decoder_state)
+      call neural_decoder_destroy(model)
+   end subroutine test_nova_batch_mean
+
    subroutine test_nova_optimizer_contract()
       type(bpe_model_t) :: bpe
-      type(neural_decoder_t) :: model, full_model, split_model, restored_model
+      type(neural_decoder_t) :: model, full_model, split_model, restored_model, uninitialized_model
       type(neural_decoder_config_t) :: decoder_config
-      type(neural_train_config_t) :: config, full_config, restored_config
-      type(neural_train_state_t) :: state, full_state, split_state, restored_state
+      type(neural_train_config_t) :: config, full_config, restored_config, default_config, wrong_config
+      type(neural_train_state_t) :: state, full_state, split_state, restored_state, partial_state
       type(neural_train_metrics_t) :: before, after, update_metrics
       type(neural_train_metrics_t) :: full_metrics, split_metrics, resumed_metrics
       type(neural_training_resource_plan_t) :: nova_plan, adam_plan
@@ -1011,7 +1285,13 @@ contains
       character(len=*), parameter :: corpus_path = 'test_neural_nova.txt'
       character(len=*), parameter :: checkpoint_path = 'test_neural_nova.vgnr'
 
-      config = neural_train_config_t(learning_rate=0.02_real64, gradient_clip_norm=4.0_real64, &
+      default_config = neural_train_config_t()
+      call assert_true(default_config%optimizer == NPT_OPTIMIZER_NOVA .and. &
+                       default_config%learning_rate == 0.003_real64, &
+                       'native NOVA default uses the conservative CLI learning rate')
+      ! A conservative toy learning rate is needed once the batch gradient is
+      ! actually averaged; the old uninitialized scale made 0.02 look stable.
+      config = neural_train_config_t(learning_rate=0.001_real64, gradient_clip_norm=4.0_real64, &
                                      embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32, &
                                      optimizer=NPT_OPTIMIZER_NOVA, weight_decay=0.01_real64, &
                                      gradient_accumulation=4_int32)
@@ -1019,7 +1299,7 @@ contains
                        'NOVA configuration with decoupled decay is accepted')
       config%learning_rate = 0.0_real64
       call assert_true(.not. neural_train_config_is_valid(config), 'NOVA rejects a zero learning rate')
-      config%learning_rate = 0.02_real64
+      config%learning_rate = 0.001_real64
 
       do index = 1_int32, token_count
          tokens(index) = modulo(index - 1_int32, 4_int32) + 1_int32
@@ -1068,6 +1348,28 @@ contains
       ! Checkpoint round trip, including the file's declared format version.
       call neural_checkpoint_save(checkpoint_path, model, bpe, config, state, status)
       call assert_i32_equal(status, NPT_OK, 'NOVA checkpoint saves')
+      wrong_config = config
+      wrong_config%optimizer = NPT_OPTIMIZER_ADAMW
+      call neural_train_metrics_reset(update_metrics)
+      call neural_train_token_sequence(model, tokens, token_count, wrong_config, state, update_metrics, status)
+      call assert_i32_equal(status, NPT_ERR_INCOMPATIBLE, 'NOVA state cannot be reused as AdamW state')
+      call assert_true(state%updates_completed == 90_int64 .and. update_metrics%prediction_tokens == 0_int64, &
+                       'incompatible optimizer is rejected before training')
+      call neural_checkpoint_save(checkpoint_path, model, bpe, wrong_config, state, status)
+      call assert_i32_equal(status, NPT_ERR_INVALID_ARGUMENT, 'checkpoint rejects NOVA state tagged as AdamW')
+      wrong_config%optimizer = NPT_OPTIMIZER_SGD
+      wrong_config%weight_decay = 0.0_real64
+      call neural_checkpoint_save(checkpoint_path, model, bpe, wrong_config, state, status)
+      call assert_i32_equal(status, NPT_ERR_INVALID_ARGUMENT, 'checkpoint rejects NOVA state tagged as SGD')
+      ! A complete NOVA state plus a partial Adam state must be rejected before
+      ! SIZE can be called on unallocated Adam arrays, including bounds builds.
+      partial_state = state
+      allocate(partial_state%adam_m_embedding(decoder_config%width, decoder_config%vocabulary_size))
+      partial_state%adam_m_embedding = 0.0_real32
+      call neural_checkpoint_save(checkpoint_path, model, bpe, config, partial_state, status)
+      call assert_i32_equal(status, NPT_ERR_INVALID_ARGUMENT, 'checkpoint rejects mixed partial optimizer state')
+      call neural_checkpoint_save(checkpoint_path, uninitialized_model, bpe, config, state, status)
+      call assert_i32_equal(status, NPT_ERR_INVALID_ARGUMENT, 'checkpoint safely rejects an uninitialized model')
       open(newunit=unit, file=checkpoint_path, status='old', action='read', access='stream', &
            form='unformatted', iostat=io_status)
       call assert_true(io_status == 0, 'NOVA checkpoint reopens for a header probe')
@@ -1099,10 +1401,18 @@ contains
          write(unit, '(A)') 'babababa'
          close(unit)
       end if
-      full_config = neural_train_config_t(learning_rate=0.02_real64, gradient_clip_norm=4.0_real64, &
+      full_config = neural_train_config_t(learning_rate=0.001_real64, gradient_clip_norm=4.0_real64, &
                                           embedding_value_limit=4.0_real64, maximum_tokens_per_record=64_int32, &
                                           optimizer=NPT_OPTIMIZER_NOVA, weight_decay=0.01_real64, &
                                           gradient_accumulation=3_int32)
+      wrong_config = full_config
+      wrong_config%optimizer = NPT_OPTIMIZER_ADAMW
+      call neural_train_metrics_reset(update_metrics)
+      call neural_train_utf8_file(model, bpe, corpus_path, wrong_config, state, update_metrics, status, &
+                                  maximum_new_source_records=1_int64)
+      call assert_i32_equal(status, NPT_ERR_INCOMPATIBLE, 'file trainer rejects an incompatible optimizer state')
+      call assert_true(state%source_records_completed == 0_int64 .and. state%updates_completed == 90_int64 .and. &
+                       update_metrics%prediction_tokens == 0_int64, 'rejection does not advance source cursor or updates')
       call neural_decoder_init(full_model, decoder_config, 848484_int64, status)
       call assert_i32_equal(status, NRD_OK, 'NOVA one-pass model initializes')
       call neural_decoder_init(split_model, decoder_config, 848484_int64, status)
@@ -1151,12 +1461,18 @@ contains
       type(bpe_model_t) :: bpe
       type(neural_decoder_t) :: model, restored_model
       type(neural_decoder_config_t) :: decoder_config
-      type(neural_train_config_t) :: config, restored_config
-      type(neural_train_state_t) :: state, sgd_state, restored_state
+      type(neural_train_config_t) :: config, restored_config, wrong_config, header_config
+      type(neural_train_state_t) :: state, sgd_state, restored_state, header_state
       type(neural_train_metrics_t) :: before, after, update_metrics
-      integer(int32) :: status, tokens(12), index
+      type(neural_decoder_config_t) :: header_decoder
+      integer(int32) :: status, tokens(12), index, header_version, header_bpe_tokens, header_bpe_merges, header_flag
+      integer(int64) :: optimizer_pos, state_optimizer_pos
+      integer(int8), allocatable :: truncated_bytes(:)
       integer :: unit, io_status
+      character(len=8) :: header_magic
       character(len=*), parameter :: checkpoint_path = 'test_adamw_contract.vgnr'
+      character(len=*), parameter :: legacy_path = 'test_adamw_legacy_sgd.vgnr'
+      character(len=*), parameter :: truncated_path = 'test_adamw_truncated.vgnr'
 
       do index = 1_int32, size(tokens, kind=int32)
          tokens(index) = modulo(index - 1_int32, 4_int32) + 1_int32
@@ -1227,6 +1543,20 @@ contains
       ! would silently change update semantics.
       call neural_checkpoint_save(checkpoint_path, model, bpe, config, state, status)
       call assert_i32_equal(status, NPT_OK, 'AdamW checkpoint saves')
+      wrong_config = config
+      wrong_config%optimizer = NPT_OPTIMIZER_SGD
+      wrong_config%weight_decay = 0.0_real64
+      call neural_train_metrics_reset(update_metrics)
+      call neural_train_token_sequence(model, tokens, size(tokens, kind=int32), wrong_config, state, update_metrics, status)
+      call assert_i32_equal(status, NPT_ERR_INCOMPATIBLE, 'AdamW moments cannot be reused by an SGD update')
+      call assert_true(state%updates_completed == 440_int64 .and. update_metrics%prediction_tokens == 0_int64, &
+                       'incompatible AdamW state is rejected before training')
+      call neural_checkpoint_save(checkpoint_path, model, bpe, wrong_config, state, status)
+      call assert_i32_equal(status, NPT_ERR_INVALID_ARGUMENT, 'checkpoint rejects AdamW state tagged as SGD')
+      wrong_config%optimizer = NPT_OPTIMIZER_NOVA
+      call neural_checkpoint_save(checkpoint_path, model, bpe, wrong_config, state, status)
+      call assert_i32_equal(status, NPT_ERR_INVALID_ARGUMENT, 'checkpoint rejects AdamW state tagged as NOVA')
+      ! The failed saves did not open or truncate the existing checkpoint.
       call neural_checkpoint_load(checkpoint_path, bpe, restored_model, restored_config, restored_state, status)
       call assert_i32_equal(status, NPT_OK, 'AdamW checkpoint loads')
       call assert_true(restored_config%optimizer == NPT_OPTIMIZER_ADAMW .and. &
@@ -1246,6 +1576,79 @@ contains
          call assert_true(.false., 'checkpoint preserves bit-identical AdamW moments')
       end if
 
+      ! Old CLI versions could switch an AdamW checkpoint to SGD while leaving
+      ! unused Adam moments in its payload. Build such a v5 fixture by editing
+      ! only the two optimizer identities, then prove SGD can resume and save.
+      call neural_checkpoint_save(legacy_path, model, bpe, config, state, status)
+      call assert_i32_equal(status, NPT_OK, 'legacy SGD fixture starts from a valid AdamW checkpoint')
+      header_magic = ''
+      header_version = 0_int32
+      header_flag = 0_int32
+      open(newunit=unit, file=legacy_path, status='old', action='readwrite', access='stream', &
+           form='unformatted', iostat=io_status)
+      if (io_status == 0) then
+         read(unit, iostat=io_status) header_magic, header_version
+         if (io_status == 0) read(unit, iostat=io_status) header_decoder%vocabulary_size, header_decoder%width, &
+            header_decoder%heads, header_decoder%local_window, header_decoder%ffn_width, &
+            header_decoder%memory_decay, header_decoder%rms_epsilon, header_decoder%rotary_period
+         if (io_status == 0) read(unit, iostat=io_status) header_bpe_tokens, header_bpe_merges
+         if (io_status == 0) read(unit, iostat=io_status) header_config%trainable_mode, header_config%learning_rate, &
+            header_config%gradient_clip_norm, header_config%embedding_value_limit, header_config%maximum_tokens_per_record
+         inquire(unit=unit, pos=optimizer_pos)
+         if (io_status == 0) read(unit, iostat=io_status) header_config%optimizer, header_config%adam_beta1, &
+            header_config%adam_beta2, header_config%adam_epsilon, header_config%weight_decay, &
+            header_config%label_smoothing, header_config%lr_schedule, header_config%warmup_updates, &
+            header_config%total_updates, header_config%minimum_lr_ratio, header_config%gradient_accumulation
+         if (io_status == 0) read(unit, iostat=io_status) header_state%records_completed, &
+            header_state%source_records_completed, header_state%updates_completed, header_state%tokens_seen, &
+            header_state%cumulative_nll, header_flag
+         inquire(unit=unit, pos=state_optimizer_pos)
+         if (io_status == 0) write(unit, pos=optimizer_pos, iostat=io_status) NPT_OPTIMIZER_SGD
+         if (io_status == 0) write(unit, pos=state_optimizer_pos, iostat=io_status) NPT_OPTIMIZER_SGD
+         close(unit)
+      end if
+      call assert_true(io_status == 0 .and. header_magic == 'VGNR0001' .and. &
+                       header_version == 5_int32 .and. header_flag == 1_int32, 'legacy SGD fixture patches successfully')
+      if (io_status == 0) then
+         ! Stop within the first optimizer array. Debug/FPE builds must report
+         ! the short read without examining still-uninitialized array values.
+         allocate(truncated_bytes(int(state_optimizer_pos + 6_int64, int32)))
+         open(newunit=unit, file=legacy_path, status='old', action='read', access='stream', &
+              form='unformatted', iostat=io_status)
+         if (io_status == 0) then
+            read(unit, iostat=io_status) truncated_bytes
+            close(unit)
+         end if
+         if (io_status == 0) then
+            open(newunit=unit, file=truncated_path, status='replace', action='write', access='stream', &
+                 form='unformatted', iostat=io_status)
+            if (io_status == 0) then
+               write(unit, iostat=io_status) truncated_bytes
+               close(unit)
+            end if
+         end if
+         deallocate(truncated_bytes)
+         call assert_true(io_status == 0, 'truncated optimizer fixture is created')
+         if (io_status == 0) then
+            call neural_checkpoint_load(truncated_path, bpe, restored_model, restored_config, restored_state, status)
+            call assert_i32_equal(status, NPT_ERR_IO, 'truncated optimizer payload is rejected without FPE')
+            open(newunit=unit, file=truncated_path, status='old', iostat=io_status)
+            if (io_status == 0) close(unit, status='delete')
+         end if
+      end if
+      call neural_checkpoint_load(legacy_path, bpe, restored_model, restored_config, restored_state, status)
+      call assert_i32_equal(status, NPT_OK, 'legacy SGD checkpoint with unused Adam moments loads')
+      call assert_true(restored_config%optimizer == NPT_OPTIMIZER_SGD .and. restored_config%weight_decay == 0.0_real64 .and. &
+                       .not. allocated(restored_state%adam_m_embedding), 'unused legacy moments are discarded for SGD')
+      call neural_train_metrics_reset(update_metrics)
+      call neural_train_token_sequence(restored_model, tokens, size(tokens, kind=int32), restored_config, restored_state, &
+                                       update_metrics, status)
+      call assert_i32_equal(status, NPT_OK, 'legacy SGD checkpoint resumes with its original update semantics')
+      call neural_checkpoint_save(legacy_path, restored_model, bpe, restored_config, restored_state, status)
+      call assert_i32_equal(status, NPT_OK, 'resumed legacy SGD checkpoint saves without stale moments')
+      open(newunit=unit, file=legacy_path, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+
       ! The legacy SGD mode stays available and never materializes AdamW state.
       config%optimizer = NPT_OPTIMIZER_SGD
       config%weight_decay = 0.0_real64
@@ -1255,6 +1658,13 @@ contains
       call assert_i32_equal(status, NPT_OK, 'legacy SGD update still succeeds')
       call assert_true(.not. allocated(sgd_state%adam_m_embedding) .and. sgd_state%updates_completed > 0_int64, &
                        'legacy SGD path keeps no AdamW moments while still advancing the cursor')
+      wrong_config = config
+      wrong_config%optimizer = NPT_OPTIMIZER_ADAMW
+      call neural_train_metrics_reset(update_metrics)
+      call neural_train_token_sequence(model, tokens, size(tokens, kind=int32), wrong_config, sgd_state, update_metrics, status)
+      call assert_i32_equal(status, NPT_ERR_INCOMPATIBLE, 'trained SGD state cannot start AdamW with a stale step counter')
+      call assert_true(.not. allocated(sgd_state%adam_m_embedding) .and. update_metrics%prediction_tokens == 0_int64, &
+                       'optimizer switch is rejected before moments or predictions are created')
 
       call neural_decoder_destroy(restored_model)
       call neural_decoder_destroy(model)
@@ -1262,6 +1672,351 @@ contains
       open(newunit=unit, file=checkpoint_path, status='old', iostat=io_status)
       if (io_status == 0) close(unit, status='delete')
    end subroutine test_adamw_optimizer_contract
+
+   !> Checkpoint corruption must be an error, not an FPE or a silent resume.
+   subroutine test_neural_checkpoint_corruption()
+      type(bpe_model_t) :: bpe
+      type(neural_decoder_t) :: model, restored, invalid_model
+      type(neural_decoder_config_t) :: decoder_config, header_decoder
+      type(neural_train_config_t) :: config, restored_config, header_config, invalid_config
+      type(neural_train_state_t) :: state, restored_state, header_state, invalid_state
+      type(neural_train_metrics_t) :: metrics
+      integer(int32), parameter :: tokens(3) = [1_int32, 2_int32, 3_int32]
+      integer(int32) :: status, version, bpe_tokens, bpe_merges, flag, stored_optimizer
+      integer(int64) :: decoder_decay_pos, lr_pos, accum_pos, state_pos, flag_pos, state_optimizer_pos
+      integer(int64) :: moment_pos, variance_pos, payload_pos, wide_pos, file_bytes, after_bytes, real32_bytes
+      integer(int8), allocatable :: original(:), after(:)
+      integer :: unit, io_status, index
+      character(len=8) :: magic
+      character(len=*), parameter :: base_path = 'test_checkpoint_valid_for_corruption.vgnr'
+      character(len=*), parameter :: bad_path = 'test_checkpoint_corrupt.vgnr'
+      character(len=*), parameter :: legacy_path = 'test_checkpoint_v3_wide.vgnr'
+
+      call bpe_init(bpe, 1_int32, status)
+      call assert_i32_equal(status, BPE_OK, 'checkpoint corruption fixture tokenizer initializes')
+      decoder_config = neural_decoder_config_t(vocabulary_size=256_int32, width=8_int32, heads=2_int32, &
+                                               local_window=4_int32, ffn_width=16_int32)
+      call neural_decoder_init(model, decoder_config, 414141_int64, status)
+      call assert_i32_equal(status, NRD_OK, 'checkpoint corruption fixture model initializes')
+      if (status /= NRD_OK) return
+      config = neural_train_config_t(optimizer=NPT_OPTIMIZER_ADAMW, learning_rate=0.001_real64, &
+                                     weight_decay=0.01_real64, maximum_tokens_per_record=8_int32)
+      call neural_train_state_init(state)
+      call neural_train_metrics_reset(metrics)
+      call neural_train_token_sequence(model, tokens, size(tokens, kind=int32), config, state, metrics, status)
+      call assert_i32_equal(status, NPT_OK, 'checkpoint corruption fixture trains')
+      if (status /= NPT_OK) return
+      call neural_checkpoint_save(base_path, model, bpe, config, state, status)
+      call assert_i32_equal(status, NPT_OK, 'checkpoint corruption fixture saves')
+      if (status /= NPT_OK) return
+
+      magic = ''
+      version = 0_int32
+      flag = 0_int32
+      stored_optimizer = 0_int32
+      open(newunit=unit, file=base_path, status='old', action='read', access='stream', &
+           form='unformatted', iostat=io_status)
+      if (io_status == 0) then
+         read(unit, iostat=io_status) magic, version
+         if (io_status == 0) read(unit, iostat=io_status) header_decoder%vocabulary_size, header_decoder%width, &
+            header_decoder%heads, header_decoder%local_window, header_decoder%ffn_width
+         inquire(unit=unit, pos=decoder_decay_pos)
+         if (io_status == 0) read(unit, iostat=io_status) header_decoder%memory_decay, &
+            header_decoder%rms_epsilon, header_decoder%rotary_period
+         if (io_status == 0) read(unit, iostat=io_status) bpe_tokens, bpe_merges, header_config%trainable_mode
+         inquire(unit=unit, pos=lr_pos)
+         if (io_status == 0) read(unit, iostat=io_status) header_config%learning_rate, header_config%gradient_clip_norm, &
+            header_config%embedding_value_limit, header_config%maximum_tokens_per_record
+         if (io_status == 0) read(unit, iostat=io_status) header_config%optimizer, header_config%adam_beta1, &
+            header_config%adam_beta2, header_config%adam_epsilon, header_config%weight_decay, &
+            header_config%label_smoothing, header_config%lr_schedule, header_config%warmup_updates, &
+            header_config%total_updates, header_config%minimum_lr_ratio
+         inquire(unit=unit, pos=accum_pos)
+         if (io_status == 0) read(unit, iostat=io_status) header_config%gradient_accumulation
+         inquire(unit=unit, pos=state_pos)
+         if (io_status == 0) read(unit, iostat=io_status) header_state%records_completed, &
+            header_state%source_records_completed, header_state%updates_completed, header_state%tokens_seen, &
+            header_state%cumulative_nll
+         inquire(unit=unit, pos=flag_pos)
+         if (io_status == 0) read(unit, iostat=io_status) flag
+         inquire(unit=unit, pos=state_optimizer_pos)
+         if (io_status == 0) read(unit, iostat=io_status) stored_optimizer
+         inquire(unit=unit, pos=moment_pos)
+         inquire(unit=unit, size=file_bytes)
+         close(unit)
+      end if
+      call assert_true(io_status == 0 .and. magic == 'VGNR0001' .and. version == 5_int32 .and. &
+                       flag == 1_int32 .and. stored_optimizer == NPT_OPTIMIZER_ADAMW, &
+                       'checkpoint corruption fixture header is readable')
+      if (io_status /= 0) return
+      real32_bytes = int(storage_size(0.0_real32) / 8, int64)
+      variance_pos = moment_pos + int(size(state%adam_m_embedding), int64) * real32_bytes
+      payload_pos = moment_pos + int(2 * size(state%adam_m_embedding) + 2 * size(state%adam_m_bias), int64) * real32_bytes
+      allocate(original(int(file_bytes)))
+      open(newunit=unit, file=base_path, status='old', action='read', access='stream', &
+           form='unformatted', iostat=io_status)
+      if (io_status == 0) then
+         read(unit, iostat=io_status) original
+         close(unit)
+      end if
+      call assert_true(io_status == 0, 'checkpoint corruption fixture bytes are readable')
+      if (io_status /= 0) return
+
+      invalid_model = model
+      invalid_model%config%ffn_width = model%config%ffn_width + 1_int32
+      call neural_checkpoint_save(base_path, invalid_model, bpe, config, state, status)
+      call assert_i32_equal(status, NPT_ERR_INVALID_ARGUMENT, &
+                            'save rejects decoder config and payload shape mismatch')
+      invalid_model = model
+      invalid_model%head_width = model%head_width + 1_int32
+      call neural_checkpoint_save(base_path, invalid_model, bpe, config, state, status)
+      call assert_i32_equal(status, NPT_ERR_INVALID_ARGUMENT, 'save rejects mismatched decoder head width')
+      if (storage_size(0.0_real32) == 32 .and. radix(0.0_real32) == 2 .and. digits(0.0_real32) == 24) then
+         invalid_model = model
+         invalid_model%config%memory_decay = transfer(int(z'7F800001', int32), 0.0_real32)
+         call neural_checkpoint_save(base_path, invalid_model, bpe, config, state, status)
+         call assert_i32_equal(status, NPT_ERR_INVALID_ARGUMENT, &
+                               'save rejects signaling NaN decoder config without FPE')
+      end if
+      invalid_state = state
+      invalid_state%records_completed = -1_int64
+      call neural_checkpoint_save(base_path, model, bpe, config, invalid_state, status)
+      call assert_i32_equal(status, NPT_ERR_INVALID_ARGUMENT, 'checkpoint save rejects negative counters')
+      call neural_checkpoint_load(base_path, bpe, restored, restored_config, restored_state, status)
+      call assert_i32_equal(status, NPT_OK, 'invalid model and counter saves leave the previous checkpoint intact')
+      invalid_config = config
+      invalid_config%learning_rate = 1.0e20_real64
+      invalid_config%weight_decay = huge(0.0_real64)
+      call assert_true(.not. neural_train_config_is_valid(invalid_config), &
+                       'config rejects overflowing lr times weight decay without FPE')
+      invalid_config%learning_rate = 1.0_real64 + 3.0_real64 / 7.0_real64
+      invalid_config%weight_decay = huge(0.0_real64) / invalid_config%learning_rate
+      call assert_true(.not. neural_train_config_is_valid(invalid_config), &
+                       'config rejects a rounded overflow-boundary product without FPE')
+
+      invalid_config = config
+      invalid_config%learning_rate = 1.0e300_real64
+      invalid_config%weight_decay = 0.0_real64
+      call assert_true(.not. neural_train_config_is_valid(invalid_config), &
+                       'config rejects rate above real32 range before narrowing')
+      invalid_config%learning_rate = 1.0e-300_real64
+      call assert_true(.not. neural_train_config_is_valid(invalid_config), &
+                       'config rejects a learning rate that would round to zero')
+      invalid_config = config
+      invalid_config%adam_epsilon = 1.0e-300_real64
+      call assert_true(.not. neural_train_config_is_valid(invalid_config), &
+                       'config rejects adaptive epsilon that would round to zero')
+      invalid_config%adam_epsilon = 1.0e300_real64
+      call assert_true(.not. neural_train_config_is_valid(invalid_config), &
+                       'config rejects adaptive epsilon above real32 range')
+      invalid_config = config
+      invalid_config%embedding_value_limit = 1.0e300_real64
+      call assert_true(.not. neural_train_config_is_valid(invalid_config), &
+                       'config rejects embedding limit above real32 range')
+      invalid_config = config
+      invalid_config%weight_decay = 0.0_real64
+      invalid_config%adam_beta1 = 1.0_real64 - 2.0_real64 ** (-52)
+      invalid_config%learning_rate = 1.0e30_real64
+      call assert_true(.not. neural_train_config_is_valid(invalid_config), &
+                       'config rejects AdamW bias-corrected rate above real32 range')
+      invalid_config = config
+      invalid_config%optimizer = NPT_OPTIMIZER_NOVA
+      invalid_config%weight_decay = 0.0_real64
+      invalid_config%learning_rate = 1.0e20_real64
+      invalid_config%adam_epsilon = 1.0e-30_real64
+      call assert_true(.not. neural_train_config_is_valid(invalid_config), &
+                       'config rejects NOVA rate divided by epsilon above real32 range')
+
+      if (storage_size(0.0_real32) == 32 .and. storage_size(0.0_real64) == 64 .and. &
+          radix(0.0_real32) == 2 .and. digits(0.0_real32) == 24 .and. &
+          radix(0.0_real64) == 2 .and. digits(0.0_real64) == 53) then
+         invalid_config = config
+         invalid_config%learning_rate = transfer(int(z'7FF0000000000001', int64), 0.0_real64)
+         call assert_true(.not. neural_train_config_is_valid(invalid_config), &
+                          'config rejects a signaling NaN without FPE')
+         invalid_state = state
+         invalid_state%cumulative_nll = transfer(int(z'7FF0000000000001', int64), 0.0_real64)
+         call neural_checkpoint_save(base_path, model, bpe, config, invalid_state, status)
+         call assert_i32_equal(status, NPT_ERR_INVALID_ARGUMENT, 'checkpoint save rejects signaling NaN counters')
+         invalid_state = state
+         invalid_state%adam_v_embedding(1, 1) = transfer(int(z'7F800001', int32), 0.0_real32)
+         call neural_checkpoint_save(base_path, model, bpe, config, invalid_state, status)
+         call assert_i32_equal(status, NPT_ERR_INVALID_ARGUMENT, 'checkpoint save rejects signaling NaN moments')
+         call neural_checkpoint_load(base_path, bpe, restored, restored_config, restored_state, status)
+         call assert_i32_equal(status, NPT_OK, 'NaN save rejections preserve the previous valid checkpoint')
+         allocate(after(size(original)), source=0_int8)
+         after_bytes = -1_int64
+         open(newunit=unit, file=base_path, status='old', action='read', access='stream', &
+              form='unformatted', iostat=io_status)
+         if (io_status == 0) then
+            inquire(unit=unit, size=after_bytes)
+            read(unit, iostat=io_status) after
+            close(unit)
+         end if
+         call assert_true(io_status == 0 .and. after_bytes == file_bytes .and. all(after == original), &
+                          'invalid model and state saves leave the exact original checkpoint bytes')
+         deallocate(after)
+         invalid_state = state
+         invalid_state%adam_v_embedding(1, 1) = -0.0_real32
+         call neural_checkpoint_save(bad_path, model, bpe, config, invalid_state, status)
+         call assert_i32_equal(status, NPT_OK, 'negative zero is a valid nonnegative optimizer moment')
+         do index = 1, 7
+            select case (index)
+            case (1)
+               call write_checkpoint_patch32(bad_path, original, variance_pos, int(z'7FC00000', int32), io_status)
+            case (2)
+               call write_checkpoint_patch32(bad_path, original, variance_pos, int(z'7F800001', int32), io_status)
+            case (3)
+               call write_checkpoint_patch32(bad_path, original, moment_pos, int(z'7F800001', int32), io_status)
+            case (4)
+               call write_checkpoint_patch32(bad_path, original, payload_pos, int(z'7F800001', int32), io_status)
+            case (5)
+               call write_checkpoint_patch32(bad_path, original, variance_pos, int(z'BF800000', int32), io_status)
+            case (6)
+               call write_checkpoint_patch32(bad_path, original, variance_pos, int(z'7F800000', int32), io_status)
+            case default
+               call write_checkpoint_patch32(bad_path, original, decoder_decay_pos, int(z'7F800001', int32), io_status)
+            end select
+            call assert_true(io_status == 0, 'corrupt checkpoint fixture is written')
+            if (io_status == 0) then
+               call neural_checkpoint_load(bad_path, bpe, restored, restored_config, restored_state, status)
+               if (index == 7) then
+                  call assert_i32_equal(status, NPT_ERR_FORMAT, 'signaling NaN header is rejected without FPE')
+               else
+                  call assert_i32_equal(status, NPT_ERR_IO, 'non-finite or negative checkpoint payload is rejected without FPE')
+               end if
+               call assert_true(.not. neural_decoder_is_ready(restored) .and. .not. restored_state%ready, &
+                                'rejected checkpoint does not expose a usable model or optimizer state')
+            end if
+         end do
+         ! An incomplete model payload must be rejected before any scan of
+         ! partially read floating-point elements.
+         call write_checkpoint_patch32(bad_path, original(:int(payload_pos + 3_int64)), &
+                                       payload_pos, int(z'7F800001', int32), io_status)
+         if (io_status == 0) then
+            call neural_checkpoint_load(bad_path, bpe, restored, restored_config, restored_state, status)
+            call assert_i32_equal(status, NPT_ERR_IO, 'truncated model payload is rejected without FPE')
+         end if
+         call write_checkpoint_patch64(bad_path, original, lr_pos, int(z'7FF0000000000001', int64), io_status)
+         if (io_status == 0) then
+            call neural_checkpoint_load(bad_path, bpe, restored, restored_config, restored_state, status)
+            call assert_i32_equal(status, NPT_ERR_FORMAT, 'signaling NaN learning rate is rejected without FPE')
+         end if
+      end if
+      call write_checkpoint_patch32(bad_path, original, flag_pos, 0_int32, io_status)
+      if (io_status == 0) then
+         call neural_checkpoint_load(bad_path, bpe, restored, restored_config, restored_state, status)
+         call assert_i32_equal(status, NPT_ERR_FORMAT, 'trained AdamW checkpoint without moments is rejected on load')
+      end if
+
+      ! Construct a genuine v3 layout using native-endian bytes and real64
+      ! moments. v3 lacks both the v4 accumulation field and the v5 optimizer
+      ! tag; the model payload is exactly the one from the valid v5 fixture.
+      open(newunit=unit, file=legacy_path, status='replace', action='write', access='stream', &
+           form='unformatted', iostat=io_status)
+      if (io_status == 0) then
+         write(unit, iostat=io_status) original(:int(accum_pos - 1_int64))
+         if (io_status == 0) write(unit, iostat=io_status) original(int(state_pos):int(state_optimizer_pos - 1_int64))
+         inquire(unit=unit, pos=wide_pos)
+         if (io_status == 0) write(unit, iostat=io_status) real(state%adam_m_embedding, real64)
+         if (io_status == 0) write(unit, iostat=io_status) real(state%adam_v_embedding, real64)
+         if (io_status == 0) write(unit, iostat=io_status) real(state%adam_m_bias, real64)
+         if (io_status == 0) write(unit, iostat=io_status) real(state%adam_v_bias, real64)
+         if (io_status == 0) write(unit, iostat=io_status) original(int(payload_pos):)
+         if (io_status == 0) write(unit, pos=9_int64, iostat=io_status) 3_int32
+         close(unit)
+      end if
+      call assert_true(io_status == 0, 'native v3 real64 checkpoint fixture is written')
+      if (io_status == 0) then
+         call neural_checkpoint_load(legacy_path, bpe, restored, restored_config, restored_state, status)
+         call assert_i32_equal(status, NPT_OK, 'valid v3 real64 moments remain loadable')
+         if (status == NPT_OK) then
+            call assert_true(all(restored_state%adam_m_embedding == state%adam_m_embedding) .and. &
+                             all(restored_state%adam_v_embedding == state%adam_v_embedding), &
+                             'v3 real64 moments narrow exactly to their original real32 values')
+         end if
+         open(newunit=unit, file=legacy_path, status='old', action='readwrite', access='stream', &
+              form='unformatted', iostat=io_status)
+         if (io_status == 0) then
+            write(unit, pos=wide_pos, iostat=io_status) huge(0.0_real64)
+            close(unit)
+         end if
+         if (io_status == 0) then
+            call neural_checkpoint_load(legacy_path, bpe, restored, restored_config, restored_state, status)
+            call assert_i32_equal(status, NPT_ERR_IO, 'out-of-real32-range v3 moment is rejected without FPE')
+         end if
+         open(newunit=unit, file=legacy_path, status='old', action='readwrite', access='stream', &
+              form='unformatted', iostat=io_status)
+         if (io_status == 0) then
+            write(unit, pos=wide_pos, iostat=io_status) real(state%adam_m_embedding(1, 1), real64)
+            if (io_status == 0) write(unit, pos=wide_pos + int(size(state%adam_m_embedding), int64) * &
+                                         int(storage_size(0.0_real64) / 8, int64), iostat=io_status) -1.0e-300_real64
+            close(unit)
+         end if
+         if (io_status == 0) then
+            call neural_checkpoint_load(legacy_path, bpe, restored, restored_config, restored_state, status)
+            call assert_i32_equal(status, NPT_ERR_IO, 'negative v3 second moment is rejected before narrowing to zero')
+         end if
+         if (storage_size(0.0_real64) == 64 .and. radix(0.0_real64) == 2 .and. digits(0.0_real64) == 53) then
+            open(newunit=unit, file=legacy_path, status='old', action='readwrite', access='stream', &
+                 form='unformatted', iostat=io_status)
+            if (io_status == 0) then
+               write(unit, pos=wide_pos + int(size(state%adam_m_embedding), int64) * &
+                          int(storage_size(0.0_real64) / 8, int64), iostat=io_status) &
+                          real(state%adam_v_embedding(1, 1), real64)
+               if (io_status == 0) write(unit, pos=wide_pos, iostat=io_status) int(z'7FF0000000000001', int64)
+               close(unit)
+            end if
+            if (io_status == 0) then
+               call neural_checkpoint_load(legacy_path, bpe, restored, restored_config, restored_state, status)
+               call assert_i32_equal(status, NPT_ERR_IO, 'signaling NaN v3 moment is rejected before conversion')
+            end if
+         end if
+      end if
+      deallocate(original)
+      call neural_decoder_destroy(model)
+      call neural_decoder_destroy(restored)
+      call bpe_destroy(bpe)
+      open(newunit=unit, file=base_path, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+      open(newunit=unit, file=bad_path, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+      open(newunit=unit, file=legacy_path, status='old', iostat=io_status)
+      if (io_status == 0) close(unit, status='delete')
+   end subroutine test_neural_checkpoint_corruption
+
+   subroutine write_checkpoint_patch32(path, original, position, bits, io_status)
+      character(len=*), intent(in) :: path
+      integer(int8), intent(in) :: original(:)
+      integer(int64), intent(in) :: position
+      integer(int32), intent(in) :: bits
+      integer, intent(out) :: io_status
+      integer :: unit
+
+      open(newunit=unit, file=path, status='replace', action='write', access='stream', &
+           form='unformatted', iostat=io_status)
+      if (io_status == 0) then
+         write(unit, iostat=io_status) original
+         if (io_status == 0) write(unit, pos=position, iostat=io_status) bits
+         close(unit)
+      end if
+   end subroutine write_checkpoint_patch32
+
+   subroutine write_checkpoint_patch64(path, original, position, bits, io_status)
+      character(len=*), intent(in) :: path
+      integer(int8), intent(in) :: original(:)
+      integer(int64), intent(in) :: position, bits
+      integer, intent(out) :: io_status
+      integer :: unit
+
+      open(newunit=unit, file=path, status='replace', action='write', access='stream', &
+           form='unformatted', iostat=io_status)
+      if (io_status == 0) then
+         write(unit, iostat=io_status) original
+         if (io_status == 0) write(unit, pos=position, iostat=io_status) bits
+         close(unit)
+      end if
+   end subroutine write_checkpoint_patch64
 
    ! Mini-batch accumulation is the throughput mode of the tied-output
    ! trainer: N per-token gradients are evaluated at the pre-step parameters,
@@ -1475,6 +2230,24 @@ contains
       call assert_true(plan%required_available_bytes > 128_int64 * 4104_int64, &
                        'resonant preflight includes snapshot, staging, and reserve rather than model state alone')
 
+      if (radix(0.0_real64) == 2 .and. digits(0.0_real64) == 53) then
+         call fortran_resource_plan_estimate(1_int64, 0.1_real64, 1_int32, plan, status)
+         call assert_true(status == FC_OK .and. plan%reserve_bytes == 238005_int64, &
+                          'resource planner rounds a fractional reserve up to a whole byte')
+         call fortran_resource_plan_estimate(1_int64, 4.2016029955748717e-7_real64, 1_int32, plan, status)
+         call assert_true(status == FC_OK .and. plan%reserve_bytes == 2_int64, &
+                          'resource ceiling detects an exact binary64 product above one rounded to one')
+         call fortran_resource_plan_estimate(1_int64, 0.25_real64, 1_int32, plan, status)
+         call assert_true(status == FC_OK .and. plan%reserve_bytes == 595011_int64, &
+                          'resource ceiling does not add a byte to an exact integer product')
+         call fortran_resource_plan_estimate(1_int64, scale(1.0_real64, -100), 1_int32, plan, status)
+         call assert_true(status == FC_OK .and. plan%reserve_bytes == 1_int64, &
+                          'resource ceiling preserves any nonzero small reserve')
+      else
+         call fortran_resource_plan_estimate(1_int64, 0.25_real64, 1_int32, plan, status)
+         call assert_true(status == FC_OK .and. plan%reserve_bytes == 4_int64 * 2380044_int64, &
+                          'unknown real format uses the conservative maximum reserve')
+      end if
       call fortran_resource_plan_estimate(0_int64, 0.25_real64, 1_int32, plan, status)
       call assert_i32_equal(status, FC_ERR_INVALID_ARGUMENT, &
                             'native Fortran resource planner rejects zero vocabulary capacity')
@@ -1484,6 +2257,10 @@ contains
       call fortran_resource_plan_estimate(128_int64, ieee_value(0.0_real64, ieee_quiet_nan), 1_int32, plan, status)
       call assert_i32_equal(status, FC_ERR_INVALID_ARGUMENT, &
                             'native Fortran resource planner rejects nonfinite reserve fraction')
+      call fortran_resource_plan_estimate(128_int64, transfer(int(z'7FF0000000000001', int64), 0.0_real64), &
+                                          1_int32, plan, status)
+      call assert_i32_equal(status, FC_ERR_INVALID_ARGUMENT, &
+                            'native resource planner rejects signaling NaN without an FPE')
       call fortran_resource_plan_estimate(100000001_int64, 0.25_real64, 1_int32, plan, status)
       call assert_i32_equal(status, FC_ERR_INVALID_ARGUMENT, &
                             'native Fortran resource planner rejects overflowing capacity request')
@@ -1523,7 +2300,7 @@ contains
       type(hv_t) :: query_hv
       character(len=TOKEN_LEN) :: neighbour_token
       integer(int32) :: status, query_slot, neighbour_slot
-      integer :: unit, io_status
+      integer :: unit, io_status, case_index
       logical :: found
       real(real32) :: similarity
 
@@ -1593,12 +2370,23 @@ contains
          call quality_gate_evaluate(model, cases, policy, report, status)
          call assert_i32_equal(status, QG_ERR_INVALID_ARGUMENT, &
                                'native quality-gate rejects nonfinite policy thresholds')
+         policy%minimum_top1_accuracy = transfer(int(z'7FF0000000000001', int64), 0.0_real64)
+         call quality_gate_evaluate(model, cases, policy, report, status)
+         call assert_i32_equal(status, QG_ERR_INVALID_ARGUMENT, &
+                               'native quality-gate rejects signaling NaN without an FPE')
          policy%minimum_top1_accuracy = 1.0_real64
          cases(1)%expected_neighbour = 'omega'
          call quality_gate_evaluate(model, cases, policy, report, status)
          call assert_i32_equal(status, QG_ERR_REJECTED, 'native quality-gate rejects incorrect expected neighbour')
          call assert_true(.not. report%passed .and. report%incorrect_cases == 1_int32, &
                           'native quality-gate fail-closes incorrect neighbour expectation')
+         policy%minimum_top1_accuracy = 0.0_real64
+         policy%maximum_incorrect_cases = 1_int32
+         cases(1)%expected_neighbour = 'alpha'
+         call quality_gate_evaluate(model, cases, policy, report, status)
+         call assert_i32_equal(status, QG_ERR_REJECTED, 'native quality-gate rejects a self-neighbour case')
+         call assert_true(.not. report%passed .and. report%unavailable_cases == 1_int32, &
+                          'impossible self-neighbour cannot pass even with permissive accuracy thresholds')
          deallocate(cases)
          open(newunit=unit, file=CASES_PATH, status='replace', action='write', form='formatted', iostat=io_status)
          call assert_true(io_status == 0, 'native quality-gate malformed TSV fixture opens')
@@ -1609,6 +2397,71 @@ contains
             call assert_i32_equal(status, QG_ERR_CASE, 'native quality-gate rejects malformed TSV rows')
             if (allocated(cases)) deallocate(cases)
          end if
+      end if
+      ! The TSV parser must reject impossible self-neighbours, oversized-row
+      ! prefixes and trailing whitespace without an unchecked second file pass.
+      open(newunit=unit, file=CASES_PATH, status='replace', action='write', access='stream', &
+           form='unformatted', iostat=io_status)
+      if (io_status == 0) then
+         write(unit) 'alpha' // achar(9) // 'alpha' // achar(10)
+         close(unit)
+         call quality_case_file_load(CASES_PATH, cases, status)
+         call assert_i32_equal(status, QG_ERR_CASE, 'quality case rejects a self-excluded neighbour expectation')
+      end if
+      open(newunit=unit, file=CASES_PATH, status='replace', action='write', access='stream', &
+           form='unformatted', iostat=io_status)
+      if (io_status == 0) then
+         write(unit) 'alpha' // achar(9) // 'beta' // repeat(' ', 260) // 'hidden' // achar(10)
+         close(unit)
+         call quality_case_file_load(CASES_PATH, cases, status)
+         call assert_i32_equal(status, QG_ERR_CASE, 'quality case rejects truncated-prefix attack')
+         call assert_true(.not. allocated(cases), 'rejected oversized case publishes no parsed cases')
+      end if
+      open(newunit=unit, file=CASES_PATH, status='replace', action='write', access='stream', &
+           form='unformatted', iostat=io_status)
+      if (io_status == 0) then
+         write(unit) 'alpha' // achar(9) // 'beta ' // achar(10)
+         close(unit)
+         call quality_case_file_load(CASES_PATH, cases, status)
+         call assert_i32_equal(status, QG_ERR_CASE, 'quality case rejects trailing whitespace')
+      end if
+      open(newunit=unit, file=CASES_PATH, status='replace', action='write', access='stream', &
+           form='unformatted', iostat=io_status)
+      if (io_status == 0) then
+         write(unit) repeat('a', TOKEN_LEN) // achar(9) // repeat('b', TOKEN_LEN) // achar(13) // achar(10)
+         close(unit)
+         call quality_case_file_load(CASES_PATH, cases, status)
+         call assert_i32_equal(status, QG_OK, 'quality case accepts maximum-length CRLF tokens')
+         if (allocated(cases)) deallocate(cases)
+      end if
+      open(newunit=unit, file=CASES_PATH, status='replace', action='write', access='stream', &
+           form='unformatted', iostat=io_status)
+      if (io_status == 0) then
+         write(unit) 'alpha' // achar(9) // 'beta' // achar(13)
+         close(unit)
+         call quality_case_file_load(CASES_PATH, cases, status)
+         call assert_i32_equal(status, QG_ERR_CASE, 'quality case rejects a bare final CR')
+      end if
+      open(newunit=unit, file=CASES_PATH, status='replace', action='write', form='formatted', iostat=io_status)
+      if (io_status == 0) then
+         do case_index = 1, 4096
+            write(unit, '(A)') 'alpha' // achar(9) // 'beta'
+         end do
+         close(unit)
+         call quality_case_file_load(CASES_PATH, cases, status)
+         call assert_i32_equal(status, QG_OK, 'quality case accepts the bounded case limit')
+         if (allocated(cases)) then
+            call assert_true(size(cases) == 4096, 'quality case preserves every bounded record')
+            deallocate(cases)
+         end if
+      end if
+      open(newunit=unit, file=CASES_PATH, status='old', action='write', position='append', iostat=io_status)
+      if (io_status == 0) then
+         write(unit, '(A)') 'alpha' // achar(9) // 'beta'
+         close(unit)
+         call quality_case_file_load(CASES_PATH, cases, status)
+         call assert_i32_equal(status, QG_ERR_CASE, 'quality case rejects more than the bounded case limit')
+         call assert_true(.not. allocated(cases), 'over-limit cases are not published')
       end if
       call pretrain_model_destroy(model)
       open(newunit=unit, file=CORPUS_PATH, status='old', iostat=io_status)

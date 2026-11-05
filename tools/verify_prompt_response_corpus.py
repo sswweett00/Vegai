@@ -36,7 +36,7 @@ from build_prompt_response_corpus import (  # noqa: E402
     verify,
 )
 from summarise_prompt_response_run import SummaryError, summarise  # noqa: E402
-from report_prompt_response_evidence import collect, examples, render  # noqa: E402
+from report_prompt_response_evidence import annotation_payloads, collect, examples, render  # noqa: E402
 
 FAILURES: list[str] = []
 
@@ -86,6 +86,26 @@ def check_run_summary(directory: Path) -> None:
           "throughput is total tokens over total seconds")
     check(summary["learned_reach_end"] == 8192.0, "the summary keeps the learned reach")
     check(len(summary["loss_curve"]) == 2, "the summary keeps a loss curve")
+
+    complete = directory / "complete"
+    complete.mkdir()
+    full = session_record(1, 200, 201)
+    full["start_byte"] = 0
+    (complete / "train-session-1.log").write_text("CORPUS_TRAIN_JSON " + json.dumps(full), encoding="utf-8")
+    full_summary = summarise(complete)
+    check(full_summary["whole_corpus"] and full_summary["corpus_fraction"] == 1.0,
+          "the final overlapping byte completes all N-1 prediction pairs")
+
+    gap = directory / "gap"
+    gap.mkdir()
+    first = session_record(1, 100, 301)
+    last = session_record(2, 300, 301)
+    for index, record in enumerate((first, last), start=1):
+        (gap / f"train-session-{index}.log").write_text(
+            "CORPUS_TRAIN_JSON " + json.dumps(record), encoding="utf-8")
+    gap_summary = summarise(gap)
+    check(not gap_summary["whole_corpus"] and gap_summary["covered_prediction_offsets"] == 100,
+          "a later EOF offset does not hide a missing segment")
 
     broken = directory / "broken"
     broken.mkdir()
@@ -201,6 +221,19 @@ def check_evidence_report(directory: Path) -> None:
     check(any("probe fact: exact 1/2" in line for line in text), "the report keeps the probe counts")
     check(any("-> 8000.0 tokens" in line for line in text), "the report keeps the learned reach")
     check("Soru: a nedir?" in joined, "the report keeps a real prompt/response pair")
+
+    evidence = collect(run)
+    evidence["probe"]["truncated"] = True
+    evidence["probe"]["fact"].update(correct_bytes=1, total_bytes=3, byte_accuracy=1 / 3)
+    updated = "\n".join(render(evidence))
+    check("1/3 bytes" in updated, "the byte-accuracy denominator is the scored byte count")
+    check("probe: truncated at the engine row limit" in updated, "the report warns about truncated probes")
+    annotations = "\n".join(text for _, text in annotation_payloads(evidence))
+    check("probe truncated at row limit" in annotations, "annotations also warn about truncated probes")
+    del evidence["probe"]["fact"]["total_bytes"]
+    legacy = "\n".join(render(evidence))
+    check("1 correct bytes; total not reported" in legacy,
+          "legacy correct-byte counts are not mislabeled as denominators")
 
     empty = directory / "evidence-empty"
     empty.mkdir()

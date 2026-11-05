@@ -80,7 +80,10 @@ python3 tools/lmm_gateway.py \
 
 `--device GPU`, `NPU` veya `CPU` bir **istenen provider** bilgisidir. Gateway,
 başarılı çalışmayı gerçek model generation çağrısı olarak kaydeder; ancak bağımsız
-profiling/evidence olmadan bir donanım hızlanma oranı iddia etmez.
+profiling/evidence olmadan bir donanım hızlanma oranı iddia etmez. Bu adapter
+şu anda aynı Python sürecinde çalışır: `--timeout-seconds`, OpenVINO native
+çağrısına toplam süre sınırı uygulamaz. İzolasyon/zaman aşımı gerekiyorsa
+operator kontrollü bir `worker` süreci veya dış supervisor kullanmalıdır.
 
 ### 2.2 `openai-compatible`
 
@@ -98,6 +101,26 @@ redirect'lerini takip etmez; böylece bearer-authenticated request başka bir UR
 sessizce tekrar gönderilmez. Managed proxy zorunluysa operator bunu açıkça
 `--allow-environment-proxy` ile kabul eder. Bu yine de operator-owned DNS/egress
 allowlist veya provider attestation yerine geçmez.
+
+Endpoint isteği ayrı, güvenilir bir leaf sürecinde yürütülür. `--timeout-seconds`
+bu sürecin başlatılmasını, stdin teslimini, DNS/TLS/HTTP beklemesini ve yanıtın
+okunmasını birlikte sınırlar; yavaşça akan yanıt veya hata gövdesi soket timeout'unu
+sürekli sıfırlayarak gateway'i sonsuza dek bekletemez. Gateway hazırlığı, asset
+hash'leme/base64, request JSON'unun hazırlanması ve son doğrulamalar bu süreye
+dahil değildir; OS scheduler/cleanup gecikmesi nedeniyle bu hard real-time
+sınırı değildir. Bağlantıyı kapatmak uzak sağlayıcının çoktan aldığı isteği veya
+üretimi iptal ettiğini **kanıtlamaz**. Leaf watchdog, gateway beklenmedik biçimde
+öldürülse bile kendi süre sınırında çıkar; POSIX'te iç leaf üst controller'ın
+process group'unda kalır. Windows'ta dış controller'ın tüm torunları anında
+öldürmesi garanti edilmez.
+
+İstek zarfı toplam **32 MiB**, her inline image **10 MiB**, endpoint yanıtı
+**8 MiB** ile sınırlıdır; aynı image'ın tekrarlanan her kullanımı bütçeye sayılır.
+Bearer token ve prompt argv'ye konmaz; token env değişkeni leaf ortamından
+çıkarılarak bounded stdin ile taşınır. Leaf ortamındaki diğer operator değişkenleri
+bu şekilde temizlenmiş sayılmaz. HTTP hata gövdesi log'a yazılmaz; yalnız SHA-256
+(8 MiB'den uzun hata gövdesinde prefix SHA-256) verilir. Redirect gövdesi
+okunmadan istek reddedilir ve `Location` takip edilmez.
 
 ### 2.3 `worker`
 
@@ -205,7 +228,10 @@ Her conversation message `id`, `role`, content part'leri ve `pinned` alanını
 taşır. `lmm_session.py append`, önceki event SHA-256 head'ini zorunlu kılar ve
 kilit + atomic replace ile ledger yayınlar; `compile` aynı lock ile çalışır ve
 raporladığı head'in publish boyunca değişmediğini tekrar doğrular. Böylece stale
-writer veya kısmi append sessizce yeni history/request üretmez.
+writer veya kısmi append sessizce yeni history/request üretmez. Her event en
+fazla 4 MiB, ledger tamamı en fazla 16 MiB ve mesaj sayısı en fazla 16.384'tür;
+append bu sınırları geçici dosyada kontrol eder, aşımda eski ledger ve head'i
+değiştirmez. Bu limitler aşılacaksa operator yeni bir session düzeni planlamalıdır.
 
 ```bash
 # İlk system message
@@ -394,7 +420,24 @@ metni ile backend'in ham yanıtı report'a kopyalanmaz; report yalnız SHA-256 v
 opsiyonel `--case-id-hmac-key` HMAC case kimliği, response hash/byte sayısı,
 citation ID'leri ve generation-report hash'i taşır. Gateway/model/tokenizer/
 worker configuration identity'leri case'ler arasında aynı kalmalıdır; evaluator
-bu stable runtime identity'yi de report'a bağlar.
+bu stable runtime identity'yi de report'a bağlar. Kimlik, gateway'in kendisinin
+yanı sıra yüklediği `lmm_contract.py`, `lmm_process.py` ve `bounded_process.py`
+kaynaklarının path/byte sayısı/SHA-256 bilgisini de içerir. Gateway bu kaynakları
+çağrı öncesi ve sonrası kontrol eder; bunların üzerine rapor çıktısı yazılamaz.
+Bu, Python yorumlayıcısının, üçüncü taraf paketlerin, trusted worker executable/
+script içeriğinin, uzak sağlayıcının veya işletim sisteminin attestation'ı
+değildir. Worker command JSON'u hash'lenir; işaret ettiği programın ve onun
+bağımlılıklarının içeriği operator tarafından ayrıca sabitlenmelidir.
+
+**Uyumluluk:** Bu kaynak alanlarını içermeyen eski held-out runtime fingerprint'i
+yeni gateway ile eşleşmez. Eski raporlar tarihsel kanıt olarak saklanabilir;
+yeni dispatch/release için held-out değerlendirmeyi tekrar çalıştırın, ona bağlı
+quality/card fingerprint'lerini yeniden üretin ve release süreçlerini mevcut
+immutable ledger kurallarına göre ilerletin. Alanı boş veya uydurma değerle
+geçiştirmek güvenli değildir. Model/istek, session, asset, knowledge, quality ve
+seçilen release/control-plane JSON girdileri artık iç içe yinelenen anahtarları,
+`NaN`/`Infinity` ve sonlu float aralığı dışına taşan sayıları reddeder; eski
+belirsiz dosyalar düzeltilip yeniden hash'lenmelidir.
 
 Komut vector'ü `--request {request}` ve `--evidence {evidence}` biçiminde tam
 olarak birer placeholder ile

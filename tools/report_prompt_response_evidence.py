@@ -155,14 +155,19 @@ def render(evidence: dict) -> list[str]:
             entry = probe.get(family) or {}
             detail = ""
             if entry.get("correct_bytes") is not None:
-                detail = (f"; next-byte accuracy {entry.get('byte_accuracy', 0.0):.3f} over "
-                          f"{entry.get('correct_bytes', 0)} bytes")
+                correct = entry["correct_bytes"]
+                total = entry.get("total_bytes")
+                byte_count = (f"{correct}/{total} bytes" if total is not None
+                              else f"{correct} correct bytes; total not reported")
+                detail = f"; next-byte accuracy {entry.get('byte_accuracy', 0.0):.3f} ({byte_count})"
                 if entry.get("mean_nll") is not None:
                     detail += f", teacher-forced nll {entry['mean_nll']:.4f}"
             lines.append(f"probe {family}: exact {entry.get('correct', 0)}/{entry.get('n', 0)} "
                          f"({entry.get('accuracy', 0.0):.3f}){detail}")
         lines.append(f"probe overall: exact {probe.get('accuracy', 0.0):.3f}, next-byte "
                      f"{probe.get('byte_accuracy', 0.0):.3f} over {probe.get('rows', 0)} rows")
+        if probe.get("truncated") is True:
+            lines.append("probe: truncated at the engine row limit; metrics do not cover the complete file")
     else:
         lines.append("probe: report missing")
 
@@ -236,6 +241,8 @@ def annotation_payloads(evidence: dict) -> list[tuple[str, str]]:
             probe_parts.append(detail)
         probe_parts.append(f"overall exact {probe.get('accuracy', 0.0):.3f} / next-byte "
                            f"{probe.get('byte_accuracy', 0.0):.3f}")
+        if probe.get("truncated") is True:
+            probe_parts.append("probe truncated at row limit; complete file not evaluated")
     else:
         probe_parts.append("no probe report")
     groups.append(("probe", probe_parts))

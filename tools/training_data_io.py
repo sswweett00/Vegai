@@ -42,6 +42,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import sqlite3
 import tempfile
 import threading
@@ -123,11 +124,16 @@ class TrainingRecord:
             raise SchemaValidationError("record.text must be a string")
         if "\n" in self.text or "\r" in self.text:
             raise SchemaValidationError("record.text must contain one logical record only; CR/LF is not allowed")
-        for name in ("id", "label", "source"):
+        for name in ("text", "id", "label", "source"):
             raw = getattr(self, name)
-            if raw is not None and (not isinstance(raw, str) or not raw):
+            if name != "text" and raw is not None and (not isinstance(raw, str) or not raw):
                 raise SchemaValidationError(f"record.{name} must be a nonempty string or null")
-        if self.split is not None and self.split not in VALID_SPLITS:
+            if raw is not None:
+                try:
+                    raw.encode("utf-8", "strict")
+                except UnicodeEncodeError as error:
+                    raise SchemaValidationError(f"record.{name} contains invalid Unicode") from error
+        if self.split is not None and (not isinstance(self.split, str) or self.split not in VALID_SPLITS):
             allowed_splits = ", ".join(sorted(VALID_SPLITS))
             raise SchemaValidationError(f"record.split must be one of {allowed_splits} or null")
         if self.metadata is not None:
@@ -137,13 +143,15 @@ class TrainingRecord:
                 rendered_metadata = json.dumps(
                     self.metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
                 )
+                metadata_bytes = len(rendered_metadata.encode("utf-8", "strict"))
+                if metadata_bytes > DEFAULT_MAX_METADATA_BYTES:
+                    raise SchemaValidationError(
+                        f"record.metadata exceeds {DEFAULT_MAX_METADATA_BYTES} UTF-8 bytes; split metadata upstream"
+                    )
+                # Normalize once and break aliases to caller-owned data.
                 normalized_metadata = json.loads(rendered_metadata)
-            except (TypeError, ValueError, json.JSONDecodeError) as error:
+            except (TypeError, ValueError, RecursionError) as error:
                 raise SchemaValidationError(f"record.metadata is not JSON-serializable: {error}") from error
-            if len(rendered_metadata.encode("utf-8")) > DEFAULT_MAX_METADATA_BYTES:
-                raise SchemaValidationError(
-                    f"record.metadata exceeds {DEFAULT_MAX_METADATA_BYTES} UTF-8 bytes; split metadata upstream"
-                )
             object.__setattr__(self, "metadata", normalized_metadata)
 
     @classmethod
@@ -155,57 +163,16 @@ class TrainingRecord:
         unknown = sorted(str(key) for key in value.keys() if key not in allowed)
         if unknown:
             raise SchemaValidationError(f"record contains unsupported fields: {', '.join(unknown)}")
-        schema_version = value.get("schema_version", RECORD_SCHEMA_VERSION)
-        if schema_version != RECORD_SCHEMA_VERSION:
-            raise SchemaValidationError(
-                f"record schema_version must be {RECORD_SCHEMA_VERSION!r}, got {schema_version!r}"
-            )
         if "text" not in value:
             raise SchemaValidationError("record is missing required string field 'text'")
-        text = value["text"]
-        if not isinstance(text, str):
-            raise SchemaValidationError("record.text must be a string")
-        if "\n" in text or "\r" in text:
-            raise SchemaValidationError("record.text must contain one logical record only; CR/LF is not allowed")
-
-        optional: dict[str, str | None] = {}
-        for name in ("id", "label", "source"):
-            raw = value.get(name)
-            if raw is not None and (not isinstance(raw, str) or not raw):
-                raise SchemaValidationError(f"record.{name} must be a nonempty string or null")
-            optional[name] = raw
-        split = value.get("split")
-        if split is not None and split not in VALID_SPLITS:
-            allowed_splits = ", ".join(sorted(VALID_SPLITS))
-            raise SchemaValidationError(f"record.split must be one of {allowed_splits} or null")
-
-        metadata = value.get("metadata")
-        if metadata is not None:
-            if not isinstance(metadata, Mapping):
-                raise SchemaValidationError("record.metadata must be a JSON object or null")
-            try:
-                # Canonical round-trip both proves JSON compatibility and breaks
-                # aliases to caller-owned mutable mappings.
-                rendered_metadata = json.dumps(
-                    metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
-                )
-                normalized_metadata = json.loads(rendered_metadata)
-            except (TypeError, ValueError, json.JSONDecodeError) as error:
-                raise SchemaValidationError(f"record.metadata is not JSON-serializable: {error}") from error
-            if len(rendered_metadata.encode("utf-8")) > DEFAULT_MAX_METADATA_BYTES:
-                raise SchemaValidationError(
-                    f"record.metadata exceeds {DEFAULT_MAX_METADATA_BYTES} UTF-8 bytes; split metadata upstream"
-                )
-            metadata = normalized_metadata
-
         return cls(
-            text=text,
-            id=optional["id"],
-            label=optional["label"],
-            split=split,
-            source=optional["source"],
-            metadata=metadata,
-            schema_version=schema_version,
+            text=value["text"],
+            id=value.get("id"),
+            label=value.get("label"),
+            split=value.get("split"),
+            source=value.get("source"),
+            metadata=value.get("metadata"),
+            schema_version=value.get("schema_version", RECORD_SCHEMA_VERSION),
         )
 
     def to_mapping(self, *, include_nulls: bool = False) -> dict[str, Any]:
@@ -480,7 +447,7 @@ def _iter_jsonl_records(
                     raise SchemaValidationError("blank JSONL line")
                 parsed = json.loads(decoded)
                 record = TrainingRecord.from_mapping(parsed)
-            except (DataReadError, SchemaValidationError, json.JSONDecodeError, TypeError, ValueError) as error:
+            except (DataReadError, SchemaValidationError, TypeError, ValueError, RecursionError) as error:
                 _record_issue(
                     path=path, number=number, error=error, policy=policy, issues=issues,
                     max_issues=max_issues, stats=stats,
@@ -522,16 +489,22 @@ def _iter_txt_records(
             yield record
 
 
+# The scanner only locates a complete JSON value. json.JSONDecoder remains the
+# syntax authority. These regexes skip ordinary text in C instead of walking
+# every character in Python.
+_JSON_OUTSIDE_STRING = re.compile(r'["{}\[\]]')
+_JSON_INSIDE_STRING = re.compile(r'["\\]')
+_JSON_SCALAR_END = re.compile(r'[ \t\r\n,\]]')
+
+
 def _iter_json_array_values(
     path: Path, compression: str | None, chunk_chars: int, max_record_bytes: int
 ) -> Iterator[tuple[int, Any]]:
-    """Incrementally parse a top-level JSON array without ``json.load``.
+    """Incrementally parse an array, retaining only one bounded JSON value.
 
-    The standard library has no event parser.  This state machine uses
-    ``JSONDecoder.raw_decode`` and retains only the unconsumed suffix plus one
-    currently decoded object.  It intentionally supports a JSON array only;
-    wrapper objects such as ``{"records": [...]}`` are not stream-friendly and
-    are rejected rather than materialized silently.
+    A record already contained in the current chunk takes the fast decoder
+    path. For a value spanning chunks, scan its boundary incrementally and
+    decode exactly once instead of rescanning its whole prefix on every read.
     """
     if chunk_chars <= 0 or max_record_bytes <= 0:
         raise ValueError("json chunk size and maximum record bytes must be positive")
@@ -562,19 +535,109 @@ def _iter_json_array_values(
             eof = True
             return False
         buffer += piece
-        # UTF-8 character count is never greater than byte count, so this is a
-        # safe early bound for a configured byte limit. One extra source chunk
-        # permits discovery of a delimiter after a maximum-size value.
-        if len(buffer) > max_record_bytes + chunk_chars:
-            raise DataReadError(
-                f"{path}: one JSON value or delimiter exceeds configured {max_record_bytes} byte limit; split records upstream"
-            )
+        # A single source chunk may include several small values. The current
+        # value is bounded separately, in UTF-8 bytes, before it is decoded.
         return True
 
     def skip_whitespace() -> None:
         nonlocal position
         while position < len(buffer) and buffer[position] in " \t\r\n":
             position += 1
+
+    def scan_spanning_value() -> Any:
+        """Find one value in linear time, carrying quote/escape state across chunks."""
+        nonlocal buffer, position, eof
+        assert buffer and position == 0
+        first = buffer[0]
+        is_container = first in "[{"
+        is_string = first == '"'
+        depth = 1 if is_container else 0
+        in_string = is_string
+        escaped = False
+        scan = 1 if is_container or is_string else 0
+        parts: list[str] = []
+        size_bytes = 0
+
+        def keep(piece: str) -> None:
+            nonlocal size_bytes
+            # Check physical UTF-8 bytes, not characters or the re-rendered
+            # value. This also bounds JSON whitespace/escape-heavy records.
+            size_bytes += len(piece.encode("utf-8"))
+            if size_bytes > max_record_bytes:
+                raise DataReadError(
+                    f"{path}: JSON element {number + 1} exceeds configured {max_record_bytes} byte limit"
+                )
+            parts.append(piece)
+
+        while True:
+            complete = False
+            if not is_container and not is_string:
+                # Scalars are not training records but must still be parsed so
+                # collect/skip can report their schema error. Wait for the
+                # delimiter, including for a number split after 'e' or '-'.
+                match = _JSON_SCALAR_END.search(buffer, scan)
+                if match is not None:
+                    scan = match.start()
+                    complete = True
+                else:
+                    scan = len(buffer)
+            else:
+                while scan < len(buffer):
+                    if in_string:
+                        if escaped:
+                            scan += 1
+                            escaped = False
+                            continue
+                        match = _JSON_INSIDE_STRING.search(buffer, scan)
+                        if match is None:
+                            scan = len(buffer)
+                            break
+                        scan = match.end()
+                        if match.group() == "\\":
+                            if scan < len(buffer):
+                                scan += 1
+                            else:
+                                escaped = True
+                        else:
+                            in_string = False
+                            if is_string:
+                                complete = True
+                                break
+                    else:
+                        match = _JSON_OUTSIDE_STRING.search(buffer, scan)
+                        if match is None:
+                            scan = len(buffer)
+                            break
+                        scan = match.end()
+                        character = match.group()
+                        if character == '"':
+                            in_string = True
+                        elif character in "[{":
+                            depth += 1
+                        else:
+                            depth -= 1
+                            if depth == 0:
+                                complete = True
+                                break
+
+            keep(buffer[:scan])
+            if complete:
+                buffer = buffer[scan:]
+                position = 0
+                raw = "".join(parts)
+                try:
+                    value, end = decoder.raw_decode(raw)
+                except (json.JSONDecodeError, RecursionError) as error:
+                    raise DataReadError(f"{path}: invalid JSON array element {number + 1}: {error}") from error
+                if end != len(raw):
+                    raise DataReadError(f"{path}: invalid JSON array element {number + 1}")
+                return value
+            if eof:
+                raise DataReadError(f"{path}: unexpected EOF in JSON array element {number + 1}")
+            buffer = opener.read(chunk_chars)
+            scan = 0
+            if not buffer:
+                eof = True
 
     try:
         while True:
@@ -595,79 +658,63 @@ def _iter_json_array_values(
                 continue
 
             if state in ("first-or-end", "value-required"):
-                skip_whitespace()
-                if position >= len(buffer):
-                    if eof:
-                        raise DataReadError(f"{path}: unexpected EOF after JSON array delimiter")
-                    append_chunk(compact=True)
-                    continue
                 if buffer[position] == "]":
                     if state == "value-required":
                         raise DataReadError(f"{path}: trailing comma in JSON array")
                     position += 1
                     state = "done"
                     continue
-                # Discard prior decoded elements before an incomplete current
-                # value asks for another source chunk. Without this compaction,
-                # a long top-level array could retain every preceding record.
+                # Drop previous values before decoding the next one.
                 if position:
                     buffer = buffer[position:]
                     position = 0
-                start = 0
-                while True:
+                value: Any
+                if buffer[0] in '[{"':
                     try:
-                        value, end = decoder.raw_decode(buffer, start)
-                    except json.JSONDecodeError as error:
-                        if eof:
-                            raise DataReadError(f"{path}: invalid JSON array element {number + 1}: {error}") from error
-                        append_chunk(compact=False)
-                        start = position
-                        continue
-                    # A scalar number at a chunk boundary can look complete.
-                    # Do not yield until the following delimiter is available.
-                    probe = end
-                    while True:
-                        while probe < len(buffer) and buffer[probe] in " \t\r\n":
-                            probe += 1
-                        if probe < len(buffer) or eof:
-                            break
-                        append_chunk(compact=False)
-                    if probe >= len(buffer):
+                        value, end = decoder.raw_decode(buffer)
+                    except json.JSONDecodeError:
+                        # A malformed complete value is also handled here: the
+                        # scanner locates its boundary, then the decoder rejects it.
+                        value = scan_spanning_value()
+                    except RecursionError as error:
+                        raise DataReadError(f"{path}: JSON array element {number + 1} is nested too deeply") from error
+                    else:
+                        if len(buffer[:end].encode("utf-8")) > max_record_bytes:
+                            raise DataReadError(
+                                f"{path}: JSON element {number + 1} exceeds configured {max_record_bytes} byte limit"
+                            )
+                        position = end
+                else:
+                    value = scan_spanning_value()
+
+                # Do not yield before a comma or closing bracket is confirmed.
+                # Discard already-consumed whitespace between chunks rather
+                # than retaining arbitrarily large inter-record separators.
+                while True:
+                    skip_whitespace()
+                    if position < len(buffer):
+                        break
+                    if eof:
                         raise DataReadError(f"{path}: JSON array element {number + 1} lacks a closing delimiter")
-                    if buffer[probe] not in ",]":
-                        raise DataReadError(f"{path}: JSON array element {number + 1} has no comma or closing bracket")
-                    position = end
-                    number += 1
-                    yield number, value
-                    state = "delimiter"
-                    break
+                    append_chunk(compact=True)
+                if buffer[position] not in ",]":
+                    raise DataReadError(f"{path}: JSON array element {number + 1} has no comma or closing bracket")
+                number += 1
+                yield number, value
+                state = "delimiter"
                 continue
 
             if state == "delimiter":
-                skip_whitespace()
-                if position >= len(buffer):
-                    if eof:
-                        raise DataReadError(f"{path}: JSON array lacks closing bracket")
-                    append_chunk(compact=True)
-                    continue
                 delimiter = buffer[position]
                 position += 1
                 if delimiter == ",":
                     state = "value-required"
-                elif delimiter == "]":
-                    state = "done"
                 else:
-                    raise DataReadError(f"{path}: expected comma or closing bracket after array element")
+                    state = "done"
                 continue
 
             if state == "done":
-                skip_whitespace()
-                if position < len(buffer):
-                    raise DataReadError(f"{path}: trailing bytes after JSON top-level array")
-                if eof:
-                    return
-                append_chunk(compact=True)
-                continue
+                raise DataReadError(f"{path}: trailing bytes after JSON top-level array")
 
             raise AssertionError(f"unknown JSON parser state {state}")
     except UnicodeDecodeError as error:
@@ -696,7 +743,7 @@ def _iter_json_records(
             if len(rendered.encode("utf-8")) > max_record_bytes:
                 raise DataReadError(f"JSON element exceeds configured {max_record_bytes} byte limit")
             record = TrainingRecord.from_mapping(value)
-        except (DataReadError, SchemaValidationError, TypeError, ValueError, json.JSONDecodeError) as error:
+        except (DataReadError, SchemaValidationError, TypeError, ValueError, RecursionError) as error:
             _record_issue(
                 path=path, number=number, error=error, policy=policy, issues=issues,
                 max_issues=max_issues, stats=stats,
@@ -731,7 +778,7 @@ def _record_from_arrow_row(
     else:
         try:
             parsed_metadata = json.loads(metadata_json)
-        except json.JSONDecodeError as error:
+        except (json.JSONDecodeError, RecursionError) as error:
             raise DataReadError(f"{path}: Arrow record {number} has invalid metadata_json: {error}") from error
         if not isinstance(parsed_metadata, dict):
             raise DataReadError(f"{path}: Arrow record {number} metadata_json must decode to an object")
@@ -1048,7 +1095,13 @@ class RecordWriter:
     def write(self, record: TrainingRecord | Mapping[str, Any]) -> None:
         if not self._opened:
             raise DataWriteError("RecordWriter must be used as a context manager")
-        normalized = record if isinstance(record, TrainingRecord) else TrainingRecord.from_mapping(record)
+        if isinstance(record, TrainingRecord):
+            # The dataclass is frozen, but nested metadata dictionaries/lists
+            # are still mutable. Revalidate and snapshot them before buffering
+            # or publishing, so later mutation cannot emit invalid/lossy JSON.
+            normalized = TrainingRecord.from_mapping(record.to_mapping()) if record.metadata is not None else record
+        else:
+            normalized = TrainingRecord.from_mapping(record)
         if self.format == "jsonl":
             assert self._handle is not None
             self._handle.write(json.dumps(normalized.to_mapping(), ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")

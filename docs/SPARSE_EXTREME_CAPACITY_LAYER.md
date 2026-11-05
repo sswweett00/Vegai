@@ -1,4 +1,4 @@
-# Aşırı Kapasiteli Seyrek Uzman Katmanı (Fortran 2023)
+# Aşırı Kapasiteli Seyrek Uzman Katmanı (Fortran 2018+)
 
 Bu belge `src/sparse_expert_layer.f90` modülünün tasarımını, karmaşıklık kanıtını,
 API sözleşmesini ve ölçüm yöntemini tanımlar. Ölçülen sayılar
@@ -58,15 +58,18 @@ belleği de adım başına `O(k)`'dir.
 | Sayfa oluşturma | yalnızca ilk dokunuşta; büyüme geometrik | amortize `O(1)` |
 | İleri | `k` × `(in*out)` MAC | `O(k·in·out)` |
 | Geri | `k` × (`dW` + `dx` + `db`) | `O(k·in·out)` |
-| Güncelleme | yalnızca **kirli liste** (en fazla `k` sayfa) | `O(k·in·out)` |
+| Güncelleme | yalnızca **kirli liste** (`D` farklı bekleyen sayfa) | `O(D·in·out)` |
 
 Kirli liste (`dirty_slots`) tasarımın kritik parçasıdır: naif bir uygulama
 optimize edici geçişinde tüm sayfa deposunu tarar, bu da uzun süren bir eğitimde
 soğuk sayfalar biriktikçe adım süresini **yavaşça artırır** ve `O(k)` iddiasını
 sessizce bozar. Bu modülde geri yayılım dokunduğu sayfaları listeye yazar,
-güncelleme yalnızca bu listeyi dolaşır ve listeyi temizler. `resident_bytes`
-hesabı da kapalı formdadır (sayfa sayısı × sabit sayfa boyutu), böylece her ekleme
-`O(pages)` iş yapmaz.
+güncelleme yalnızca bu listeyi dolaşır ve listeyi temizler. Her ileri/geri
+adımının hemen ardından güncelleme yapılırsa `D ≤ k`; birden fazla geri yayılım
+biriktirildiğinde `D` farklı dokunulan sayfa sayısına büyüyebilir. Liste üyeliği
+sayfa bayrağıyla `O(1)` denetlenir. `resident_bytes` sayısal dizilerin kapalı
+formlu tahminidir; router normu ve kirli listeyi içerir, allocator/descriptor
+ve geçici büyütme kopyalarını içermez ve toplam süreç belleği değildir.
 
 ## 4. Neden öğrenilebilir bir router yok
 
@@ -112,10 +115,11 @@ parametre sayısını verir.
 Durum kodları kapalı-başarısız çalışır: `SE_OK`, `SE_ERR_INVALID_ARGUMENT`,
 `SE_ERR_ALLOCATION`, `SE_ERR_NUMERICAL`, `SE_ERR_ORDER`.
 
-**Yeniden üretilebilirlik:** bir uzmanın ilk ağırlıkları `(seed, expert_id)`
-fonksiyonudur. Dolayısıyla kontrol noktası parametreleri değil, `seed` ile
-dokunulmuş kimlikleri saklamak yeterlidir; aynı tohum iki bağımsız katmanda
-bit-bit aynı sonucu verir (sözleşme testi bunu doğrular).
+**Yeniden üretilebilirlik:** bir uzmanın *ilk* ağırlıkları `(seed, expert_id)`
+ile belirlenir; aynı tohum iki bağımsız katmanda aynı başlangıcı verir (sözleşme
+testi). Eğitimden sonra yalnız seed ve kimlikleri saklamak yeterli değildir:
+öğrenilmiş ağırlıklar, optimizer durumu ve bekleyen gradyanlar da korunmalıdır.
+Bu modül bunları serileştiren bir checkpoint uygulaması sağlamaz.
 
 ## 6. Benchmark: yöntem ve ölçütler
 
@@ -128,11 +132,14 @@ bit-bit aynı sonucu verir (sözleşme testi bunu doğrular).
 | C | 32×32 | 8 | 947.000 | 1.000.032.000 |
 
 B ve C aynı uzman şeklini ve aynı `k`'yi paylaşır: aralarındaki tek fark
-kapasitedir. Her nokta 32 adım ısınma + 256 ölçülen adım koşar; adım
+kapasitedir. Her örnek 32 adım ısınma + 256 ölçülen adım koşar; adım
 = ileri + geri + güncelleme, `system_clock` ile ölçülür. İki mod vardır:
 
-* **steady** — her adımda aynı girdi; ısınmadan sonra tüm sayfalar yerleşik, sayı
-  saf aritmetiktir.
+* **steady** — her adımda aynı girdi; ısınmadan sonra tüm sayfalar yerleşiktir.
+  Rapor, kısa zamanlama duraksamalarına daha dayanıklı olması için beş örneğin
+  medyanıdır; bu beş tekrar yalnız benchmark'a aittir, eğitim adımına değil.
+  CTest bunu diğer CTest işleriyle paralel koşturmaz; başka süreçlerin veya
+  paylaşımlı hostun yükü yine de süre kapısını etkileyebilir.
 * **streaming** — her adımda yeni deterministik girdi; sayı soğuk uzmanların
   oluşturulma maliyetini de içerir. 1e9 kapasiteli, yalnızca küçük bir dilimi
   yerleşik olan bir katmanın gerçek rejimi budur.
@@ -147,7 +154,11 @@ koduyla biter (dolayısıyla CTest'te bir testtir):
 Makine-okunur tek satır (`SPARSE_LAYER_BENCH_JSON: {...}`) CI annotation'ına ve
 iş özetine yazılır.
 
-### 6.1 Ölçülen sonuç (CI, `e91826b`, koşu 40669623211)
+### 6.1 Tarihî ölçüm (CI, `e91826b`, koşu 40669623211)
+
+Bu tablo SplitMix/rehash ve kirli-liste düzeltmelerinden önceki koda aittir;
+güncel derlemenin gecikmesini veya her donanımdaki oranı kanıtlamaz. Tekrar
+ölçüm için aşağıdaki benchmark'ı hedef sistemde çalıştırın.
 
 Ubuntu x86-64, AMD EPYC 7763, **Debug** yapı (`-fcheck=all -ffpe-trap=...`, yani
 mutlak süreler iyimser değil kötümserdir; önemli olan oranlardır):

@@ -42,6 +42,7 @@ from typing import Any
 from continuous_pretrain import (
     ContinuousPretrainError,
     file_sha256,
+    load_json as load_continuous_json,
     load_manifest,
     verify_shard_bytes,
 )
@@ -51,6 +52,7 @@ from production_dataset import DATASET_SCHEMA, DIGEST_INDEX_SCHEMA, DatasetBuild
 from pretraining_quality_evaluation import MAX_CASES as QUALITY_MAX_CASES
 from pretraining_quality_evaluation import MAX_CHECKPOINT_BYTES as QUALITY_MAX_CHECKPOINT_BYTES
 from pretraining_quality_evaluation import (
+    PROCESS_RUNNER_SOURCE,
     PretrainingQualityEvaluationError,
     QualityPolicy,
     evaluator_binding,
@@ -116,11 +118,9 @@ def fsync_directory(directory: Path) -> None:
 
 def read_json(path: Path, label: str) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ProductionRunError(f"cannot read {label} {path}: {error}") from error
-    require(isinstance(value, dict), f"{label} must be a JSON object: {path}")
-    return value
+        return load_continuous_json(path, label)
+    except ContinuousPretrainError as error:
+        raise ProductionRunError(str(error)) from error
 
 
 def resolve_inside(parent: Path, relative: object, label: str) -> Path:
@@ -676,6 +676,9 @@ def continuous_command(
         "--initial-plasticity", str(arguments.initial_plasticity),
         "--minimum-plasticity", str(arguments.minimum_plasticity), "--decay-events", str(arguments.decay_events),
         "--reserve-fraction", str(arguments.reserve_fraction),
+        # The parent captures child output in memory. Per-shard progress is
+        # already recorded in state; omit it for arbitrarily long ledgers.
+        "--quiet-progress",
     ]
     if arguments.omp_threads is not None:
         command.extend(["--omp-threads", str(arguments.omp_threads)])
@@ -867,6 +870,8 @@ def quality_report_summary(
         "case_manifest": quality_binding["case_manifest_sha256"],
         "policy": quality_binding["policy_sha256"],
     }
+    if "process_runner_sha256" in quality_binding:
+        expected["process_runner"] = quality_binding["process_runner_sha256"]
     for label, digest in expected.items():
         value = provenance.get(label)
         require(isinstance(value, dict) and value.get("sha256") == digest,
@@ -919,16 +924,24 @@ def run_quality_gate(
         runtime_scratch = quality_scratch_capacity(quality_binding, binary, checkpoint_bytes)
         require(file_sha256(QUALITY_EVALUATOR) == quality_binding["evaluator_source_sha256"],
                 "quality evaluator source changed after quality preflight")
+        if "process_runner_sha256" in quality_binding:
+            require(file_sha256(PROCESS_RUNNER_SOURCE) == quality_binding["process_runner_sha256"],
+                    "bounded process runner changed after quality preflight")
         # The evaluator writes its privacy-safe report atomically. Its stdout
         # is deliberately not retained by this wrapper: even a malformed or
         # replaced child must not create an unbounded/sensitive durable log.
         child = subprocess.run(
-            command, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
+            command, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=arguments.quality_timeout_seconds + 300.0, check=False,
         )
         require(file_sha256(QUALITY_EVALUATOR) == quality_binding["evaluator_source_sha256"],
                 "quality evaluator source changed while quality gate was running")
+        if "process_runner_sha256" in quality_binding:
+            require(file_sha256(PROCESS_RUNNER_SOURCE) == quality_binding["process_runner_sha256"],
+                    "bounded process runner changed while quality gate was running")
         report_summary = quality_report_summary(report_path, quality_binding, binary_sha256, checkpoint_sha256)
-    except (OSError, ValueError, json.JSONDecodeError, ProductionRunError):
+    except (OSError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired,
+            ContinuousPretrainError, ProductionRunError):
         # Child output can contain operator-specific diagnostics.  The durable
         # production result deliberately carries only this bounded category.
         return {

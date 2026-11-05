@@ -4,13 +4,14 @@
 !  A small, deterministic, native quality-gate primitive for HDC checkpoints.
 !
 !  This is intentionally a bounded structural/top-1 semantic-neighbour gate.
-!  It evaluates explicit held-out ASCII token pairs against the loaded Fortran
-!  model. It does not claim general language-model quality, semantic safety, or
+!  It evaluates explicit operator-supplied ASCII token pairs against the loaded
+!  Fortran model; held-out provenance is not verified here. It does not claim
+!  general language-model quality, semantic safety, or
 !  replace governed provenance/cryptographic attestation adapters.
 !==============================================================================
 module fortran_quality_gate
    use, intrinsic :: iso_fortran_env, only: int32, int64, real32, real64, iostat_end
-   use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+   use portable_cli, only: cli_real64_is_finite
    use hyper_types, only: hv_t
    use text_tokenizer, only: TOKEN_LEN
    use hdc_pretraining, only: PT_OK, hdc_pretrain_model_t, pretrain_model_is_ready, &
@@ -64,10 +65,10 @@ contains
       valid = .false.
       if (policy%minimum_cases <= 0_int32 .or. policy%minimum_cases > QG_MAX_CASES .or. &
           policy%maximum_incorrect_cases < 0_int32) return
-      if (.not. ieee_is_finite(policy%minimum_top1_accuracy) .or. &
-          .not. ieee_is_finite(policy%minimum_top1_wilson_lower_bound_95) .or. &
-          .not. ieee_is_finite(policy%minimum_mean_similarity) .or. &
-          .not. ieee_is_finite(policy%minimum_case_similarity)) return
+      if (.not. cli_real64_is_finite(policy%minimum_top1_accuracy) .or. &
+          .not. cli_real64_is_finite(policy%minimum_top1_wilson_lower_bound_95) .or. &
+          .not. cli_real64_is_finite(policy%minimum_mean_similarity) .or. &
+          .not. cli_real64_is_finite(policy%minimum_case_similarity)) return
       if (policy%minimum_top1_accuracy < 0.0_real64 .or. policy%minimum_top1_accuracy > 1.0_real64) return
       if (policy%minimum_top1_wilson_lower_bound_95 < 0.0_real64 .or. &
           policy%minimum_top1_wilson_lower_bound_95 > 1.0_real64) return
@@ -80,28 +81,42 @@ contains
       character(len=*), intent(in) :: path
       type(quality_case_t), allocatable, intent(out) :: cases(:)
       integer(int32), intent(out) :: status
-      integer :: unit, io_status, count, case_index
-      character(len=256) :: line
+      type(quality_case_t), allocatable :: work(:)
+      integer :: unit, io_status, count, record_bytes
+      character(len=2 * TOKEN_LEN + 2) :: line
+      logical :: eof
 
       status = QG_ERR_INVALID_ARGUMENT
-      if (allocated(cases)) deallocate(cases)
       if (len_trim(path) == 0) return
-      open(newunit=unit, file=trim(path), status='old', action='read', form='formatted', iostat=io_status)
+      allocate(work(QG_MAX_CASES), stat=io_status)
+      if (io_status /= 0) then
+         status = QG_ERR_IO
+         return
+      end if
+      open(newunit=unit, file=trim(path), status='old', action='read', access='stream', &
+           form='unformatted', iostat=io_status)
       if (io_status /= 0) then
          status = QG_ERR_IO
          return
       end if
 
+      ! A single bounded pass avoids counting one version of a file and then
+      ! indexing a changed second version without revalidation. It also rejects
+      ! overlong records rather than accepting their truncated prefixes.
       count = 0
       do
-         read(unit, '(A)', iostat=io_status) line
-         if (io_status == iostat_end) exit
-         if (io_status /= 0) then
+         call quality_read_record(unit, line, record_bytes, eof, status)
+         if (status /= QG_OK) then
             close(unit)
-            status = QG_ERR_IO
             return
          end if
-         if (.not. quality_case_line_is_valid(line)) then
+         if (eof) exit
+         if (record_bytes <= 0) then
+            close(unit)
+            status = QG_ERR_CASE
+            return
+         end if
+         if (.not. quality_case_line_is_valid(line(:record_bytes))) then
             close(unit)
             status = QG_ERR_CASE
             return
@@ -112,41 +127,68 @@ contains
             status = QG_ERR_CASE
             return
          end if
+         call quality_case_from_line(line(:record_bytes), work(count))
       end do
-      close(unit)
+      close(unit, iostat=io_status)
+      if (io_status /= 0) then
+         status = QG_ERR_IO
+         return
+      end if
       if (count == 0) then
-         allocate(cases(0))
          status = QG_ERR_CASE
          return
       end if
-
       allocate(cases(count), stat=io_status)
       if (io_status /= 0) then
          status = QG_ERR_IO
          return
       end if
-      open(newunit=unit, file=trim(path), status='old', action='read', form='formatted', iostat=io_status)
-      if (io_status /= 0) then
-         deallocate(cases)
-         status = QG_ERR_IO
-         return
-      end if
-      case_index = 0
+      cases = work(:count)
+      status = QG_OK
+   end subroutine quality_case_file_load
+
+   subroutine quality_read_record(unit, line, record_bytes, eof, status)
+      integer, intent(in) :: unit
+      character(len=*), intent(out) :: line
+      integer, intent(out) :: record_bytes
+      logical, intent(out) :: eof
+      integer(int32), intent(out) :: status
+      character(len=1) :: byte
+      integer :: io_status
+
+      line = ''
+      record_bytes = 0
+      eof = .false.
+      status = QG_OK
       do
-         read(unit, '(A)', iostat=io_status) line
-         if (io_status == iostat_end) exit
+         read(unit, iostat=io_status) byte
+         if (io_status == iostat_end) then
+            if (record_bytes == 0) then
+               eof = .true.
+            else if (line(record_bytes:record_bytes) == achar(13)) then
+               ! A bare final CR is not a CRLF delimiter.
+               status = QG_ERR_CASE
+            end if
+            return
+         end if
          if (io_status /= 0) then
-            close(unit)
-            deallocate(cases)
             status = QG_ERR_IO
             return
          end if
-         case_index = case_index + 1
-         call quality_case_from_line(line, cases(case_index))
+         if (byte == achar(10)) then
+            if (record_bytes > 0) then
+               if (line(record_bytes:record_bytes) == achar(13)) record_bytes = record_bytes - 1
+            end if
+            return
+         end if
+         if (record_bytes >= len(line)) then
+            status = QG_ERR_CASE
+            return
+         end if
+         record_bytes = record_bytes + 1
+         line(record_bytes:record_bytes) = byte
       end do
-      close(unit)
-      status = QG_OK
-   end subroutine quality_case_file_load
+   end subroutine quality_read_record
 
    subroutine quality_gate_evaluate(model, cases, policy, report, status)
       type(hdc_pretrain_model_t), intent(in) :: model
@@ -246,7 +288,8 @@ contains
       type(quality_case_t), intent(in) :: case_data
 
       valid = quality_token_is_valid(trim(case_data%query_token)) .and. &
-              quality_token_is_valid(trim(case_data%expected_neighbour))
+              quality_token_is_valid(trim(case_data%expected_neighbour)) .and. &
+              case_data%query_token /= case_data%expected_neighbour
    end function quality_case_is_valid
 
    pure logical function quality_case_line_is_valid(line) result(valid)
@@ -255,11 +298,12 @@ contains
 
       valid = .false.
       tab_position = index(line, achar(9))
-      if (tab_position <= 1 .or. tab_position >= len_trim(line)) return
+      if (tab_position <= 1 .or. tab_position >= len(line)) return
       extra_tab_position = index(line(tab_position + 1:), achar(9))
       if (extra_tab_position /= 0) return
-      valid = quality_token_is_valid(trim(line(:tab_position - 1))) .and. &
-              quality_token_is_valid(trim(line(tab_position + 1:)))
+      valid = quality_token_is_valid(line(:tab_position - 1)) .and. &
+              quality_token_is_valid(line(tab_position + 1:)) .and. &
+              line(:tab_position - 1) /= line(tab_position + 1:)
    end function quality_case_line_is_valid
 
    subroutine quality_case_from_line(line, case_data)
@@ -279,7 +323,7 @@ contains
       character(len=1) :: character
 
       valid = .false.
-      token_length = len_trim(token)
+      token_length = len(token)
       if (token_length <= 0 .or. token_length > TOKEN_LEN) return
       do index = 1, token_length
          character = token(index:index)

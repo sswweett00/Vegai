@@ -34,9 +34,12 @@ from typing import Any, Mapping, Sequence
 
 from pretraining_quality_evaluation import (
     MAX_CASES,
+    PROCESS_RUNNER_SOURCE,
     PretrainingQualityEvaluationError,
     QualityPolicy,
+    ensure_output_distinct,
     evaluator_binding,
+    output_path,
     gate_failures,
     wilson_lower_bound_95,
 )
@@ -296,6 +299,8 @@ def read_validated_report(
         "case_manifest": quality_binding.get("case_manifest_sha256"),
         "policy": quality_binding.get("policy_sha256"),
     }
+    if "process_runner_sha256" in quality_binding:
+        expected_provenance["process_runner"] = quality_binding["process_runner_sha256"]
     for name, expected_digest in expected_provenance.items():
         value = provenance.get(name)
         require(isinstance(value, dict) and value.get("sha256") == expected_digest,
@@ -577,9 +582,24 @@ def parse_arguments() -> argparse.Namespace:
 def main() -> int:
     arguments = parse_arguments()
     try:
+        output = output_path(arguments.output)
+        ensure_output_distinct(output, [
+            ("quality comparator tool", Path(__file__)),
+            ("quality evaluator tool", Path(__file__).with_name("pretraining_quality_evaluation.py")),
+            ("bounded process runner", PROCESS_RUNNER_SOURCE),
+            ("pretraining executable", arguments.pretrain_bin),
+            ("baseline checkpoint", arguments.baseline_checkpoint),
+            ("candidate checkpoint", arguments.candidate_checkpoint),
+            ("baseline quality report", arguments.baseline_report),
+            ("candidate quality report", arguments.candidate_report),
+            ("quality case manifest", arguments.cases),
+            ("quality policy", arguments.quality_policy),
+            ("redaction key", arguments.redaction_key_file),
+            ("quality regression policy", arguments.regression_policy),
+        ])
         report = compare(arguments)
-        atomic_write_json(arguments.output, report)
-    except (ContinuousQualityGateError, OSError, ValueError) as error:
+        atomic_write_json(output, report)
+    except (ContinuousQualityGateError, PretrainingQualityEvaluationError, OSError, ValueError) as error:
         print(f"continuous quality gate: FAIL: {error}", file=sys.stderr)
         return 2
     print(json.dumps(report, ensure_ascii=True, sort_keys=True))

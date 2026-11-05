@@ -136,6 +136,7 @@ contains
       type(bpe_training_metrics_t), intent(inout) :: metrics
       integer(int32), intent(out) :: status
       character(len=BPE_MAX_INPUT_BYTES) :: line
+      type(utf8_stream_reader_t) :: reader
       integer(int32) :: tokens(BPE_MAX_INPUT_BYTES), token_count, line_bytes, pair_index, bpe_status, stream_status
       integer :: unit, io_status
       logical :: end_of_file, oversized
@@ -152,8 +153,14 @@ contains
          status = BPET_ERR_IO
          return
       end if
+      call utf8_stream_reader_init(reader, unit, stream_status)
+      if (stream_status /= UTF8_STREAM_OK) then
+         close(unit)
+         status = BPET_ERR_ALLOCATION
+         return
+      end if
       do
-         call utf8_stream_read_record(unit, line, line_bytes, end_of_file, oversized, stream_status)
+         call utf8_stream_read_record(unit, line, line_bytes, end_of_file, oversized, stream_status, reader)
          if (stream_status /= UTF8_STREAM_OK) then
             close(unit)
             status = BPET_ERR_IO
@@ -276,6 +283,7 @@ contains
       type(bpe_training_metrics_t), intent(inout) :: metrics
       integer(int32), intent(out) :: status
       character(len=BPE_MAX_INPUT_BYTES) :: line
+      type(utf8_stream_reader_t) :: reader
       integer(int32) :: line_tokens(BPE_MAX_INPUT_BYTES)
       integer(int32), allocatable :: all_tokens(:), left_tokens(:), right_tokens(:)
       integer(int64), allocatable :: record_start(:), record_length(:), keys(:), counts(:)
@@ -317,8 +325,15 @@ contains
          status = BPET_ERR_IO
          return
       end if
+      call utf8_stream_reader_init(reader, unit, stream_status)
+      if (stream_status /= UTF8_STREAM_OK) then
+         close(unit)
+         deallocate(all_tokens, record_start, record_length)
+         status = BPET_ERR_ALLOCATION
+         return
+      end if
       do
-         call utf8_stream_read_record(unit, line, line_bytes, end_of_file, oversized, stream_status)
+         call utf8_stream_read_record(unit, line, line_bytes, end_of_file, oversized, stream_status, reader)
          if (stream_status /= UTF8_STREAM_OK) then
             close(unit)
             deallocate(all_tokens, record_start, record_length)

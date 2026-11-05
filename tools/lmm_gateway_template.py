@@ -12,11 +12,10 @@ model nor a response policy.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 from pathlib import Path
 from typing import Sequence
 
-from lmm_contract import FileIdentity, LMMContractError, MAX_JSON_BYTES, file_identity, require, require_unchanged
+from lmm_contract import FileIdentity, LMMContractError, MAX_JSON_BYTES, file_identity, require, require_unchanged, strict_json_value
 
 
 REQUEST_PLACEHOLDER = "{request}"
@@ -75,9 +74,12 @@ def load_gateway_command_template(path: Path, *, label: str = "gateway command")
     """
     identity = file_identity(path, label, maximum_bytes=MAX_JSON_BYTES)
     try:
-        value = json.loads(path.resolve().read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise LMMContractError(f"cannot parse {label} {path}: {error}") from error
+        with path.resolve().open("rb") as handle:
+            raw = handle.read(MAX_JSON_BYTES + 1)
+    except OSError as error:
+        raise LMMContractError(f"cannot read {label} {path}: {error}") from error
+    require(len(raw) <= MAX_JSON_BYTES, f"{label} exceeds {MAX_JSON_BYTES} bytes")
+    value = strict_json_value(raw, f"{label} {path}")
     require(isinstance(value, list) and value and all(isinstance(item, str) and item for item in value),
             f"{label} must be a nonempty JSON string array")
     command = tuple(value)
