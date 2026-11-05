@@ -139,10 +139,14 @@ jobs:
           if [ "$code" -ne 0 ]; then
             # Workflow logs are not always reachable from review tooling, so the
             # failure reason is republished as an API-readable annotation.
-            detail=$(tail -n 12 "${RUNNER_TEMP}/throughput/benchmark.stderr" | tr '\n' ' ' | cut -c1-1800)
+            detail=$(tail -n 12 "${RUNNER_TEMP}/throughput/benchmark.stderr" | tr '\n' ' ' | cut -c1-1200)
             if [ -z "$detail" ]; then
-              detail=$(tail -n 12 "${RUNNER_TEMP}/throughput/benchmark.stdout" | tr '\n' ' ' | cut -c1-1800)
+              detail=$(tail -n 12 "${RUNNER_TEMP}/throughput/benchmark.stdout" | tr '\n' ' ' | cut -c1-1200)
             fi
+            # Publish the machine-readable gate reasons as well: the stderr tail
+            # otherwise only carries the measurement line.
+            gates=$(python3 -c 'import json,sys; from pathlib import Path; p=Path(sys.argv[1]); r=json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}; print("; ".join(r.get("gate_failures") or []) or r.get("error") or "no gate failure was recorded")' "${RUNNER_TEMP}/throughput/benchmark.json" 2>/dev/null || echo "gate report unreadable")
+            echo "::error title=Neural throughput A/B gates::${gates}"
             echo "::error title=Neural throughput A/B diagnostic::${detail}"
           fi
           exit "$code"

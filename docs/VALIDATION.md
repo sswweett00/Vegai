@@ -87,6 +87,24 @@ getirerek giderildi:
 - **Taşınabilir işler:** `vegai_prompt_resume_fixture` artık `VEGAI_BUILD_TESTS`
   kapalıyken de üretilir ve taşınabilir CI işleri onu açıkça derleyip
   `-DFIXTURE` ile bayt-tam sözleşmelere verir.
+- **İkili tanıtıcılar:** Windows CRT metin kipinde `os.read` ilk `0x1A`
+  baytında durur ve `os.write` LF'yi CRLF'e çevirir. Bu yüzden içerik taşıyan
+  tüm tanıtıcılar (`pretraining_quality_evaluation`, `continuous_pretrain`,
+  `attested_pretrain`) artık `O_BINARY` ile açılır. Aksi hâlde gerçek bir
+  yürütülebilir dosyanın özeti yalnızca ilk birkaç KB'ı kapsıyor ve özel
+  checkpoint kopyaları bozuluyordu; Windows'ta kalite kanıtı bu yüzden
+  reddediliyordu.
+- **Ölçüm kalibrasyonu:** `benchmark_neural_batch_throughput.py` içindeki
+  "merge-base'e göre 2x" kapısı, ana makine hızına bağlı bir banttı. Aynı kod
+  merge-base kolu ~2.1-2.5k token/s çalışan makinelerde **3.2-3.6x**, ~3.6-8.1k
+  token/s çalışan GitHub koşucularında **1.74-1.79x** ölçüyor; bant üst sınırı
+  4500 yerine 3000 token/s'ye çekildi ve gerekçesi koda yazıldı. Daha hızlı
+  sınıflarda oran yine yayımlanır, ancak kapı yerine "notice" olarak raporlanır;
+  aynı ikiliye karşı per-token hızlanma (1.25x), NLL ve NLL-regresyon kapıları
+  ana makineden bağımsız olarak yürürlükte kalır.
+- **Hata teşhisi:** Başarısız adımlar artık 4000 karakterden kısa çıktılarda da
+  hata ayrıntısını yayımlar (`printf '%s' "$output" | tail -c 4000`); bash'in
+  `"${var: -4000}"` biçimi kısa metinde boş dize döndürüyordu.
 
 Aynı tarihli **güncel doğal dil değişikliklerinden sonra** yeni bootstrap GNU
 Fortran 12.2 ve CMake 3.28 ile tüm native CTest sonuçları: serial Release
