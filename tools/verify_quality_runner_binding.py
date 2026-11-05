@@ -261,10 +261,22 @@ def verify(workspace: Path) -> None:
                                stderr=subprocess.STDOUT, timeout=15)
     if completed.returncode != 0:
         fresh = evaluator.file_identity(copied_binary, "copied binary", evaluator.MAX_BINARY_BYTES)
+        probe = subprocess.run(
+            [sys.executable, "-c",
+             "import hashlib,sys;print(len(open(sys.argv[1],'rb').read()), "
+             "hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest(), sys.argv[1])",
+             str(copied_binary)],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15)
         recorded = comparator_payload["provenance"]["pretrain_binary"]
         require(False,
                 f"valid comparator fixture failed: {completed.stdout}; "
-                f"recorded {recorded!r}, re-read {fresh.public()!r} for {copied_binary}")
+                f"recorded {recorded!r}, re-read {fresh.public()!r} for {copied_binary}; "
+                f"original {binary_identity.public()!r} for {binary}; "
+                f"interpreter {sys.executable}; "
+                f"copied size {copied_binary.stat().st_size}, "
+                f"resolved {copied_binary.resolve()}, "
+                f"child probe {probe.stdout.strip()!r}, "
+                f"command {comparison_command}")
     require(json.loads(comparison_output.read_text())["status"] == "passed",
             f"valid comparator fixture did not pass: {completed.stdout}")
     dependencies = (copied_comparator, copied_evaluator, copied_runner, copied_binary, checkpoint, baseline_report,
