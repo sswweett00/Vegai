@@ -169,6 +169,36 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         raise
 
 
+# Python 3.14's JSON scanner tolerates far deeper nesting than 3.11/3.12, so a
+# recursion error alone is not a contract. Bound the document structurally
+# before parsing: nothing in the durable controller/quality schemas nests this
+# deep, and an unbounded document cannot be validated deterministically.
+MAX_JSON_DEPTH = 64
+
+
+def _require_bounded_json_depth(text: str, label: str) -> None:
+    depth = 0
+    quoted = False
+    escaped = False
+    for character in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+            continue
+        if character == '"':
+            quoted = True
+        elif character in "[{":
+            depth += 1
+            if depth > MAX_JSON_DEPTH:
+                raise ValueError(f"{label} exceeds {MAX_JSON_DEPTH} levels of JSON nesting")
+        elif character in "]}":
+            depth -= 1
+
+
 def load_json(path: Path, label: str) -> dict[str, Any]:
     """Reject ambiguous keys and non-finite numbers in durable input contracts."""
     def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -189,8 +219,10 @@ def load_json(path: Path, label: str) -> dict[str, Any]:
         return result
 
     try:
+        text = path.read_text(encoding="utf-8")
+        _require_bounded_json_depth(text, label)
         value = json.loads(
-            path.read_text(encoding="utf-8"), object_pairs_hook=unique_object,
+            text, object_pairs_hook=unique_object,
             parse_constant=reject_constant, parse_float=finite_float,
         )
     except (OSError, UnicodeDecodeError, ValueError, RecursionError) as error:

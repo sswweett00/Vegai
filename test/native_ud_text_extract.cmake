@@ -127,8 +127,8 @@ endif()
 # The NUL fixture is binary. Generate the invalid UTF-8 byte at runtime: a
 # text-oriented checkout/patch transport can silently turn a stored 0xFF into
 # the valid replacement character U+FFFD, which would invalidate this test.
-run_extract(2 "${CMAKE_CURRENT_LIST_DIR}/fixtures/ud-invalid-nul.conllu" "${work}/nul.txt" 1)
-expect_no_file("${work}/nul.txt")
+run_extract(2 "${CMAKE_CURRENT_LIST_DIR}/fixtures/ud-invalid-nul.conllu" "${work}/nul-output.txt" 1)
+expect_no_file("${work}/nul-output.txt")
 string(HEX "# text = bad" invalid_prefix)
 string(HEX "text\n" invalid_suffix)
 native_write_hex("${work}/invalid-utf8.conllu" "${invalid_prefix}" "ff" "${invalid_suffix}")

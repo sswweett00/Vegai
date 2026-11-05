@@ -125,11 +125,11 @@ def manifest(workspace: Path, *, fake: bool) -> Path:
     first = workspace / "first.txt"
     second = workspace / "second.txt"
     if fake:
-        first.write_text("alpha beta\ngamma delta\n", encoding="ascii")
-        second.write_text("delta gamma\nbeta alpha\n", encoding="ascii")
+        first.write_text("alpha beta\ngamma delta\n", encoding="ascii", newline="\n")
+        second.write_text("delta gamma\nbeta alpha\n", encoding="ascii", newline="\n")
     else:
-        first.write_text(("alpha beta gamma delta epsilon zeta\n") * 8, encoding="ascii")
-        second.write_text(("zeta epsilon delta gamma beta alpha\n") * 8, encoding="ascii")
+        first.write_text(("alpha beta gamma delta epsilon zeta\n") * 8, encoding="ascii", newline="\n")
+        second.write_text(("zeta epsilon delta gamma beta alpha\n") * 8, encoding="ascii", newline="\n")
     ledger = workspace / "ledger.json"
     run([
         sys.executable, str(MANIFEST_TOOL), str(first), str(second), "--output", str(ledger),

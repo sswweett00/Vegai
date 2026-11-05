@@ -52,6 +52,8 @@ jobs:
         run: |
           cmake --preset portable-serial -DVEGAI_BUILD_TESTS=OFF
           cmake --build --preset portable-serial --parallel
+          # The byte-exact fixture is required by the native contracts below.
+          cmake --build --preset portable-serial --parallel --target vegai_prompt_resume_fixture
 
       - name: Run native Fortran control/profile/resource/checkpoint/attestation contract
         run: |
@@ -73,7 +75,8 @@ jobs:
           cmake -DCONTROL="$PWD/build/portable-serial/vegai_control" \
             -DCORPUS="$PWD/examples/corpus/toy_hdc_corpus.txt" -DWORK_ROOT="$RUNNER_TEMP" \
             -P test/native_control_regression.cmake
-          cmake -DEXTRACT="$PWD/build/portable-serial/vegai_ud_text_extract" -DWORK_ROOT="$RUNNER_TEMP" \
+          cmake -DEXTRACT="$PWD/build/portable-serial/vegai_ud_text_extract" \
+            -DFIXTURE="$PWD/build/portable-serial/vegai_prompt_resume_fixture" -DWORK_ROOT="$RUNNER_TEMP" \
             -P test/native_ud_text_extract.cmake
 
   macos-arm64-portable:
@@ -102,6 +105,8 @@ jobs:
         run: |
           cmake --preset portable-serial -DVEGAI_BUILD_TESTS=OFF -DCMAKE_Fortran_COMPILER="$FC"
           cmake --build --preset portable-serial --parallel
+          # The byte-exact fixture is required by the native contracts below.
+          cmake --build --preset portable-serial --parallel --target vegai_prompt_resume_fixture
 
       - name: Run native Fortran control/profile/resource/checkpoint/attestation contract
         shell: bash
@@ -125,7 +130,8 @@ jobs:
           cmake -DCONTROL="$PWD/build/portable-serial/vegai_control" \
             -DCORPUS="$PWD/examples/corpus/toy_hdc_corpus.txt" -DWORK_ROOT="$RUNNER_TEMP" \
             -P test/native_control_regression.cmake
-          cmake -DEXTRACT="$PWD/build/portable-serial/vegai_ud_text_extract" -DWORK_ROOT="$RUNNER_TEMP" \
+          cmake -DEXTRACT="$PWD/build/portable-serial/vegai_ud_text_extract" \
+            -DFIXTURE="$PWD/build/portable-serial/vegai_prompt_resume_fixture" -DWORK_ROOT="$RUNNER_TEMP" \
             -P test/native_ud_text_extract.cmake
 
   windows-x86_64-portable:
@@ -152,6 +158,8 @@ jobs:
           set -euo pipefail
           cmake --preset portable-serial -DVEGAI_BUILD_TESTS=OFF
           cmake --build --preset portable-serial --parallel
+          # The byte-exact fixture is required by the native contracts below.
+          cmake --build --preset portable-serial --parallel --target vegai_prompt_resume_fixture
 
       - name: Run native Fortran control/profile/resource/checkpoint/attestation contract
         shell: msys2 {0}
@@ -195,5 +203,6 @@ jobs:
           run_contract control cmake -DCONTROL="$root/build/portable-serial/vegai_control.exe" \
             -DCORPUS="$root/examples/corpus/toy_hdc_corpus.txt" -DWORK_ROOT="$work" \
             -P test/native_control_regression.cmake
-          run_contract ud-extract cmake -DEXTRACT="$root/build/portable-serial/vegai_ud_text_extract.exe" -DWORK_ROOT="$work" \
+          run_contract ud-extract cmake -DEXTRACT="$root/build/portable-serial/vegai_ud_text_extract.exe" \
+            -DFIXTURE="$root/build/portable-serial/vegai_prompt_resume_fixture.exe" -DWORK_ROOT="$work" \
             -P test/native_ud_text_extract.cmake

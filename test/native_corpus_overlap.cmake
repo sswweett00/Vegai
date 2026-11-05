@@ -142,12 +142,12 @@ run_check(2 "invalid UTF-8" "${work}/ok" "${work}/invalid-utf8")
 string(HEX "valid\na" bad_prefix)
 native_write_hex("${work}/bad-after-match" "${bad_prefix}" "ff" "0a")
 run_check(2 "invalid UTF-8" "${work}/bad-after-match" "${work}/ok")
-execute_process(COMMAND "${FIXTURE}" corpus "${work}/nul" 6 RESULT_VARIABLE fixture_result)
+execute_process(COMMAND "${FIXTURE}" corpus "${work}/nul-record" 6 RESULT_VARIABLE fixture_result)
 if(NOT "${fixture_result}" STREQUAL "0")
   message(FATAL_ERROR "could not make NUL fixture")
 endif()
-run_check(2 "NUL byte" "${work}/ok" "${work}/nul")
-run_check(2 "NUL byte" "${work}/nul" "${work}/ok")
+run_check(2 "NUL byte" "${work}/ok" "${work}/nul-record")
+run_check(2 "NUL byte" "${work}/nul-record" "${work}/ok")
 
 # Each exact limit is accepted; the next record must fail closed instead of
 # being dropped and producing a false disjoint report.

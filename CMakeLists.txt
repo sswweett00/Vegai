@@ -258,6 +258,11 @@ endif()
 add_executable(vegai_natural_eval app/natural_eval.f90)
 target_link_libraries(vegai_natural_eval PRIVATE vegai_context)
 
+# Byte-exact fixture writer used by the native contract scripts and by the
+# Make check targets. It is built even when tests are disabled so that the
+# portable platform jobs can exercise the same byte-exact contracts.
+add_executable(vegai_prompt_resume_fixture tools/prompt_resume_fixture.f90)
+target_link_libraries(vegai_prompt_resume_fixture PRIVATE vegai_context)
 if(VEGAI_BUILD_TESTS)
     include(CTest)
     enable_testing()
@@ -351,8 +356,6 @@ if(VEGAI_BUILD_TESTS)
     add_executable(vegai_natural_quality_ab tools/benchmark_natural_quality.f90)
     target_link_libraries(vegai_natural_quality_ab PRIVATE vegai_context)
 
-    add_executable(vegai_prompt_resume_fixture tools/prompt_resume_fixture.f90)
-    target_link_libraries(vegai_prompt_resume_fixture PRIVATE vegai_context)
     add_test(NAME vegai_corpus_overlap_contract
              COMMAND ${CMAKE_COMMAND} -DOVERLAP=$<TARGET_FILE:vegai_corpus_overlap>
                      -DFIXTURE=$<TARGET_FILE:vegai_prompt_resume_fixture> -DWORK_ROOT=${CMAKE_CURRENT_BINARY_DIR}

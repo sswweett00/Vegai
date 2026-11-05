@@ -14,6 +14,12 @@ if(NOT DEFINED FIXTURE OR "${FIXTURE}" STREQUAL "")
 endif()
 
 function(native_write_hex path)
+  # The helper only creates the file; empty fixtures (a zero-byte corpus) are
+  # legal and the destination directory may not exist yet.
+  get_filename_component(parent "${path}" DIRECTORY)
+  if(NOT "${parent}" STREQUAL "")
+    file(MAKE_DIRECTORY "${parent}")
+  endif()
   execute_process(COMMAND "${FIXTURE}" bytes "${path}" ${ARGN}
     RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
   if(NOT "${result}" STREQUAL "0")

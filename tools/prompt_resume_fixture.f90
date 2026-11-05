@@ -22,7 +22,7 @@ program prompt_resume_fixture
    character(len=4096) :: large_line
    real(real64) :: expected_rate
 
-   if (command_argument_count() < 3) error stop 'expected action, path and arguments'
+   if (command_argument_count() < 2) error stop 'expected action, path and arguments'
    call get_command_argument(1, action, status=argument_status)
    if (argument_status /= 0) error stop 'invalid action'
    call get_command_argument(2, path, status=argument_status)
@@ -204,7 +204,7 @@ contains
       integer :: slot, argument_status, file_unit, io_status, star
       integer(int64) :: count
 
-      open(newunit=file_unit, file=target, status='new', action='write', access='stream', &
+      open(newunit=file_unit, file=target, status='replace', action='write', access='stream', &
            form='unformatted', iostat=io_status)
       if (io_status /= 0) error stop 'byte fixture open failed'
       do slot = first_token, command_argument_count()

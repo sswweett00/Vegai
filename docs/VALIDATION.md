@@ -62,6 +62,22 @@ getirerek giderildi:
   karşılaştırır; artımlı derleme testi bu nedenle en az bir saniye bekler.
 - **Depo satır sonları:** `.gitattributes` metin dosyalarını her platformda LF
   olarak checkout eder; ikili fixture ve arşiv yamaları normalize edilmez.
+- **Eksik modül onarımı:** Windows/NTFS ve HFS+ ikinci çözünürlüklü damga
+  karşılaştırabildiği için eksik `.mod` artık damga zamanına güvenmez: `.ready`
+  kuralı eksik modül gördüğünde ilgili kütüphanenin nesnelerini siler ve
+  böylece onarım her dosya sisteminde deterministik olur. Nesne sayısı sözleşmesi
+  değişmedi; yalnızca hasarlı derleme yolu tam yeniden derleme yapar.
+- **JSON derinliği (denetleyici):** `tools/continuous_pretrain.py` artık
+  ayrıştırmadan önce ham metinde 64 seviyeyi aşan JSON'u reddeder. Python 3.14'ün
+  JSON tarayıcısı 3.11/3.12'den çok daha derin belgeleri kabul ettiği için
+  özyineleme hatası tek başına sözleşme sayılmaz.
+- **Rezerve aygıt adları:** Windows'ta `nul`, `con`, `aux`, `com1` gibi adlar
+  aygıta yönlenir. NUL baytı fixture'ları artık `nul-bytes.txt`,
+  `nul-corpus.bin`, `nul-record`, `nul-output.txt` gibi adlar kullanır; içerik
+  ve doğrulanan baytlar aynıdır.
+- **Taşınabilir işler:** `vegai_prompt_resume_fixture` artık `VEGAI_BUILD_TESTS`
+  kapalıyken de üretilir ve taşınabilir CI işleri onu açıkça derleyip
+  `-DFIXTURE` ile bayt-tam sözleşmelere verir.
 
 Aynı tarihli **güncel doğal dil değişikliklerinden sonra** yeni bootstrap GNU
 Fortran 12.2 ve CMake 3.28 ile tüm native CTest sonuçları: serial Release
