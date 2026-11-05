@@ -21,6 +21,17 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# Check the actual executable identities, not an opaque link count: adding a
+# new default target must update this contract instead of silently masking a
+# missing or duplicate link.
+HDS_APPLICATIONS = {
+    "hds_engine", "vegai_pretrain", "vegai_causal_lm", "vegai_neural_lm",
+    "vegai_neural_pretrain", "vegai_field", "vegai_chat", "vegai_dialogue_eval",
+    "vegai_control", "vegai_corpus_overlap", "vegai_ud_text_extract", "vegai_sparse_layer_bench",
+}
+CONTEXT_APPLICATIONS = {"vegai_context_engine", "vegai_prompt_engine", "vegai_natural_eval"}
+TEST_APPLICATIONS = {"vegai_tests", "vegai_utf8_stream_tests", "vegai_sparse_layer_tests", "vegai_context_tests"}
+
 FAKE_COMPILER = r'''#!/usr/bin/env python3
 import json, os, re, sys
 from pathlib import Path
@@ -114,6 +125,12 @@ def compiled_sources(invocations: list[list[str]]) -> set[str]:
     }
 
 
+def require_links(invocations: list[list[str]], expected: set[str], description: str) -> None:
+    targets = [Path(args[args.index("-o") + 1]).name for args in invocations if "-c" not in args]
+    require(set(targets) == expected and len(targets) == len(expected),
+            f"{description}: expected {sorted(expected)}, got {sorted(targets)}")
+
+
 def main() -> int:
     groups = verify_module_graph(ROOT)
     if os.name != "posix" or not shutil.which("make") or not shutil.which("ar"):
@@ -150,7 +167,8 @@ def main() -> int:
         object_targets = [args[args.index("-o") + 1] for args in first if "-c" in args]
         require(len(object_targets) == sum(map(len, groups.values())) and len(set(object_targets)) == len(object_targets),
                 "a library object was missing or compiled more than once")
-        require(len([args for args in first if "-c" not in args]) == 17, "unexpected application/test link count")
+        require_links(first, HDS_APPLICATIONS | CONTEXT_APPLICATIONS | TEST_APPLICATIONS,
+                      "clean build application/test links")
         require(not run_make("all"), "unchanged make all unexpectedly recompiled or relinked")
 
         # Only the changed module and its transitive USE consumers are rebuilt.
@@ -159,7 +177,7 @@ def main() -> int:
         updated = run_make("all")
         require(compiled_sources(updated) == {"hdc_pretraining", "dialogue_retrieval", "fortran_quality_gate", "fortran_control"},
                 f"incorrect HDS incremental rebuild: {compiled_sources(updated)}")
-        require(len([args for args in updated if "-c" not in args]) == 11, "HDS applications were not all relinked")
+        require_links(updated, HDS_APPLICATIONS, "HDS incremental rebuild links")
 
         # An individual missing .mod must repair the affected library even if
         # its directory, archive and application binaries still exist.
@@ -188,7 +206,7 @@ def main() -> int:
         require(not run_make("all", flags), "identical compiler flags did not reuse the build")
         link_changed = run_make("all", flags, "LDFLAGS=-Wl,--as-needed")
         require(not compiled_sources(link_changed), "link-only flag change unnecessarily recompiled modules")
-        require(len([args for args in link_changed if "-c" not in args]) == 13, "link-only flag change did not relink all apps")
+        require_links(link_changed, HDS_APPLICATIONS | CONTEXT_APPLICATIONS, "link-only flag change")
         require(not run_make("all", flags, "LDFLAGS=-Wl,--as-needed"), "identical link flags did not reuse the build")
     print("make build verification: PASS (USE graph, parallel/incremental builds, module repair, failure recovery, flags)")
     return 0

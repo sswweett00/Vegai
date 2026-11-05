@@ -172,12 +172,28 @@ jobs:
           set -euo pipefail
           root="$(cygpath -m "$PWD")"
           work="$(cygpath -m "$RUNNER_TEMP")"
-          cmake -DENGINE="$root/build/portable-serial/hds_engine.exe" \
+          run_contract() {
+            local name="$1" output status detail
+            shift
+            if output=$("$@" 2>&1); then
+              printf '%s\n' "$output"
+            else
+              status=$?
+              printf '%s\n' "$output" >&2
+              detail=${output: -4000}
+              detail=${detail//'%'/'%25'}
+              detail=${detail//$'\r'/'%0D'}
+              detail=${detail//$'\n'/'%0A'}
+              printf '::error title=Portable %s::%s\n' "$name" "$detail"
+              return "$status"
+            fi
+          }
+          run_contract runtime cmake -DENGINE="$root/build/portable-serial/hds_engine.exe" \
             -DPRETRAIN="$root/build/portable-serial/vegai_pretrain.exe" \
             -DCORPUS="$root/examples/corpus/toy_hdc_corpus.txt" -DWORK_ROOT="$work" \
             -P test/native_portable_runtime.cmake
-          cmake -DCONTROL="$root/build/portable-serial/vegai_control.exe" \
+          run_contract control cmake -DCONTROL="$root/build/portable-serial/vegai_control.exe" \
             -DCORPUS="$root/examples/corpus/toy_hdc_corpus.txt" -DWORK_ROOT="$work" \
             -P test/native_control_regression.cmake
-          cmake -DEXTRACT="$root/build/portable-serial/vegai_ud_text_extract.exe" -DWORK_ROOT="$work" \
+          run_contract ud-extract cmake -DEXTRACT="$root/build/portable-serial/vegai_ud_text_extract.exe" -DWORK_ROOT="$work" \
             -P test/native_ud_text_extract.cmake

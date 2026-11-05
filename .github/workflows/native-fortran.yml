@@ -56,6 +56,30 @@ jobs:
         run: cmake --build build-native-ci --parallel 2
       - name: Run native contracts
         run: ctest --test-dir build-native-ci --output-on-failure --parallel 2
+      - name: Surface native contract failures
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed_file=build-native-ci/Testing/Temporary/LastTestsFailed.log
+          log_file=build-native-ci/Testing/Temporary/LastTest.log
+          if [ ! -s "$failed_file" ] || [ ! -f "$log_file" ]; then
+            echo '::error title=CTest diagnostic::Failure occurred before CTest produced a failure log.'
+            exit 0
+          fi
+          while IFS=: read -r number name; do
+            name=${name%$'\r'}
+            [ -n "$name" ] || continue
+            detail=$(awk -v test_name="$name" '
+              index($0, "Testing: " test_name) { active=1 }
+              active { print }
+              active && /^<end of output>/ { exit }
+            ' "$log_file" | tail -c 4000)
+            detail=${detail//'%'/'%25'}
+            detail=${detail//$'\r'/'%0D'}
+            detail=${detail//$'\n'/'%0A'}
+            printf '::error title=CTest %s::%s\n' "$name" "$detail"
+          done < "$failed_file"
 
   native-openmp-debug:
     name: GNU Fortran 2018 / Linux OpenMP and checked arithmetic

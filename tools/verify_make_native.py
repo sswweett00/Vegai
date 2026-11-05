@@ -5,14 +5,18 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import errno
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+
+from verify_make_build import source_groups
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +25,14 @@ ROOT = Path(__file__).resolve().parents[1]
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def require_compiled_sources(output: str, expected: list[str], description: str) -> None:
+    # The real Make recipes print each compile command. Compare multisets so
+    # common modules built once in each library are counted twice.
+    actual = re.findall(r' -c "src/([a-z_][a-z0-9_]*)\.f90"', output)
+    require(Counter(actual) == Counter(expected),
+            f"{description}: expected {sorted(expected)}, got {sorted(actual)}")
 
 
 def verify_fifo(root: Path) -> None:
@@ -59,6 +71,7 @@ def main() -> int:
     args = parser.parse_args()
     require(os.name == "posix" and shutil.which("make") and shutil.which("ar"), "requires POSIX make and ar")
     require(shutil.which(args.compiler) is not None, f"Fortran compiler not found: {args.compiler}")
+    groups = source_groups(ROOT)
 
     with tempfile.TemporaryDirectory(prefix="vegai-make-native-") as temporary:
         root = Path(temporary)
@@ -77,7 +90,8 @@ def main() -> int:
         first = run_make("context-engine", "prompt-engine", "utf8-stream-tests", "sparse-tests")
         require("PASS: buffered UTF-8 record stream contracts" in first, "native stream contract did not pass")
         require("PASS: all sparse-layer contracts hold" in first, "optimized native sparse contracts did not pass")
-        require(first.count(' -c "src/') == 28, "native clean parallel build did not compile all 28 library objects")
+        require_compiled_sources(first, groups["HDS_OBJ_DIR"] + groups["CONTEXT_OBJ_DIR"],
+                                 "native clean parallel library build")
         verify_fifo(root)
         no_op = run_make("context-engine", "prompt-engine", "utf8-stream-tests")
         require(' -c "src/' not in no_op and "app/context_engine.f90" not in no_op,
@@ -86,10 +100,10 @@ def main() -> int:
         (root / "build" / "mod-context" / "fixed_budget_backward.mod").unlink()
         repaired = run_make("context-engine", "prompt-engine")
         require((root / "build" / "mod-context" / "fixed_budget_backward.mod").is_file(), "missing native module was not repaired")
-        require(repaired.count(' -c "src/') == 5, "native module repair did not rebuild the context library")
+        require_compiled_sources(repaired, groups["CONTEXT_OBJ_DIR"], "native module repair")
 
         changed = run_make("context-engine", optimization="-O0 -g -fcheck=all")
-        require(changed.count(' -c "src/') == 5, "changed compiler flags reused old native context objects")
+        require_compiled_sources(changed, groups["CONTEXT_OBJ_DIR"], "changed compiler flags")
         same = run_make("context-engine", optimization="-O0 -g -fcheck=all")
         require(' -c "src/' not in same and "app/context_engine.f90" not in same,
                 "unchanged native compiler flags rebuilt the target")

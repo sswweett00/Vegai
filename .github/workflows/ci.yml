@@ -112,18 +112,27 @@ jobs:
 
       - name: Surface native test diagnostics on failure
         if: failure()
+        shell: bash
         run: |
           set -euo pipefail
-          log_file=$(find build-ci -name LastTest.log -type f -print -quit)
-          if [ -n "$log_file" ]; then
-            detail=$(grep -Ein 'fail|error|assert|checks:|gradient probe|nll before|remote influence' "$log_file" | tail -n 40 | tr '\n' ' ' | cut -c1-1900 || true)
-            if [ -z "$detail" ]; then
-              detail=$(tail -n 140 "$log_file" | tr '\n' ' ' | cut -c1-1900)
-            fi
-          else
-            detail="CTest failed without a LastTest.log diagnostic"
+          failed_file=build-ci/Testing/Temporary/LastTestsFailed.log
+          log_file=build-ci/Testing/Temporary/LastTest.log
+          if [ ! -s "$failed_file" ] || [ ! -f "$log_file" ]; then
+            echo '::error title=CTest diagnostic::Failure occurred before CTest produced a failure log.'
+            exit 0
           fi
-          echo "::error title=Fortran property test diagnostic::$detail"
+          while IFS=: read -r number name; do
+            [ -n "$name" ] || continue
+            detail=$(awk -v test_name="$name" '
+              index($0, "Testing: " test_name) { active=1 }
+              active { print }
+              active && /^<end of output>/ { exit }
+            ' "$log_file" | tail -c 4000)
+            detail=${detail//'%'/'%25'}
+            detail=${detail//$'\r'/'%0D'}
+            detail=${detail//$'\n'/'%0A'}
+            printf '::error title=CTest %s::%s\n' "$name" "$detail"
+          done < "$failed_file"
 
       - name: Run executable end-to-end verification
         run: |
@@ -743,14 +752,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python tools/verify_bounded_process.py
-          python tools/verify_lmm_endpoint_transport.py
-          python tools/verify_lmm_source_binding.py
-          python tools/verify_system_contracts.py
-          python tools/verify_quality_runner_binding.py
-          python tools/verify_continuous_progress.py
-          python tools/verify_training_streaming.py
-          python tools/verify_neural_turkish_epoch1.py
+          for test in verify_bounded_process verify_lmm_endpoint_transport verify_lmm_source_binding \
+              verify_system_contracts verify_quality_runner_binding verify_continuous_progress \
+              verify_training_streaming verify_neural_turkish_epoch1; do
+            echo "::group::$test"
+            if output=$(python "tools/$test.py" 2>&1); then
+              printf '%s\n' "$output"
+            else
+              status=$?
+              printf '%s\n' "$output" >&2
+              detail=${output: -4000}
+              detail=${detail//'%'/'%25'}
+              detail=${detail//$'\r'/'%0D'}
+              detail=${detail//$'\n'/'%0A'}
+              printf '::error title=%s::%s\n' "$test" "$detail"
+              exit "$status"
+            fi
+            echo '::endgroup::'
+          done
       - name: Verify parallel Make dependency graph
         if: runner.os != 'Windows'
         run: python tools/verify_make_build.py
