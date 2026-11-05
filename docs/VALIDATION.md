@@ -62,11 +62,20 @@ getirerek giderildi:
   karşılaştırır; artımlı derleme testi bu nedenle en az bir saniye bekler.
 - **Depo satır sonları:** `.gitattributes` metin dosyalarını her platformda LF
   olarak checkout eder; ikili fixture ve arşiv yamaları normalize edilmez.
-- **Eksik modül onarımı:** Windows/NTFS ve HFS+ ikinci çözünürlüklü damga
-  karşılaştırabildiği için eksik `.mod` artık damga zamanına güvenmez: `.ready`
-  kuralı eksik modül gördüğünde ilgili kütüphanenin nesnelerini siler ve
-  böylece onarım her dosya sisteminde deterministik olur. Nesne sayısı sözleşmesi
-  değişmedi; yalnızca hasarlı derleme yolu tam yeniden derleme yapar.
+- **Eksik modül onarımı:** Eksik `.mod` veya eksik modül dizini artık damga
+  zamanına güvenmez. Modül durumu `-include` edilen makefile dosyalarında
+  tutulur; hasar görüldüğünde ilgili kütüphanenin nesneleri silinir ve GNU Make
+  dosyaları yeniden stat ederek yeniden başlar. Böylece saniye çözünürlüklü
+  dosya sistemi/make (macOS make 3.81, HFS+, NTFS) onarımı "güncel" sayamaz.
+  Nesne sayısı sözleşmesi değişmedi; yalnızca hasarlı derleme yolu tam yeniden
+  derleme yapar.
+- **Windows `fsync`:** `FlushFileBuffers` yazılabilir tanıtıcı ister; Windows'ta
+  dosya artık `O_RDWR` ile açılır ve salt-okunur dosya işletim sisteminin kendi
+  geri yazımına bırakılır. POSIX davranışı (`O_RDONLY` + `fsync`) aynıdır.
+- **Uzun fixture'lar:** İşletim sistemi tek komut satırı argümanını sınırlar.
+  `native_write_text` uzun metinleri 16000 hex karakterlik parçalar hâlinde
+  yazar (`bytes` + `bytes-append`); içerik yine bayt-tamdır ve satır sonları
+  platformdan bağımsızdır.
 - **JSON derinliği (denetleyici):** `tools/continuous_pretrain.py` artık
   ayrıştırmadan önce ham metinde 64 seviyeyi aşan JSON'u reddeder. Python 3.14'ün
   JSON tarayıcısı 3.11/3.12'den çok daha derin belgeleri kabul ettiği için

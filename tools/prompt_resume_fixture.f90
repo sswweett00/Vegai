@@ -27,11 +27,13 @@ program prompt_resume_fixture
    if (argument_status /= 0) error stop 'invalid action'
    call get_command_argument(2, path, status=argument_status)
    if (argument_status /= 0 .or. len_trim(path) == 0) error stop 'invalid path'
-   if (trim(action) == 'bytes') then
+   if (trim(action) == 'bytes' .or. trim(action) == 'bytes-append') then
       ! CMake's file(WRITE) emits native line endings (CRLF on Windows), so
       ! byte-exact test corpora are written here from hexadecimal tokens.
       ! A token is either hex text or "<one hex byte>*<repeat count>".
-      call write_hex_tokens(trim(path), 3)
+      ! 'bytes' creates the file; 'bytes-append' extends it, which keeps each
+      ! invocation inside the operating system's command-line argument limit.
+      call write_hex_tokens(trim(path), 3, trim(action) == 'bytes-append')
       stop 0
    end if
    if (command_argument_count() /= 3 .and. command_argument_count() /= 4) &
@@ -197,15 +199,21 @@ program prompt_resume_fixture
 
 contains
 
-   subroutine write_hex_tokens(target, first_token)
+   subroutine write_hex_tokens(target, first_token, append)
       character(len=*), intent(in) :: target
       integer, intent(in) :: first_token
-      character(len=2048) :: token
+      logical, intent(in) :: append
+      character(len=20000) :: token
       integer :: slot, argument_status, file_unit, io_status, star
       integer(int64) :: count
 
-      open(newunit=file_unit, file=target, status='replace', action='write', access='stream', &
-           form='unformatted', iostat=io_status)
+      if (append) then
+         open(newunit=file_unit, file=target, status='old', action='write', access='stream', &
+              position='append', form='unformatted', iostat=io_status)
+      else
+         open(newunit=file_unit, file=target, status='replace', action='write', access='stream', &
+              form='unformatted', iostat=io_status)
+      end if
       if (io_status /= 0) error stop 'byte fixture open failed'
       do slot = first_token, command_argument_count()
          call get_command_argument(slot, token, status=argument_status)

@@ -107,7 +107,21 @@ def is_sha256(value: object) -> bool:
 
 
 def fsync_file(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
+    """Flush a file's bytes to stable storage.
+
+    POSIX can flush a read-only descriptor. Windows cannot: FlushFileBuffers
+    requires a writable handle and os.fsync raises EBADF, so the descriptor is
+    opened read-write there. A file this process may not write is left to the
+    operating system's own write-back, which is the only option available.
+    """
+
+    flags = os.O_RDWR if os.name == "nt" else os.O_RDONLY
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        if os.name != "nt":
+            raise
+        return
     try:
         os.fsync(descriptor)
     finally:

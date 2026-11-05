@@ -326,7 +326,9 @@ check_tiny_report(two two 1 1 1 ON OFF 1.0)
 check_tiny_report(limit-one two 0 0 0 OFF ON 0.0 --bytes 1)
 check_tiny_report(limit-two three 1 1 1 OFF ON 0.5 --bytes 2)
 string(REPEAT "A" 2000001 long_corpus)
-native_write_text("${work}/large-denominator.txt" "${long_corpus}")
+# This corpus contains no line terminator, so file(WRITE) is byte-identical on
+# every platform and avoids a multi-megabyte command-line fixture transfer.
+file(WRITE "${work}/large-denominator.txt" "${long_corpus}")
 check_tiny_report(tiny-fraction large-denominator 1 1 1 OFF ON 5e-7 --bytes 2)
 check_tiny_report(at-end two 0 0 1 ON OFF 1.0 --start-byte 1)
 # --max-updates is an absolute cumulative checkpoint limit, not an additional

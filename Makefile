@@ -148,29 +148,46 @@ $(LINK_CONFIG): FORCE | $(BUILD_DIR)
 	@printf '%s\n' 'FC=$(call sh_quote,$(FC))' 'FFLAGS=$(call sh_quote,$(FFLAGS))' 'LDFLAGS=$(call sh_quote,$(LDFLAGS))' > "$@.tmp"
 	@if ! cmp -s "$@.tmp" "$@"; then mv "$@.tmp" "$@"; else rm -f "$@.tmp"; fi
 
-# A missing individual .mod (not just a missing directory) must invalidate the
-# corresponding library. Every listed source defines one same-named module.
-# Touching the stable marker only on damage forces all producers to recover,
-# including after a failed/incomplete previous compilation.
-# Damage must be repaired on every filesystem, so a missing module deletes the
-# library's objects instead of relying on stamp timestamps: FAT/NTFS/HFS+ can
-# report equal second-resolution stamps, which would otherwise let a stale
-# object mask the damage on Windows and macOS.
-$(HDS_MOD_DIR)/.ready: FORCE | $(BUILD_DIR)
+# A missing individual .mod (not just a missing directory) invalidates the whole
+# library, including after a failed or incomplete previous compilation. The
+# module state files are *included makefiles*, so detection runs before any
+# dependency decision and damage deletes the library's objects; GNU Make then
+# restarts with freshly stat'ed files. Timestamp-only stamps cannot express
+# this: filesystems and make versions with one-second resolution (macOS make
+# 3.81, HFS+, NTFS) can report a repair as "up to date" and silently leave a
+# deleted module masked by a stale object.
+HDS_MOD_STATE := $(BUILD_DIR)/.hds-modules.mk
+CONTEXT_MOD_STATE := $(BUILD_DIR)/.context-modules.mk
+-include $(HDS_MOD_STATE)
+-include $(CONTEXT_MOD_STATE)
+
+$(HDS_MOD_STATE): FORCE | $(BUILD_DIR)
 	@mkdir -p "$(HDS_MOD_DIR)"
 	@missing=0; for module in $(basename $(notdir $(SOURCES))); do \
 	  test -f "$(HDS_MOD_DIR)/$$module.mod" || missing=1; \
-	done; if test ! -f "$@" || test "$$missing" = 1; then \
-	  rm -f $(HDS_OBJECTS); touch "$@"; \
+	done; state="hds_modules_missing := $$missing"; \
+	if test "$$(cat "$@" 2>/dev/null)" != "$$state"; then \
+	  if test "$$missing" = 1; then rm -f $(HDS_OBJECTS); fi; \
+	  printf '%s\n' "$$state" > "$@"; \
 	fi
 
-$(CONTEXT_MOD_DIR)/.ready: FORCE | $(BUILD_DIR)
+$(CONTEXT_MOD_STATE): FORCE | $(BUILD_DIR)
 	@mkdir -p "$(CONTEXT_MOD_DIR)"
 	@missing=0; for module in $(basename $(notdir $(CONTEXT_SOURCES))); do \
 	  test -f "$(CONTEXT_MOD_DIR)/$$module.mod" || missing=1; \
-	done; if test ! -f "$@" || test "$$missing" = 1; then \
-	  rm -f $(CONTEXT_OBJECTS); touch "$@"; \
+	done; state="context_modules_missing := $$missing"; \
+	if test "$$(cat "$@" 2>/dev/null)" != "$$state"; then \
+	  if test "$$missing" = 1; then rm -f $(CONTEXT_OBJECTS); fi; \
+	  printf '%s\n' "$$state" > "$@"; \
 	fi
+
+$(HDS_MOD_DIR)/.ready: FORCE | $(BUILD_DIR)
+	@mkdir -p "$(HDS_MOD_DIR)"
+	@test -f "$@" || touch "$@"
+
+$(CONTEXT_MOD_DIR)/.ready: FORCE | $(BUILD_DIR)
+	@mkdir -p "$(CONTEXT_MOD_DIR)"
+	@test -f "$@" || touch "$@"
 
 $(HDS_OBJ_DIR)/%.o: src/%.f90 $(COMPILE_CONFIG) $(HDS_MOD_DIR)/.ready Makefile | $(HDS_OBJ_DIR)
 	$(FC) $(FFLAGS) -J"$(abspath $(HDS_MOD_DIR))" -I"$(abspath $(HDS_MOD_DIR))" -c "src/$*.f90" -o "$@"
